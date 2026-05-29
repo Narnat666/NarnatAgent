@@ -2,7 +2,7 @@
 
 ## 设计理念
 
-- **最小完备集**：8个工具覆盖所有开发场景，不按功能域分，按操作类型分
+- **最小完备集**：9个工具覆盖所有开发场景，不按功能域分，按操作类型分
 - **原子操作**：每个工具只做一件事，无内部状态，工具间不直接调用
 - **LLM调度**：LLM是唯一调度者，决定调哪个工具+传什么参数
 - **安全优先**：Read/Glob/Grep只读无风险，Edit/Write需确认覆写，Bash需确认删除命令
@@ -17,7 +17,7 @@
 | 参数 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | file_path | string | 是 | 文件绝对路径 |
-| offset | int | 否 | 起始行号（0-based，0=第一行），省略则从头读 |
+| offset | int | 否 | 起始行号（1-based，1=第一行），省略则从头读 |
 | limit | int | 否 | 最大行数，省略则读全文 |
 
 **输出**：带行号的文件内容字符串，格式 `行号→内容`
@@ -248,6 +248,85 @@
 
 ---
 
+### 9. TodoWrite
+
+**用途**：创建和管理结构化任务列表，用于跟踪当前编码会话的进度。复杂多步骤任务必须使用，让用户看到AI的工作计划和执行进度。
+
+**输入**：
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| todos | array | 是 | 任务列表，每个元素是一个对象 |
+
+每个 todo 对象的字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| content | string | 是 | 任务描述，祈使语气（如 "Run tests"） |
+| activeForm | string | 是 | 进行时形式，执行时显示（如 "Running tests"） |
+| status | string | 是 | 任务状态，枚举值：`pending` / `in_progress` / `completed` |
+
+**输出**：无返回内容，UI侧更新任务列表显示
+
+**设计要点**：
+- **任何时刻恰好只有1个任务处于 `in_progress`**，这是硬性约束
+- 收到新指令时，立即用 TodoWrite 创建任务列表
+- 开始执行某任务前，先将其标记为 `in_progress`
+- 完成后**立即**标记为 `completed`，不要批量标记
+- 遇到错误/阻塞时，保持 `in_progress`，创建新任务描述需解决什么
+- 不要标记 `completed` 如果：测试失败、实现不完整、遇到未解决错误
+- 单一、简单的任务不需要使用 TodoWrite
+
+**实现算法**：
+```
+1. 校验todos数组非空
+2. 校验恰好只有1个status为in_progress的项（0个或多个都报错）
+3. 校验每个todo都有content、activeForm、status三个必填字段
+4. 将任务列表渲染到UI（覆盖式更新，不是追加）
+5. 返回空字符串（无输出内容）
+```
+
+**LLM工具定义格式**（传给LLM的tools参数）：
+```python
+{
+    "type": "function",
+    "function": {
+        "name": "TodoWrite",
+        "description": "创建和管理结构化任务列表，用于跟踪当前编码会话的进度。复杂多步骤任务必须使用。任何时刻恰好只有1个任务处于in_progress状态。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "description": "任务描述，祈使语气，如'Run tests'"
+                            },
+                            "activeForm": {
+                                "type": "string",
+                                "description": "进行时形式，执行时显示，如'Running tests'"
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed"],
+                                "description": "任务状态"
+                            }
+                        },
+                        "required": ["content", "status", "activeForm"]
+                    },
+                    "description": "任务列表"
+                }
+            },
+            "required": ["todos"]
+        }
+    }
+}
+```
+
+---
+
 ## 工具调用铁律
 
 1. **Edit前必须Read** — 确认old_string精确匹配，禁止凭记忆猜测
@@ -260,7 +339,7 @@
 
 | 级别 | 工具 | 行为 |
 |---|---|---|
-| READONLY | Read, Glob, Grep, WebSearch, WebFetch | 无风险，直接执行 |
+| READONLY | Read, Glob, Grep, WebSearch, WebFetch, TodoWrite | 无风险，直接执行 |
 | WRITE | Edit, Write | 覆写风险，记录diff |
 | DESTRUCTIVE | Bash | 删除命令需用户确认 |
 
@@ -276,7 +355,7 @@
 
 ---
 
-## 工具搭配范式：8个工具完成所有项目开发
+## 工具搭配范式：9个工具完成所有项目开发
 
 ### 范式1：修Bug
 
@@ -371,4 +450,4 @@ Bash(command="目标项目测试")       → 验证兼容
 | **搜索→学习→创建→验证** | WebSearch→Read→Write→Bash | 新功能/接入API/建项目 |
 | **扫描→确认→修复** | Grep→Read→Edit | 安全审计/批量修复 |
 
-**本质**：8个工具的排列组合能覆盖所有开发任务，因为开发只有4件事——**读、写、搜、执行**。
+**本质**：9个工具的排列组合能覆盖所有开发任务，因为开发只有4件事——**读、写、搜、执行**，加上**进度跟踪**让过程透明。

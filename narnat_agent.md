@@ -4,7 +4,7 @@
 
 **工具、上下文即核心，精简至上。**
 
-1.  **AI工具设计**：数量严控，拒绝冗余。单次调用必须返回全量有效信息，禁止碎片化交互。
+1.  **AI工具设计**：数量严控，拒绝冗余。9个工具覆盖所有开发场景。单次调用必须返回全量有效信息，禁止碎片化交互。
 2.  **上下文策略**：默认零压缩。仅在用户编辑+回车提问累计达 **120次** 时触发强制压缩。
     -   ⚠️ **50次**：提示对话已经50轮。
     -   ⚠️ **100次**：提示对话已经到达100轮，建议开启新对话。
@@ -23,14 +23,14 @@
 1. **拦截用户输入**：Agent检测到第121次提问，暂存该问题，冻结当前会话，UI显示"正在压缩..."动态界面（调用`ui.begin_compressing()`）
 2. **发送压缩prompt**：Agent向当前AI发送压缩指令（见第6节压缩prompt模板），**复用当前对话的全部messages**（AI需要完整上下文才能总结），在messages末尾追加一条user消息作为压缩指令
 3. **写入磁盘**：Agent将AI输出写入 `.narnat/last_session_summary.md`
-4. **校验总结结果**：读取 `.narnat/last_session_summary.md`，若内容为"未压缩"或为空，说明AI总结失败，**不销毁旧会话**，报错"压缩失败"并恢复用户输入
+4. **校验总结结果**：读取 `.narnat/last_session_summary.md`，若内容为空，说明AI总结失败，**不销毁旧会话**，报错"压缩失败"并恢复用户输入
 5. **销毁旧会话**：校验通过（md中有实际内容），Agent清除当前会话的全部上下文
 6. **创建新会话**：Agent创建新会话，将md内容直接追加到系统prompt末尾（作为"上一轮对话成果"注入），无需额外让AI调Read工具
-7. **重置标记**：继承完毕后，将 `.narnat/last_session_summary.md` 清空并写入"未压缩"，作为下次压缩的初始状态
+7. **重置标记**：继承完毕后，将 `.narnat/last_session_summary.md` 清空（写入空字符串），作为下次压缩的初始状态
 8. **恢复用户问题**：将第121次暂存的问题发送给新会话的AI，继续处理
 9. **停止压缩动画**：调用`ui.end_compressing()`
 
-**初始状态**：`.narnat/last_session_summary.md` 初始内容为"未压缩"。每次压缩成功并继承后重置为"未压缩"。
+**初始状态**：`.narnat/last_session_summary.md` 初始为空文件。每次压缩成功并继承后重置为空文件。校验逻辑：文件非空=压缩成功，文件为空=未压缩/压缩失败。
 
 ## 4. UI设计
 
@@ -112,9 +112,9 @@ Avoid over-the-top validation like 'You are absolutely right'.
 11. Be careful not to introduce security vulnerabilities (command injection, XSS, SQL injection, etc).
 ```
 
-### 5.2 铁律（代码内置，不可覆盖）
+### 5.2 铁律（代码内置 + prompt告知，双重保障）
 
-以下规则写入代码作为默认行为，不出现在prompt中，用户无法通过narnat.md覆盖：
+以下规则同时出现在5.1节基础prompt中（告知AI遵守）和代码中（兜底拦截，用户无法通过narnat.md覆盖）：
 
 - Edit前必须Read
 - 改一处验一处
@@ -132,22 +132,6 @@ Avoid over-the-top validation like 'You are absolutely right'.
 
 ```
 请总结本轮对话的全部经验和成果，写入经验成果.md，确保新对话能继承当前对话的全部经验成果。
-
-总结格式：
-## 需求摘要
-（用户的核心诉求）
-
-## 已完成操作
-（按主题分段，每段：目标→操作→结果）
-
-## 代码变更清单
-（被Edit/Write修改过的文件及变更要点）
-
-## 当前状态
-（项目当前所处阶段）
-
-## 未完成项
-（待办/中断的任务）
 ```
 
 ## 7. 配置管理
@@ -204,7 +188,7 @@ tool_definitions = [
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "文件绝对路径"},
-                    "offset": {"type": "integer", "description": "起始行号，省略则从头读"},
+                    "offset": {"type": "integer", "description": "起始行号(1-based)，省略则从头读"},
                     "limit": {"type": "integer", "description": "最大行数，省略则读全文"}
                 },
                 "required": ["file_path"]
@@ -213,6 +197,44 @@ tool_definitions = [
     },
     # ... 其余7个工具同理
 ]
+
+# TodoWrite工具定义（第9个工具，结构较复杂，单独列出）
+tool_definitions.append({
+    "type": "function",
+    "function": {
+        "name": "TodoWrite",
+        "description": "创建和管理结构化任务列表，用于跟踪当前编码会话的进度。复杂多步骤任务必须使用。任何时刻恰好只有1个任务处于in_progress状态。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "description": "任务描述，祈使语气，如'Run tests'"
+                            },
+                            "activeForm": {
+                                "type": "string",
+                                "description": "进行时形式，执行时显示，如'Running tests'"
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed"],
+                                "description": "任务状态"
+                            }
+                        },
+                        "required": ["content", "status", "activeForm"]
+                    },
+                    "description": "任务列表"
+                }
+            },
+            "required": ["todos"]
+        }
+    }
+})
 ```
 
 **LLM返回tool_call**（AI决定调工具）：
@@ -249,9 +271,12 @@ delta.content = "问题在第42行，修复方案是..."
 │                                                      │
 │  while True:                                         │
 │    1. user_input = ui.read_input()                   │
-│    2. messages.append({"role":"user","content":...}) │
-│    3. context.turn_count += 1                        │
-│    4. if context.need_compress(): → compressor执行   │
+│    2. context.turn_count += 1                        │
+│    3. if context.need_compress():                    │
+│         → 暂存user_input，执行compressor              │
+│         → 压缩完成后在新会话中处理user_input           │
+│         → continue                                   │
+│    4. messages.append({"role":"user","content":...}) │
 │    5. stream = ui.create_stream()                    │
 │    6. while True:  ← 工具调度内循环                  │
 │       a. response = llm.chat(messages, tools)        │
@@ -272,7 +297,7 @@ delta.content = "问题在第42行，修复方案是..."
 **关键数据结构**：
 
 - `messages`：对话历史列表，包含system/user/assistant/tool四种role
-- `tool_definitions`：8个工具的JSON Schema定义，每次请求都传给LLM
+- `tool_definitions`：9个工具的JSON Schema定义，每次请求都传给LLM
 - `tool_call`：LLM返回的工具调用请求，含name+arguments
 - `tool_result`：工具执行结果，以role=tool回传
 
@@ -362,6 +387,7 @@ narnat_agent/
 │   ├── bash.py                 # Bash工具
 │   ├── web_search.py           # WebSearch工具
 │   ├── web_fetch.py            # WebFetch工具
+│   ├── todo_write.py           # TodoWrite工具
 │   └── registry.py             # 工具注册表：名称→实现映射
 │
 ├── ui/                         # UI层（表现层）
@@ -372,7 +398,8 @@ narnat_agent/
 │
 ├── config/                     # 配置层（基础设施层）
 │   ├── loader.py               # 读取narnat.json + narnat.md，拼接系统prompt
-│   └── defaults.py             # 默认配置常量（铁律、压缩prompt模板等）
+│   ├── defaults.py             # 默认配置常量（铁律、压缩prompt模板等）
+│   └── session_store.py        # 会话持久化：序列化/反序列化messages，供commands/调用
 │
 ├── logs/                       # 日志目录（运行时生成）
 │
@@ -381,7 +408,7 @@ narnat_agent/
 └── __init__.py
 
 .narnat/                        # 运行时数据（项目根目录下）
-├── last_session_summary.md     # 压缩总结（初始内容"未压缩"）
+├── last_session_summary.md     # 压缩总结（初始为空文件）
 ├── narnat.json                 # 用户调度配置
 └── narnat.md                   # 用户调教指令
 ```
@@ -393,8 +420,8 @@ narnat_agent/
 | 表现层 | ui/ | 用户输入/流式输出/中断 | 无 |
 | 表现层 | commands/ | /save等命令实现 | config/, logger |
 | 应用服务层 | core/ | 主循环/LLM调度/上下文/压缩 | tools/, ui/, config/, logger |
-| 基础设施层 | tools/ | 8个工具实现 | logger |
-| 基础设施层 | config/ | 配置读取/prompt拼接 | 无 |
+| 基础设施层 | tools/ | 9个工具实现 | logger |
+| 基础设施层 | config/ | 配置读取/prompt拼接/会话持久化 | 无 |
 | 基础设施层 | logger | 日志记录 | 无 |
 
 **原则**：上层依赖下层，下层不依赖上层。问题定位：哪个模块出错改哪个模块。
@@ -442,7 +469,8 @@ tests/
 │   ├── test_write.py           # 新建/覆写/自动建目录/空内容
 │   ├── test_bash.py            # 正常命令/超时/删除确认/交互式拦截/长输出截断
 │   ├── test_web_search.py      # 正常搜索/降级链/无结果
-│   └── test_web_fetch.py       # 正常抓取/404/超时/反爬
+│   ├── test_web_fetch.py       # 正常抓取/404/超时/反爬
+│   └── test_todo_write.py      # 正常创建/状态转换/多任务/边界校验
 │
 ├── test_core/                  # 核心调度测试
 │   ├── test_llm.py             # API连接/流式输出/token计数/错误重试
