@@ -73,7 +73,6 @@ Avoid over-the-top validation like 'You are absolutely right'.
   Use sparingly — frequent searches hurt user experience and add cost.
   Applicable: real-time info, knowledge AI absolutely lacks, user correction.
   NEVER use for local code search (that's Grep's job).
-- WebFetch: Fetch full web page content by URL. Use after WebSearch when摘要 insufficient.
   Do NOT blindly trust web information — verify with objective judgment before implementing.
 
 ## Progress Tracking
@@ -322,7 +321,7 @@ delta.content = "问题在第42行，修复方案是..."
 
 ### 8.3 Web工具调度格式
 
-WebSearch和WebFetch无LLM tool_call差异，遵循相同格式。但实现上需注意：
+WebSearch的LLM tool_call格式：
 
 **WebSearch工具定义**：
 ```python
@@ -344,27 +343,7 @@ WebSearch和WebFetch无LLM tool_call差异，遵循相同格式。但实现上�
 }
 ```
 
-**WebFetch工具定义**：
-```python
-{
-    "type": "function",
-    "function": {
-        "name": "WebFetch",
-        "description": "根据URL抓取网页完整内容",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "url": {"type": "string", "description": "目标网页URL"}
-            },
-            "required": ["url"]
-        }
-    }
-}
-```
-
 **WebSearch实现**：搜索引擎降级链 百度→Bing→DuckDuckGo，用requests请求，解析HTML提取标题+摘要+URL。
-
-**WebFetch实现**：requests.get获取页面，用html2text或BeautifulSoup提取正文，超时10s，失败返回错误信息。
 
 ## 9. 项目结构
 
@@ -386,7 +365,6 @@ narnat_agent/
 │   ├── write.py                # Write工具
 │   ├── bash.py                 # Bash工具
 │   ├── web_search.py           # WebSearch工具
-│   ├── web_fetch.py            # WebFetch工具
 │   ├── todo_write.py           # TodoWrite工具
 │   └── registry.py             # 工具注册表：名称→实现映射
 │
@@ -469,7 +447,6 @@ tests/
 │   ├── test_write.py           # 新建/覆写/自动建目录/空内容
 │   ├── test_bash.py            # 正常命令/超时/删除确认/交互式拦截/长输出截断
 │   ├── test_web_search.py      # 正常搜索/降级链/无结果
-│   ├── test_web_fetch.py       # 正常抓取/404/超时/反爬
 │   └── test_todo_write.py      # 正常创建/状态转换/多任务/边界校验
 │
 ├── test_core/                  # 核心调度测试

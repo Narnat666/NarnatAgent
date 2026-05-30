@@ -69,7 +69,7 @@ TOOL_DEFINITIONS: List[Dict] = [
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "正则表达式"},
-                    "path": {"type": "string", "description": "搜索目录，省略为当前工作目录"},
+                    "path": {"type": "string", "description": "搜索路径，可以是目录或文件，省略为当前工作目录"},
                     "glob": {"type": "string", "description": "限定文件类型，如 *.py"},
                     "output_mode": {
                         "type": "string",
@@ -92,7 +92,7 @@ TOOL_DEFINITIONS: List[Dict] = [
         "type": "function",
         "function": {
             "name": "Edit",
-            "description": "修改文件。行号模式: Edit(file, line_start, line_end, new_string) 替换指定行范围；字符串模式: Edit(file, old_string, new_string) 精确替换匹配文本",
+            "description": "修改文件。行号模式: Edit(file, line_start, line_end, new_string) 替换指定行范围，N行换N行可不重读连续Edit，N行换M行(N≠M)后必须重新Read；字符串模式: Edit(file, old_string, new_string) 精确替换匹配文本",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -126,11 +126,11 @@ TOOL_DEFINITIONS: List[Dict] = [
         "type": "function",
         "function": {
             "name": "Bash",
-            "description": "执行shell命令。用于git/pip/npm/docker等，禁止用于文件操作",
+            "description": "执行shell命令。根据当前操作系统使用对应命令。禁止用于文件操作",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "shell命令"},
+                    "command": {"type": "string", "description": "shell命令，根据当前操作系统使用对应语法"},
                     "description": {"type": "string", "description": "命令描述(5-10字)"},
                     "timeout": {"type": "integer", "description": "超时毫秒数，默认120000，最大600000"},
                     "run_in_background": {"type": "boolean", "description": "后台运行"},

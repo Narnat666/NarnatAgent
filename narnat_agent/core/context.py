@@ -62,6 +62,10 @@ class ContextManager:
         self._warned_50 = False
         self._warned_100 = False
 
+    def set_retry_soon(self):
+        """压缩失败后设置近期重试（10轮后再次触发压缩）"""
+        self._turn_count = max(0, COMPRESS_TURN - 10)
+
     def get_summary(self) -> Dict[str, Any]:
         """获取上下文摘要"""
         return {

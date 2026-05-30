@@ -495,6 +495,10 @@ class SessionCallbacks:
         """删除指定会话(name不为空)或全部(name为空或--all)，返回结果"""
         return ""
 
+    def on_exit(self) -> str:
+        """退出时自动保存，返回保存的会话名或空串"""
+        return ""
+
 
 # ═══════════════════════════════════════════════════════════════
 # Tab 补全
@@ -609,6 +613,11 @@ class UIStreamSession:
             sys.stdout.write("\r\x1b[K")
             sys.stdout.flush()
 
+    def flush_renderer(self) -> None:
+        """flush渲染器缓冲区，确保之前的文字已完整输出到终端"""
+        if self._started:
+            self._renderer.flush()
+
     def resume_spinner(self) -> None:
         """恢复spinner（工具执行后调用，仅当AI还在思考时）"""
         if self._spinner_paused and not self._started:
@@ -685,6 +694,10 @@ class UIInterface:
             self._compress_thread.join(timeout=0.5)
         self._compress_stop = None
         self._compress_thread = None
+
+    def auto_save(self) -> str:
+        """退出时自动保存，返回保存的会话名或空串"""
+        return self._callbacks.on_exit()
 
 
 def _make_keybindings() -> KeyBindings:

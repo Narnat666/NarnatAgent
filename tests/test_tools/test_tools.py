@@ -136,6 +136,37 @@ class TestGrep:
         result = grep.execute("class", self.tmpdir, glob="*.py")
         assert "app.py" in result
 
+    def test_grep_file_path_files_with_matches(self):
+        """path参数接受文件路径"""
+        file_path = os.path.join(self.tmpdir, "app.py")
+        result = grep.execute("class Foo", file_path)
+        assert "app.py" in result
+
+    def test_grep_file_path_content_mode(self):
+        """文件路径+content模式"""
+        file_path = os.path.join(self.tmpdir, "app.py")
+        result = grep.execute("class Foo", file_path, output_mode="content", n=True)
+        assert "class Foo" in result
+
+    def test_grep_file_path_count_mode(self):
+        """文件路径+count模式"""
+        file_path = os.path.join(self.tmpdir, "app.py")
+        result = grep.execute("class", file_path, output_mode="count")
+        assert "app.py" in result
+
+    def test_grep_file_path_no_match(self):
+        """文件路径搜索无匹配"""
+        file_path = os.path.join(self.tmpdir, "app.py")
+        result = grep.execute("NonExistentPattern", file_path)
+        assert "无匹配" in result
+
+    def test_grep_file_path_with_context(self):
+        """文件路径+上下文行"""
+        file_path = os.path.join(self.tmpdir, "app.py")
+        result = grep.execute("class Foo", file_path, output_mode="content", C=1)
+        assert "class Foo" in result
+        assert "pass" in result
+
 
 # ═══════════════════════════════════════════════════════════════
 # Edit 测试

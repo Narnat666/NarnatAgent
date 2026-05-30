@@ -15,6 +15,7 @@ from narnat_agent.tools.registry import execute as registry_execute, get_tool_na
 from narnat_agent.config.loader import load_config, AIConfig
 from narnat_agent.config.session_store import save_session, load_session, list_sessions, delete_session
 from narnat_agent.core.context import ContextManager
+from narnat_agent.config.defaults import WARN_TURN_1, COMPRESS_TURN
 from narnat_agent.core.compressor import Compressor
 from narnat_agent.core.llm import LLMClient
 from narnat_agent.commands.session import SessionManager
@@ -318,13 +319,13 @@ class TestContextRegression:
     def test_increment_returns_empty_before_thresholds(self):
         """阈值前返回空串"""
         ctx = ContextManager()
-        for _ in range(49):
+        for _ in range(WARN_TURN_1 - 1):
             assert ctx.increment() == ""
 
     def test_compress_exactly_at_120(self):
-        """恰好120轮触发"""
+        """恰好COMPRESS_TURN轮触发"""
         ctx = ContextManager()
-        for _ in range(119):
+        for _ in range(COMPRESS_TURN - 1):
             ctx.increment()
         assert not ctx.need_compress()
         ctx.increment()

@@ -4,8 +4,8 @@
 
 # ── 上下文压缩阈值 ──
 WARN_TURN_1 = 50    # 提示对话已50轮
-WARN_TURN_2 = 100   # 提示已100轮，建议开新对话
-COMPRESS_TURN = 120  # 强制压缩
+WARN_TURN_2 = 80   # 提示已80轮，建议开新对话
+COMPRESS_TURN = 100  # 强制压缩
 
 # ── 铁律（代码内置 + prompt告知，双重保障） ──
 IRON_RULES = """
@@ -45,7 +45,7 @@ Avoid over-the-top validation like 'You are absolutely right'.
 - Write: Create or overwrite file. MUST provide full content, NEVER partial content.
   ALWAYS prefer Edit for modifying existing files, NEVER rewrite entire file just to change a few lines.
 - Edit: Modify file. Two modes:
-  1) Line range: Edit(file, line_start, line_end, new_string) — replace lines [start,end] with new_string. Preferred: Read→Edit by line numbers, no need to copy old_string.
+  1) Line range: Edit(file, line_start, line_end, new_string) — replace lines [start,end] with new_string. Preferred: Read→Edit by line numbers, no need to copy old_string. CRITICAL: equal-line replacement (N→N lines) preserves line numbers for subsequent Edits; unequal replacement (N→M, N≠M) shifts line numbers — MUST re-Read before next Edit on same file.
   2) String match: Edit(file, old_string, new_string) — exact string replacement. old_string must match exactly.
 - Glob: Search files by name pattern (e.g. **/*.py). For content search, use Grep.
 - Grep: Search file content by regex. MUST use regex syntax, NEVER glob syntax.

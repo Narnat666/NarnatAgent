@@ -27,7 +27,7 @@ def execute(
 
     Args:
         pattern: 正则表达式
-        path: 搜索目录
+        path: 搜索路径，可以是目录或文件
         glob: 限定文件类型，如 *.py
         output_mode: files_with_matches / content / count
         i: 忽略大小写
@@ -50,14 +50,17 @@ def execute(
     except re.error as e:
         return f"错误: 非法正则: {e}"
 
-    root = path or os.getcwd()
-    if not os.path.isdir(root):
-        return f"错误: 目录不存在: {root}"
-
     # 上下文：C覆盖A和B
     if C > 0:
         A = C
         B = C
+
+    root = path or os.getcwd()
+    if os.path.isfile(root):
+        # path是文件 → 直接在该文件内搜索
+        return _search_single_file(root, regex, output_mode, n, A, B, head_limit)
+    if not os.path.isdir(root):
+        return f"错误: 路径不存在: {root}"
 
     results = []
     file_matches = _search_files(root, regex, glob, output_mode, n, A, B, head_limit)
@@ -80,6 +83,54 @@ def execute(
             if head_limit and len(results) >= head_limit:
                 break
         return "\n".join(results) if results else "(无匹配)"
+
+
+def _search_single_file(file_path, regex, output_mode, show_n, A, B, head_limit):
+    """在单个文件内执行搜索"""
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="strict") as f:
+            content = f.read()
+    except (UnicodeDecodeError, PermissionError, OSError):
+        return "(无匹配)"
+
+    if output_mode == "files_with_matches":
+        return file_path if regex.search(content) else "(无匹配)"
+    elif output_mode == "count":
+        matches = regex.findall(content)
+        return f"{file_path}:{len(matches)}" if matches else "(无匹配)"
+    else:  # content
+        lines = content.split("\n")
+        results, _ = _match_lines(file_path, lines, regex, A, B, head_limit)
+        return "\n".join(results) if results else "(无匹配)"
+
+
+def _match_lines(path_label, lines, regex, A, B, head_limit):
+    """逐行匹配并收集结果（content模式），供单文件和目录搜索共用。
+
+    Returns:
+        (results, match_count) — results含上下文行，match_count仅计匹配行数
+    """
+    results = []
+    count = 0
+    for line_idx, line in enumerate(lines):
+        if not regex.search(line):
+            continue
+        line_num = line_idx + 1
+        if B > 0 or A > 0:
+            start = max(0, line_idx - B)
+            end = min(len(lines), line_idx + A + 1)
+            context_lines = []
+            for ci in range(start, end):
+                prefix = ">" if ci == line_idx else " "
+                context_lines.append(f"  {prefix} {ci+1}:{lines[ci]}")
+            results.append(f"{path_label}:{line_num}:{line}")
+            results.extend(context_lines)
+        else:
+            results.append(f"{path_label}:{line_num}:{line}")
+        count += 1
+        if head_limit and count >= head_limit:
+            break
+    return results, count
 
 
 def _search_files(root, regex, glob_filter, output_mode, show_n, A, B, head_limit):
@@ -114,23 +165,10 @@ def _search_files(root, regex, glob_filter, output_mode, show_n, A, B, head_limi
                     count += 1
             else:  # content
                 lines = content.split("\n")
-                for line_idx, line in enumerate(lines):
-                    m = regex.search(line)
-                    if m:
-                        line_num = line_idx + 1
-                        # 上下文
-                        context_lines = []
-                        if B > 0 or A > 0:
-                            start = max(0, line_idx - B)
-                            end = min(len(lines), line_idx + A + 1)
-                            for ci in range(start, end):
-                                prefix = ">" if ci == line_idx else " "
-                                context_lines.append(f"  {prefix} {ci+1}:{lines[ci]}")
-                            results.append(f"{rel}:{line_num}:{line}")
-                            results.extend(context_lines)
-                        else:
-                            results.append(f"{rel}:{line_num}:{line}")
-                        count += 1
+                remaining = head_limit - count if head_limit else 0
+                matched, match_count = _match_lines(rel, lines, regex, A, B, remaining)
+                results.extend(matched)
+                count += match_count
 
             if head_limit and count >= head_limit:
                 break

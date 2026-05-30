@@ -111,39 +111,61 @@
 
 ### 4. Edit
 
-**用途**：精确修改文件内容，最核心的写操作工具
+**用途**：精确修改文件内容，最核心的写操作工具。支持两种模式。
 
 **输入**：
+
 | 参数 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | file_path | string | 是 | 文件路径 |
-| old_string | string | 是 | 要替换的原文（必须精确匹配，含缩进） |
-| new_string | string | 是 | 替换后的新文 |
-| replace_all | bool | 否 | 替换所有匹配（默认只替换第一个） |
+| old_string | string | 否 | 要替换的原文（字符串模式，必须精确匹配，含缩进） |
+| new_string | string | 否 | 替换后的新文，两种模式都可用 |
+| replace_all | bool | 否 | 替换所有匹配（字符串模式，默认只替换第一个） |
+| line_start | int | 否 | 起始行号（行号模式，1-based，1=第一行） |
+| line_end | int | 否 | 结束行号（行号模式，含此行；0或省略则等于line_start） |
 
 **输出**：确认信息 + unified diff
+
+**行号模式**（推荐）：
+
+`Edit(file, line_start, line_end, new_string)` 替换指定行范围为 new_string。Read 后直接用行号下刀，省掉拷贝 old_string 的步骤。
+
+**行号模式关键规则**：
+- **等行替换（N行换N行）**：行号基准不变，可连续多次 Edit 无需重新 Read
+- **不等行替换（N行换M行，N≠M）**：行号必然偏移，后续 Edit 前**必须重新 Read** 确认新行号
+- 单行替换：`lien_end` 省略或等于 `line_start`
+- new_string 为空字符串则删除指定行
+
+**字符串模式**：
+
+`Edit(file, old_string, new_string)` 精确字符串匹配替换。
 
 **设计要点**：
 - **old_string必须精确匹配**：包括缩进、空格、换行，模糊匹配是万恶之源
 - old_string在文件中不唯一且未设replace_all → 报错，要求扩大上下文使其唯一
 - old_string未找到 → 返回错误+相似行提示，引导LLM先Read确认
 - 文件不存在 → 报错，应用Write创建
-- 空old_string不允许
+- 空old_string不允许（行号模式用line_start替代）
+- 两种模式互斥：有 line_start 走行号模式，否则走字符串模式
 
 **实现算法**：
 ```
 1. 读取path全文
-2. 在全文中查找old_string
-   - 未找到：计算编辑距离，返回最相似的行作为提示
-   - 找到多个且无replace_all：报错"不唯一，请扩大上下文"
-   - 找到1个或replace_all=True：执行替换
-3. 替换后写回文件
-4. 生成unified diff（替换前→替换后）
-5. 返回确认信息+diff
+2. 若line_start>0：
+   a. 校验行号范围（line_end默认=line_start）
+   b. 替换[line_start-1, line_end)区间为新内容
+   c. 写回文件，生成unified diff
+3. 否则：
+   a. 在全文中查找old_string
+      - 未找到：计算编辑距离，返回最相似的行作为提示
+      - 找到多个且无replace_all：报错"不唯一，请扩大上下文"
+      - 找到1个或replace_all=True：执行替换
+   b. 替换后写回文件
+   c. 生成unified diff
+4. 返回确认信息+diff
 ```
 
-**关键**：Edit的可靠性完全取决于old_string的精确性。LLM必须先Read确认内容再Edit，这是调度逻辑的铁律。
-
+**关键**：Edit的可靠性完全取决于输入的精确性。行号模式 Read → Edit 是最优路径，不等行替换后必须 Re-Read。
 ---
 
 ### 5. Write
@@ -225,30 +247,11 @@
 **使用规则**：
 - 谨慎使用，频繁搜索会带来较差用户体验和额外成本
 - 适用场景：实时信息（天气、股价等）、AI绝对不知道但完成任务必需的资料、用户指出之前回答不准确需要纠正时
-- 搜索结果仅提供摘要，如需获取完整页面内容，需配合 `WebFetch` 工具使用
 - 不用于搜索本地代码（那是Grep的活）
 
 ---
 
-### 8. WebFetch
-
-**用途**：根据URL抓取网页完整内容。WebSearch返回摘要，WebFetch抓全文。用于WebSearch摘要信息不足时获取详细内容。
-
-**输入**：
-| 参数 | 类型 | 必填 | 说明 |
-|---|---|---|---|
-| url | string | 是 | 目标网页URL |
-
-**输出**：网页正文内容（纯文本，去除HTML标签）。
-
-**使用规则**：
-- 仅在WebSearch摘要不足以判断时使用
-- 不盲目信任网络信息，需客观判断、理论确实可行再实现
-- 抓取失败（404/超时/反爬）返回错误信息，LLM决策下一步
-
----
-
-### 9. TodoWrite
+### 8. TodoWrite
 
 **用途**：创建和管理结构化任务列表，用于跟踪当前编码会话的进度。复杂多步骤任务必须使用，让用户看到AI的工作计划和执行进度。
 
@@ -339,7 +342,7 @@
 
 | 级别 | 工具 | 行为 |
 |---|---|---|
-| READONLY | Read, Glob, Grep, WebSearch, WebFetch, TodoWrite | 无风险，直接执行 |
+| READONLY | Read, Glob, Grep, WebSearch, TodoWrite | 无风险，直接执行 |
 | WRITE | Edit, Write | 覆写风险，记录diff |
 | DESTRUCTIVE | Bash | 删除命令需用户确认 |
 

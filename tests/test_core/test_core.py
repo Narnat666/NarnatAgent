@@ -28,24 +28,23 @@ class TestContextManager:
 
     def test_no_warning_before_50(self):
         ctx = ContextManager()
-        for _ in range(49):
+        for _ in range(WARN_TURN_1 - 1):
             warn = ctx.increment()
             assert warn == ""
 
     def test_warning_at_50(self):
         ctx = ContextManager()
-        for _ in range(49):
+        for _ in range(WARN_TURN_1 - 1):
             ctx.increment()
-        warn = ctx.increment()  # 第50次
-        assert "50" in warn
+        warn = ctx.increment()  # 第WARN_TURN_1次
+        assert str(WARN_TURN_1) in warn
 
     def test_warning_at_100(self):
         ctx = ContextManager()
-        for _ in range(100):
+        for _ in range(WARN_TURN_2):
             ctx.increment()
-        warn = ctx.increment()  # 第101次
-        # 第100次应该已经触发了警告
-        assert ctx.turn_count == 101
+        warn = ctx.increment()  # 第WARN_TURN_2+1次
+        assert ctx.turn_count == WARN_TURN_2 + 1
 
     def test_need_compress(self):
         ctx = ContextManager()
@@ -67,6 +66,23 @@ class TestContextManager:
         assert ctx.turn_count == 0
         assert not ctx.need_compress()
 
+    def test_set_retry_soon(self):
+        """压缩失败后近期重试"""
+        ctx = ContextManager()
+        for _ in range(COMPRESS_TURN):
+            ctx.increment()
+        assert ctx.need_compress()
+        ctx.set_retry_soon()
+        # 重试点应小于COMPRESS_TURN
+        assert ctx.turn_count < COMPRESS_TURN
+        # 再过几轮还不触发
+        for _ in range(COMPRESS_TURN - ctx.turn_count - 1):
+            ctx.increment()
+        assert not ctx.need_compress()
+        # 再过1轮触发
+        ctx.increment()
+        assert ctx.need_compress()
+
     def test_get_summary(self):
         ctx = ContextManager()
         ctx.increment()
@@ -74,16 +90,15 @@ class TestContextManager:
         assert summary["turn_count"] == 1
 
     def test_warning_only_once(self):
-        """50轮警告只触发一次"""
+        """WARN_TURN_1警告只触发一次"""
         ctx = ContextManager()
         warnings = []
-        for _ in range(60):
+        for _ in range(WARN_TURN_1 + 10):
             warn = ctx.increment()
             if warn:
                 warnings.append(warn)
-        # 50轮警告只应出现一次
-        w50 = [w for w in warnings if "50" in w]
-        assert len(w50) == 1
+        w1 = [w for w in warnings if str(WARN_TURN_1) in w]
+        assert len(w1) == 1
 
 
 # ═══════════════════════════════════════════════════════════════

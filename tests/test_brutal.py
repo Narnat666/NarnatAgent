@@ -14,6 +14,7 @@ from narnat_agent.tools.registry import execute as registry_execute
 from narnat_agent.config.loader import load_config
 from narnat_agent.config.session_store import save_session, load_session, list_sessions, delete_session
 from narnat_agent.core.context import ContextManager
+from narnat_agent.config.defaults import COMPRESS_TURN
 from narnat_agent.core.compressor import Compressor
 from narnat_agent.core.llm import LLMClient
 from narnat_agent.config.loader import AIConfig
@@ -506,13 +507,13 @@ class TestAuditFixes:
     def test_compress_failure_then_normal_use(self):
         """压缩失败reset后，正常使用不受影响"""
         ctx = ContextManager()
-        for _ in range(120):
+        for _ in range(COMPRESS_TURN):
             ctx.increment()
         ctx.reset()
-        # 正常使用50轮
-        for _ in range(50):
+        # 正常使用几轮
+        for _ in range(COMPRESS_TURN - 1):
             ctx.increment()
-        assert ctx.turn_count == 50
+        assert ctx.turn_count == COMPRESS_TURN - 1
         assert not ctx.need_compress()
 
     def test_write_clear_read_files(self):

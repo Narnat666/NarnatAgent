@@ -33,9 +33,9 @@ class LLMClient:
         else:
             self._backend = _OpenAIBackend(config, self._tool_defs, logger)
 
-    def chat_stream(self, messages: List[Dict[str, Any]]) -> Iterator:
-        """流式调用LLM，yield OpenAI格式chunk"""
-        return self._backend.chat_stream(messages)
+    def chat_stream(self, messages: List[Dict[str, Any]], no_tools: bool = False) -> Iterator:
+        """流式调用LLM，yield OpenAI格式chunk。no_tools=True时不传工具定义（压缩请求用）"""
+        return self._backend.chat_stream(messages, no_tools=no_tools)
 
     def count_tokens(self, messages: List[Dict[str, Any]]) -> int:
         """粗略估算token数（中文1字≈2token，英文1词≈1token）"""
@@ -67,17 +67,19 @@ class _OpenAIBackend:
             base_url=config.base_url,
         )
 
-    def chat_stream(self, messages):
+    def chat_stream(self, messages, no_tools=False):
         if self._logger:
             self._logger.info("core.llm", f"发送请求(OpenAI), messages={len(messages)}条")
 
         try:
-            stream = self._client.chat.completions.create(
+            kwargs = dict(
                 model=self._config.model,
                 messages=messages,
-                tools=self._tool_defs,
                 stream=True,
             )
+            if not no_tools:
+                kwargs["tools"] = self._tool_defs
+            stream = self._client.chat.completions.create(**kwargs)
         except Exception as e:
             if self._logger:
                 self._logger.error("core.llm", f"API调用失败: {e}")
@@ -158,7 +160,7 @@ class _AnthropicBackend:
             "Content-Type": "application/json",
         }
 
-    def chat_stream(self, messages):
+    def chat_stream(self, messages, no_tools=False):
         if self._logger:
             self._logger.info("core.llm", f"发送请求(Anthropic), messages={len(messages)}条")
 
@@ -178,7 +180,7 @@ class _AnthropicBackend:
         }
         if system:
             body["system"] = system
-        if anthropic_tools:
+        if anthropic_tools and not no_tools:
             body["tools"] = anthropic_tools
 
         # 发送请求
