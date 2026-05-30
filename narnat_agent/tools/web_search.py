@@ -1,16 +1,20 @@
-"""WebSearch工具 —— Bing(HTTP) + 百度(Playwright) 双引擎
+"""WebSearch工具 —— Bing(HTTP) + 百度(Playwright子进程) 双引擎
 
 降级策略:
 1. Bing HTML — 纯HTTP，速度快（~1s），国内直连cn.bing.com
-2. Baidu    — Playwright无头浏览器，速度慢（~3s），中文搜索质量更高
+2. Baidu    — Playwright子进程，速度慢（~3s），中文搜索质量更高
 
 Bing 先行快速返回，百度补充更多中文结果。两者合并去重后按相关性排序。
 
 百度必须用浏览器：纯HTTP请求无法绕过验证码（百度JS设置关键cookie）。
-Playwright用系统Edge（channel=msedge），非headless+反自动化检测。
+Playwright在子进程中运行，避免事件循环污染主进程（prompt_toolkit依赖asyncio）。
 """
 
+import json
+import os
 import re
+import subprocess
+import sys
 import time
 from html import unescape as _html_unescape
 from typing import List, Dict
@@ -28,7 +32,7 @@ _UA = (
 _TIMEOUT = 5           # HTTP请求超时秒数
 _MAX_RETRIES = 2       # 仅5xx重试
 _SNIPPET_LEN = 200     # 摘要最大长度
-_BAIDU_TIMEOUT = 15000 # 百度Playwright超时ms
+_BAIDU_TIMEOUT = 20    # 百度子进程超时秒数
 
 # 预编译正则
 _RE_STRIP_TAG = re.compile(r"<[^>]+>")
@@ -75,6 +79,23 @@ def _url_key(url: str) -> str:
         return url.rstrip("/")
 
 
+def _extract_query_words(query: str) -> set:
+    """
+    提取查询词用于相关性判断。
+    英文按空格拆分，中文按2字滑窗拆分（"红米K80" → "红米","米k","k8","80"）。
+    """
+    words = set()
+    for w in re.findall(r"[a-zA-Z0-9]{2,}", query):
+        words.add(w.lower())
+    cn_chars = re.findall(r"[\u4e00-\u9fff]+", query)
+    for seg in cn_chars:
+        for i in range(len(seg) - 1):
+            words.add(seg[i:i + 2])
+        if len(seg) == 1:
+            words.add(seg)
+    return words
+
+
 def _relevance_score(result: Dict, query: str) -> float:
     """结果与查询的相关性：标题命中查询词越多分越高"""
     title = result.get("title", "").lower()
@@ -85,25 +106,6 @@ def _relevance_score(result: Dict, query: str) -> float:
     title_hits = sum(1 for w in q_words if w in title)
     snippet_hits = sum(1 for w in q_words if w in snippet)
     return (title_hits * 3 + snippet_hits) / (len(q_words) * 4)
-
-
-def _extract_query_words(query: str) -> set:
-    """
-    提取查询词用于相关性判断。
-    英文按空格拆分，中文按2字滑窗拆分（"红米K80" → "红米","米k","k8","80"）。
-    """
-    words = set()
-    # 英文词
-    for w in re.findall(r"[a-zA-Z0-9]{2,}", query):
-        words.add(w.lower())
-    # 中文：连续中文字符按2字滑窗
-    cn_chars = re.findall(r"[\u4e00-\u9fff]+", query)
-    for seg in cn_chars:
-        for i in range(len(seg) - 1):
-            words.add(seg[i:i + 2])
-        if len(seg) == 1:
-            words.add(seg)
-    return words
 
 
 def _format_results(results: List[Dict]) -> str:
@@ -149,8 +151,7 @@ def execute(query: str, num: int = 5, lr: str = "") -> str:
             seen.add(key)
             results.append(r)
 
-    # 2. 百度 — Playwright，中文搜索更强
-    # 百度跳转链接(/link?url=xxx)按完整URL去重，因为路径都是/link
+    # 2. 百度 — Playwright子进程，中文搜索更强
     baidu_seen: set = set()
     for r in _search_baidu(query, num):
         url = r.get("url", "")
@@ -165,13 +166,7 @@ def execute(query: str, num: int = 5, lr: str = "") -> str:
     # 过滤掉明显不相关的结果（标题与查询无任何词重叠）
     q_words = _extract_query_words(query)
     if q_words:
-        filtered = []
-        for r in results:
-            title = r.get("title", "").lower()
-            # 标题至少命中1个查询词才算相关
-            if any(w in title for w in q_words):
-                filtered.append(r)
-        # 如果过滤后还有结果就用过滤后的，否则保留原始（避免过度过滤）
+        filtered = [r for r in results if any(w in r.get("title", "").lower() for w in q_words)]
         if filtered:
             results = filtered
 
@@ -247,106 +242,114 @@ def _extract_bing_snippet(html: str, start: int) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 2. 百度 — Playwright浏览器，中文搜索强
+# 2. 百度 — Playwright子进程，隔离事件循环
 # ═══════════════════════════════════════════════════════════════
 
-# 模块级浏览器缓存，避免每次搜索都启动浏览器
-_browser_cache = {"pw": None, "browser": None, "context": None, "page": None}
+# 子进程脚本路径
+_BAIDU_WORKER = os.path.join(os.path.dirname(__file__), "_baidu_worker.py")
+
+# 长连接worker进程缓存
+_worker_proc = None
+_worker_ready = False
 
 
-def _get_baidu_page():
-    """获取或创建百度搜索用的浏览器页面（复用实例）"""
-    cache = _browser_cache
+def _get_worker():
+    """获取或启动百度搜索worker子进程（长连接复用浏览器）"""
+    global _worker_proc, _worker_ready
 
-    if cache["page"] is not None:
-        try:
-            # 检查页面是否还活着
-            cache["page"].evaluate("1+1")
-            return cache["page"]
-        except Exception:
-            _close_baidu_browser()
+    # 检查现有进程是否还活着
+    if _worker_proc is not None and _worker_ready:
+        if _worker_proc.poll() is None:
+            return _worker_proc
+        # 进程已死，清理
+        _cleanup_worker()
 
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
+    if not os.path.exists(_BAIDU_WORKER):
         return None
 
     try:
-        pw = sync_playwright().start()
-        browser = pw.chromium.launch(
-            channel="msedge",
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-features=AutomationControlled",
-                "--disable-infobars",
-                "--window-size=1920,1080",
-            ],
+        proc = subprocess.Popen(
+            [sys.executable, _BAIDU_WORKER],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=0,
         )
-        context = browser.new_context(
-            user_agent=_UA,
-            viewport={"width": 1920, "height": 1080},
-            locale="zh-CN",
-        )
-        # 反自动化检测：隐藏 webdriver、伪造浏览器特征
-        context.add_init_script(
-            'Object.defineProperty(navigator,"webdriver",{get:()=>undefined});'
-            'Object.defineProperty(navigator,"languages",{get:()=>["zh-CN","zh","en"]});'
-            'Object.defineProperty(navigator,"plugins",{get:()=>[1,2,3,4,5]});'
-            'window.chrome={runtime:{}};'
-        )
-        page = context.new_page()
+        # 等待ready信号
+        line = proc.stdout.readline()
+        if not line:
+            _cleanup_worker()
+            return None
 
-        # 先访问首页获取cookie（等待JS执行设置关键cookie）
-        page.goto("https://www.baidu.com/", timeout=_BAIDU_TIMEOUT)
-        page.wait_for_load_state("networkidle", timeout=_BAIDU_TIMEOUT)
-        time.sleep(2)  # 等待JS设置BAIDUID_BFESS/BA_HECTOR/ZFY等cookie
+        text = _decode_output(line)
+        if '"ready"' not in text:
+            _cleanup_worker()
+            return None
 
-        cache["pw"] = pw
-        cache["browser"] = browser
-        cache["context"] = context
-        cache["page"] = page
-        return page
+        _worker_proc = proc
+        _worker_ready = True
+        return proc
     except Exception:
-        _close_baidu_browser()
+        _cleanup_worker()
         return None
 
 
-def _close_baidu_browser():
-    """关闭缓存的浏览器"""
-    cache = _browser_cache
-    for key in ("page", "context", "browser", "pw"):
+def _cleanup_worker():
+    """清理worker子进程"""
+    global _worker_proc, _worker_ready
+    if _worker_proc is not None:
         try:
-            if cache[key] is not None:
-                if key == "pw":
-                    cache[key].stop()
-                else:
-                    cache[key].close()
+            _worker_proc.stdin.close()
         except Exception:
             pass
-        cache[key] = None
+        try:
+            _worker_proc.terminate()
+            _worker_proc.wait(timeout=3)
+        except Exception:
+            try:
+                _worker_proc.kill()
+            except Exception:
+                pass
+    _worker_proc = None
+    _worker_ready = False
+
+
+def _decode_output(data: bytes) -> str:
+    """解码子进程输出（Windows默认GBK）"""
+    for enc in ("utf-8", "gbk", "latin-1"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("latin-1")
 
 
 def _search_baidu(query: str, num: int) -> List[Dict]:
-    """百度搜索 — Playwright + 系统Edge，复用浏览器实例"""
-    page = _get_baidu_page()
-    if page is None:
+    """百度搜索 — 通过长连接worker子进程，复用浏览器实例"""
+    proc = _get_worker()
+    if proc is None:
         return []
 
+    # 百度对长查询容易触发验证码，截断到30字符
+    baidu_query = query[:30] if len(query) > 30 else query
+
     try:
-        # 百度对长查询容易触发验证码，截断到30字符
-        baidu_query = query[:30] if len(query) > 30 else query
-        fetch_rn = min(num * 2, 20)
-        page.goto(
-            f"https://www.baidu.com/s?wd={quote_plus(baidu_query)}&rn={fetch_rn}",
-            timeout=_BAIDU_TIMEOUT,
-        )
-        page.wait_for_load_state("networkidle", timeout=_BAIDU_TIMEOUT)
-        html = page.content()
-        return _parse_baidu(html, num)
+        # 发送搜索请求
+        cmd = json.dumps({"query": baidu_query, "num": num}, ensure_ascii=False) + "\n"
+        proc.stdin.write(cmd.encode("utf-8"))
+        proc.stdin.flush()
+
+        # 读取结果
+        line = proc.stdout.readline()
+        if not line:
+            _cleanup_worker()
+            return []
+
+        text = _decode_output(line)
+        data = json.loads(text)
+        return data if isinstance(data, list) else []
     except Exception:
-        # 页面可能已失效，清除缓存下次重建
-        _close_baidu_browser()
+        _cleanup_worker()
         return []
 
 
