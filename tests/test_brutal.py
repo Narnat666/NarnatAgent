@@ -747,3 +747,83 @@ class TestAnthropicBackend:
         assert read_tool["name"] == "Read"
         assert "input_schema" in read_tool
         assert "description" in read_tool
+
+
+# ═══════════════════════════════════════════════════════════════
+# 本轮审核修复验证
+# ═══════════════════════════════════════════════════════════════
+
+class TestAuditRound2Fixes:
+    """验证第二轮审核修复"""
+
+    def test_count_tokens_handles_none_content(self):
+        """严重1修复：count_tokens对content=None不崩溃"""
+        from narnat_agent.core.llm import LLMClient
+        from narnat_agent.config.loader import AIConfig
+        config = AIConfig(api_key="test", base_url="https://api.test.com", model="test")
+        client = LLMClient(config)
+        # content=None的消息不应崩溃
+        result = client.count_tokens([
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "type": "function", "function": {"name": "Read", "arguments": "{}"}}]},
+            {"role": "user", "content": "hello"},
+        ])
+        assert result > 0
+
+    def test_anthropic_stop_reason_mapping(self):
+        """严重2修复：Anthropic stop_reason正确映射"""
+        import inspect
+        from narnat_agent.core.llm import _AnthropicBackend
+        source = inspect.getsource(_AnthropicBackend.chat_stream)
+        # 确认有tool_use的映射
+        assert 'stop_reason == "tool_use"' in source
+        # 确认max_tokens不会映射为tool_calls
+        assert 'end_turn' in source
+        # 不应存在简单的二元映射
+        assert '"tool_calls"' not in source.split('end_turn')[0]
+
+    def test_glob_multi_star_pattern(self):
+        """严重3修复：src/**/*.py模式正确匹配"""
+        from narnat_agent.tools.glob import _match_pattern
+        # src/**/*.py 应匹配 src/foo/bar.py
+        assert _match_pattern("src/foo/bar.py", "src/**/*.py")
+        # src/**/*.py 应匹配 src/baz.py
+        assert _match_pattern("src/baz.py", "src/**/*.py")
+        # 不应匹配 tests/foo.py
+        assert not _match_pattern("tests/foo.py", "src/**/*.py")
+
+    def test_debug_mode_no_log_file(self):
+        """-d参数：非debug模式不创建日志文件"""
+        from narnat_agent.core.agent import Agent
+        a = Agent(debug=False)
+        assert a._logger._logger is None
+
+    def test_debug_mode_creates_log_file(self):
+        """-d参数：debug模式创建日志文件"""
+        from narnat_agent.core.agent import Agent
+        a = Agent(debug=True)
+        assert a._logger._logger is not None
+
+    def test_session_name_safety(self):
+        """中等修复：会话名安全化"""
+        from narnat_agent.config.session_store import _session_path
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as td:
+            # ..应被替换
+            p1 = _session_path(td, "..")
+            assert ".." not in os.path.basename(p1)
+            # Windows禁止字符应被替换
+            p2 = _session_path(td, "test<>file")
+            assert "<" not in os.path.basename(p2)
+            assert ">" not in os.path.basename(p2)
+
+    def test_compress_prompt_filename_consistent(self):
+        """中等修复：COMPRESS_PROMPT中文件名与LAST_SESSION_SUMMARY一致"""
+        from narnat_agent.config.defaults import COMPRESS_PROMPT, LAST_SESSION_SUMMARY
+        assert LAST_SESSION_SUMMARY in COMPRESS_PROMPT
+
+    def test_no_total_cost_field(self):
+        """中等修复：移除了无用的_total_cost字段"""
+        import inspect
+        from narnat_agent.core.agent import Agent
+        source = inspect.getsource(Agent.__init__)
+        assert "_total_cost" not in source

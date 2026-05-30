@@ -89,7 +89,7 @@ Avoid over-the-top validation like 'You are absolutely right'.
 """
 
 # ── 压缩Prompt模板 ──
-COMPRESS_PROMPT = "请总结本轮对话的全部经验和成果，写入经验成果.md，确保新对话能继承当前对话的全部经验成果。"
+COMPRESS_PROMPT = "请总结本轮对话的全部经验和成果，写入last_session_summary.md，确保新对话能继承当前对话的全部经验成果。"
 
 # ── .narnat 目录名 ──
 NARNAT_DIR = ".narnat"

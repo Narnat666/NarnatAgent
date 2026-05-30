@@ -2,7 +2,7 @@
 上下文管理 —— 轮次计数、压缩触发、会话销毁/创建
 """
 
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any, Optional
 
 from ..config.defaults import WARN_TURN_1, WARN_TURN_2, COMPRESS_TURN
 

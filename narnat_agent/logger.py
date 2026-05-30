@@ -91,12 +91,7 @@ class AgentLogger:
         if not self._logger:
             return
         safe_msg = _redact(msg)
-        # 用子logger名模拟模块名
-        child = logging.getLogger(f"narnat_{id(self)}.{module}")
-        child.handlers.clear()
-        child.propagate = True
-        child.parent = self._logger
-        child.log(level, safe_msg)
+        self._logger.log(level, f"[{module}] {safe_msg}")
 
     def debug(self, module: str, msg: str):
         self._log(logging.DEBUG, module, msg)

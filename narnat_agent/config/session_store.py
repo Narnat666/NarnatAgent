@@ -22,7 +22,14 @@ def _sessions_dir(narnat_dir: str) -> str:
 
 def _session_path(narnat_dir: str, name: str) -> str:
     """获取指定会话的文件路径"""
+    # 安全化：替换路径分隔符和Windows禁止字符
     safe_name = name.replace("/", "_").replace("\\", "_")
+    safe_name = safe_name.replace(":", "_").replace("<", "_").replace(">", "_")
+    safe_name = safe_name.replace("|", "_").replace("?", "_").replace("*", "_")
+    # 防止..逃逸
+    safe_name = safe_name.replace("..", "_")
+    if not safe_name:
+        safe_name = "unnamed"
     return os.path.join(_sessions_dir(narnat_dir), f"{safe_name}.json")
 
 

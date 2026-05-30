@@ -41,7 +41,7 @@ class LLMClient:
         """粗略估算token数（中文1字≈2token，英文1词≈1token）"""
         total = 0
         for m in messages:
-            content = m.get("content", "")
+            content = m.get("content") or ""
             if not content:
                 continue
             cn_chars = sum(1 for c in content if '\u4e00' <= c <= '\u9fff')
@@ -245,7 +245,13 @@ class _AnthropicBackend:
                 stop_reason = data.get("delta", {}).get("stop_reason", "")
                 if stop_reason:
                     # 转换 stop_reason → finish_reason
-                    finish_reason = "stop" if stop_reason == "end_turn" else "tool_calls"
+                    if stop_reason == "end_turn":
+                        finish_reason = "stop"
+                    elif stop_reason == "tool_use":
+                        finish_reason = "tool_calls"
+                    else:
+                        # max_tokens / stop_sequence 等都映射为 stop
+                        finish_reason = "stop"
 
                     # 转换 tool_use_blocks → OpenAI tool_calls 格式
                     if tool_use_blocks:

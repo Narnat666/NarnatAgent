@@ -84,7 +84,6 @@ def execute(
 
 def _search_files(root, regex, glob_filter, output_mode, show_n, A, B, head_limit):
     """遍历文件执行搜索"""
-    fnm = fnmatch
 
     results = []
     count = 0
@@ -92,7 +91,7 @@ def _search_files(root, regex, glob_filter, output_mode, show_n, A, B, head_limi
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in _IGNORE_DIRS]
         for fname in filenames:
-            if glob_filter and not fnm.fnmatch(fname, glob_filter):
+            if glob_filter and not fnmatch.fnmatch(fname, glob_filter):
                 continue
             full = os.path.join(dirpath, fname)
             rel = os.path.relpath(full, root)

@@ -48,12 +48,13 @@ class NarnatSessionCallbacks(SessionCallbacks):
 class Agent:
     """Narnat Agent 主控"""
 
-    def __init__(self, project_root: Optional[str] = None):
+    def __init__(self, project_root: Optional[str] = None, debug: bool = False):
         # 加载配置
         self._config = load_config(project_root)
-        # 初始化日志
+        # 初始化日志（仅debug模式启用）
         self._logger = AgentLogger(self._config.project_root)
-        self._logger.start(self._config.project_root)
+        if debug:
+            self._logger.start(self._config.project_root)
         # 初始化LLM
         self._llm = LLMClient(self._config.ai, self._logger)
         # 初始化上下文管理
@@ -77,7 +78,6 @@ class Agent:
         # 统计
         self._total_input_tokens = 0
         self._total_output_tokens = 0
-        self._total_cost = 0.0
 
     def _confirm_delete(self, command: str) -> bool:
         """删除命令确认回调"""
@@ -181,7 +181,6 @@ class Agent:
                         stream.finish(
                             self._total_input_tokens,
                             self._total_output_tokens,
-                            cost=self._total_cost,
                         )
                         return
 
@@ -249,7 +248,6 @@ class Agent:
             stream.finish(
                 self._total_input_tokens,
                 self._total_output_tokens,
-                cost=self._total_cost,
             )
             break
 

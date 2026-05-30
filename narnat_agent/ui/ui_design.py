@@ -26,7 +26,10 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 
 if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, OSError):
+        pass
 
 # ═══════════════════════════════════════════════════════════════
 # ANSI 转义序列常量
@@ -693,71 +696,4 @@ def read_input(session: PromptSession) -> Optional[str]:
         return None
 
 
-# ═══════════════════════════════════════════════════════════════
-# 模拟流式后端 (后端对接范本)
-# ═══════════════════════════════════════════════════════════════
 
-def _mock_stream(text: str):
-    """模拟 AI 流式输出生成器。后端需实现类似接口"""
-    time.sleep(1.5)
-    md = f"## 回复\n\n你输入了: **{text}**\n\n### 功能列表\n\n"
-    md += "- [x] 标题/粗体/斜体/删除/代码/链接/图片\n"
-    md += "- [x] 列表(无序/有序/任务)/引用/嵌套引用\n"
-    md += "- [x] 代码块(行号+语言着色)/表格/水平线\n\n"
-    md += "> 这是一段引用\n> > 嵌套引用\n\n"
-    md += "## 表格示例\n\n"
-    md += "| 语言 | 颜色 | 类型 |\n|------|------|------|\n"
-    md += "| python | cyan | 脚本 |\n| rust | red | 编译 |\n| js | yellow | 脚本 |\n\n"
-    md += "---\n\n"
-    md += "```python\ndef greet(name):\n    return f'Hello, {name}!'\n\nprint(greet('world'))\n```\n"
-    for i, ch in enumerate(md):
-        if _interrupt_ctrl.is_set:
-            return
-        yield ch
-        if i % 3 == 0:
-            time.sleep(0.015)
-
-
-# ═══════════════════════════════════════════════════════════════
-# 主循环 (后端对接参考实现)
-# ═══════════════════════════════════════════════════════════════
-
-def main() -> None:
-    ui = UIInterface("deepseek-chat")
-    ui.start()
-
-    while True:
-        line = ui.read_input()
-        if line is None:
-            continue
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped == "/exit":
-            return
-        if stripped.startswith("/"):
-            parts = stripped.split(None, 1)
-            cmd = parts[0]
-            args = parts[1] if len(parts) > 1 else ""
-            if ui.dispatch_command(cmd, args):
-                continue
-
-        stream = ui.create_stream()
-        try:
-            for chunk in _mock_stream(stripped):
-                if stream.cancelled:
-                    break
-                stream.feed(chunk)
-            stream.finish(
-                input_tokens=500 + len(stripped) * 3,
-                output_tokens=200 + len(stripped) * 2,
-                cache=300, cost=0.001 + len(stripped) * 0.0001)
-        except KeyboardInterrupt:
-            ui.on_interrupted()
-            stream.abort()
-        except Exception as e:
-            print(f"  {X}错误:{e}{R}")
-
-
-if __name__ == "__main__":
-    main()

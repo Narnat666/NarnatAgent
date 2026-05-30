@@ -84,4 +84,14 @@ def _match_pattern(rel_path: str, pattern: str) -> bool:
             return fnmatch.fnmatch(os.path.basename(rel_path), suffix) or \
                    fnmatch.fnmatch(rel_path, suffix)
         return True
+    # 多个**的情况：用递归walk匹配（已由外层os.walk保证递归）
+    # 只需检查basename是否匹配pattern中最后一个**后的suffix
+    if len(parts) > 2:
+        last_suffix = parts[-1].lstrip("/\\")
+        first_prefix = parts[0].rstrip("/\\")
+        if first_prefix and not rel_path.startswith(first_prefix):
+            return False
+        if last_suffix:
+            return fnmatch.fnmatch(os.path.basename(rel_path), last_suffix)
+        return True
     return fnmatch.fnmatch(rel_path, pattern)
