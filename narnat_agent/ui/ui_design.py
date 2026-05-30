@@ -103,8 +103,9 @@ class InterruptController:
         self._stop_poll.clear()
         self._poll_thread = threading.Thread(target=self._poll_esc, daemon=True)
         self._poll_thread.start()
+        # 忽略Ctrl+C(SIGINT)，只接受Esc打断
         self._saved_sigint = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, lambda s, f: self._interrupt.set())
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     def _poll_esc(self) -> None:
         try:
