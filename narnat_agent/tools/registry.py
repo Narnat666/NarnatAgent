@@ -92,16 +92,18 @@ TOOL_DEFINITIONS: List[Dict] = [
         "type": "function",
         "function": {
             "name": "Edit",
-            "description": "精确替换文件中的字符串。old_string必须精确匹配，先Read确认再Edit",
+            "description": "修改文件。行号模式: Edit(file, line_start, line_end, new_string) 替换指定行范围；字符串模式: Edit(file, old_string, new_string) 精确替换匹配文本",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "文件路径"},
-                    "old_string": {"type": "string", "description": "要替换的原文（必须精确匹配）"},
+                    "old_string": {"type": "string", "description": "要替换的原文（字符串模式，必须精确匹配）"},
                     "new_string": {"type": "string", "description": "替换后的新文"},
-                    "replace_all": {"type": "boolean", "description": "替换所有匹配（默认只替换第一个）"},
+                    "replace_all": {"type": "boolean", "description": "替换所有匹配（字符串模式，默认只替换第一个）"},
+                    "line_start": {"type": "integer", "description": "起始行号（行号模式，从1开始）"},
+                    "line_end": {"type": "integer", "description": "结束行号（行号模式，含此行；0或省略则等于line_start）"},
                 },
-                "required": ["file_path", "old_string", "new_string"],
+                "required": ["file_path"],
             },
         },
     },

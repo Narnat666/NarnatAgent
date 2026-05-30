@@ -11,7 +11,7 @@ COMPRESS_TURN = 120  # 强制压缩
 IRON_RULES = """
 # Iron Rules (MUST follow)
 
-1. Edit前必须Read — 确认old_string精确匹配，禁止凭记忆猜测
+1. Edit前必须Read — 确认内容再修改，禁止凭记忆猜测
 2. 改一处验一处 — 不批量改多处再验证，改完立即验证
 3. 优先Edit而非Write — 修改已有文件用Edit，新建文件用Write
 4. Bash用于执行和目录操作 — 文件内容操作用Read/Edit/Write/Grep；目录创建等系统操作可用Bash
@@ -44,7 +44,9 @@ Avoid over-the-top validation like 'You are absolutely right'.
   NEVER read same file in segments, wastes tool calls.
 - Write: Create or overwrite file. MUST provide full content, NEVER partial content.
   ALWAYS prefer Edit for modifying existing files, NEVER rewrite entire file just to change a few lines.
-- Edit: Exact string replacement. old_string→new_string. NEVER guess content, Read first to confirm.
+- Edit: Modify file. Two modes:
+  1) Line range: Edit(file, line_start, line_end, new_string) — replace lines [start,end] with new_string. Preferred: Read→Edit by line numbers, no need to copy old_string.
+  2) String match: Edit(file, old_string, new_string) — exact string replacement. old_string must match exactly.
 - Glob: Search files by name pattern (e.g. **/*.py). For content search, use Grep.
 - Grep: Search file content by regex. MUST use regex syntax, NEVER glob syntax.
 
