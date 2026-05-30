@@ -1,1 +1,37 @@
-.arts
+# ═══ Python ═══
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ═══ pytest ═══
+.pytest_cache/
+.pytest_cache/
+
+# ═══ Nuitka 编译产物 ═══
+output/
+main.build/
+main.dist/
+nuitka-crash-report.xml
+*.exe
+
+# ═══ IDE / 工具 ═══
+.arts/
+.codeartsdoer/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ═══ 运行时数据 ═══
+.narnat/
+logs/
+
+# ═══ 系统文件 ═══
+Thumbs.db
+.DS_Store
+Desktop.ini

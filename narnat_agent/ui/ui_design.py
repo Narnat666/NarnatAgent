@@ -207,10 +207,10 @@ def _render_heading(_line: str, m: Match) -> str:
     level = len(m.group(1))
     body = InlineRules.render(m.group(2))
     if level <= 2:
-        return f"{B}{CYN}{body}{R}"
+        return f"  {B}{CYN}{body}{R}"
     if level == 3:
-        return f"{B}{GRN}{body}{R}"
-    return f"{B}{body}{R}"
+        return f"  {B}{GRN}{body}{R}"
+    return f"  {B}{body}{R}"
 
 
 def _render_hr(_line: str, _m: Match) -> str:
@@ -220,17 +220,17 @@ def _render_hr(_line: str, _m: Match) -> str:
 def _render_task(_line: str, m: Match) -> str:
     done = m.group(1).lower() == "x"
     marker = f"{E}v{R}" if done else f"{G}o{R}"
-    return f"  {marker} {InlineRules.render(m.group(2))}"
+    return f"   {marker} {InlineRules.render(m.group(2))}"
 
 
 def _render_ul(_line: str, _m: Match) -> str:
-    return f"  {E}*{R} {InlineRules.render(_line[2:])}"
+    return f"   {E}*{R} {InlineRules.render(_line[2:])}"
 
 
 def _render_ol(_line: str, m: Match) -> str:
     num = m.group(1)
     body_start = len(num) + 2
-    return f"  {G}{num}.{R} {InlineRules.render(_line[body_start:])}"
+    return f"   {G}{num}.{R} {InlineRules.render(_line[body_start:])}"
 
 
 def _render_blockquote(_line: str, _m: Match) -> str:
@@ -240,18 +240,18 @@ def _render_blockquote(_line: str, _m: Match) -> str:
         rest = rest[1:]
         depth += 1
     body = rest.strip()
-    return f"{D}{G}{'| ' * depth}{R}{InlineRules.render(body)}"
+    return f"  {D}{G}{'| ' * depth}{R}{InlineRules.render(body)}"
 
 
 def _render_table_row(_line: str, _m: Match) -> str:
     cells = [c.strip() for c in _line.strip("|").split("|")]
     if _is_table_separator(cells):
         return ""
-    return "  " + " | ".join(InlineRules.render(c) for c in cells)
+    return "    " + " | ".join(InlineRules.render(c) for c in cells)
 
 
 def _render_paragraph(_line: str, _m: Match) -> str:
-    return InlineRules.render(_line)
+    return "  " + InlineRules.render(_line)
 
 
 _RE_TABLE_SEP = re.compile(r"^[-:]+$")
@@ -388,10 +388,10 @@ class StreamingRenderer:
             self._buf_append(rest)
             return True
         rendered = render_line(line)
-        if rendered or self._normal_line_count > 0:
-            sys.stdout.write(rendered + "\n")
-        else:
-            sys.stdout.write(rendered)
+        if not rendered:
+            # 跳过空行，避免段落间多余换行
+            return False
+        sys.stdout.write(rendered + "\n")
         sys.stdout.flush()
         self._normal_line_count += 1
         return False
@@ -599,7 +599,6 @@ class UIStreamSession:
         self._spinner_stop.set()
         self._renderer.flush()
         show_stats(input_tokens, output_tokens, cache, cost)
-        sys.stdout.write("\n")
 
     def abort(self) -> None:
         self._spinner_stop.set()
@@ -637,8 +636,7 @@ class UIInterface:
         return _dispatch_command(cmd, args, self._callbacks)
 
     def create_stream(self) -> UIStreamSession:
-        _interrupt_ctrl.enter_run_mode()
-        _interrupt_ctrl.clear()
+        _interrupt_ctrl.enter_run_mode()  # 内部已clear
         session = UIStreamSession()
         session.begin()
         return session
