@@ -4,6 +4,8 @@
 
 import json
 import os
+import sys
+import platform
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -74,9 +76,14 @@ def _load_user_md(narnat_dir: str) -> str:
         return ""
 
 
-def _build_system_prompt(model: str, user_md: str) -> str:
+def _build_system_prompt(model: str, user_md: str, cwd: str = "", os_name: str = "", shell_name: str = "") -> str:
     """拼接系统prompt：基础prompt + 铁律 + 用户自定义"""
-    parts = [BASE_PROMPT_TEMPLATE.format(model=model), IRON_RULES]
+    parts = [BASE_PROMPT_TEMPLATE.format(
+        model=model,
+        cwd=cwd or os.getcwd(),
+        platform=os_name or platform.system(),
+        shell=shell_name or ("PowerShell" if sys.platform == "win32" else "bash"),
+    ), IRON_RULES]
     if user_md:
         parts.append(user_md)
     return "\n".join(parts)
@@ -91,7 +98,7 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
     3. 读取 narnat.md → 用户自定义指令
     4. 拼接系统prompt
     """
-    root = project_root or _find_project_root()
+    root = os.path.abspath(project_root or _find_project_root())
     narnat_dir = os.path.join(root, NARNAT_DIR)
 
     # 确保 .narnat 目录存在
@@ -113,7 +120,13 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
 
     ai_config = _load_json(narnat_dir)
     user_md = _load_user_md(narnat_dir)
-    system_prompt = _build_system_prompt(ai_config.model, user_md)
+    system_prompt = _build_system_prompt(
+        model=ai_config.model,
+        user_md=user_md,
+        cwd=root,
+        os_name=platform.system(),
+        shell_name="PowerShell" if sys.platform == "win32" else "bash",
+    )
 
     return AppConfig(
         ai=ai_config,

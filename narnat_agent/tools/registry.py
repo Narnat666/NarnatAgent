@@ -5,7 +5,7 @@
 import json
 from typing import Dict, List, Any, Callable, Optional
 
-from . import read, glob, grep, edit, write, bash, web_search, web_fetch, todo_write
+from . import read, glob, grep, edit, write, bash, web_search, todo_write
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -20,7 +20,6 @@ _TOOL_IMPLEMENTATIONS: Dict[str, Callable] = {
     "Write": write.execute,
     "Bash": bash.execute,
     "WebSearch": web_search.execute,
-    "WebFetch": web_fetch.execute,
     "TodoWrite": todo_write.execute,
 }
 
@@ -152,20 +151,6 @@ TOOL_DEFINITIONS: List[Dict] = [
                     "lr": {"type": "string", "description": "语言限制，如lang_en/lang_zh-CN"},
                 },
                 "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "WebFetch",
-            "description": "根据URL抓取网页完整内容",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string", "description": "目标网页URL"},
-                },
-                "required": ["url"],
             },
         },
     },

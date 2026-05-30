@@ -570,6 +570,8 @@ class UIStreamSession:
       session.finish(input_tokens, output_tokens)
     或异常时:
       session.abort()
+
+    工具执行期间调用 pause_spinner/resume_spinner 避免闪烁。
     """
 
     def __init__(self) -> None:
@@ -577,6 +579,7 @@ class UIStreamSession:
         self._spinner_stop = threading.Event()
         self._spinner_thread: Optional[threading.Thread] = None
         self._started = False
+        self._spinner_paused = False
 
     @property
     def cancelled(self) -> bool:
@@ -596,6 +599,25 @@ class UIStreamSession:
             if self._spinner_thread is not None:
                 self._spinner_thread.join(timeout=0.5)
         self._renderer.feed(chunk)
+
+    def pause_spinner(self) -> None:
+        """暂停spinner（工具执行前调用），清除当前行避免闪烁"""
+        if not self._started and self._spinner_thread is not None and self._spinner_thread.is_alive():
+            self._spinner_stop.set()
+            self._spinner_paused = True
+            # 清除spinner行
+            sys.stdout.write("\r\x1b[K")
+            sys.stdout.flush()
+
+    def resume_spinner(self) -> None:
+        """恢复spinner（工具执行后调用，仅当AI还在思考时）"""
+        if self._spinner_paused and not self._started:
+            self._spinner_paused = False
+            self._spinner_stop.clear()
+            self._spinner_thread = threading.Thread(
+                target=_spinner_thread,
+                args=(self._spinner_stop,), daemon=True)
+            self._spinner_thread.start()
 
     def finish(self, input_tokens: int = 0, output_tokens: int = 0,
                cache: int = 0, cost: float = 0.0) -> None:

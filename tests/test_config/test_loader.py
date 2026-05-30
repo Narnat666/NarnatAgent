@@ -42,9 +42,18 @@ class TestDefaults:
 
     def test_base_prompt_format(self):
         """格式化后不含原始占位符"""
-        result = BASE_PROMPT_TEMPLATE.format(model="test-model")
+        result = BASE_PROMPT_TEMPLATE.format(
+            model="test-model",
+            cwd="/tmp/test",
+            platform="Linux",
+            shell="bash",
+        )
         assert "{model}" not in result
+        assert "{cwd}" not in result
+        assert "{platform}" not in result
+        assert "{shell}" not in result
         assert "test-model" in result
+        assert "/tmp/test" in result
 
 
 # ═══════════════════════════════════════════════════════════════

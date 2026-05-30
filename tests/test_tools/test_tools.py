@@ -330,16 +330,16 @@ class TestTodoWrite:
 # ═══════════════════════════════════════════════════════════════
 
 class TestRegistry:
-    def test_all_9_tools_registered(self):
+    def test_all_8_tools_registered(self):
         names = get_tool_names()
-        assert len(names) == 9
+        assert len(names) == 8
         expected = {"Read", "Glob", "Grep", "Edit", "Write", "Bash",
-                    "WebSearch", "WebFetch", "TodoWrite"}
+                    "WebSearch", "TodoWrite"}
         assert set(names) == expected
 
     def test_tool_definitions_count(self):
         defs = get_tool_definitions()
-        assert len(defs) == 9
+        assert len(defs) == 8
 
     def test_execute_known_tool(self):
         tmpdir = tempfile.mkdtemp()

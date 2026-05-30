@@ -741,7 +741,7 @@ class TestAnthropicBackend:
 
         tool_defs = get_tool_definitions()
         anthropic_tools = backend._convert_tools(tool_defs)
-        assert len(anthropic_tools) == 9
+        assert len(anthropic_tools) == 8
         # 检查第一个工具（Read）
         read_tool = anthropic_tools[0]
         assert read_tool["name"] == "Read"

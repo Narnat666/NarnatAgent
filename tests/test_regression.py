@@ -453,7 +453,7 @@ class TestSessionManagerRegression:
 
 class TestRegistryRegression:
     def test_all_tools_callable(self):
-        """所有9个工具可通过registry调用"""
+        """所有8个工具可通过registry调用"""
         tmpdir = tempfile.mkdtemp()
         try:
             fpath = os.path.join(tmpdir, "test.txt")
@@ -484,4 +484,4 @@ class TestRegistryRegression:
     def test_tool_names_complete(self):
         """工具名列表完整"""
         names = set(get_tool_names())
-        assert names == {"Read", "Glob", "Grep", "Edit", "Write", "Bash", "WebSearch", "WebFetch", "TodoWrite"}
+        assert names == {"Read", "Glob", "Grep", "Edit", "Write", "Bash", "WebSearch", "TodoWrite"}

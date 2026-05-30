@@ -88,12 +88,76 @@ class Agent:
             return False
 
     def _on_todo_update(self, todos):
-        """TodoWrite UI更新回调"""
-        # 简单打印到终端
+        """TodoWrite UI更新回调 — 展示工作计划和进度"""
+        from ..ui.ui_design import C, E, Y, G, B, R, D
+
+        # 找到当前 in_progress 的任务
+        in_progress_item = None
         for t in todos:
-            status_icon = {"pending": "○", "in_progress": "●", "completed": "✓"}
-            icon = status_icon.get(t["status"], " ")
-            print(f"  {icon} {t['content']}")
+            if t["status"] == "in_progress":
+                in_progress_item = t
+                break
+
+        # 打印任务列表
+        for t in todos:
+            status = t["status"]
+            content = t.get("content", "")
+            active_form = t.get("activeForm", content)
+
+            if status == "completed":
+                icon = f"{E}✓{R}"
+                line = f"  {icon} {D}{content}{R}"
+            elif status == "in_progress":
+                icon = f"{Y}●{R}"
+                line = f"  {icon} {B}{active_form}{R}"
+            else:  # pending
+                icon = f"{G}○{R}"
+                line = f"  {icon} {D}{content}{R}"
+
+            print(line)
+
+    def _show_tool_call(self, name: str, arguments: dict):
+        """在终端显示工具调用摘要，让用户看到AI正在做什么"""
+        from ..ui.ui_design import C, D, R
+
+        # 工具名→简短描述映射
+        _TOOL_LABELS = {
+            "Read": "读取",
+            "Glob": "搜索文件",
+            "Grep": "搜索内容",
+            "Edit": "编辑",
+            "Write": "写入",
+            "Bash": "执行命令",
+            "WebSearch": "联网搜索",
+            "TodoWrite": "更新计划",
+        }
+
+        label = _TOOL_LABELS.get(name, name)
+
+        # 提取关键参数用于摘要
+        summary = ""
+        if name == "Read":
+            summary = arguments.get("file_path", "")
+        elif name == "Edit":
+            summary = arguments.get("file_path", "")
+        elif name == "Write":
+            summary = arguments.get("file_path", "")
+        elif name == "Bash":
+            summary = arguments.get("command", "")[:60]
+        elif name == "Grep":
+            summary = arguments.get("pattern", "")
+        elif name == "Glob":
+            summary = arguments.get("pattern", "")
+        elif name == "WebSearch":
+            summary = arguments.get("query", "")
+
+        if summary:
+            # 截断过长的摘要
+            if len(summary) > 80:
+                summary = summary[:77] + "..."
+            print(f"  {D}[{label}] {summary}{R}")
+        else:
+            print(f"  {D}[{label}]{R}")
 
     def run(self):
         """主循环"""
@@ -214,10 +278,17 @@ class Agent:
                         if file_path:
                             write_tool.mark_read(file_path)
 
+                    # UI: 暂停spinner，显示工具调用摘要，避免闪烁
+                    stream.pause_spinner()
+                    self._show_tool_call(name, arguments)
+
                     # 执行工具
                     result = tool_execute(name, arguments)
                     self._logger.info(f"tools.{name.lower()}", f"调用: {json.dumps(arguments, ensure_ascii=False)[:200]}")
                     self._logger.info(f"tools.{name.lower()}", f"结果: {result[:200] if result else '(空)'}")
+
+                    # UI: 恢复spinner（AI可能继续思考）
+                    stream.resume_spinner()
 
                     # 回传工具结果
                     self._messages.append({
