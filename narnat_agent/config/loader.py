@@ -33,11 +33,60 @@ class AppConfig:
     project_root: str = ""
 
 
+def _is_nuitka_onefile() -> bool:
+    """检测是否运行在 Nuitka onefile 模式下。
+    
+    Nuitka onefile 不设置 sys.frozen，sys.executable 指向临时解压目录的 python.exe，
+    临时目录路径通常包含 "onefile_" 。
+    """
+    exe_dir = os.path.dirname(sys.executable)
+    # Nuitka onefile 临时目录特征：路径含 "onefile_" 且 sys.executable 是 python.exe
+    if "onefile_" in exe_dir and os.path.basename(sys.executable).lower() == "python.exe":
+        return True
+    # 也检查 __compiled__ 属性（Nuitka 设置的）
+    if "__compiled__" in dir(sys.modules.get("__main__", type(None))):
+        return True
+    return False
+
+
+def _find_narnat_exe_dir() -> Optional[str]:
+    """通过 PATH 查找 narnat.exe 所在目录。"""
+    import shutil
+    for name in ("narnat.exe", "narnat"):
+        found = shutil.which(name)
+        if found:
+            return os.path.dirname(os.path.abspath(found))
+    return None
+
+
 def _find_project_root() -> str:
-    """从当前目录向上查找包含 .narnat 的目录，找不到则用当前目录"""
+    # 1. 环境变量优先级最高，允许用户显式指定
+    env_home = os.environ.get("NARNAT_HOME")
+    if env_home and os.path.isdir(os.path.join(env_home, NARNAT_DIR)):
+        return env_home
+
+    # 2. Nuitka onefile 模式：sys.executable 指向临时目录，需要通过 PATH 定位真实 exe
+    if _is_nuitka_onefile():
+        exe_dir = _find_narnat_exe_dir()
+        if exe_dir and os.path.isdir(os.path.join(exe_dir, NARNAT_DIR)):
+            return exe_dir
+        # 找不到 .narnat 也返回 exe_dir，避免在 cwd 下创建配置
+        if exe_dir:
+            return exe_dir
+        # PATH 也找不到，fallback 到临时目录
+        return os.path.dirname(sys.executable)
+
+    # 3. PyInstaller / Nuitka standalone 模式：sys.frozen=True，sys.executable 指向真实 exe
+    if getattr(sys, 'frozen', False):
+        exe_dir = os.path.dirname(sys.executable)
+        if os.path.isdir(os.path.join(exe_dir, NARNAT_DIR)):
+            return exe_dir
+        return exe_dir
+
+    # 4. 开发模式：从 cwd 向上查找
     cwd = os.getcwd()
     candidate = cwd
-    for _ in range(10):  # 最多向上查10层
+    for _ in range(10):
         if os.path.isdir(os.path.join(candidate, NARNAT_DIR)):
             return candidate
         parent = os.path.dirname(candidate)
@@ -123,7 +172,7 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
     system_prompt = _build_system_prompt(
         model=ai_config.model,
         user_md=user_md,
-        cwd=root,
+        cwd=os.getcwd(),
         os_name=platform.system(),
         shell_name="PowerShell" if sys.platform == "win32" else "bash",
     )
