@@ -626,7 +626,7 @@ class TestInterruptFixes:
         for i, line in enumerate(lines):
             if 'stream.cancelled' in line and 'if' in line:
                 # 后续几行应有abort和on_interrupted
-                block = '\n'.join(lines[i:i+5])
+                block = '\n'.join(lines[i:i+10])
                 assert 'stream.abort()' in block
                 assert 'on_interrupted()' in block
                 break

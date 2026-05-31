@@ -348,7 +348,7 @@ class Agent:
         """修复messages：打断后可能留下不完整的消息序列。
         
         1. assistant含tool_calls但没有对应的tool消息 → 补上tool("[用户中断]")
-        2. 末尾是tool消息 → 补上assistant("（用户中断了工具执行）")
+        2. 如果第1步修复了，且末尾是tool消息 → 补上assistant（API要求tool后不能直接跟user）
         """
         # 1. 为未回复的tool_call补上空结果
         replied_ids = set()
@@ -372,11 +372,10 @@ class Agent:
                         replied_ids.add(tc_id)
                         repaired = True
 
-        # 2. 末尾是tool消息时，补上assistant消息
-        # Anthropic API要求tool后面不能直接跟user
-        if self._messages and self._messages[-1].get("role") == "tool":
+        # 2. 只有在第1步确实修复了未回复的tool_call时，才补assistant
+        # 正常流程中末尾是tool消息是正常的（下一轮LLM调用会处理）
+        if repaired and self._messages and self._messages[-1].get("role") == "tool":
             self._messages.append({"role": "assistant", "content": "（用户中断了工具执行）"})
-            repaired = True
 
         if repaired:
             self._logger.info("core.agent", "_repair_messages: 修复了打断后的消息序列")

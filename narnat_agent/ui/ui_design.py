@@ -111,16 +111,36 @@ class InterruptController:
             signal.signal(signal.SIGINT, signal.default_int_handler)
 
     def _poll_esc(self) -> None:
+        """轮询ESC键。仅在Windows原生控制台下使用msvcrt检测。"""
+        # 检测是否在原生Windows控制台下
+        # Cygwin/Git Bash/WSL等伪终端下msvcrt不可靠，跳过
+        try:
+            import msvcrt
+            # 尝试获取控制台模式，如果失败说明不是原生控制台
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+            mode = ctypes.c_ulong()
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                # 不是原生控制台，不检测ESC
+                return
+        except (ImportError, OSError, AttributeError):
+            return
+
         while not self._stop_poll.is_set():
             try:
-                import msvcrt
                 if msvcrt.kbhit():
                     ch = msvcrt.getch()
                     if ch == b'\x1b':
-                        self._interrupt.set()
-                        break
-            except (ImportError, OSError):
-                pass
+                        # 真正的ESC键：后面没有更多字符（方向键等转义序列会有后续字符）
+                        import time
+                        time.sleep(0.02)
+                        if not msvcrt.kbhit():
+                            self._interrupt.set()
+                            break
+                        # 有后续字符，是转义序列不是ESC，忽略
+            except OSError:
+                break
             self._stop_poll.wait(0.05)
 
 
@@ -623,11 +643,13 @@ class UIStreamSession:
 
     def finish(self, input_tokens: int = 0, output_tokens: int = 0,
                cache: int = 0, cost: float = 0.0) -> None:
+        _interrupt_ctrl.enter_input_mode()  # 立即停止ESC轮询，防止误触发
         self._spinner_stop.set()
         self._renderer.flush()
         show_stats(input_tokens, output_tokens, cache, cost)
 
     def abort(self) -> None:
+        _interrupt_ctrl.enter_input_mode()  # 立即停止ESC轮询
         self._spinner_stop.set()
         show_interrupted()
 
