@@ -66,7 +66,7 @@ class TestToolClassification:
         assert _WRITE_TOOLS == {"Edit", "Write"}
 
     def test_serial_tools(self):
-        assert _SERIAL_TOOLS == {"Bash", "TodoWrite"}
+        assert _SERIAL_TOOLS == {"Shell", "TodoWrite"}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -125,7 +125,7 @@ class TestResultOrder:
             _tc("tc_0", "Read", {"file_path": f0}),          # 只读
             _tc("tc_1", "Glob", {"pattern": "*.txt", "path": self.tmpdir}),  # 只读
             _tc("tc_2", "Write", {"file_path": f1, "content": "new1\n"}),    # 写入
-            _tc("tc_3", "Bash", {"command": "echo ok"}),     # 串行
+            _tc("tc_3", "Shell", {"command": "echo ok"}),     # 串行
         ]
 
         results = agent._execute_tool_calls(tool_calls, stream)
@@ -274,8 +274,8 @@ class TestInterruptSafety:
 
         with patch.object(agent, '_run_single', mock_run_single):
             tool_calls = [
-                _tc("tc_0", "Bash", {"command": "echo first"}),
-                _tc("tc_1", "Bash", {"command": "echo second"}),
+                _tc("tc_0", "Shell", {"command": "echo first"}),
+                _tc("tc_1", "Shell", {"command": "echo second"}),
             ]
             results = agent._execute_tool_calls(tool_calls, stream)
 
@@ -418,7 +418,7 @@ class TestBoundaryConditions:
         stream = MagicMock()
         stream.cancelled = False
 
-        tool_calls = [_tc("tc_0", "Bash", {"command": "echo test"})]
+        tool_calls = [_tc("tc_0", "Shell", {"command": "echo test"})]
         results = agent._execute_tool_calls(tool_calls, stream)
 
         assert len(results) == 1
@@ -543,7 +543,7 @@ class TestPhaseOrdering:
 
         tool_calls = [
             _tc("tc_0", "Write", {"file_path": f0, "content": "written\n"}),
-            _tc("tc_1", "Bash", {"command": f"type {f0}"}),
+            _tc("tc_1", "Shell", {"command": f"type {f0}"}),
         ]
 
         results = agent._execute_tool_calls(tool_calls, stream)
@@ -598,7 +598,7 @@ class TestBackwardCompatibility:
         from narnat_agent.tools.bash import execute as bash_execute
         direct_result = bash_execute("echo 42")
 
-        tool_calls = [_tc("tc_0", "Bash", {"command": "echo 42"})]
+        tool_calls = [_tc("tc_0", "Shell", {"command": "echo 42"})]
         results = agent._execute_tool_calls(tool_calls, stream)
 
         assert results[0][1] == direct_result

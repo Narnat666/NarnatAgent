@@ -22,7 +22,7 @@ from ..logger import AgentLogger
 # ── 工具分类 ──
 _READONLY_TOOLS = {"Read", "Glob", "Grep", "WebSearch"}
 _WRITE_TOOLS = {"Edit", "Write"}
-_SERIAL_TOOLS = {"Bash", "TodoWrite"}
+_SERIAL_TOOLS = {"Shell", "TodoWrite"}
 
 # 工具名→简短描述映射
 _TOOL_LABELS = {
@@ -31,7 +31,7 @@ _TOOL_LABELS = {
     "Grep": "搜索内容",
     "Edit": "编辑",
     "Write": "写入",
-    "Bash": "执行命令",
+    "Shell": "执行命令",
     "WebSearch": "联网搜索",
     "TodoWrite": "更新计划",
 }
@@ -114,6 +114,7 @@ class Agent:
         self._ui = UIInterface(self._config.ai.model, callbacks)
         # 注入工具回调
         bash_tool.set_confirm_callback(self._confirm_delete)
+        bash_tool.set_interrupt_check(lambda: _interrupt_ctrl.is_set)
         todo_tool.set_ui_callback(self._on_todo_update)
         # 统计
         self._total_input_tokens = 0
@@ -161,7 +162,7 @@ class Agent:
         summary = ""
         if name in _FILE_PATH_TOOLS:
             summary = arguments.get("file_path", "")
-        elif name == "Bash":
+        elif name == "Shell":
             summary = arguments.get("command", "")[:60]
         elif name == "Grep":
             summary = arguments.get("pattern", "")
@@ -223,6 +224,8 @@ class Agent:
 
             # 4. 追加用户消息（压缩成功时已追加，跳过）
             if not compress_ok:
+                # 修复messages：打断可能留下不完整的tool_call
+                self._repair_messages()
                 self._messages.append({"role": "user", "content": stripped})
                 self._logger.info("core.agent", f"用户输入: {stripped[:100]}")
 
@@ -242,13 +245,22 @@ class Agent:
     def _agent_loop(self, stream):
         """工具调度内循环"""
         while True:
-            # a. 调用LLM
+            # a. 修复messages：如果有未回复的tool_call，补上空结果
+            self._repair_messages()
+
+            # b. 调用LLM
             content_parts = []
             tool_calls_result = []
 
             for chunk in self._llm.chat_stream(self._messages):
                 # b. 检查中断
                 if stream.cancelled:
+                    # 将已收到的部分内容追加为assistant消息，保持messages完整
+                    if content_parts:
+                        self._messages.append({
+                            "role": "assistant",
+                            "content": "".join(content_parts),
+                        })
                     stream.abort()
                     self._ui.on_interrupted()
                     return
@@ -286,6 +298,15 @@ class Agent:
 
                 # 中断检查：并行执行中可能被打断
                 if stream.cancelled:
+                    # 为未完成的tool_call补上空结果，避免API 400错误
+                    completed_ids = {tc_id for tc_id, _ in tool_results}
+                    for tc in tool_calls_result:
+                        if tc["id"] not in completed_ids:
+                            self._messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "content": "[用户中断]",
+                            })
                     stream.abort()
                     self._ui.on_interrupted()
                     return
@@ -322,6 +343,43 @@ class Agent:
                 self._total_output_tokens,
             )
             break
+
+    def _repair_messages(self):
+        """修复messages：打断后可能留下不完整的消息序列。
+        
+        1. assistant含tool_calls但没有对应的tool消息 → 补上tool("[用户中断]")
+        2. 末尾是tool消息 → 补上assistant("（用户中断了工具执行）")
+        """
+        # 1. 为未回复的tool_call补上空结果
+        replied_ids = set()
+        for msg in self._messages:
+            if msg.get("role") == "tool":
+                tc_id = msg.get("tool_call_id")
+                if tc_id:
+                    replied_ids.add(tc_id)
+
+        repaired = False
+        for msg in self._messages:
+            if msg.get("role") == "assistant" and "tool_calls" in msg:
+                for tc in msg["tool_calls"]:
+                    tc_id = tc.get("id")
+                    if tc_id and tc_id not in replied_ids:
+                        self._messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": "[用户中断]",
+                        })
+                        replied_ids.add(tc_id)
+                        repaired = True
+
+        # 2. 末尾是tool消息时，补上assistant消息
+        # Anthropic API要求tool后面不能直接跟user
+        if self._messages and self._messages[-1].get("role") == "tool":
+            self._messages.append({"role": "assistant", "content": "（用户中断了工具执行）"})
+            repaired = True
+
+        if repaired:
+            self._logger.info("core.agent", "_repair_messages: 修复了打断后的消息序列")
 
     def _execute_tool_calls(
         self,

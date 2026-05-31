@@ -485,4 +485,4 @@ class TestRegistryRegression:
     def test_tool_names_complete(self):
         """工具名列表完整"""
         names = set(get_tool_names())
-        assert names == {"Read", "Glob", "Grep", "Edit", "Write", "Bash", "WebSearch", "TodoWrite"}
+        assert names == {"Read", "Glob", "Grep", "Edit", "Write", "Shell", "WebSearch", "TodoWrite"}

@@ -18,7 +18,7 @@ _TOOL_IMPLEMENTATIONS: Dict[str, Callable] = {
     "Grep": grep.execute,
     "Edit": edit.execute,
     "Write": write.execute,
-    "Bash": bash.execute,
+    "Shell": bash.execute,
     "WebSearch": web_search.execute,
     "TodoWrite": todo_write.execute,
 }
@@ -125,12 +125,12 @@ TOOL_DEFINITIONS: List[Dict] = [
     {
         "type": "function",
         "function": {
-            "name": "Bash",
-            "description": "执行shell命令。根据当前操作系统使用对应命令。禁止用于文件操作",
+            "name": "Shell",
+            "description": f"执行shell命令。语法: {__import__('sys').platform}。禁止用于文件操作",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "shell命令，根据当前操作系统使用对应语法"},
+                    "command": {"type": "string", "description": f"shell命令(语法: {__import__('sys').platform})"},
                     "description": {"type": "string", "description": "命令描述(5-10字)"},
                     "timeout": {"type": "integer", "description": "超时毫秒数，默认120000，最大600000"},
                     "run_in_background": {"type": "boolean", "description": "后台运行"},

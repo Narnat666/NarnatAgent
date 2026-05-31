@@ -14,7 +14,7 @@ IRON_RULES = """
 1. Edit前必须Read — 确认内容再修改，禁止凭记忆猜测
 2. 改一处验一处 — 不批量改多处再验证，改完立即验证
 3. 优先Edit而非Write — 修改已有文件用Edit，新建文件用Write
-4. Bash用于执行和目录操作 — 文件内容操作用Read/Edit/Write/Grep；目录创建等系统操作可用Bash
+4. Shell用于执行和目录操作 — 文件内容操作用Read/Edit/Write/Grep；目录创建等系统操作可用Shell
 5. Grep定位→Read确认→Edit修改 — 标准三步流程
 """
 
@@ -51,9 +51,9 @@ Avoid over-the-top validation like 'You are absolutely right'.
 - Grep: Search file content by regex. MUST use regex syntax, NEVER glob syntax.
 
 ## Command Execution
-- Bash: Execute shell command. For git/pip/npm/docker/mkdir etc.
+- Shell: Execute shell command. For git/pip/npm/docker/mkdir etc.
   NEVER use for file content operations (read/write/search), use dedicated tools instead.
-  Directory creation and system-level operations are OK with Bash.
+  Directory creation and system-level operations are OK with Shell.
   NEVER use interactive commands (vim/top). Max timeout 600000ms.
   run_in_background: for long-running processes (servers, watchers).
   dangerouslyDisableSandbox: skip safety checks (interactive command block etc).

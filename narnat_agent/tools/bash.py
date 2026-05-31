@@ -38,11 +38,20 @@ _background_procs: dict = {}
 # 权限确认回调，由agent层注入
 _confirm_callback: Optional[Callable[[str], bool]] = None
 
+# 中断检查回调，由agent层注入（返回True表示用户按了ESC）
+_interrupt_check: Optional[Callable[[], bool]] = None
+
 
 def set_confirm_callback(cb: Callable[[str], bool]):
     """设置删除确认回调。cb返回True表示允许执行。"""
     global _confirm_callback
     _confirm_callback = cb
+
+
+def set_interrupt_check(cb: Callable[[], bool]):
+    """设置中断检查回调。cb返回True表示用户请求中断。"""
+    global _interrupt_check
+    _interrupt_check = cb
 
 
 def _adapt_windows_command(command: str) -> str:
@@ -181,19 +190,39 @@ def execute(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=os.getcwd(),
+            # 创建新进程组，以便能kill整个进程树
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
         )
     except FileNotFoundError as e:
         return f"错误: Shell未找到: {e}"
     except OSError as e:
         return f"错误: 启动失败: {e}"
 
+    # 轮询等待，支持中断
+    import time
+    start_time = time.time()
+    interrupted = False
     try:
-        stdout, stderr = proc.communicate(timeout=timeout_sec)
-    except subprocess.TimeoutExpired:
+        while proc.poll() is None:
+            elapsed = time.time() - start_time
+            if elapsed >= timeout_sec:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+                out = _decode_output(stdout)
+                return f"{out}\n[超时: 命令执行超过{timeout_sec:.0f}秒]"
+            # 检查中断标志（ESC或Ctrl+C触发）
+            if _interrupt_check and _interrupt_check():
+                proc.kill()
+                interrupted = True
+                break
+            time.sleep(0.05)
+        stdout, stderr = proc.communicate()
+    except Exception:
         proc.kill()
         stdout, stderr = proc.communicate()
-        out = _decode_output(stdout)
-        return f"{out}\n[超时: 命令执行超过{timeout_sec:.0f}秒]"
+
+    if interrupted:
+        return "[用户中断]"
 
     # 解码输出
     out = _decode_output(stdout)

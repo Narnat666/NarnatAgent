@@ -103,33 +103,25 @@ class InterruptController:
         self._stop_poll.clear()
         self._poll_thread = threading.Thread(target=self._poll_esc, daemon=True)
         self._poll_thread.start()
-        # 忽略Ctrl+C(SIGINT)，只接受Esc打断
-        self._saved_sigint = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        # 恢复SIGINT为默认行为（编译为exe后Ctrl+C直接退出，不拦截）
+        if self._saved_sigint is not None:
+            signal.signal(signal.SIGINT, self._saved_sigint)
+            self._saved_sigint = None
+        else:
+            signal.signal(signal.SIGINT, signal.default_int_handler)
 
     def _poll_esc(self) -> None:
-        try:
-            import msvcrt
-            while not self._stop_poll.is_set():
-                if msvcrt.kbhit() and msvcrt.getch() == b'\x1b':
-                    self._interrupt.set()
-                    break
-                self._stop_poll.wait(0.05)
-        except ImportError:
-            import select
-            import tty
-            import termios
-            fd = sys.stdin.fileno()
-            old = termios.tcgetattr(fd)
+        while not self._stop_poll.is_set():
             try:
-                tty.setcbreak(fd)
-                while not self._stop_poll.is_set():
-                    if select.select([sys.stdin], [], [], 0.05)[0]:
-                        if sys.stdin.read(1) == '\x1b':
-                            self._interrupt.set()
-                            break
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                import msvcrt
+                if msvcrt.kbhit():
+                    ch = msvcrt.getch()
+                    if ch == b'\x1b':
+                        self._interrupt.set()
+                        break
+            except (ImportError, OSError):
+                pass
+            self._stop_poll.wait(0.05)
 
 
 _interrupt_ctrl = InterruptController()
@@ -708,8 +700,19 @@ def _make_keybindings() -> KeyBindings:
     def _submit(event):
         event.current_buffer.validate_and_handle()
 
+    # Alt+Enter 换行
     @kb.add("escape", "enter", eager=True)
-    def _newline(event):
+    def _newline_alt_enter(event):
+        event.current_buffer.insert_text("\n")
+
+    # Ctrl+O 换行
+    @kb.add("c-o", eager=True)
+    def _newline_ctrl_o(event):
+        event.current_buffer.insert_text("\n")
+
+    # Alt+J 换行（vim 风格）
+    @kb.add("escape", "j", eager=True)
+    def _newline_alt_j(event):
         event.current_buffer.insert_text("\n")
     return kb
 

@@ -364,7 +364,7 @@ class TestRegistry:
     def test_all_8_tools_registered(self):
         names = get_tool_names()
         assert len(names) == 8
-        expected = {"Read", "Glob", "Grep", "Edit", "Write", "Bash",
+        expected = {"Read", "Glob", "Grep", "Edit", "Write", "Shell",
                     "WebSearch", "TodoWrite"}
         assert set(names) == expected
 
