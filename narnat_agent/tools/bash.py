@@ -54,11 +54,92 @@ def set_interrupt_check(cb: Callable[[], bool]):
     _interrupt_check = cb
 
 
+def _needs_powershell(command: str) -> bool:
+    """
+    检测命令是否需要PowerShell而非cmd。
+
+    cmd /c 对嵌套引号处理有缺陷，如:
+      python -c "import sys; sys.exit(1)"
+    cmd会把引号吃掉导致语法错误。
+
+    检测规则：命令中存在 -c/-m 后跟引号包裹的代码片段。
+    """
+    # python -c "code" / python3 -c "code" 模式
+    if re.search(r'\bpython\d?\s+-c\s+"', command):
+        return True
+    # node -e "code" 模式
+    if re.search(r'\bnode\s+-e\s+"', command):
+        return True
+    # PowerShell cmdlet 特征
+    if re.search(r'\b(Get-|Set-|New-|Remove-|Write-|Select-|Where-|ForEach-|Invoke-|Start-|Stop-|Out-)\w+', command):
+        return True
+    # $env: 变量
+    if '$env:' in command:
+        return True
+    return False
+
+
 def _adapt_windows_command(command: str) -> str:
     """
-    将常见bash语法自动适配为PowerShell语法。
+    将常见bash语法自动适配为Windows cmd语法。
 
     仅做最小必要转换，不改变用户意图。
+    """
+    adapted = command
+
+    # mkdir -p → mkdir（cmd的mkdir自动创建中间目录）
+    adapted = re.sub(
+        r'\bmkdir\s+-p\s+',
+        lambda m: 'mkdir ',
+        adapted,
+    )
+
+    # && 保持不变（cmd支持&&）
+
+    # export VAR=val → set VAR=val
+    adapted = re.sub(
+        r'\bexport\s+(\w+)=(\S+)',
+        r'set \1=\2',
+        adapted,
+    )
+
+    # echo 保持不变（cmd原生支持echo）
+
+    # cat file → type file
+    adapted = re.sub(
+        r'\bcat\s+',
+        'type ',
+        adapted,
+    )
+
+    # ls → dir
+    adapted = re.sub(
+        r'\bls\b',
+        'dir',
+        adapted,
+    )
+
+    # which → where
+    adapted = re.sub(
+        r'\bwhich\s+',
+        'where ',
+        adapted,
+    )
+
+    # touch file → type nul > file
+    adapted = re.sub(
+        r'\btouch\s+',
+        'type nul > ',
+        adapted,
+    )
+
+    return adapted
+
+
+def _adapt_powershell_command(command: str) -> str:
+    """
+    将常见bash语法自动适配为PowerShell语法。
+    仅在需要回退到PowerShell时使用。
     """
     adapted = command
 
@@ -70,9 +151,7 @@ def _adapt_windows_command(command: str) -> str:
     )
 
     # && → ; (PowerShell中&&需要PS7+，用;保证兼容)
-    # 但保留PowerShell原生的&&（PS7+用户）
     if "&&" in adapted and "$env:" not in adapted:
-        # 仅在明显是bash风格命令时转换
         adapted = adapted.replace("&&", "; ")
 
     # export VAR=val → $env:VAR = "val"
@@ -172,8 +251,14 @@ def execute(
 
     # 选择shell + 命令适配
     if sys.platform == "win32":
-        effective_cmd = _adapt_windows_command(command)
-        shell_cmd = ["powershell", "-Command", effective_cmd]
+        # cmd /c 对嵌套引号处理有缺陷（如 python -c "code"），
+        # 检测到引号嵌套时回退到PowerShell
+        if _needs_powershell(command):
+            effective_cmd = _adapt_powershell_command(command)
+            shell_cmd = ["powershell", "-Command", effective_cmd]
+        else:
+            effective_cmd = _adapt_windows_command(command)
+            shell_cmd = ["cmd", "/c", effective_cmd]
     else:
         shell_cmd = ["bash", "-c", command]
 
@@ -190,36 +275,40 @@ def execute(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=os.getcwd(),
-            # 创建新进程组，以便能kill整个进程树
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
         )
     except FileNotFoundError as e:
         return f"错误: Shell未找到: {e}"
     except OSError as e:
         return f"错误: 启动失败: {e}"
 
-    # 轮询等待，支持中断
-    import time
-    start_time = time.time()
+    # 用communicate(timeout)等待，同时在线程中检查中断
+    # 比poll()轮询更高效，避免管道大量输出时死锁
     interrupted = False
     try:
-        while proc.poll() is None:
-            elapsed = time.time() - start_time
-            if elapsed >= timeout_sec:
-                proc.kill()
-                stdout, stderr = proc.communicate()
-                out = _decode_output(stdout)
-                return f"{out}\n[超时: 命令执行超过{timeout_sec:.0f}秒]"
-            # 检查中断标志（ESC或Ctrl+C触发）
-            if _interrupt_check and _interrupt_check():
-                proc.kill()
-                interrupted = True
-                break
-            time.sleep(0.05)
+        # 中断检查线程：如果用户按ESC，kill进程
+        def _interrupt_watcher():
+            while proc.poll() is None:
+                if _interrupt_check and _interrupt_check():
+                    proc.kill()
+                    return
+                time.sleep(0.05)
+
+        watcher = threading.Thread(target=_interrupt_watcher, daemon=True)
+        watcher.start()
+
+        stdout, stderr = proc.communicate(timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        proc.kill()
         stdout, stderr = proc.communicate()
+        out = _decode_output(stdout)
+        return f"{out}\n[超时: 命令执行超过{timeout_sec:.0f}秒]"
     except Exception:
         proc.kill()
         stdout, stderr = proc.communicate()
+
+    # 检查是否被中断
+    if _interrupt_check and _interrupt_check():
+        interrupted = True
 
     if interrupted:
         return "[用户中断]"
