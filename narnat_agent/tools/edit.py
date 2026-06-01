@@ -17,10 +17,12 @@
 import os
 import difflib
 
+from ..ui.ui_design import colorize_diff
+
 
 def execute(file_path: str, old_string: str = "", new_string: str = "",
             replace_all: bool = False,
-            line_start: int = 0, line_end: int = 0) -> str:
+            line_start: int = 0, line_end: int = 0) -> tuple:
     """
     修改文件内容。
 
@@ -36,18 +38,20 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
         line_end: 结束行号（行号模式，含此行；0或省略则等于line_start）
 
     Returns:
-        确认信息 + unified diff
+        (llm_result, color_diff) 元组:
+        - llm_result: 纯文本确认信息+diff，传给LLM
+        - color_diff: 着色diff，传给终端展示
     """
     if not os.path.isfile(file_path):
-        return f"错误: 文件不存在: {file_path}，如需创建请用Write工具"
+        return (f"错误: 文件不存在: {file_path}，如需创建请用Write工具", "")
 
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
     except PermissionError:
-        return f"错误: 权限不足: {file_path}"
+        return (f"错误: 权限不足: {file_path}", "")
     except OSError as e:
-        return f"错误: 读取失败: {e}"
+        return (f"错误: 读取失败: {e}", "")
 
     # ── 行号模式 ──
     if line_start > 0:
@@ -55,16 +59,16 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
 
     # ── 字符串模式 ──
     if not old_string:
-        return "错误: old_string不能为空（或使用line_start行号模式）"
+        return ("错误: old_string不能为空（或使用line_start行号模式）", "")
 
     count = content.count(old_string)
     if count == 0:
         hint = _find_similar(content, old_string)
-        return f"错误: 未找到匹配文本。请先Read确认文件内容。\n{hint}"
+        return (f"错误: 未找到匹配文本。请先Read确认文件内容。\n{hint}", "")
 
     if count > 1 and not replace_all:
-        return (f"错误: 找到{count}处匹配，old_string不唯一。"
-                f"请扩大上下文使其唯一，或设置replace_all=True")
+        return ((f"错误: 找到{count}处匹配，old_string不唯一。"
+                 f"请扩大上下文使其唯一，或设置replace_all=True"), "")
 
     if replace_all:
         new_content = content.replace(old_string, new_string)
@@ -76,7 +80,7 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
 
 
 def _edit_by_lines(content: str, file_path: str,
-                   line_start: int, line_end: int, new_string: str) -> str:
+                   line_start: int, line_end: int, new_string: str) -> tuple:
     """行号范围替换"""
     lines = content.splitlines(keepends=True)
     total = len(lines)
@@ -87,11 +91,11 @@ def _edit_by_lines(content: str, file_path: str,
 
     # 边界检查
     if line_start < 1 or line_start > total:
-        return f"错误: line_start={line_start} 超出范围（1-{total}）"
+        return (f"错误: line_start={line_start} 超出范围（1-{total}）", "")
     if line_end < line_start:
-        return f"错误: line_end={line_end} < line_start={line_start}"
+        return (f"错误: line_end={line_end} < line_start={line_start}", "")
     if line_end > total:
-        return f"错误: line_end={line_end} 超出范围（1-{total}）"
+        return (f"错误: line_end={line_end} 超出范围（1-{total}）", "")
 
     # 构造新内容
     new_lines = new_string.splitlines(keepends=True)
@@ -115,18 +119,28 @@ def _detect_line_ending(content: str) -> str:
 
 
 def _write_and_diff(old_content: str, new_content: str, file_path: str,
-                    count: int, range_desc: str = "") -> str:
-    """写回文件并生成diff"""
+                    count: int, range_desc: str = "") -> tuple:
+    """写回文件并生成diff。
+
+    Returns:
+        (llm_result, color_diff) 元组:
+        - llm_result: 纯文本确认信息+diff，传给LLM
+        - color_diff: 着色diff，传给终端展示；空串表示无差异
+    """
     try:
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(new_content)
     except OSError as e:
-        return f"错误: 写入失败: {e}"
+        return (f"错误: 写入失败: {e}", "")
 
     diff = _make_diff(old_content, new_content, file_path)
     if range_desc:
-        return f"已替换{range_desc}（{count}行）\n{diff}"
-    return f"已替换{count}处\n{diff}"
+        llm_result = f"已替换{range_desc}（{count}行）\n{diff}"
+    else:
+        llm_result = f"已替换{count}处\n{diff}"
+
+    color_diff = _make_color_diff(diff)
+    return (llm_result, color_diff)
 
 
 def _find_similar(content: str, old_string: str) -> str:
@@ -165,3 +179,8 @@ def _make_diff(old_content: str, new_content: str, file_path: str) -> str:
     )
     result = "\n".join(diff)
     return result if result else "(无差异)"
+
+
+def _make_color_diff(diff_text: str) -> str:
+    """对着色diff调用ui层着色函数，返回ANSI着色文本"""
+    return colorize_diff(diff_text)

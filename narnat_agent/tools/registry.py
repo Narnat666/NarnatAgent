@@ -195,7 +195,7 @@ TOOL_DEFINITIONS: List[Dict] = [
 ]
 
 
-def execute(name: str, arguments: Dict[str, Any]) -> str:
+def execute(name: str, arguments: Dict[str, Any]) -> tuple:
     """
     执行指定工具。
 
@@ -204,18 +204,25 @@ def execute(name: str, arguments: Dict[str, Any]) -> str:
         arguments: 工具参数字典
 
     Returns:
-        工具执行结果字符串
+        (llm_result, color_diff) 元组:
+        - llm_result: 纯文本结果，传给LLM
+        - color_diff: 着色diff文本，传给终端展示；空串表示无需展示
     """
     impl = _TOOL_IMPLEMENTATIONS.get(name)
     if impl is None:
-        return f"错误: 未知工具: {name}"
+        return (f"错误: 未知工具: {name}", "")
 
     try:
-        return impl(**arguments)
+        result = impl(**arguments)
+        # Edit/Write 返回 (llm_result, color_diff) 元组
+        if isinstance(result, tuple):
+            return result
+        # 其他工具返回纯字符串
+        return (result, "")
     except TypeError as e:
-        return f"错误: 工具参数错误({name}): {e}"
+        return (f"错误: 工具参数错误({name}): {e}", "")
     except Exception as e:
-        return f"错误: 工具执行失败({name}): {e}"
+        return (f"错误: 工具执行失败({name}): {e}", "")
 
 
 def get_tool_names() -> List[str]:

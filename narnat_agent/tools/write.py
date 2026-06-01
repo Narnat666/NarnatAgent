@@ -1,6 +1,9 @@
 """Write工具 —— 创建新文件或完整覆写文件"""
 
 import os
+import difflib
+
+from ..ui.ui_design import colorize_diff
 
 
 # 跟踪已Read过的文件，Write覆写前需确认
@@ -17,7 +20,7 @@ def clear_read_files():
     _read_files.clear()
 
 
-def execute(file_path: str, content: str) -> str:
+def execute(file_path: str, content: str) -> tuple:
     """
     创建或覆写文件。
 
@@ -26,28 +29,55 @@ def execute(file_path: str, content: str) -> str:
         content: 完整文件内容
 
     Returns:
-        确认信息 + 写入字节数
+        (llm_result, color_diff) 元组:
+        - llm_result: 纯文本确认信息，传给LLM
+        - color_diff: 着色diff，传给终端展示；空串表示新建文件无需diff
     """
     abs_path = os.path.abspath(file_path)
 
     # 覆写已有文件前检查是否Read过
     if os.path.isfile(abs_path):
         if abs_path not in _read_files:
-            return (f"错误: 覆写已有文件前必须先Read确认当前内容。"
-                    f"请先Read {file_path}，再决定用Edit还是Write。")
+            return ((f"错误: 覆写已有文件前必须先Read确认当前内容。"
+                     f"请先Read {file_path}，再决定用Edit还是Write。"), "")
 
     # 自动创建父目录
     parent = os.path.dirname(abs_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
 
+    # 覆写已有文件时生成diff
+    color_diff = ""
+    if os.path.isfile(abs_path):
+        try:
+            with open(abs_path, "r", encoding="utf-8") as f:
+                old_content = f.read()
+            diff = _make_diff(old_content, content, file_path)
+            color_diff = colorize_diff(diff)
+        except Exception:
+            pass  # 读取旧内容失败时不影响写入，只是不展示diff
+
     try:
         with open(abs_path, "w", encoding="utf-8") as f:
             f.write(content)
     except OSError as e:
-        return f"错误: 写入失败: {e}"
+        return (f"错误: 写入失败: {e}", "")
 
     byte_count = len(content.encode("utf-8"))
     # 写入后标记为已读
     _read_files.add(abs_path)
-    return f"已写入: {file_path} ({byte_count}字节)"
+    return (f"已写入: {file_path} ({byte_count}字节)", color_diff)
+
+
+def _make_diff(old_content: str, new_content: str, file_path: str) -> str:
+    """生成unified diff"""
+    old_lines = old_content.splitlines()
+    new_lines = new_content.splitlines()
+    diff = difflib.unified_diff(
+        old_lines, new_lines,
+        fromfile=f"a/{os.path.basename(file_path)}",
+        tofile=f"b/{os.path.basename(file_path)}",
+        lineterm="",
+    )
+    result = "\n".join(diff)
+    return result if result else "(无差异)"

@@ -16,7 +16,7 @@ from ..tools.registry import execute as tool_execute
 from ..tools import write as write_tool
 from ..tools import bash as bash_tool
 from ..tools import todo_write as todo_tool
-from ..ui.ui_design import UIInterface, SessionCallbacks, _interrupt_ctrl, D, E, R, Y, G, B
+from ..ui.ui_design import UIInterface, SessionCallbacks, _interrupt_ctrl, D, E, R, Y, G, B, C
 from ..logger import AgentLogger
 
 # ── 工具分类 ──
@@ -178,6 +178,13 @@ class Agent:
             print(f"  {D}[{label}] {summary}{R}")
         else:
             print(f"  {D}[{label}]{R}")
+
+    def _show_diff(self, color_diff: str):
+        """在终端展示着色diff"""
+        # 每行缩进2空格，与工具调用摘要对齐
+        for line in color_diff.split("\n"):
+            print(f"  {line}")
+        print()  # diff后空一行，与后续输出分隔
 
     def run(self):
         """主循环"""
@@ -481,20 +488,24 @@ class Agent:
         stream.flush_renderer()
         self._show_tool_call(name, arguments)
 
-        # 执行工具
-        result = tool_execute(name, arguments)
+        # 执行工具 → 返回 (llm_result, color_diff)
+        llm_result, color_diff = tool_execute(name, arguments)
         self._logger.info(
             f"tools.{name.lower()}",
             f"调用: {json.dumps(arguments, ensure_ascii=False)[:200]}",
         )
         self._logger.info(
             f"tools.{name.lower()}",
-            f"结果: {result[:200] if result else '(空)'}",
+            f"结果: {llm_result[:200] if llm_result else '(空)'}",
         )
+
+        # 展示着色diff（Edit/Write编辑文件后）
+        if color_diff:
+            self._show_diff(color_diff)
 
         # UI: 恢复spinner
         stream.resume_spinner()
-        return result
+        return llm_result
 
     def _run_parallel(
         self,

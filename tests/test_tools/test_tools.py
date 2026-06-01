@@ -183,21 +183,21 @@ class TestEdit:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_edit_exact_match(self):
-        result = edit.execute(self.test_file, "print('hello')", "print('world')")
+        result, color_diff = edit.execute(self.test_file, "print('hello')", "print('world')")
         assert "已替换" in result
         with open(self.test_file, "r") as f:
             assert "world" in f.read()
 
     def test_edit_not_found(self):
-        result = edit.execute(self.test_file, "nonexistent_code", "new_code")
+        result, color_diff = edit.execute(self.test_file, "nonexistent_code", "new_code")
         assert "错误" in result
 
     def test_edit_empty_old_string(self):
-        result = edit.execute(self.test_file, "", "new")
+        result, color_diff = edit.execute(self.test_file, "", "new")
         assert "错误" in result
 
     def test_edit_file_not_exist(self):
-        result = edit.execute("/nonexistent/file.py", "old", "new")
+        result, color_diff = edit.execute("/nonexistent/file.py", "old", "new")
         assert "错误" in result
 
     def test_edit_multiple_match_no_replace_all(self):
@@ -205,21 +205,21 @@ class TestEdit:
         fpath = os.path.join(self.tmpdir, "multi.py")
         with open(fpath, "w") as f:
             f.write("x = 1\nx = 2\n")
-        result = edit.execute(fpath, "x", "y")
+        result, color_diff = edit.execute(fpath, "x", "y")
         assert "不唯一" in result
 
     def test_edit_replace_all(self):
         fpath = os.path.join(self.tmpdir, "multi.py")
         with open(fpath, "w") as f:
             f.write("x = 1\nx = 2\n")
-        result = edit.execute(fpath, "x", "y", replace_all=True)
+        result, color_diff = edit.execute(fpath, "x", "y", replace_all=True)
         assert "已替换" in result
         with open(fpath, "r") as f:
             content = f.read()
         assert content.count("y") == 2
 
     def test_edit_shows_diff(self):
-        result = edit.execute(self.test_file, "print('hello')", "print('world')")
+        result, color_diff = edit.execute(self.test_file, "print('hello')", "print('world')")
         assert "---" in result or "已替换" in result
 
 
@@ -238,20 +238,20 @@ class TestWrite:
 
     def test_write_new_file(self):
         fpath = os.path.join(self.tmpdir, "new.py")
-        result = write.execute(fpath, "print('hello')")
+        result, color_diff = write.execute(fpath, "print('hello')")
         assert "已写入" in result
         with open(fpath, "r") as f:
             assert f.read() == "print('hello')"
 
     def test_write_creates_parent_dir(self):
         fpath = os.path.join(self.tmpdir, "sub", "dir", "file.py")
-        result = write.execute(fpath, "content")
+        result, color_diff = write.execute(fpath, "content")
         assert "已写入" in result
         assert os.path.isfile(fpath)
 
     def test_write_empty_content(self):
         fpath = os.path.join(self.tmpdir, "empty.txt")
-        result = write.execute(fpath, "")
+        result, color_diff = write.execute(fpath, "")
         assert "已写入" in result
 
     def test_write_overwrite_without_read(self):
@@ -259,7 +259,7 @@ class TestWrite:
         fpath = os.path.join(self.tmpdir, "existing.py")
         with open(fpath, "w") as f:
             f.write("old content")
-        result = write.execute(fpath, "new content")
+        result, color_diff = write.execute(fpath, "new content")
         assert "错误" in result
 
     def test_write_overwrite_after_read(self):
@@ -268,7 +268,7 @@ class TestWrite:
         with open(fpath, "w") as f:
             f.write("old content")
         write.mark_read(fpath)
-        result = write.execute(fpath, "new content")
+        result, color_diff = write.execute(fpath, "new content")
         assert "已写入" in result
 
 
@@ -378,13 +378,13 @@ class TestRegistry:
             fpath = os.path.join(tmpdir, "test.txt")
             with open(fpath, "w") as f:
                 f.write("hello\n")
-            result = registry_execute("Read", {"file_path": fpath})
+            result, color_diff = registry_execute("Read", {"file_path": fpath})
             assert "hello" in result
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_execute_unknown_tool(self):
-        result = registry_execute("UnknownTool", {})
+        result, color_diff = registry_execute("UnknownTool", {})
         assert "错误" in result
 
     def test_tool_definition_structure(self):
@@ -459,7 +459,7 @@ class TestEditBoundary:
         fpath = os.path.join(self.tmpdir, "indent.py")
         with open(fpath, "w") as f:
             f.write("def foo():\n    x = 1\n    y = 2\n")
-        result = edit.execute(fpath, "    x = 1", "    x = 10")
+        result, color_diff = edit.execute(fpath, "    x = 1", "    x = 10")
         assert "已替换" in result
 
     def test_edit_indent_mismatch(self):
@@ -468,7 +468,7 @@ class TestEditBoundary:
         with open(fpath, "w") as f:
             f.write("def foo():\n    x = 1\n")
         # Edit是子串匹配，'x = 1'是'    x = 1'的子串，所以会匹配成功
-        result = edit.execute(fpath, "x = 1", "x = 10")
+        result, color_diff = edit.execute(fpath, "x = 1", "x = 10")
         assert "已替换" in result
 
     def test_edit_multiline_replacement(self):
@@ -476,7 +476,7 @@ class TestEditBoundary:
         fpath = os.path.join(self.tmpdir, "multi.py")
         with open(fpath, "w") as f:
             f.write("a = 1\nb = 2\nc = 3\n")
-        result = edit.execute(fpath, "a = 1\nb = 2", "a = 10\nb = 20")
+        result, color_diff = edit.execute(fpath, "a = 1\nb = 2", "a = 10\nb = 20")
         assert "已替换" in result
         with open(fpath, "r") as f:
             content = f.read()
@@ -488,7 +488,7 @@ class TestEditBoundary:
         fpath = os.path.join(self.tmpdir, "same.py")
         with open(fpath, "w") as f:
             f.write("x = 1\n")
-        result = edit.execute(fpath, "x = 1", "x = 1")
+        result, color_diff = edit.execute(fpath, "x = 1", "x = 1")
         # 应该替换但无差异
         assert "已替换" in result or "无差异" in result
 
@@ -597,3 +597,126 @@ class TestTodoWriteBoundary:
         """非字典项"""
         result = todo_write.execute(["not a dict"])
         assert "错误" in result
+
+
+# ═══════════════════════════════════════════════════════════════
+# Diff 着色测试
+# ═══════════════════════════════════════════════════════════════
+
+from narnat_agent.ui.ui_design import colorize_diff, R, X, E, C, D, G, B
+
+
+class TestColorizeDiff:
+    """colorize_diff 着色函数测试"""
+
+    def test_empty_diff(self):
+        result = colorize_diff("")
+        assert "(无差异)" in result
+
+    def test_no_diff_text(self):
+        result = colorize_diff("(无差异)")
+        assert "(无差异)" in result
+
+    def test_delete_line_red(self):
+        """-行着红色"""
+        diff = "-old line"
+        result = colorize_diff(diff)
+        assert X in result  # RED
+        assert "old line" in result
+
+    def test_add_line_green(self):
+        """+行着绿色"""
+        diff = "+new line"
+        result = colorize_diff(diff)
+        assert E in result  # GREEN
+        assert "new line" in result
+
+    def test_hunk_header_cyan(self):
+        """@@行着青色暗淡"""
+        diff = "@@ -1,3 +1,3 @@"
+        result = colorize_diff(diff)
+        assert C in result  # CYAN
+        assert D in result  # DIM
+
+    def test_file_header_bold_cyan(self):
+        """---和+++行着粗体青色"""
+        diff = "--- a/file.py\n+++ b/file.py"
+        result = colorize_diff(diff)
+        assert B in result  # BOLD
+        assert C in result  # CYAN
+
+    def test_context_line_gray(self):
+        """上下文行着灰色"""
+        diff = " unchanged line"
+        result = colorize_diff(diff)
+        assert G in result  # GRAY
+
+    def test_full_diff(self):
+        """完整diff着色"""
+        diff = "--- a/test.py\n+++ b/test.py\n@@ -1,3 +1,3 @@\n line1\n-old line\n+new line"
+        result = colorize_diff(diff)
+        # 验证所有行都被着色
+        assert "--- a/test.py" in result
+        assert "+++ b/test.py" in result
+        assert "@@ -1,3 +1,3 @@" in result
+        assert "old line" in result
+        assert "new line" in result
+
+
+class TestEditColorDiff:
+    """Edit工具返回着色diff的测试"""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.test_file = os.path.join(self.tmpdir, "edit_test.py")
+        with open(self.test_file, "w", encoding="utf-8") as f:
+            f.write("def hello():\n    print('hello')\n")
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_edit_returns_color_diff(self):
+        """Edit返回的color_diff非空且包含ANSI着色"""
+        result, color_diff = edit.execute(
+            self.test_file, "print('hello')", "print('world')")
+        assert "已替换" in result
+        assert color_diff  # 非空
+        assert X in color_diff  # 红色（删除行）
+        assert E in color_diff  # 绿色（添加行）
+
+    def test_edit_error_returns_empty_color_diff(self):
+        """Edit错误时color_diff为空"""
+        result, color_diff = edit.execute(
+            self.test_file, "nonexistent", "new")
+        assert "错误" in result
+        assert color_diff == ""
+
+
+class TestWriteColorDiff:
+    """Write工具返回着色diff的测试"""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        write._read_files.clear()
+
+    def test_write_new_file_no_color_diff(self):
+        """新建文件时color_diff为空"""
+        fpath = os.path.join(self.tmpdir, "new.py")
+        result, color_diff = write.execute(fpath, "print('hello')")
+        assert "已写入" in result
+        assert color_diff == ""
+
+    def test_write_overwrite_has_color_diff(self):
+        """覆写已有文件时color_diff非空"""
+        fpath = os.path.join(self.tmpdir, "existing.py")
+        with open(fpath, "w") as f:
+            f.write("old content\n")
+        write.mark_read(fpath)
+        result, color_diff = write.execute(fpath, "new content\n")
+        assert "已写入" in result
+        assert color_diff  # 非空
+        assert X in color_diff  # 红色（删除行）
+        assert E in color_diff  # 绿色（添加行）

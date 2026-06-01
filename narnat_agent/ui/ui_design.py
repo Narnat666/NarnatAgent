@@ -59,6 +59,34 @@ def _terminal_width() -> int:
         return 120
 
 
+def colorize_diff(diff_text: str) -> str:
+    """对 unified diff 文本着色：-行红色、+行绿色、@@行青色暗淡，其余灰色。
+
+    保留行首的 +/- 符号，仅对内容着色，不改变文本结构。
+    """
+    if not diff_text or diff_text == "(无差异)":
+        return f"{G}(无差异){R}"
+
+    out = []
+    for line in diff_text.split("\n"):
+        if line.startswith("---") or line.startswith("+++"):
+            # 文件头行：粗体 + 对应颜色
+            out.append(f"{B}{C}{line}{R}")
+        elif line.startswith("@@"):
+            # 位置行：青色暗淡
+            out.append(f"{D}{C}{line}{R}")
+        elif line.startswith("-"):
+            # 删除行：红色
+            out.append(f"{X}{line}{R}")
+        elif line.startswith("+"):
+            # 添加行：绿色
+            out.append(f"{E}{line}{R}")
+        else:
+            # 上下文行：灰色
+            out.append(f"{G}{line}{R}")
+    return "\n".join(out)
+
+
 def _sep() -> None:
     sys.stdout.write(f"  {G}{'─' * (_terminal_width() - 2)}{R}\n")
 
