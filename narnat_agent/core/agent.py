@@ -163,7 +163,7 @@ class Agent:
         if name in _FILE_PATH_TOOLS:
             summary = arguments.get("file_path", "")
         elif name == "Shell":
-            summary = arguments.get("command", "")[:60]
+            summary = arguments.get("command", "")
         elif name == "Grep":
             summary = arguments.get("pattern", "")
         elif name == "Glob":
@@ -173,8 +173,8 @@ class Agent:
 
         if summary:
             # 截断过长的摘要
-            if len(summary) > 80:
-                summary = summary[:77] + "..."
+            if len(summary) > 100:
+                summary = summary[:97] + "..."
             print(f"  {D}[{label}] {summary}{R}")
         else:
             print(f"  {D}[{label}]{R}")
