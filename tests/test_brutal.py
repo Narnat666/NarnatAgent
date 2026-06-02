@@ -21,6 +21,11 @@ from narnat_agent.config.loader import AIConfig
 from narnat_agent.logger import AgentLogger
 
 
+def _r(result):
+    """解包工具返回值：tuple→取第一个元素(llm_result)，str→原样返回"""
+    return result[0] if isinstance(result, tuple) else result
+
+
 # ═══════════════════════════════════════════════════════════════
 # Read 暴力测试
 # ═══════════════════════════════════════════════════════════════
@@ -107,7 +112,7 @@ class TestEditBrutal:
         with open(fpath, "w") as f:
             pass
         result = edit.execute(fpath, "anything", "something")
-        assert "错误" in result
+        assert "错误" in _r(result)
 
     def test_edit_unicode_content(self):
         """Unicode内容替换"""
@@ -115,7 +120,7 @@ class TestEditBrutal:
         with open(fpath, "w", encoding="utf-8") as f:
             f.write("# 注释：你好世界\ndef foo():\n    pass\n")
         result = edit.execute(fpath, "# 注释：你好世界", "# 注释：修改后")
-        assert "已替换" in result
+        assert "已替换" in _r(result)
 
     def test_edit_replace_all_many_occurrences(self):
         """replace_all替换大量匹配"""
@@ -124,7 +129,7 @@ class TestEditBrutal:
             for i in range(100):
                 f.write(f"var = 'old'\n")
         result = edit.execute(fpath, "'old'", "'new'", replace_all=True)
-        assert "已替换100处" in result
+        assert "已替换100处" in _r(result)
         with open(fpath, "r") as f:
             content = f.read()
         assert content.count("'new'") == 100
@@ -137,7 +142,7 @@ class TestEditBrutal:
         with open(fpath, "w") as f:
             f.write(long_content + "\n")
         result = edit.execute(fpath, long_content, "replaced")
-        assert "已替换" in result
+        assert "已替换" in _r(result)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -222,7 +227,7 @@ class TestWriteBrutal:
         fpath = os.path.join(self.tmpdir, "large.txt")
         content = "A" * 100000
         result = write.execute(fpath, content)
-        assert "已写入" in result
+        assert "已写入" in _r(result)
         with open(fpath, "r") as f:
             assert len(f.read()) == 100000
 
@@ -231,7 +236,7 @@ class TestWriteBrutal:
         fpath = os.path.join(self.tmpdir, "uni.txt")
         content = "你好世界\n🎉\n日本語テスト\n"
         result = write.execute(fpath, content)
-        assert "已写入" in result
+        assert "已写入" in _r(result)
         with open(fpath, "r", encoding="utf-8") as f:
             assert f.read() == content
 
@@ -421,7 +426,7 @@ class TestToolChainIntegration:
         write.mark_read(fpath)
         # Edit修改
         result = edit.execute(fpath, "x = 1", "x = 10")
-        assert "已替换" in result
+        assert "已替换" in _r(result)
         # Read验证
         content2 = read.execute(fpath)
         assert "x = 10" in content2
@@ -440,7 +445,7 @@ class TestToolChainIntegration:
         assert "a - b" in content
         # Edit修复
         result = edit.execute(fpath, "return a - b  # bug!", "return a + b  # fixed")
-        assert "已替换" in result
+        assert "已替换" in _r(result)
         # 验证
         content2 = read.execute(fpath)
         assert "a + b" in content2
@@ -544,7 +549,7 @@ class TestAuditFixes:
 
             # 新会话中Write必须先Read
             result = write.execute(fpath, "new content\n")
-            assert "错误" in result  # 未Read，应报错
+            assert "错误" in _r(result)  # 未Read，应报错
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
             write._read_files.clear()

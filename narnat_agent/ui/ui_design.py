@@ -32,24 +32,35 @@ if sys.platform == "win32":
         pass
 
 # ═══════════════════════════════════════════════════════════════
-# ANSI 转义序列常量
+# ANSI 转义序列常量  (Salt Flow 配色 - 椒盐音乐风格)
 # ═══════════════════════════════════════════════════════════════
 
 RST = "\x1b[0m"
 BLD = "\x1b[1m"
 DIM = "\x1b[2m"
-GRY = "\x1b[90m"
-CYN = "\x1b[36m"
-GRN = "\x1b[32m"
-YLW = "\x1b[33m"
-RED = "\x1b[31m"
-BLU = "\x1b[34m"
-MAG = "\x1b[35m"
-ORG = "\x1b[38;5;214m"
-BG8 = "\x1b[48;5;236m"
+
+# 核心中性色（灰蓝调，现代沉浸感）
+GRY = "\x1b[38;2;100;116;139m"      # 灰蓝 #64748B（次要文字、分隔线）
+
+# 主题流光色（青绿/蓝紫为主，低饱和舒适）
+CYN = "\x1b[38;2;94;234;212m"       # 流光青 #5EEAD4（主题主色、标题）
+GRN = "\x1b[38;2;52;211;153m"       # 薄荷绿 #34D399（成功、添加行）
+YLW = "\x1b[38;2;251;191;36m"       # 暖琥珀 #FBBF24（行内代码、提示）
+RED = "\x1b[38;2;248;113;113m"      # 珊瑚红 #F87171（错误、删除行）
+BLU = "\x1b[38;2;167;139;250m"      # 薰衣草紫 #A78BFA（链接、交互）
+MAG = "\x1b[38;2;232;121;249m"      # 粉紫流光 #E879F9（装饰、品牌色）
+ORG = "\x1b[38;2;251;146;60m"       # 桃橙色 #FB923C（强调、spinner）
+
+# 背景色（深夜蓝黑，沉浸式代码块背景）
+BG8 = "\x1b[48;2;15;23;42m"         # 深夜蓝 #0F172A
+
+# 文字色（保持不变）
+WHT = "\x1b[38;2;255;255;255m"      # 极致白色 #FFFFFF（用户输入）❗ 不变
+WHT7 = "\x1b[38;2;255;255;208m"     # 偏黄米白 #FFFFD0（AI输出）❗ 不变
 
 R, B, D, G, C = RST, BLD, DIM, GRY, CYN
 E, Y, X, U, M, O, BG = GRN, YLW, RED, BLU, MAG, ORG, BG8
+W, W7 = WHT, WHT7
 
 
 def _terminal_width() -> int:
@@ -139,19 +150,22 @@ class InterruptController:
             signal.signal(signal.SIGINT, signal.default_int_handler)
 
     def _poll_esc(self) -> None:
-        """轮询ESC键。仅在Windows原生控制台下使用msvcrt检测。"""
-        # 检测是否在原生Windows控制台下
-        # Cygwin/Git Bash/WSL等伪终端下msvcrt不可靠，跳过
+        """轮询ESC键。Windows使用msvcrt，Unix使用select+termios。"""
+        if sys.platform == "win32":
+            self._poll_esc_windows()
+        else:
+            self._poll_esc_unix()
+
+    def _poll_esc_windows(self) -> None:
+        """Windows原生控制台下使用msvcrt检测ESC键。"""
         try:
             import msvcrt
-            # 尝试获取控制台模式，如果失败说明不是原生控制台
             import ctypes
             kernel32 = ctypes.windll.kernel32
             handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
             mode = ctypes.c_ulong()
             if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-                # 不是原生控制台，不检测ESC
-                return
+                return  # 非原生控制台
         except (ImportError, OSError, AttributeError):
             return
 
@@ -160,16 +174,64 @@ class InterruptController:
                 if msvcrt.kbhit():
                     ch = msvcrt.getch()
                     if ch == b'\x1b':
-                        # 真正的ESC键：后面没有更多字符（方向键等转义序列会有后续字符）
-                        import time
                         time.sleep(0.02)
                         if not msvcrt.kbhit():
                             self._interrupt.set()
                             break
-                        # 有后续字符，是转义序列不是ESC，忽略
+                        # 转义序列，消费掉后续字符
+                        while msvcrt.kbhit():
+                            msvcrt.getch()
             except OSError:
                 break
-            self._stop_poll.wait(0.05)
+            self._stop_poll.wait(0.03)
+
+    def _poll_esc_unix(self) -> None:
+        """Unix/Linux/macOS下使用select+termios检测ESC键。"""
+        try:
+            import select
+            import termios
+            import tty
+        except ImportError:
+            return
+
+        fd = sys.stdin.fileno()
+        old_settings = None
+        try:
+            old_settings = termios.tcgetattr(fd)
+            tty.setcbreak(fd)  # 设置为cbreak模式，允许单字符读取
+        except (termios.error, OSError):
+            return  # 无法设置终端模式（如管道输入）
+
+        try:
+            while not self._stop_poll.is_set():
+                try:
+                    # 使用select检测stdin是否有数据，超时30ms
+                    ready, _, _ = select.select([sys.stdin], [], [], 0.03)
+                    if ready:
+                        ch = os.read(fd, 1)
+                        if ch == b'\x1b':
+                            # 等待短暂时间判断是否为转义序列
+                            time.sleep(0.02)
+                            ready2, _, _ = select.select([sys.stdin], [], [], 0.01)
+                            if not ready2:
+                                self._interrupt.set()
+                                break
+                            # 转义序列，消费掉后续字符
+                            while True:
+                                ready3, _, _ = select.select(
+                                    [sys.stdin], [], [], 0.005)
+                                if not ready3:
+                                    break
+                                os.read(fd, 1)
+                except (OSError, ValueError):
+                    break
+        finally:
+            # 恢复终端原始设置
+            if old_settings is not None:
+                try:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                except (termios.error, OSError):
+                    pass
 
 
 _interrupt_ctrl = InterruptController()
@@ -219,8 +281,8 @@ class InlineRules:
     @classmethod
     def render(cls, text: str) -> str:
         text = cls._RE_STRIKE.sub(f"{X}\\1{R}", text)
-        text = cls._RE_BOLD.sub(f"{B}\\1{R}", text)
-        text = cls._RE_ITAL.sub(f"{D}\\1{R}", text)
+        text = cls._RE_BOLD.sub(f"{B}{W7}\\1{R}", text)
+        text = cls._RE_ITAL.sub(f"{D}{W7}\\1{R}", text)
         text = cls._RE_CODE.sub(f"{Y}\\1{R}", text)
         text = cls._RE_IMG.sub(f"{D}[img:\\1]{R}", text)
         text = cls._RE_LINK.sub(f"{U}\\1{R}", text)
@@ -254,7 +316,7 @@ def _render_heading(_line: str, m: Match) -> str:
         return f"  {B}{CYN}{body}{R}"
     if level == 3:
         return f"  {B}{GRN}{body}{R}"
-    return f"  {B}{body}{R}"
+    return f"  {B}{W7}{body}{R}"
 
 
 def _render_hr(_line: str, _m: Match) -> str:
@@ -264,17 +326,17 @@ def _render_hr(_line: str, _m: Match) -> str:
 def _render_task(_line: str, m: Match) -> str:
     done = m.group(1).lower() == "x"
     marker = f"{E}v{R}" if done else f"{G}o{R}"
-    return f"   {marker} {InlineRules.render(m.group(2))}"
+    return f"   {marker} {W7}{InlineRules.render(m.group(2))}{R}"
 
 
 def _render_ul(_line: str, _m: Match) -> str:
-    return f"   {E}*{R} {InlineRules.render(_line[2:])}"
+    return f"   {E}*{R} {W7}{InlineRules.render(_line[2:])}{R}"
 
 
 def _render_ol(_line: str, m: Match) -> str:
     num = m.group(1)
     body_start = len(num) + 2
-    return f"   {G}{num}.{R} {InlineRules.render(_line[body_start:])}"
+    return f"   {G}{num}.{R} {W7}{InlineRules.render(_line[body_start:])}{R}"
 
 
 def _render_blockquote(_line: str, _m: Match) -> str:
@@ -284,18 +346,18 @@ def _render_blockquote(_line: str, _m: Match) -> str:
         rest = rest[1:]
         depth += 1
     body = rest.strip()
-    return f"  {D}{G}{'| ' * depth}{R}{InlineRules.render(body)}"
+    return f"  {D}{G}{'| ' * depth}{R}{W7}{InlineRules.render(body)}{R}"
 
 
 def _render_table_row(_line: str, _m: Match) -> str:
     cells = [c.strip() for c in _line.strip("|").split("|")]
     if _is_table_separator(cells):
         return ""
-    return "    " + " | ".join(InlineRules.render(c) for c in cells)
+    return f"    {W7}" + " | ".join(InlineRules.render(c) for c in cells) + f"{R}"
 
 
 def _render_paragraph(_line: str, _m: Match) -> str:
-    return "  " + InlineRules.render(_line)
+    return f"  {W7}{InlineRules.render(_line)}{R}"
 
 
 _RE_TABLE_SEP = re.compile(r"^[-:]+$")
@@ -767,7 +829,10 @@ def _make_keybindings() -> KeyBindings:
     return kb
 
 
-_PROMPT_STYLE = Style.from_dict({"prompt": "bold #00ff00"})
+_PROMPT_STYLE = Style.from_dict({
+    "prompt": "bold #00ff00",       # # 提示符保持绿色
+    "": "#ffffff",                  # 用户输入文本：极致白色
+})
 
 
 def _create_session() -> PromptSession:
@@ -783,6 +848,3 @@ def read_input(session: PromptSession) -> Optional[str]:
         return session.prompt([("class:prompt", "# ")])
     except (KeyboardInterrupt, EOFError):
         return None
-
-
-

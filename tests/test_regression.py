@@ -19,6 +19,11 @@ from narnat_agent.config.defaults import WARN_TURN_1, COMPRESS_TURN
 from narnat_agent.core.compressor import Compressor
 from narnat_agent.core.llm import LLMClient
 from narnat_agent.commands.session import SessionManager
+
+
+def _r(result):
+    """解包工具返回值：tuple→取第一个元素(llm_result)，str→原样返回"""
+    return result[0] if isinstance(result, tuple) else result
 from narnat_agent.logger import AgentLogger, _redact
 
 
@@ -128,10 +133,11 @@ class TestEditRegression:
         with open(fpath, "w") as f:
             f.write("x = 1\ny = 2\n")
         result = edit.execute(fpath, "x = 1", "x = 10")
+        r = _r(result)
         # 不应有连续空行（双换行的特征）
-        assert "\n\n\n" not in result
-        assert "---" in result
-        assert "+++" in result
+        assert "\n\n\n" not in r
+        assert "---" in r
+        assert "+++" in r
 
     def test_edit_preserves_unrelated_content(self):
         """替换不影响其他内容"""
@@ -152,7 +158,7 @@ class TestEditRegression:
         with open(fpath, "w") as f:
             f.write("def calculate_total():\n    return sum(items)\n")
         result = edit.execute(fpath, "def calc_total():", "def new_name():")
-        assert "相似" in result or "错误" in result
+        assert "相似" in _r(result) or "错误" in _r(result)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -461,23 +467,23 @@ class TestRegistryRegression:
             with open(fpath, "w") as f:
                 f.write("content\n")
             # Read
-            assert "content" in registry_execute("Read", {"file_path": fpath})
+            assert "content" in _r(registry_execute("Read", {"file_path": fpath}))
             # Glob
             result = registry_execute("Glob", {"pattern": "*.txt", "path": tmpdir})
-            assert "test.txt" in result
+            assert "test.txt" in _r(result)
             # Grep
             result = registry_execute("Grep", {"pattern": "content", "path": tmpdir})
-            assert "test.txt" in result
+            assert "test.txt" in _r(result)
             # Edit
             result = registry_execute("Edit", {"file_path": fpath, "old_string": "content", "new_string": "modified"})
-            assert "已替换" in result
+            assert "已替换" in _r(result)
             # Write
             fpath2 = os.path.join(tmpdir, "new.txt")
             result = registry_execute("Write", {"file_path": fpath2, "content": "new file"})
-            assert "已写入" in result
+            assert "已写入" in _r(result)
             # TodoWrite
             result = registry_execute("TodoWrite", {"todos": [{"content": "T", "status": "in_progress", "activeForm": "D"}]})
-            assert "已更新" in result
+            assert "已更新" in _r(result)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
             write._read_files.clear()

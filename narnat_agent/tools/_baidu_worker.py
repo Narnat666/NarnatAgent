@@ -11,15 +11,28 @@ import json
 import re
 import sys
 import time
+import platform
 from html import unescape
 from urllib.parse import quote_plus
 
 
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
+def _make_ua() -> str:
+    """根据当前平台生成 User-Agent 字符串。"""
+    os_name = platform.system()
+    if os_name == "Windows":
+        os_part = "Windows NT 10.0; Win64; x64"
+    elif os_name == "Darwin":
+        os_part = "Macintosh; Intel Mac OS X 10_15_7"
+    else:
+        os_part = "X11; Linux x86_64"
+    return (
+        f"Mozilla/5.0 ({os_part}) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    )
+
+
+_UA = _make_ua()
 _TIMEOUT_MS = 15000
 _SNIPPET_LEN = 200
 
@@ -85,16 +98,26 @@ def main():
 
     try:
         pw = sync_playwright().start()
-        browser = pw.chromium.launch(
-            channel="msedge",
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-features=AutomationControlled",
-                "--disable-infobars",
-                "--window-size=1920,1080",
-            ],
-        )
+        # 优先使用系统已安装的 Edge，回退到 Playwright 自带的 Chromium
+        browser = None
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=AutomationControlled",
+            "--disable-infobars",
+            "--window-size=1920,1080",
+        ]
+        for channel in ("msedge", "chrome"):
+            try:
+                browser = pw.chromium.launch(
+                    channel=channel,
+                    headless=True,
+                    args=launch_args,
+                )
+                break
+            except Exception:
+                continue
+        if browser is None:
+            browser = pw.chromium.launch(headless=True, args=launch_args)
         context = browser.new_context(
             user_agent=_UA,
             viewport={"width": 1920, "height": 1080},

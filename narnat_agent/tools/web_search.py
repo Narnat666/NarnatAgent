@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import time
+import platform
 from html import unescape as _html_unescape
 from typing import List, Dict
 from urllib.parse import quote_plus, urlparse
@@ -23,11 +24,22 @@ from urllib.parse import quote_plus, urlparse
 
 # ── 常量 ──
 
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
+def _make_ua() -> str:
+    """根据当前平台生成 User-Agent 字符串。"""
+    os_name = platform.system()
+    if os_name == "Windows":
+        os_part = "Windows NT 10.0; Win64; x64"
+    elif os_name == "Darwin":
+        os_part = "Macintosh; Intel Mac OS X 10_15_7"
+    else:
+        os_part = "X11; Linux x86_64"
+    return (
+        f"Mozilla/5.0 ({os_part}) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    )
+
+_UA = _make_ua()
 
 _TIMEOUT = 5           # HTTP请求超时秒数
 _MAX_RETRIES = 2       # 仅5xx重试
@@ -315,8 +327,9 @@ def _cleanup_worker():
 
 
 def _decode_output(data: bytes) -> str:
-    """解码子进程输出（Windows默认GBK）"""
-    for enc in ("utf-8", "gbk", "latin-1"):
+    """解码子进程输出。Windows默认GBK，Unix默认UTF-8。"""
+    fallback_encs = ("gbk",) if sys.platform == "win32" else ()
+    for enc in ("utf-8",) + fallback_encs + ("latin-1",):
         try:
             return data.decode(enc)
         except UnicodeDecodeError:

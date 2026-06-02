@@ -40,8 +40,9 @@ def _is_nuitka_onefile() -> bool:
     临时目录路径通常包含 "onefile_" 。
     """
     exe_dir = os.path.dirname(sys.executable)
-    # Nuitka onefile 临时目录特征：路径含 "onefile_" 且 sys.executable 是 python.exe
-    if "onefile_" in exe_dir and os.path.basename(sys.executable).lower() == "python.exe":
+    # Nuitka onefile 临时目录特征：路径含 "onefile_" 且 sys.executable 是 python 解释器
+    exe_name = os.path.basename(sys.executable).lower()
+    if "onefile_" in exe_dir and exe_name in ("python.exe", "python", "python3"):
         return True
     # 也检查 __compiled__ 属性（Nuitka 设置的）
     if "__compiled__" in dir(sys.modules.get("__main__", type(None))):

@@ -54,6 +54,15 @@ def set_interrupt_check(cb: Callable[[], bool]):
     _interrupt_check = cb
 
 
+def _find_executable(*names: str) -> Optional[str]:
+    """按优先级查找可执行文件，返回第一个找到的名称或路径。"""
+    import shutil
+    for name in names:
+        if shutil.which(name):
+            return name
+    return None
+
+
 def _needs_powershell(command: str) -> bool:
     """
     检测命令是否需要PowerShell而非cmd。
@@ -201,20 +210,19 @@ def _adapt_powershell_command(command: str) -> str:
 
 
 def _decode_output(raw: bytes) -> str:
-    """安全解码子进程输出，处理GBK/UTF-8等编码"""
+    """安全解码子进程输出。Windows下回退GBK，Unix下仅UTF-8。"""
     if not raw:
         return ""
-    # 优先UTF-8
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
         pass
-    # Windows下GBK
-    try:
-        return raw.decode("gbk")
-    except UnicodeDecodeError:
-        pass
-    # 最终降级
+    # Windows下cmd默认GBK编码
+    if sys.platform == "win32":
+        try:
+            return raw.decode("gbk")
+        except UnicodeDecodeError:
+            pass
     return raw.decode("utf-8", errors="replace")
 
 
@@ -255,12 +263,20 @@ def execute(
         # 检测到引号嵌套时回退到PowerShell
         if _needs_powershell(command):
             effective_cmd = _adapt_powershell_command(command)
-            shell_cmd = ["powershell", "-Command", effective_cmd]
+            # 优先 powershell，回退 pwsh（PowerShell Core）
+            ps = _find_executable("powershell", "pwsh")
+            if ps is None:
+                return "错误: 未找到PowerShell，请安装后重试"
+            shell_cmd = [ps, "-Command", effective_cmd]
         else:
             effective_cmd = _adapt_windows_command(command)
             shell_cmd = ["cmd", "/c", effective_cmd]
     else:
-        shell_cmd = ["bash", "-c", command]
+        # 优先bash，回退sh（某些最小Unix环境可能只有sh）
+        shell = _find_executable("bash", "sh")
+        if shell is None:
+            return "错误: 未找到shell，请安装bash或sh后重试"
+        shell_cmd = [shell, "-c", command]
 
     timeout_sec = min(timeout / 1000, 600)
 
