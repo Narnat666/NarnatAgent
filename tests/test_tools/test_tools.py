@@ -5,7 +5,7 @@ import shutil
 import tempfile
 import pytest
 
-from narnat_agent.tools import read, glob, grep, edit, write, bash, todo_write
+from narnat_agent.tools import read, glob, grep, edit, write, bash, terminal, todo_write
 from narnat_agent.tools.registry import execute as registry_execute, get_tool_names, get_tool_definitions
 
 
@@ -285,9 +285,11 @@ class TestBash:
         result = bash.execute("python -c \"exit(0)\"")
         assert "exit code: 0" in result
 
-    def test_interactive_blocked(self):
-        result = bash.execute("vim test.txt")
-        assert "错误" in result
+    def test_ssh_command_not_blocked(self):
+        """SSH命令不再被拦截，AI写什么就执行什么"""
+        result = bash.execute("ssh -o BatchMode=yes -o ConnectTimeout=1 nonexistent@127.0.0.1 echo test")
+        # 应该尝试执行（可能连接失败，但不应被拦截）
+        assert "禁止" not in result
 
     def test_delete_needs_confirm(self):
         """删除命令被拦截"""
@@ -303,6 +305,14 @@ class TestBash:
         # echo不是删除命令，直接执行
         assert "deleting" in result
         bash.set_confirm_callback(None)
+
+    def test_no_command_translation(self):
+        """命令不再被翻译：cat还是cat，不会变成type"""
+        # 在Windows上，cat命令应该原样传递给shell
+        # 如果翻译了，cmd会执行type，PowerShell会执行Get-Content
+        # 我们验证bash模块不再有_adapt_windows_command和_adapt_powershell_command
+        assert not hasattr(bash, '_adapt_windows_command')
+        assert not hasattr(bash, '_adapt_powershell_command')
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -361,16 +371,16 @@ class TestTodoWrite:
 # ═══════════════════════════════════════════════════════════════
 
 class TestRegistry:
-    def test_all_8_tools_registered(self):
+    def test_all_9_tools_registered(self):
         names = get_tool_names()
-        assert len(names) == 8
-        expected = {"Read", "Glob", "Grep", "Edit", "Write", "Shell",
+        assert len(names) == 9
+        expected = {"Read", "Glob", "Grep", "Edit", "Write", "Shell", "Terminal",
                     "WebSearch", "TodoWrite"}
         assert set(names) == expected
 
     def test_tool_definitions_count(self):
         defs = get_tool_definitions()
-        assert len(defs) == 8
+        assert len(defs) == 9
 
     def test_execute_known_tool(self):
         tmpdir = tempfile.mkdtemp()
@@ -720,3 +730,152 @@ class TestWriteColorDiff:
         assert color_diff  # 非空
         assert X in color_diff  # 红色（删除行）
         assert E in color_diff  # 绿色（添加行）
+
+
+# ═══════════════════════════════════════════════════════════════
+# Terminal 暴力测试
+# ═══════════════════════════════════════════════════════════════
+
+class TestTerminalBasic:
+    """Terminal工具基础测试（不需要真实SSH连接）"""
+
+    def test_status_no_sessions(self):
+        """无会话时status返回空"""
+        terminal._sessions.clear()
+        result = terminal.execute(action="status")
+        assert "无活跃" in result
+
+    def test_connect_missing_params(self):
+        """connect缺少host或username"""
+        result = terminal.execute(action="connect")
+        assert "错误" in result
+        result = terminal.execute(action="connect", host="1.2.3.4")
+        assert "错误" in result
+
+    def test_exec_no_command(self):
+        """exec缺少command"""
+        result = terminal.execute(action="exec", host="1.2.3.4")
+        assert "错误" in result
+
+    def test_exec_no_session(self):
+        """exec时无活跃会话"""
+        terminal._sessions.clear()
+        result = terminal.execute(action="exec", command="ls")
+        assert "错误" in result
+
+    def test_close_no_host(self):
+        """close无host时关闭所有（即使为空也不崩溃）"""
+        terminal._sessions.clear()
+        result = terminal.execute(action="close")
+        assert "已关闭" in result
+
+    def test_unknown_action(self):
+        """未知action"""
+        result = terminal.execute(action="invalid")
+        assert "错误" in result
+
+    def test_connect_unreachable_host(self):
+        """连接不可达主机应返回错误而非崩溃"""
+        result = terminal.execute(
+            action="connect",
+            host="192.0.2.1",  # TEST-NET-1, 不可路由
+            username="test",
+            password="test",
+        )
+        assert "错误" in result or "失败" in result
+
+    def test_connect_invalid_credentials(self):
+        """错误凭据应返回认证错误"""
+        # 连接localhost但用错误用户名
+        result = terminal.execute(
+            action="connect",
+            host="127.0.0.1",
+            username="nonexistent_user_xyz",
+            password="wrong_password",
+        )
+        assert "错误" in result or "失败" in result
+
+
+class TestTerminalSessionManagement:
+    """Terminal会话管理测试"""
+
+    def setup_method(self):
+        terminal._sessions.clear()
+
+    def teardown_method(self):
+        terminal.cleanup()
+
+    def test_status_empty(self):
+        result = terminal.execute(action="status")
+        assert "无活跃" in result
+
+    def test_close_nonexistent_host(self):
+        """关闭不存在的会话"""
+        result = terminal.execute(action="close", host="10.0.0.1")
+        assert "未找到" in result
+
+    def test_exec_with_single_session_auto_select(self):
+        """只有一个会话时exec自动选择（模拟：无真实连接，测试逻辑）"""
+        # 这个测试验证当只有一个session时，不指定host也能自动选择
+        # 由于没有真实SSH，我们直接测试_sessions为空时的错误
+        result = terminal.execute(action="exec", command="ls")
+        assert "错误" in result  # 无会话
+
+
+class TestTerminalBrutal:
+    """Terminal暴力测试：极端场景"""
+
+    def setup_method(self):
+        terminal._sessions.clear()
+
+    def teardown_method(self):
+        terminal.cleanup()
+
+    def test_rapid_connect_failures(self):
+        """快速连续连接失败不崩溃"""
+        for i in range(10):
+            result = terminal.execute(
+                action="connect",
+                host=f"192.0.2.{i}",
+                username="test",
+                password="test",
+            )
+            # 每次都应返回错误，不应崩溃
+            assert isinstance(result, str)
+
+    def test_exec_without_connect(self):
+        """未连接就exec"""
+        for i in range(5):
+            result = terminal.execute(action="exec", command=f"cmd{i}")
+            assert "错误" in result
+
+    def test_status_after_many_failed_connects(self):
+        """多次失败连接后status仍正常"""
+        for i in range(5):
+            terminal.execute(
+                action="connect",
+                host=f"192.0.2.{i}",
+                username="test",
+                password="test",
+            )
+        result = terminal.execute(action="status")
+        assert isinstance(result, str)
+
+    def test_close_all_repeatedly(self):
+        """反复关闭所有会话不崩溃"""
+        for _ in range(5):
+            result = terminal.execute(action="close")
+            assert "已关闭" in result
+
+    def test_mixed_actions_rapid(self):
+        """快速混合操作不崩溃"""
+        actions = [
+            {"action": "status"},
+            {"action": "exec", "command": "ls"},
+            {"action": "close"},
+            {"action": "connect", "host": "192.0.2.1", "username": "test", "password": "test"},
+            {"action": "status"},
+        ]
+        for kwargs in actions:
+            result = terminal.execute(**kwargs)
+            assert isinstance(result, str)

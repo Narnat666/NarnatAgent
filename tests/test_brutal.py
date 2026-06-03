@@ -9,7 +9,7 @@ import json
 import time
 import pytest
 
-from narnat_agent.tools import read, glob, grep, edit, write, bash, todo_write
+from narnat_agent.tools import read, glob, grep, edit, write, bash, terminal, todo_write
 from narnat_agent.tools.registry import execute as registry_execute
 from narnat_agent.config.loader import load_config
 from narnat_agent.config.session_store import save_session, load_session, list_sessions, delete_session
@@ -262,6 +262,16 @@ class TestBashBrutal:
         r2 = bash.execute('python -c "print(2)"')
         assert "1" in r1
         assert "2" in r2
+
+    def test_ssh_not_blocked(self):
+        """SSH命令不再被拦截"""
+        result = bash.execute("ssh -o BatchMode=yes -o ConnectTimeout=1 nonexistent@127.0.0.1 echo test")
+        assert "禁止" not in result
+
+    def test_no_command_translation(self):
+        """命令不再被翻译"""
+        assert not hasattr(bash, '_adapt_windows_command')
+        assert not hasattr(bash, '_adapt_powershell_command')
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -747,7 +757,7 @@ class TestAnthropicBackend:
 
         tool_defs = get_tool_definitions()
         anthropic_tools = backend._convert_tools(tool_defs)
-        assert len(anthropic_tools) == 8
+        assert len(anthropic_tools) == 9
         # 检查第一个工具（Read）
         read_tool = anthropic_tools[0]
         assert read_tool["name"] == "Read"

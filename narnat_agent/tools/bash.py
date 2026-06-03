@@ -1,12 +1,11 @@
-"""Bash工具 —— 执行shell命令
+"""Shell工具 —— 执行shell命令
 
-跨平台适配:
-- Windows: PowerShell (自动转换常见bash语法)
-- Linux/macOS: bash
+AI写什么就执行什么，不做命令翻译。
+Windows用PowerShell执行，Linux/macOS用bash执行。
 
-高级功能:
-- run_in_background: 后台运行，立即返回进程信息
-- dangerouslyDisableSandbox: 禁用安全检查（交互式命令拦截等）
+安全策略:
+- 仅拦截rm/del等删除命令，需用户确认
+- 其他命令直接执行，信任AI
 """
 
 import os
@@ -20,15 +19,9 @@ from typing import Optional, Callable
 from ..config.defaults import MAX_BASH_OUTPUT
 
 
-# 删除命令正则
+# 删除命令正则（仅保留删除确认，其他全部放行）
 _RE_DELETE = re.compile(
     r"\b(rm\s|del\s|Remove-Item\s|rmdir\s|rd\s)",
-    re.IGNORECASE,
-)
-
-# 交互式命令正则
-_RE_INTERACTIVE = re.compile(
-    r"\b(vim|vi|nano|emacs|top|htop|less|more|man|ssh|telnet)\b",
     re.IGNORECASE,
 )
 
@@ -70,143 +63,16 @@ def _needs_powershell(command: str) -> bool:
     cmd /c 对嵌套引号处理有缺陷，如:
       python -c "import sys; sys.exit(1)"
     cmd会把引号吃掉导致语法错误。
-
-    检测规则：命令中存在 -c/-m 后跟引号包裹的代码片段。
     """
-    # python -c "code" / python3 -c "code" 模式
     if re.search(r'\bpython\d?\s+-c\s+"', command):
         return True
-    # node -e "code" 模式
     if re.search(r'\bnode\s+-e\s+"', command):
         return True
-    # PowerShell cmdlet 特征
     if re.search(r'\b(Get-|Set-|New-|Remove-|Write-|Select-|Where-|ForEach-|Invoke-|Start-|Stop-|Out-)\w+', command):
         return True
-    # $env: 变量
     if '$env:' in command:
         return True
     return False
-
-
-def _adapt_windows_command(command: str) -> str:
-    """
-    将常见bash语法自动适配为Windows cmd语法。
-
-    仅做最小必要转换，不改变用户意图。
-    """
-    adapted = command
-
-    # mkdir -p → mkdir（cmd的mkdir自动创建中间目录）
-    adapted = re.sub(
-        r'\bmkdir\s+-p\s+',
-        lambda m: 'mkdir ',
-        adapted,
-    )
-
-    # && 保持不变（cmd支持&&）
-
-    # export VAR=val → set VAR=val
-    adapted = re.sub(
-        r'\bexport\s+(\w+)=(\S+)',
-        r'set \1=\2',
-        adapted,
-    )
-
-    # echo 保持不变（cmd原生支持echo）
-
-    # cat file → type file
-    adapted = re.sub(
-        r'\bcat\s+',
-        'type ',
-        adapted,
-    )
-
-    # ls → dir
-    adapted = re.sub(
-        r'\bls\b',
-        'dir',
-        adapted,
-    )
-
-    # which → where
-    adapted = re.sub(
-        r'\bwhich\s+',
-        'where ',
-        adapted,
-    )
-
-    # touch file → type nul > file
-    adapted = re.sub(
-        r'\btouch\s+',
-        'type nul > ',
-        adapted,
-    )
-
-    return adapted
-
-
-def _adapt_powershell_command(command: str) -> str:
-    """
-    将常见bash语法自动适配为PowerShell语法。
-    仅在需要回退到PowerShell时使用。
-    """
-    adapted = command
-
-    # mkdir -p → New-Item -ItemType Directory -Force
-    adapted = re.sub(
-        r'\bmkdir\s+-p\s+',
-        lambda m: 'New-Item -ItemType Directory -Force -Path ',
-        adapted,
-    )
-
-    # && → ; (PowerShell中&&需要PS7+，用;保证兼容)
-    if "&&" in adapted and "$env:" not in adapted:
-        adapted = adapted.replace("&&", "; ")
-
-    # export VAR=val → $env:VAR = "val"
-    adapted = re.sub(
-        r'\bexport\s+(\w+)=(\S+)',
-        r'$env:\1 = "\2"',
-        adapted,
-    )
-
-    # echo "text" → Write-Host "text" (仅简单echo)
-    adapted = re.sub(
-        r'\becho\s+',
-        'Write-Host ',
-        adapted,
-        count=1,
-    )
-
-    # cat file → Get-Content file
-    adapted = re.sub(
-        r'\bcat\s+',
-        'Get-Content ',
-        adapted,
-    )
-
-    # ls → Get-ChildItem (仅独立ls)
-    adapted = re.sub(
-        r'\bls\b',
-        'Get-ChildItem',
-        adapted,
-    )
-
-    # which → Get-Command
-    adapted = re.sub(
-        r'\bwhich\s+',
-        'Get-Command ',
-        adapted,
-    )
-
-    # touch file → New-Item -ItemType File -Path file
-    adapted = re.sub(
-        r'\btouch\s+',
-        'New-Item -ItemType File -Path ',
-        adapted,
-    )
-
-    return adapted
 
 
 def _decode_output(raw: bytes) -> str:
@@ -217,7 +83,6 @@ def _decode_output(raw: bytes) -> str:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
         pass
-    # Windows下cmd默认GBK编码
     if sys.platform == "win32":
         try:
             return raw.decode("gbk")
@@ -234,7 +99,7 @@ def execute(
     dangerouslyDisableSandbox: bool = False,
 ) -> str:
     """
-    执行shell命令。
+    执行shell命令。AI写什么就执行什么，不做翻译。
 
     Args:
         command: shell命令
@@ -246,33 +111,22 @@ def execute(
     Returns:
         stdout + stderr + 退出码
     """
-    # 安全检查（可被dangerouslyDisableSandbox跳过）
+    # 安全检查：仅删除命令需确认
     if not dangerouslyDisableSandbox:
-        # 拦截交互式命令
-        if _RE_INTERACTIVE.search(command):
-            return "错误: 禁止交互式命令，请使用非交互式替代方案"
-
-        # 删除命令需确认
         if _RE_DELETE.search(command):
             if _confirm_callback and not _confirm_callback(command):
                 return "操作已取消: 删除命令需用户确认"
 
-    # 选择shell + 命令适配
+    # 选择shell，不做命令翻译
     if sys.platform == "win32":
-        # cmd /c 对嵌套引号处理有缺陷（如 python -c "code"），
-        # 检测到引号嵌套时回退到PowerShell
         if _needs_powershell(command):
-            effective_cmd = _adapt_powershell_command(command)
-            # 优先 powershell，回退 pwsh（PowerShell Core）
             ps = _find_executable("powershell", "pwsh")
             if ps is None:
                 return "错误: 未找到PowerShell，请安装后重试"
-            shell_cmd = [ps, "-Command", effective_cmd]
+            shell_cmd = [ps, "-Command", command]
         else:
-            effective_cmd = _adapt_windows_command(command)
-            shell_cmd = ["cmd", "/c", effective_cmd]
+            shell_cmd = ["cmd", "/c", command]
     else:
-        # 优先bash，回退sh（某些最小Unix环境可能只有sh）
         shell = _find_executable("bash", "sh")
         if shell is None:
             return "错误: 未找到shell，请安装bash或sh后重试"
@@ -297,11 +151,8 @@ def execute(
     except OSError as e:
         return f"错误: 启动失败: {e}"
 
-    # 用communicate(timeout)等待，同时在线程中检查中断
-    # 比poll()轮询更高效，避免管道大量输出时死锁
     interrupted = False
     try:
-        # 中断检查线程：如果用户按ESC，kill进程
         def _interrupt_watcher():
             while proc.poll() is None:
                 if _interrupt_check and _interrupt_check():
@@ -322,22 +173,18 @@ def execute(
         proc.kill()
         stdout, stderr = proc.communicate()
 
-    # 检查是否被中断
     if _interrupt_check and _interrupt_check():
         interrupted = True
 
     if interrupted:
         return "[用户中断]"
 
-    # 解码输出
     out = _decode_output(stdout)
     err = _decode_output(stderr)
 
-    # 截断长输出
     if len(out) > MAX_BASH_OUTPUT:
         out = out[:MAX_BASH_OUTPUT] + f"\n... (输出超过{MAX_BASH_OUTPUT}字符，已截断)"
 
-    # 格式化结果
     parts = []
     if out.strip():
         parts.append(out.strip())
@@ -366,10 +213,8 @@ def _run_background(shell_cmd: list, original_command: str) -> str:
     start_time = time.time()
     _background_procs[pid] = (proc, start_time)
 
-    # 启动后台线程等待进程完成，自动清理
     def _wait_and_cleanup():
         proc.wait()
-        # 进程完成后保留一段时间再清理，允许查询结果
         time.sleep(60)
         _background_procs.pop(pid, None)
 

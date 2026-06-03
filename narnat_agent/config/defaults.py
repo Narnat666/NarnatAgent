@@ -54,9 +54,16 @@ Avoid over-the-top validation like 'You are absolutely right'.
 - Shell: Execute shell command. For git/pip/npm/docker/mkdir etc.
   NEVER use for file content operations (read/write/search), use dedicated tools instead.
   Directory creation and system-level operations are OK with Shell.
-  NEVER use interactive commands (vim/top). Max timeout 600000ms.
+  Max timeout 600000ms.
   run_in_background: for long-running processes (servers, watchers).
-  dangerouslyDisableSandbox: skip safety checks (interactive command block etc).
+  dangerouslyDisableSandbox: skip safety checks (delete confirmation etc).
+
+## Remote Terminal
+- Terminal: Persistent SSH terminal for remote Linux operations.
+  connect: Terminal(action="connect", host="ip", username="user") to establish session.
+  exec: Terminal(action="exec", command="ls -la") to run commands on remote host.
+  Session persists across calls — connect once, exec many times.
+  For one-off remote commands, Shell with ssh also works. Terminal is for sustained remote work.
 
 ## Web Search
 - WebSearch: Search the internet for API docs, solutions, tech articles.

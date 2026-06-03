@@ -32,6 +32,7 @@ _TOOL_LABELS = {
     "Edit": "编辑",
     "Write": "写入",
     "Shell": "执行命令",
+    "Terminal": "终端",
     "WebSearch": "联网搜索",
     "TodoWrite": "更新计划",
 }
@@ -164,6 +165,18 @@ class Agent:
             summary = arguments.get("file_path", "")
         elif name == "Shell":
             summary = arguments.get("command", "")
+        elif name == "Terminal":
+            action = arguments.get("action", "")
+            if action == "connect":
+                host = arguments.get("host", "")
+                username = arguments.get("username", "")
+                summary = f"connect {username}@{host}"
+            elif action == "exec":
+                summary = arguments.get("command", "")
+            elif action == "close":
+                summary = f"close {arguments.get('host', '')}"
+            else:
+                summary = action
         elif name == "Grep":
             summary = arguments.get("pattern", "")
         elif name == "Glob":
@@ -172,9 +185,6 @@ class Agent:
             summary = arguments.get("query", "")
 
         if summary:
-            # 截断过长的摘要
-            if len(summary) > 100:
-                summary = summary[:97] + "..."
             print(f"  {D}[{label}] {summary}{R}")
         else:
             print(f"  {D}[{label}]{R}")

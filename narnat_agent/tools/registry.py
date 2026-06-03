@@ -5,7 +5,7 @@
 import json
 from typing import Dict, List, Any, Callable, Optional
 
-from . import read, glob, grep, edit, write, bash, web_search, todo_write
+from . import read, glob, grep, edit, write, bash, terminal, web_search, todo_write
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -19,6 +19,7 @@ _TOOL_IMPLEMENTATIONS: Dict[str, Callable] = {
     "Edit": edit.execute,
     "Write": write.execute,
     "Shell": bash.execute,
+    "Terminal": terminal.execute,
     "WebSearch": web_search.execute,
     "TodoWrite": todo_write.execute,
 }
@@ -137,6 +138,31 @@ TOOL_DEFINITIONS: List[Dict] = [
                     "dangerouslyDisableSandbox": {"type": "boolean", "description": "禁用沙箱"},
                 },
                 "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "Terminal",
+            "description": "可持续SSH终端，用于远程操控Linux设备。connect建立会话，exec执行命令，会话持久化可复用",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["connect", "exec", "status", "close"],
+                        "description": "操作: connect=建立SSH会话, exec=执行命令, status=查看会话, close=关闭会话",
+                    },
+                    "host": {"type": "string", "description": "远程主机IP或域名"},
+                    "username": {"type": "string", "description": "SSH用户名"},
+                    "port": {"type": "integer", "description": "SSH端口，默认22"},
+                    "key_path": {"type": "string", "description": "SSH私钥路径，如 ~/.ssh/id_rsa"},
+                    "password": {"type": "string", "description": "SSH密码（优先使用key_path）"},
+                    "command": {"type": "string", "description": "要执行的命令（exec时必填）"},
+                    "timeout": {"type": "integer", "description": "命令超时秒数，默认30"},
+                },
+                "required": ["action"],
             },
         },
     },
