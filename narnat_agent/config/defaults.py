@@ -42,11 +42,14 @@ Avoid over-the-top validation like 'You are absolutely right'.
 ## File Operations
 - Read: Read file content. MUST read entire file at once (omit offset/limit), unless file >500 lines.
   NEVER read same file in segments, wastes tool calls.
+  For remote files: Read(file_path, remote=True) reads via SFTP (requires Terminal session).
 - Write: Create or overwrite file. MUST provide full content, NEVER partial content.
   ALWAYS prefer Edit for modifying existing files, NEVER rewrite entire file just to change a few lines.
+  For remote files: Write(file_path, content, remote=True) writes via SFTP.
 - Edit: Modify file. Two modes:
   1) Line range: Edit(file, line_start, line_end, new_string) — replace lines [start,end] with new_string. Preferred: Read→Edit by line numbers, no need to copy old_string. CRITICAL: equal-line replacement (N→N lines) preserves line numbers for subsequent Edits; unequal replacement (N→M, N≠M) shifts line numbers — MUST re-Read before next Edit on same file.
   2) String match: Edit(file, old_string, new_string) — exact string replacement. old_string must match exactly.
+  For remote files: Edit(file_path, ..., remote=True) modifies via SFTP.
 - Glob: Search files by name pattern (e.g. **/*.py). For content search, use Grep.
 - Grep: Search file content by regex. MUST use regex syntax, NEVER glob syntax.
 

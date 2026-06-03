@@ -20,19 +20,25 @@ def clear_read_files():
     _read_files.clear()
 
 
-def execute(file_path: str, content: str) -> tuple:
+def execute(file_path: str, content: str,
+            remote: bool = False, host: str = "") -> tuple:
     """
     创建或覆写文件。
 
     Args:
         file_path: 文件路径
         content: 完整文件内容
+        remote: 通过SFTP写入远程文件（需先Terminal connect）
+        host: 远程主机（仅remote=True时使用）
 
     Returns:
         (llm_result, color_diff) 元组:
         - llm_result: 纯文本确认信息，传给LLM
         - color_diff: 着色diff，传给终端展示；空串表示新建文件无需diff
     """
+    if remote:
+        from .remote import remote_write
+        return remote_write(file_path, content, host)
     abs_path = os.path.abspath(file_path)
 
     # 覆写已有文件前检查是否Read过

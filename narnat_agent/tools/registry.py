@@ -34,13 +34,15 @@ TOOL_DEFINITIONS: List[Dict] = [
         "type": "function",
         "function": {
             "name": "Read",
-            "description": "读取文件内容，带行号。默认读全文，offset/limit仅用于大文件分段",
+            "description": "读取文件内容，带行号。默认读全文，offset/limit仅用于大文件分段。remote=True时通过SFTP读远程文件",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "文件绝对路径"},
                     "offset": {"type": "integer", "description": "起始行号(1-based)，省略则从头读"},
                     "limit": {"type": "integer", "description": "最大行数，省略则读全文"},
+                    "remote": {"type": "boolean", "description": "通过SFTP读取远程文件（需先Terminal connect）"},
+                    "host": {"type": "string", "description": "远程主机IP（仅remote=True时使用）"},
                 },
                 "required": ["file_path"],
             },
@@ -93,7 +95,7 @@ TOOL_DEFINITIONS: List[Dict] = [
         "type": "function",
         "function": {
             "name": "Edit",
-            "description": "修改文件。行号模式: Edit(file, line_start, line_end, new_string) 替换指定行范围，N行换N行可不重读连续Edit，N行换M行(N≠M)后必须重新Read；字符串模式: Edit(file, old_string, new_string) 精确替换匹配文本",
+            "description": "修改文件。行号模式: Edit(file, line_start, line_end, new_string) 替换指定行范围；字符串模式: Edit(file, old_string, new_string) 精确替换匹配文本。remote=True时通过SFTP修改远程文件",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -103,6 +105,8 @@ TOOL_DEFINITIONS: List[Dict] = [
                     "replace_all": {"type": "boolean", "description": "替换所有匹配（字符串模式，默认只替换第一个）"},
                     "line_start": {"type": "integer", "description": "起始行号（行号模式，从1开始）"},
                     "line_end": {"type": "integer", "description": "结束行号（行号模式，含此行；0或省略则等于line_start）"},
+                    "remote": {"type": "boolean", "description": "通过SFTP修改远程文件（需先Terminal connect）"},
+                    "host": {"type": "string", "description": "远程主机IP（仅remote=True时使用）"},
                 },
                 "required": ["file_path"],
             },
@@ -112,12 +116,14 @@ TOOL_DEFINITIONS: List[Dict] = [
         "type": "function",
         "function": {
             "name": "Write",
-            "description": "创建新文件或完整覆写文件。修改已有文件应优先用Edit",
+            "description": "创建新文件或完整覆写文件。修改已有文件应优先用Edit。remote=True时通过SFTP写入远程文件",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "文件路径"},
                     "content": {"type": "string", "description": "完整文件内容"},
+                    "remote": {"type": "boolean", "description": "通过SFTP写入远程文件（需先Terminal connect）"},
+                    "host": {"type": "string", "description": "远程主机IP（仅remote=True时使用）"},
                 },
                 "required": ["file_path", "content"],
             },

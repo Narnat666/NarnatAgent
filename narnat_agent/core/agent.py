@@ -15,6 +15,7 @@ from ..config.session_store import save_session, load_session, list_sessions, de
 from ..tools.registry import execute as tool_execute
 from ..tools import write as write_tool
 from ..tools import bash as bash_tool
+from ..tools import terminal as terminal_tool
 from ..tools import todo_write as todo_tool
 from ..ui.ui_design import UIInterface, SessionCallbacks, _interrupt_ctrl, D, E, R, Y, G, B, C
 from ..logger import AgentLogger
@@ -116,6 +117,7 @@ class Agent:
         # 注入工具回调
         bash_tool.set_confirm_callback(self._confirm_delete)
         bash_tool.set_interrupt_check(lambda: _interrupt_ctrl.is_set)
+        terminal_tool.set_confirm_callback(self._confirm_delete)
         todo_tool.set_ui_callback(self._on_todo_update)
         # 统计
         self._total_input_tokens = 0

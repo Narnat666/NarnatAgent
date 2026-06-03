@@ -22,7 +22,8 @@ from ..ui.ui_design import colorize_diff
 
 def execute(file_path: str, old_string: str = "", new_string: str = "",
             replace_all: bool = False,
-            line_start: int = 0, line_end: int = 0) -> tuple:
+            line_start: int = 0, line_end: int = 0,
+            remote: bool = False, host: str = "") -> tuple:
     """
     修改文件内容。
 
@@ -36,12 +37,18 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
         replace_all: 替换所有匹配（字符串模式，默认只替换第一个）
         line_start: 起始行号（行号模式，从1开始）
         line_end: 结束行号（行号模式，含此行；0或省略则等于line_start）
+        remote: 通过SFTP修改远程文件（需先Terminal connect）
+        host: 远程主机（仅remote=True时使用）
 
     Returns:
         (llm_result, color_diff) 元组:
         - llm_result: 纯文本确认信息+diff，传给LLM
         - color_diff: 着色diff，传给终端展示
     """
+    if remote:
+        from .remote import remote_edit
+        return remote_edit(file_path, old_string, new_string, replace_all,
+                          line_start, line_end, host)
     if not os.path.isfile(file_path):
         return (f"错误: 文件不存在: {file_path}，如需创建请用Write工具", "")
 

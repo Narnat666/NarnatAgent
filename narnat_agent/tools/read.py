@@ -4,7 +4,8 @@ import os
 from ..config.defaults import MAX_FILE_LINES, MAX_LINE_CHARS
 
 
-def execute(file_path: str, offset: int = 0, limit: int = 0) -> str:
+def execute(file_path: str, offset: int = 0, limit: int = 0,
+            remote: bool = False, host: str = "") -> str:
     """
     读取文件内容。
 
@@ -12,10 +13,18 @@ def execute(file_path: str, offset: int = 0, limit: int = 0) -> str:
         file_path: 文件绝对路径
         offset: 起始行号(1-based)，0表示从头读
         limit: 最大行数，0表示读全文
+        remote: 通过SFTP读取远程文件（需先Terminal connect）
+        host: 远程主机（仅remote=True时使用）
 
     Returns:
         带行号的文件内容字符串，格式 "  行号→内容"
     """
+    if remote:
+        from .remote import remote_read, mark_remote_read
+        result = remote_read(file_path, offset, limit, host)
+        if "错误" not in result:
+            mark_remote_read(file_path, host)
+        return result
     if not os.path.isfile(file_path):
         return f"错误: 文件不存在: {file_path}"
 

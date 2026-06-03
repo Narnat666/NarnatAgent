@@ -4,22 +4,46 @@
 
 核心设计:
 - 每个SSH连接是一个会话(session)，通过host标识
-- AI发命令 → 写入channel → 读取输出+prompt → 返回给AI
+- AI发命令 → 写入channel → 读取输出 → 返回给AI
 - 会话持久化，多次调用复用同一连接
 - 命令结束检测：发送唯一marker，读到marker即表示命令执行完毕
-- 每次exec返回: 命令输出 + 当前prompt，AI能看到自己在哪个目录
+- 每次exec后主动获取pwd，构造 user@host:path$ 给AI看
+- 超时后发送Ctrl+C中断远程命令，并排空channel缓冲区，防止后续命令被污染
+
+输出解析(修复stdout丢失问题):
+- PTY invoke_shell模式下，shell回显命令文本与实际stdout混合
+- _strip_echo: 精确剥离命令回显(首行+续行"> "前缀)，保留纯stdout
+- _clean_output: 清洗ANSI码、内部标记(__NARNAT_*)、续行提示符
+- marker附加$?退出码: echo __MARKER__$?，一行同时标记结束和捕获退出码
+- prompt属性: 自动将/home/user缩写为~，与真实shell一致
 """
 
 import os
 import re
 import time
 import threading
-from typing import Optional
+from typing import Callable, Optional
 
 import paramiko
 import socket
 
 from ..config.defaults import MAX_BASH_OUTPUT
+
+
+# ── 危险命令检测 ──
+
+_RE_DELETE = re.compile(
+    r"\b(rm\s|del\s|Remove-Item\s|rmdir\s|rd\s)",
+    re.IGNORECASE,
+)
+
+_confirm_callback: Optional[Callable[[str], bool]] = None
+
+
+def set_confirm_callback(cb: Callable[[str], bool]):
+    """设置删除确认回调。cb返回True表示允许执行。由agent层注入。"""
+    global _confirm_callback
+    _confirm_callback = cb
 
 
 # ── 会话管理 ──
@@ -36,6 +60,7 @@ class SSHSession:
         self.host = host
         self.username = username
         self.port = port
+        self._cwd = "~"
 
         self._client = paramiko.SSHClient()
         self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -51,25 +76,47 @@ class SSHSession:
 
         self._client.connect(**connect_kwargs)
 
-        # 创建交互式channel，分配PTY
         self._channel = self._client.invoke_shell(term="xterm", width=200, height=50)
-        self._channel.settimeout(0.1)
+        self._channel.settimeout(0.5)
 
-        # 等待shell初始化，记录初始prompt
-        self._initial_output, self._last_prompt = self._read_until_prompt(timeout=5)
+        self._initial_output = self._read_until_prompt(timeout=5)
+        self._update_cwd()
+
+    @property
+    def prompt(self) -> str:
+        """构造当前prompt: user@host:path$
+
+        path显示规则:
+        - /home/username → ~
+        - /home/username/xxx → ~/xxx
+        - 其他路径原样显示
+        """
+        display_path = self._cwd
+        home_prefix = f"/home/{self.username}"
+        if self._cwd == home_prefix:
+            display_path = "~"
+        elif self._cwd.startswith(home_prefix + "/"):
+            display_path = "~" + self._cwd[len(home_prefix):]
+        return f"{self.username}@{self.host}:{display_path}$"
 
     def execute(self, command: str, timeout: int = 30) -> str:
-        """在远程shell中执行命令，返回输出+prompt"""
-        # 生成唯一marker用于检测命令结束
-        marker = f"__NARNAT_MARKER_{time.time_ns()}__"
+        """在远程shell中执行命令，返回输出+prompt
 
-        # 发送: 命令 + echo marker + pwd（获取当前目录）
-        # 这样marker之后一定会有prompt，我们可以读到prompt
-        full_cmd = f"{command}; echo {marker}\n"
+        发送格式: command; echo __MARKER__$?; echo __PWD_MARKER__
+        - 用 $? 捕获退出码，附加在marker后，一行搞定
+        - pwd -P 独立获取路径，避免 $(pwd) 展开时序问题
+        """
+        # 发送新命令前，排空channel中可能残留的上次输出
+        self._drain_stale_output()
+
+        marker = f"__NARNAT_MARKER_{time.time_ns()}__"
+        pwd_marker = f"__NARNAT_PWD_{time.time_ns()}__"
+
+        # 用 $? 捕获退出码附加在marker行，pwd -P 独立获取路径
+        full_cmd = f"{command}; echo {marker}$?; pwd -P; echo {pwd_marker}\n"
         self._channel.send(full_cmd)
 
-        # 读取输出直到marker出现，然后继续读一点拿到prompt
-        return self._read_until_marker(marker, timeout=timeout)
+        return self._read_until_marker(marker, pwd_marker, timeout=timeout)
 
     def close(self):
         """关闭会话"""
@@ -82,125 +129,285 @@ class SSHSession:
         except Exception:
             pass
 
-    def _read_until_marker(self, marker: str, timeout: int = 30) -> str:
-        """读取channel输出，直到读到marker，然后继续读prompt"""
+    def _drain_channel(self, duration: float = 1.5):
+        """排空channel缓冲区中的残留数据
+
+        超时后远程命令可能还在跑，需要：
+        1. 发Ctrl+C中断
+        2. 等一小段时间让输出排完
+        3. 丢弃所有残留数据
+        """
+        self._channel.send("\x03")
+        time.sleep(0.1)
+        self._channel.send("\n")
+
+        deadline = time.time() + duration
+        while time.time() < deadline:
+            try:
+                self._channel.recv(4096)
+            except socket.timeout:
+                break
+            except Exception:
+                break
+
+    def _drain_stale_output(self):
+        """排空channel中可能残留的旧输出
+
+        每次exec前调用，防止前一个命令的残留输出污染当前命令的返回。
+        只做非阻塞读取，不发送Ctrl+C（不中断任何正在运行的命令）。
+        临时使用短超时(0.1s)快速排空，避免无残留数据时浪费等待时间。
+        """
+        old_timeout = self._channel.gettimeout()
+        try:
+            self._channel.settimeout(0.1)
+            while True:
+                chunk = self._channel.recv(4096)
+                if not chunk:
+                    break
+        except socket.timeout:
+            pass
+        except Exception:
+            pass
+        finally:
+            self._channel.settimeout(old_timeout)
+
+    def _update_cwd(self, timeout: int = 3):
+        """通过执行pwd命令更新当前工作目录"""
+        marker = f"__NARNAT_CWD_{time.time_ns()}__"
+        # 用 pwd -P + marker，和 execute 同样的机制
+        self._channel.send(f"pwd -P; echo {marker}\n")
+
         output = ""
         deadline = time.time() + timeout
-        marker_found = False
+        while time.time() < deadline:
+            try:
+                chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
+                output += chunk
+                if marker in output:
+                    break
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+
+        # 解析: ... /actual/path\n __MARKER__\n prompt
+        # marker所在行之前的一行就是pwd输出
+        if marker in output:
+            before_marker = output.split(marker)[0]
+            lines = before_marker.strip().split("\n")
+            # 取最后一个非空行作为pwd
+            for line in reversed(lines):
+                cleaned = self._clean_output(line).strip()
+                # 修复运算符优先级: and 优先于 or，需要括号
+                if cleaned and (not cleaned.startswith("echo ")) and (("/" in cleaned) or (cleaned == "/")):
+                    self._cwd = cleaned
+                    break
+
+    def _read_until_marker(self, marker: str, pwd_marker: str, timeout: int = 30) -> str:
+        """读取channel输出，直到读到pwd_marker。超时则中断命令并排空缓冲区。
+
+        找到pwd_marker后，继续读取直到连续N次recv超时(表示数据已全部到达)，
+        而非固定时间窗口，确保命令的完整输出不被截断。
+        """
+        output = ""
+        deadline = time.time() + timeout
+        found = False
+        # 找到marker后，连续recv超时次数达到此阈值才认为数据读完
+        DRAIN_CONSECUTIVE_TIMEOUTS = 3
 
         while time.time() < deadline:
             try:
                 chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
                 output += chunk
 
-                if not marker_found and marker in output:
-                    marker_found = True
-                    # marker找到了，再读一小段时间等prompt出现
-                    # prompt通常在marker后立即出现
-                    prompt_deadline = time.time() + 0.3
-                    while time.time() < prompt_deadline:
+                if not found and pwd_marker in output:
+                    found = True
+                    # 继续读取，直到连续多次recv超时(表示没有更多数据)
+                    consecutive_timeouts = 0
+                    while consecutive_timeouts < DRAIN_CONSECUTIVE_TIMEOUTS:
                         try:
                             extra = self._channel.recv(4096).decode("utf-8", errors="replace")
-                            output += extra
+                            if extra:
+                                output += extra
+                                consecutive_timeouts = 0  # 有数据，重置计数
+                            else:
+                                consecutive_timeouts += 1
                         except socket.timeout:
+                            consecutive_timeouts += 1
+                        except Exception:
                             break
                     break
 
             except socket.timeout:
-                if marker_found:
+                if found:
                     break
                 continue
             except Exception:
                 break
 
-        # 解析输出：分离命令输出和prompt
-        cmd_output, prompt = self._parse_output(output, marker)
-        self._last_prompt = prompt
+        # 超时处理
+        if not found:
+            self._drain_channel(duration=1.5)
+            cmd_output = self._parse_partial_output(output, marker)
+            if len(cmd_output) > MAX_BASH_OUTPUT:
+                cmd_output = cmd_output[:MAX_BASH_OUTPUT] + f"\n... (输出超过{MAX_BASH_OUTPUT}字符，已截断)"
+            self._update_cwd()
+            if cmd_output:
+                return f"{cmd_output}\n[超时: 命令执行超过{timeout}秒，已发送Ctrl+C中断]\n{self.prompt}"
+            else:
+                return f"[超时: 命令执行超过{timeout}秒，已发送Ctrl+C中断]\n{self.prompt}"
 
-        # 截断
+        # 正常解析
+        cmd_output, cwd = self._parse_output(output, marker, pwd_marker)
+        if cwd:
+            self._cwd = cwd
+
         if len(cmd_output) > MAX_BASH_OUTPUT:
             cmd_output = cmd_output[:MAX_BASH_OUTPUT] + f"\n... (输出超过{MAX_BASH_OUTPUT}字符，已截断)"
 
-        # 返回: 命令输出 + prompt行
-        if cmd_output and prompt:
-            return f"{cmd_output}\n{prompt}"
-        elif prompt:
-            return prompt
-        elif cmd_output:
-            return cmd_output
+        if cmd_output:
+            return f"{cmd_output}\n{self.prompt}"
         else:
-            return f"[超时: 命令执行超过{timeout}秒]"
+            return self.prompt
 
-    def _parse_output(self, raw: str, marker: str) -> tuple[str, str]:
-        """解析原始输出，分离命令输出和prompt
+    def _parse_output(self, raw: str, marker: str, pwd_marker: str) -> tuple[str, Optional[str]]:
+        """解析正常完成的输出，返回 (命令输出, cwd)
 
-        原始输出结构:
-          命令回显\n  命令输出\n  marker\n  prompt
+        原始输出结构(PTY回显+实际输出混合):
+          命令回显(含$?字面量, 可能多行PTY折行)
+          命令实际输出行1
+          命令实际输出行2
+          __MARKER__0    <-- marker + 退出码(shell展开$?)
+          /actual/working/dir    <-- pwd -P 的输出
+          __PWD_MARKER__
+          prompt
 
-        返回: (命令输出, prompt)
+        关键: PTY回显中marker是字面量(含$?), 而输出行中marker已被shell展开(含数字)
+        因此必须按行查找marker行(以marker开头), 而非简单的子串split
         """
-        # 先按marker分割
-        parts = raw.split(marker)
-        before_marker = parts[0] if len(parts) > 0 else ""
-        after_marker = parts[1] if len(parts) > 1 else ""
+        exit_code = None
+        cwd = None
 
-        # before_marker: 命令回显 + 命令输出
-        # 去掉第一行（命令回显）
-        lines = before_marker.split("\n")
-        # 找到命令回显行（通常第一行包含我们发送的命令）
-        cmd_output_lines = []
+        lines = raw.split("\n")
+
+        # 按行查找: marker行以marker开头(后跟退出码数字)
+        marker_line_idx = None
         for i, line in enumerate(lines):
-            # 跳过第一行（命令回显）
-            if i == 0:
-                continue
-            cmd_output_lines.append(line)
+            if line.strip().startswith(marker):
+                marker_line_idx = i
+                # 提取退出码: marker行 = __NARNAT_MARKER_xxx__N
+                exit_str = line.strip()[len(marker):]
+                try:
+                    exit_code = int(exit_str)
+                except ValueError:
+                    exit_code = None
+                break
 
-        # after_marker: prompt
-        prompt = self._clean_output(after_marker)
+        # 按行查找: pwd_marker行
+        pwd_marker_line_idx = None
+        if marker_line_idx is not None:
+            for i in range(marker_line_idx + 1, len(lines)):
+                if pwd_marker in lines[i]:
+                    pwd_marker_line_idx = i
+                    break
 
-        cmd_output = self._clean_output("\n".join(cmd_output_lines))
+        # 提取cwd: marker行和pwd_marker行之间
+        if marker_line_idx is not None and pwd_marker_line_idx is not None:
+            for i in range(marker_line_idx + 1, pwd_marker_line_idx):
+                cleaned = self._clean_output(lines[i]).strip()
+                if cleaned and (cleaned.startswith("/") or cleaned == "/"):
+                    cwd = cleaned
+                    break
 
-        return cmd_output, prompt
+        # 提取命令输出: marker行之前的所有内容，精确剥离命令回显
+        if marker_line_idx is not None:
+            before_marker = "\n".join(lines[:marker_line_idx])
+        else:
+            before_marker = raw
 
-    def _read_until_prompt(self, timeout: int = 5) -> tuple[str, str]:
-        """等待shell初始化完成，返回(初始输出, prompt)"""
+        cmd_output = self._strip_echo(before_marker)
+
+        return self._clean_output(cmd_output), cwd
+
+    def _parse_partial_output(self, raw: str, marker: str) -> str:
+        """解析超时时的部分输出（marker可能还没出现）"""
+        lines = raw.split("\n")
+
+        # 按行查找marker行(以marker开头)
+        marker_line_idx = None
+        for i, line in enumerate(lines):
+            if line.strip().startswith(marker):
+                marker_line_idx = i
+                break
+
+        if marker_line_idx is not None:
+            before_marker = "\n".join(lines[:marker_line_idx])
+            return self._clean_output(self._strip_echo(before_marker))
+
+        # marker都没出现，剥离命令回显
+        return self._clean_output(self._strip_echo(raw))
+
+    def _read_until_prompt(self, timeout: int = 5) -> str:
+        """等待shell初始化完成，返回初始输出"""
         output = ""
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
                 chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
                 output += chunk
-                # 检测常见prompt特征
                 if re.search(r'[#$>]\s*$', output.strip()):
                     break
             except socket.timeout:
                 continue
             except Exception:
                 break
+        return self._clean_output(output)
 
-        cleaned = self._clean_output(output)
-        # 分离初始输出和prompt
-        # prompt通常是最后一行
-        lines = cleaned.split("\n")
-        if len(lines) > 1 and re.search(r'[#$>]', lines[-1]):
-            prompt = lines[-1].strip()
-            init_output = "\n".join(lines[:-1]).strip()
-            return init_output, prompt
-        return cleaned, ""
+    @staticmethod
+    def _strip_echo(raw: str) -> str:
+        """从PTY输出中精确剥离命令回显
+
+        PTY shell会回显用户输入的命令文本。在invoke_shell模式下，
+        发送 "command; echo MARKER..." 后，shell先回显这整行，
+        再输出命令的实际stdout。
+
+        策略: 找到第一个换行符，跳过该行（命令回显的首行），
+        然后继续跳过以 PS2 续行提示符("> "或">")开头的行。
+        """
+        lines = raw.split("\n")
+        if not lines:
+            return raw
+
+        # 跳过第一行（命令回显首行）
+        start = 1
+
+        # 跳过续行回显: PTY在多行输入时回显 "> " 前缀
+        while start < len(lines):
+            stripped = lines[start].strip()
+            if stripped.startswith("> ") or stripped == ">":
+                start += 1
+            else:
+                break
+
+        return "\n".join(lines[start:])
 
     @staticmethod
     def _clean_output(raw: str) -> str:
-        """清洗ANSI转义码和回车符"""
-        # CSI序列: ESC [ (可选?) (数字;)* 字母  — 覆盖颜色、光标、bracketed paste等
-        # OSC序列: ESC ] ... BEL/ST
-        # 其他: ESC (字母) 等单字符序列
+        """清洗ANSI转义码、回车符、内部标记和续行提示符"""
         ansi_re = re.compile(
-            r'\x1b\[\??[0-9;]*[a-zA-Z]'   # CSI: ESC[?2004l, ESC[0m, ESC[1;34m 等
-            r'|\x1b\].*?(?:\x07|\x1b\\)'  # OSC: ESC]...BEL 或 ESC]...ST
-            r'|\x1b[()][A-Za-z0-9]'       # 字符集选择: ESC(B, ESC)0 等
+            r'\x1b\[\??[0-9;]*[a-zA-Z]'
+            r'|\x1b\].*?(?:\x07|\x1b\\)'
+            r'|\x1b[()][A-Za-z0-9]'
         )
         cleaned = ansi_re.sub('', raw)
         cleaned = cleaned.replace('\r', '')
+
+        # 清理内部标记: __NARNAT_MARKER_xxx__, __NARNAT_CWD_xxx__, __NARNAT_PWD_xxx__
+        cleaned = re.sub(r'__NARNAT_(?:MARKER|CWD|PWD)_\d+__', '', cleaned)
+
+        # 清理续行提示符: 行首的 "> " (PS2 prompt回显)
+        cleaned = re.sub(r'(^|\n)> ', r'\1', cleaned)
+
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         return cleaned.strip()
 
@@ -250,9 +457,7 @@ def _connect(host: str, username: str, port: int = 22,
         if session_key in _sessions:
             session = _sessions[session_key]
             if not session._channel.closed:
-                # 返回当前prompt，让AI知道自己在哪
-                prompt = session._last_prompt
-                return f"会话已存在: {session_key}\n{prompt}" if prompt else f"会话已存在: {session_key}，直接exec即可"
+                return f"会话已存在: {session_key}\n{session.prompt}"
             else:
                 del _sessions[session_key]
 
@@ -268,12 +473,10 @@ def _connect(host: str, username: str, port: int = 22,
         with _sessions_lock:
             _sessions[session_key] = session
 
-        # 返回初始输出 + prompt
         parts = [f"已连接: {session_key}"]
         if session._initial_output:
             parts.append(session._initial_output)
-        if session._last_prompt:
-            parts.append(session._last_prompt)
+        parts.append(session.prompt)
         return "\n".join(parts)
 
     except paramiko.AuthenticationException:
@@ -288,6 +491,11 @@ def _exec(host: str, command: str, timeout: int = 30) -> str:
     """在已连接的会话中执行命令"""
     if not command:
         return "错误: exec需要提供command"
+
+    # 安全检查：删除命令需用户确认
+    if _RE_DELETE.search(command):
+        if _confirm_callback and not _confirm_callback(command):
+            return "操作已取消: 删除命令需用户确认"
 
     if not host:
         with _sessions_lock:
@@ -332,8 +540,7 @@ def _status() -> str:
         lines = []
         for key, session in _sessions.items():
             alive = "活跃" if not session._channel.closed else "已断开"
-            prompt = f" | {session._last_prompt}" if session._last_prompt else ""
-            lines.append(f"  {key} [{alive}]{prompt}")
+            lines.append(f"  {key} [{alive}] {session.prompt}")
         return "SSH会话:\n" + "\n".join(lines)
 
 
@@ -367,3 +574,14 @@ def cleanup():
         for session in _sessions.values():
             session.close()
         _sessions.clear()
+
+
+def get_session(host: str = "") -> Optional[SSHSession]:
+    """获取指定host的SSH会话（供SFTP等内部使用）"""
+    with _sessions_lock:
+        if not host and len(_sessions) == 1:
+            return list(_sessions.values())[0]
+        for key, session in _sessions.items():
+            if host in key:
+                return session
+    return None
