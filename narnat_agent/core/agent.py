@@ -23,7 +23,7 @@ from ..logger import AgentLogger
 # ── 工具分类 ──
 _READONLY_TOOLS = {"Read", "Glob", "Grep", "WebSearch"}
 _WRITE_TOOLS = {"Edit", "Write"}
-_SERIAL_TOOLS = {"Shell", "TodoWrite"}
+_SERIAL_TOOLS = {"Shell", "Terminal", "TodoWrite"}
 
 # 工具名→简短描述映射
 _TOOL_LABELS = {

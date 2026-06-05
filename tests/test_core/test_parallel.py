@@ -66,7 +66,7 @@ class TestToolClassification:
         assert _WRITE_TOOLS == {"Edit", "Write"}
 
     def test_serial_tools(self):
-        assert _SERIAL_TOOLS == {"Shell", "TodoWrite"}
+        assert _SERIAL_TOOLS == {"Shell", "Terminal", "TodoWrite"}
 
 
 # ═══════════════════════════════════════════════════════════════

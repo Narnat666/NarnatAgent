@@ -86,7 +86,8 @@ class _OpenAIBackend:
             yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
             return
 
-        tool_calls_buffer = {}
+        tool_calls_buffer = {}      # tc_id → {id, name, arguments}
+        _index_to_id = {}           # index → tc_id（用于增量chunk匹配）
         content_buffer = []
         _tc_idx = 0
 
@@ -102,9 +103,17 @@ class _OpenAIBackend:
 
             if delta.tool_calls:
                 for tc in delta.tool_calls:
+                    tc_index = getattr(tc, 'index', None)
                     if tc.id:
+                        # 新tool_call的开始chunk（含id和name）
                         tc_id = tc.id
+                        if tc_index is not None:
+                            _index_to_id[tc_index] = tc_id
+                    elif tc_index is not None and tc_index in _index_to_id:
+                        # 增量chunk（无id但有index）→ 匹配已有buffer
+                        tc_id = _index_to_id[tc_index]
                     else:
+                        # 兜底：无id无index，生成fallback id
                         tc_id = f"_tc_{_tc_idx}"
                         _tc_idx += 1
                     buf = tool_calls_buffer.setdefault(
