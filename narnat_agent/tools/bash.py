@@ -63,6 +63,11 @@ def _needs_powershell(command: str) -> bool:
     cmd /c 对嵌套引号处理有缺陷，如:
       python -c "import sys; sys.exit(1)"
     cmd会把引号吃掉导致语法错误。
+
+    PowerShell特有语法($_, $var, $env:, cmdlet等)也必须用PowerShell执行。
+
+    包含非ASCII字符(如中文路径)时也优先用PowerShell，
+    因为cmd的GBK编码对Unicode路径支持差，容易导致乱码/找不到文件。
     """
     if re.search(r'\bpython\d?\s+-c\s+"', command):
         return True
@@ -70,7 +75,14 @@ def _needs_powershell(command: str) -> bool:
         return True
     if re.search(r'\b(Get-|Set-|New-|Remove-|Write-|Select-|Where-|ForEach-|Invoke-|Start-|Stop-|Out-)\w+', command):
         return True
-    if '$env:' in command:
+    # PowerShell变量: $_, $var, $env:NAME 等
+    if re.search(r'\$\w+', command):
+        return True
+    # PowerShell子表达式: $(...)
+    if '$(' in command:
+        return True
+    # 非ASCII字符(中文路径等): cmd的GBK编码对Unicode支持差，PowerShell原生支持UTF-8
+    if any(ord(c) > 127 for c in command):
         return True
     return False
 
@@ -123,7 +135,10 @@ def execute(
             ps = _find_executable("powershell", "pwsh")
             if ps is None:
                 return "错误: 未找到PowerShell，请安装后重试"
-            shell_cmd = [ps, "-Command", command]
+            # 设置PowerShell输出编码为UTF-8，避免中文乱码
+            # -NoProfile加速启动，-Command执行命令
+            shell_cmd = [ps, "-NoProfile", "-Command",
+                         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + command]
         else:
             shell_cmd = ["cmd", "/c", command]
     else:

@@ -61,6 +61,8 @@ class SSHSession:
         self.username = username
         self.port = port
         self._cwd = "~"
+        # 保存密码，用于sudo等需要密码交互的场景
+        self._password = password
 
         self._client = paramiko.SSHClient()
         self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -105,9 +107,16 @@ class SSHSession:
         发送格式: command; echo __MARKER__$?; echo __PWD_MARKER__
         - 用 $? 捕获退出码，附加在marker后，一行搞定
         - pwd -P 独立获取路径，避免 $(pwd) 展开时序问题
+
+        sudo智能处理:
+        - 检测到sudo命令且session有密码时，自动转为 echo PASS | sudo -S 形式
+        - 避免PTY下sudo密码交互卡住的问题
         """
         # 发送新命令前，排空channel中可能残留的上次输出
         self._drain_stale_output()
+
+        # sudo智能处理: 有密码时自动注入，避免PTY下密码交互卡住
+        command = self._inject_sudo_password(command)
 
         marker = f"__NARNAT_MARKER_{time.time_ns()}__"
         pwd_marker = f"__NARNAT_PWD_{time.time_ns()}__"
@@ -118,9 +127,50 @@ class SSHSession:
 
         return self._read_until_marker(marker, pwd_marker, timeout=timeout)
 
+    def _inject_sudo_password(self, command: str) -> str:
+        """智能处理sudo命令的密码注入
+
+        在PTY模式下，sudo会直接在终端提示输入密码，
+        但通过channel无法可靠地交互式输入密码(时序问题)。
+
+        策略: 当检测到裸sudo命令(不含-S)且session有密码时，
+        自动转为 echo PASS | sudo -S 形式，通过管道非交互式输入密码。
+
+        不处理的场景:
+        - 已经是 sudo -S (AI已自行处理)
+        - 没有保存密码
+        - 命令中不含sudo
+        """
+        if not self._password or 'sudo' not in command:
+            return command
+
+        # 检测裸sudo(不含-S): 需要注入密码
+        # 匹配 sudo 但不匹配 sudo -S
+        if re.search(r'\bsudo\b', command) and not re.search(r'\bsudo\s+-S\b', command):
+            # 将 sudo 替换为 echo PASS | sudo -S
+            # 需要处理 sudo -k, sudo -v 等选项，保留它们
+            command = re.sub(
+                r'\bsudo\b',
+                f"echo '{self._password}' | sudo -S",
+                command
+            )
+
+        return command
+
     def close(self):
-        """关闭会话"""
+        """关闭会话
+
+        改进: 关闭前先尝试让shell的子进程脱离当前session，
+        避免关闭channel时SIGHUP杀掉后台进程。
+        发送 disown -a 让所有后台job脱离，然后短暂等待。
+        """
         try:
+            # 让shell中的后台进程脱离，避免close时被SIGHUP杀掉
+            try:
+                self._channel.send("disown -a 2>/dev/null\n")
+                time.sleep(0.3)
+            except Exception:
+                pass
             self._channel.close()
         except Exception:
             pass
@@ -150,22 +200,52 @@ class SSHSession:
             except Exception:
                 break
 
+    def _try_read_residual(self, duration: float = 2.0) -> str:
+        """尝试读取channel中可能还在传输的残余数据
+
+        与_drain_channel不同，此方法不发送Ctrl+C，不中断任何命令，
+        只是安静地读取并返回所有可用数据。
+        用于超时处理前，尽可能收集已产生但尚未读取的输出。
+        """
+        result = ""
+        deadline = time.time() + duration
+        consecutive_timeouts = 0
+        while time.time() < deadline:
+            try:
+                chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
+                if chunk:
+                    result += chunk
+                    consecutive_timeouts = 0
+                else:
+                    consecutive_timeouts += 1
+            except socket.timeout:
+                consecutive_timeouts += 1
+                if consecutive_timeouts >= 3:
+                    break
+            except Exception:
+                break
+        return result
+
     def _drain_stale_output(self):
         """排空channel中可能残留的旧输出
 
         每次exec前调用，防止前一个命令的残留输出污染当前命令的返回。
         只做非阻塞读取，不发送Ctrl+C（不中断任何正在运行的命令）。
-        临时使用短超时(0.1s)快速排空，避免无残留数据时浪费等待时间。
+
+        改进: 使用极短超时(0.05s)快速排空，且限制最大排空时间(0.5s)，
+        避免在无残留数据时浪费等待时间，也避免在慢速网络下排空不充分。
         """
         old_timeout = self._channel.gettimeout()
         try:
-            self._channel.settimeout(0.1)
-            while True:
-                chunk = self._channel.recv(4096)
-                if not chunk:
+            self._channel.settimeout(0.05)
+            deadline = time.time() + 0.5
+            while time.time() < deadline:
+                try:
+                    chunk = self._channel.recv(4096)
+                    if not chunk:
+                        break
+                except socket.timeout:
                     break
-        except socket.timeout:
-            pass
         except Exception:
             pass
         finally:
@@ -206,14 +286,18 @@ class SSHSession:
     def _read_until_marker(self, marker: str, pwd_marker: str, timeout: int = 30) -> str:
         """读取channel输出，直到读到pwd_marker。超时则中断命令并排空缓冲区。
 
-        找到pwd_marker后，继续读取直到连续N次recv超时(表示数据已全部到达)，
-        而非固定时间窗口，确保命令的完整输出不被截断。
+        改进(修复输出丢失):
+        - 找到pwd_marker后，继续读取直到连续N次recv超时，确保prompt等尾部数据到达
+        - 增大consecutive timeout阈值(5次)，适应慢速网络/VM环境
+        - 每次recv之间增加短暂sleep，给远程shell时间生成prompt
+        - 超时时先尝试读取残余数据再发Ctrl+C，尽可能保留部分输出
         """
         output = ""
         deadline = time.time() + timeout
         found = False
         # 找到marker后，连续recv超时次数达到此阈值才认为数据读完
-        DRAIN_CONSECUTIVE_TIMEOUTS = 3
+        # 增大到5次(每次0.5s超时)，给慢速网络/VM足够时间
+        DRAIN_CONSECUTIVE_TIMEOUTS = 5
 
         while time.time() < deadline:
             try:
@@ -245,17 +329,26 @@ class SSHSession:
             except Exception:
                 break
 
-        # 超时处理
+        # 超时处理: 先尝试读取残余数据，再发Ctrl+C中断
         if not found:
-            self._drain_channel(duration=1.5)
-            cmd_output = self._parse_partial_output(output, marker)
-            if len(cmd_output) > MAX_BASH_OUTPUT:
-                cmd_output = cmd_output[:MAX_BASH_OUTPUT] + f"\n... (输出超过{MAX_BASH_OUTPUT}字符，已截断)"
-            self._update_cwd()
-            if cmd_output:
-                return f"{cmd_output}\n[超时: 命令执行超过{timeout}秒，已发送Ctrl+C中断]\n{self.prompt}"
-            else:
-                return f"[超时: 命令执行超过{timeout}秒，已发送Ctrl+C中断]\n{self.prompt}"
+            # 在发Ctrl+C前，先尝试读取可能还在传输中的输出
+            residual = self._try_read_residual(duration=2.0)
+            if residual:
+                output += residual
+                # 读完残余数据后再次检查marker
+                if pwd_marker in output:
+                    found = True
+
+            if not found:
+                self._drain_channel(duration=1.5)
+                cmd_output = self._parse_partial_output(output, marker)
+                if len(cmd_output) > MAX_BASH_OUTPUT:
+                    cmd_output = cmd_output[:MAX_BASH_OUTPUT] + f"\n... (输出超过{MAX_BASH_OUTPUT}字符，已截断)"
+                self._update_cwd()
+                if cmd_output:
+                    return f"{cmd_output}\n[超时: 命令执行超过{timeout}秒，已发送Ctrl+C中断]\n{self.prompt}"
+                else:
+                    return f"[超时: 命令执行超过{timeout}秒，已发送Ctrl+C中断]\n{self.prompt}"
 
         # 正常解析
         cmd_output, cwd = self._parse_output(output, marker, pwd_marker)
