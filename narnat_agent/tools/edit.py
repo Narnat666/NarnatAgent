@@ -45,6 +45,11 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
         - llm_result: 纯文本确认信息+diff，传给LLM
         - color_diff: 着色diff，传给终端展示
     """
+    # AI可能传字符串类型的数值参数，确保类型正确
+    line_start = int(line_start) if line_start else 0
+    line_end = int(line_end) if line_end else 0
+    replace_all = bool(replace_all)
+    remote = bool(remote)
     if remote:
         from .remote import remote_edit
         return remote_edit(file_path, old_string, new_string, replace_all,

@@ -23,7 +23,7 @@ def _get_sftp(session: SSHSession):
 def remote_read(file_path: str, offset: int = 0, limit: int = 0,
                 host: str = "") -> str:
     """通过SFTP读取远程文件"""
-    session = get_session(host)
+    session = get_session(host=host)
     if session is None:
         return "错误: 无活跃SSH会话，请先Terminal connect"
 
@@ -73,7 +73,7 @@ def mark_remote_read(file_path: str, host: str = ""):
 
 def remote_write(file_path: str, content: str, host: str = "") -> tuple:
     """通过SFTP写入远程文件"""
-    session = get_session(host)
+    session = get_session(host=host)
     if session is None:
         return ("错误: 无活跃SSH会话，请先Terminal connect", "")
 
@@ -126,7 +126,7 @@ def remote_edit(file_path: str, old_string: str = "", new_string: str = "",
                 line_start: int = 0, line_end: int = 0,
                 host: str = "") -> tuple:
     """通过SFTP修改远程文件"""
-    session = get_session(host)
+    session = get_session(host=host)
     if session is None:
         return ("错误: 无活跃SSH会话，请先Terminal connect", "")
 

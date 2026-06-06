@@ -42,7 +42,7 @@ def _make_ua() -> str:
 _UA = _make_ua()
 
 _TIMEOUT = 5           # HTTP请求超时秒数
-_MAX_RETRIES = 2       # 仅5xx重试
+_MAX_RETRIES = 50      # 仅5xx重试
 _BAIDU_TIMEOUT = 20    # 百度子进程超时秒数
 
 # 预编译正则
@@ -171,13 +171,6 @@ def execute(query: str, num: int = 10, lr: str = "") -> str:
 
     if not results:
         return "(无搜索结果)"
-
-    # 过滤掉明显不相关的结果（标题与查询无任何词重叠）
-    q_words = _extract_query_words(query)
-    if q_words:
-        filtered = [r for r in results if any(w in r.get("title", "").lower() for w in q_words)]
-        if filtered:
-            results = filtered
 
     # 按相关性排序
     results.sort(key=lambda r: _relevance_score(r, query), reverse=True)
@@ -340,8 +333,8 @@ def _search_baidu(query: str, num: int) -> List[Dict]:
     if proc is None:
         return []
 
-    # 百度对长查询容易触发验证码，截断到30字符
-    baidu_query = query[:30] if len(query) > 30 else query
+    # 百度搜索 — 纯管道: AI给什么搜什么，不截断
+    baidu_query = query
 
     try:
         # 发送搜索请求

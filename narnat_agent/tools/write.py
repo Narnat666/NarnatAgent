@@ -36,6 +36,7 @@ def execute(file_path: str, content: str,
         - llm_result: 纯文本确认信息，传给LLM
         - color_diff: 着色diff，传给终端展示；空串表示新建文件无需diff
     """
+    remote = bool(remote)
     if remote:
         from .remote import remote_write
         return remote_write(file_path, content, host)

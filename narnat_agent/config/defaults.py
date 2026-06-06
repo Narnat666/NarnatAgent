@@ -66,6 +66,8 @@ Avoid over-the-top validation like 'You are absolutely right'.
   connect: Terminal(action="connect", host="ip", username="user") to establish session.
   exec: Terminal(action="exec", command="ls -la") to run commands on remote host.
   Session persists across calls — connect once, exec many times.
+  Supports up to 5 concurrent terminals (session_id 0-4). When a terminal is occupied by a long-running process (e.g. compilation), connect a new terminal to continue working — do NOT wait.
+  Background commands (&) MUST redirect output to file, otherwise output pollutes the channel and corrupts subsequent command results.
   For one-off remote commands, Shell with ssh also works. Terminal is for sustained remote work.
 
 ## Web Search
@@ -127,8 +129,3 @@ DEFAULT_MODEL = "deepseek-chat"
 
 # ── 日志目录 ──
 LOG_DIR = "logs"
-
-# ── 文件操作常量 ──
-MAX_FILE_LINES = 2000       # 超过此行数提示分段读
-MAX_LINE_CHARS = 2000       # 单行超过此字符数截断
-MAX_BASH_OUTPUT = 30000     # Bash输出超过此字节数截断

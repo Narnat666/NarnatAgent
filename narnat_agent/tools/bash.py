@@ -1,11 +1,7 @@
-"""Shell工具 —— 执行shell命令
+"""Shell工具 —— 纯管道，AI写什么就执行什么
 
-AI写什么就执行什么，不做命令翻译。
-Windows用PowerShell执行，Linux/macOS用bash执行。
-
-安全策略:
-- 仅拦截rm/del等删除命令，需用户确认
-- 其他命令直接执行，信任AI
+Windows用PowerShell，Linux/macOS用bash。
+AI自己负责写正确语法，我们只管送达和返回。
 """
 
 import os
@@ -15,8 +11,6 @@ import sys
 import threading
 import time
 from typing import Optional, Callable
-
-from ..config.defaults import MAX_BASH_OUTPUT
 
 
 # 删除命令正则（仅保留删除确认，其他全部放行）
@@ -56,37 +50,6 @@ def _find_executable(*names: str) -> Optional[str]:
     return None
 
 
-def _needs_powershell(command: str) -> bool:
-    """
-    检测命令是否需要PowerShell而非cmd。
-
-    cmd /c 对嵌套引号处理有缺陷，如:
-      python -c "import sys; sys.exit(1)"
-    cmd会把引号吃掉导致语法错误。
-
-    PowerShell特有语法($_, $var, $env:, cmdlet等)也必须用PowerShell执行。
-
-    包含非ASCII字符(如中文路径)时也优先用PowerShell，
-    因为cmd的GBK编码对Unicode路径支持差，容易导致乱码/找不到文件。
-    """
-    if re.search(r'\bpython\d?\s+-c\s+"', command):
-        return True
-    if re.search(r'\bnode\s+-e\s+"', command):
-        return True
-    if re.search(r'\b(Get-|Set-|New-|Remove-|Write-|Select-|Where-|ForEach-|Invoke-|Start-|Stop-|Out-)\w+', command):
-        return True
-    # PowerShell变量: $_, $var, $env:NAME 等
-    if re.search(r'\$\w+', command):
-        return True
-    # PowerShell子表达式: $(...)
-    if '$(' in command:
-        return True
-    # 非ASCII字符(中文路径等): cmd的GBK编码对Unicode支持差，PowerShell原生支持UTF-8
-    if any(ord(c) > 127 for c in command):
-        return True
-    return False
-
-
 def _decode_output(raw: bytes) -> str:
     """安全解码子进程输出。Windows下回退GBK，Unix下仅UTF-8。"""
     if not raw:
@@ -105,42 +68,33 @@ def _decode_output(raw: bytes) -> str:
 
 def execute(
     command: str,
-    description: str = "",
     timeout: int = 120000,
     run_in_background: bool = False,
-    dangerouslyDisableSandbox: bool = False,
 ) -> str:
     """
     执行shell命令。AI写什么就执行什么，不做翻译。
 
     Args:
         command: shell命令
-        description: 命令描述
         timeout: 超时毫秒数
         run_in_background: 后台运行，立即返回
-        dangerouslyDisableSandbox: 禁用安全检查
 
     Returns:
         stdout + stderr + 退出码
     """
     # 安全检查：仅删除命令需确认
-    if not dangerouslyDisableSandbox:
-        if _RE_DELETE.search(command):
-            if _confirm_callback and not _confirm_callback(command):
-                return "操作已取消: 删除命令需用户确认"
+    if _RE_DELETE.search(command):
+        if _confirm_callback and not _confirm_callback(command):
+            return "操作已取消: 删除命令需用户确认"
 
-    # 选择shell，不做命令翻译
+    # Windows: 统一用PowerShell，AI输入什么就执行什么
+    # 优先pwsh(PowerShell 7+，原生支持&&/||)，回退powershell 5.x
     if sys.platform == "win32":
-        if _needs_powershell(command):
-            ps = _find_executable("powershell", "pwsh")
-            if ps is None:
-                return "错误: 未找到PowerShell，请安装后重试"
-            # 设置PowerShell输出编码为UTF-8，避免中文乱码
-            # -NoProfile加速启动，-Command执行命令
-            shell_cmd = [ps, "-NoProfile", "-Command",
-                         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + command]
-        else:
-            shell_cmd = ["cmd", "/c", command]
+        ps = _find_executable("pwsh", "powershell")
+        if ps is None:
+            return "错误: 未找到PowerShell，请安装后重试"
+        shell_cmd = [ps, "-NoProfile", "-Command",
+                     "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + command]
     else:
         shell = _find_executable("bash", "sh")
         if shell is None:
@@ -149,11 +103,11 @@ def execute(
 
     timeout_sec = min(timeout / 1000, 600)
 
-    # ── 后台运行模式 ──
+    # 后台运行模式
     if run_in_background:
         return _run_background(shell_cmd, command)
 
-    # ── 前台运行模式 ──
+    # 前台运行模式
     try:
         proc = subprocess.Popen(
             shell_cmd,
@@ -180,10 +134,17 @@ def execute(
 
         stdout, stderr = proc.communicate(timeout=timeout_sec)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        # 纯管道: 超时不杀进程，返回已收集输出，AI自己决定
         stdout, stderr = proc.communicate()
         out = _decode_output(stdout)
-        return f"{out}\n[超时: 命令执行超过{timeout_sec:.0f}秒]"
+        err = _decode_output(stderr)
+        parts = []
+        if out.strip():
+            parts.append(out.strip())
+        if err.strip():
+            parts.append(f"[stderr]\n{err.strip()}")
+        parts.append(f"[超时: 命令执行超过{timeout_sec:.0f}秒，进程仍在运行]")
+        return "\n".join(parts)
     except Exception:
         proc.kill()
         stdout, stderr = proc.communicate()
@@ -196,9 +157,6 @@ def execute(
 
     out = _decode_output(stdout)
     err = _decode_output(stderr)
-
-    if len(out) > MAX_BASH_OUTPUT:
-        out = out[:MAX_BASH_OUTPUT] + f"\n... (输出超过{MAX_BASH_OUTPUT}字符，已截断)"
 
     parts = []
     if out.strip():

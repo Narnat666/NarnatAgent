@@ -21,7 +21,7 @@ import time
 from typing import Optional, Callable, List, Match
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 
@@ -617,6 +617,10 @@ class SessionCallbacks:
         """删除指定会话(name不为空)或全部(name为空或--all)，返回结果"""
         return ""
 
+    def on_list_names(self) -> list:
+        """返回所有已保存会话的名称列表，供Tab补全使用"""
+        return []
+
     def on_exit(self) -> str:
         """退出时自动保存，返回保存的会话名或空串"""
         return ""
@@ -626,17 +630,63 @@ class SessionCallbacks:
 # Tab 补全
 # ═══════════════════════════════════════════════════════════════
 
-_CMD_COMPLETER = WordCompleter(
-    ["/clear", "/save", "/show", "/enter", "/delete", "/exit"],
-    ignore_case=True, sentence=True,
-    meta_dict={
+class _CommandCompleter(Completer):
+    """命令补全：/enter /delete 动态补全会话名，其余命令静态补全"""
+
+    _COMMANDS = {
         "/clear":  "清理屏幕",
         "/save":   "保存当前会话",
         "/show":   "显示所有会话",
         "/enter":  "进入历史会话",
         "/delete": "删除会话",
         "/exit":   "退出程序",
-    })
+    }
+    # 需要动态补全会话名的命令
+    _NAME_COMMANDS = {"/enter", "/delete"}
+
+    def __init__(self, callbacks: SessionCallbacks):
+        self._cb = callbacks
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor.lstrip()
+        # 不以/开头的不补全
+        if not text.startswith("/"):
+            return
+
+        parts = text.split()
+        num_parts = len(parts)
+
+        # 输入中光标前无空格 → 补全命令名
+        if num_parts == 1 and not text.endswith(" "):
+            word = parts[0].lower()
+            for cmd, meta in self._COMMANDS.items():
+                if cmd.startswith(word):
+                    yield Completion(
+                        cmd[len(word):],
+                        start_position=0,
+                        display_meta=meta,
+                    )
+            return
+
+        # 命令后有空格 → 补全参数
+        if num_parts >= 1:
+            cmd = parts[0].lower()
+            if cmd in self._NAME_COMMANDS:
+                # 动态获取会话名
+                names = self._cb.on_list_names()
+                if num_parts == 1 and text.endswith(" "):
+                    # 刚输入完命令+空格，补全所有会话名
+                    for name in names:
+                        yield Completion(name, start_position=0)
+                elif num_parts == 2 and not text.endswith(" "):
+                    # 正在输入会话名，按前缀过滤
+                    prefix = parts[1]
+                    for name in names:
+                        if name.startswith(prefix):
+                            yield Completion(
+                                name[len(prefix):],
+                                start_position=0,
+                            )
 
 
 def _dispatch_command(cmd: str, args: str, cb: SessionCallbacks) -> bool:
@@ -705,7 +755,7 @@ class UIStreamSession:
         self._spinner_stop = threading.Event()
         self._spinner_thread: Optional[threading.Thread] = None
         self._started = False
-        self._spinner_paused = False
+        self._spinner_pause_count = 0  # 并行工具pause计数，归零才恢复spinner
 
     @property
     def cancelled(self) -> bool:
@@ -728,9 +778,9 @@ class UIStreamSession:
 
     def pause_spinner(self) -> None:
         """暂停spinner（工具执行前调用），清除当前行避免闪烁"""
-        if not self._started and self._spinner_thread is not None and self._spinner_thread.is_alive():
+        self._spinner_pause_count += 1
+        if self._spinner_pause_count == 1 and not self._started and self._spinner_thread is not None and self._spinner_thread.is_alive():
             self._spinner_stop.set()
-            self._spinner_paused = True
             # 清除spinner行
             sys.stdout.write("\r\x1b[K")
             sys.stdout.flush()
@@ -741,9 +791,9 @@ class UIStreamSession:
             self._renderer.flush()
 
     def resume_spinner(self) -> None:
-        """恢复spinner（工具执行后调用，仅当AI还在思考时）"""
-        if self._spinner_paused and not self._started:
-            self._spinner_paused = False
+        """恢复spinner（工具执行后调用），所有并行工具完成后才真正恢复"""
+        self._spinner_pause_count = max(0, self._spinner_pause_count - 1)
+        if self._spinner_pause_count == 0 and not self._started:
             self._spinner_stop.clear()
             self._spinner_thread = threading.Thread(
                 target=_spinner_thread,
@@ -754,12 +804,22 @@ class UIStreamSession:
                cache: int = 0, cost: float = 0.0) -> None:
         _interrupt_ctrl.enter_input_mode()  # 立即停止ESC轮询，防止误触发
         self._spinner_stop.set()
+        if self._spinner_thread is not None:
+            self._spinner_thread.join(timeout=0.5)
+        # 清除spinner残留行
+        sys.stdout.write("\r\x1b[K")
+        sys.stdout.flush()
         self._renderer.flush()
         show_stats(input_tokens, output_tokens, cache, cost)
 
     def abort(self) -> None:
         _interrupt_ctrl.enter_input_mode()  # 立即停止ESC轮询
         self._spinner_stop.set()
+        if self._spinner_thread is not None:
+            self._spinner_thread.join(timeout=0.5)
+        # 清除spinner残留行
+        sys.stdout.write("\r\x1b[K")
+        sys.stdout.flush()
         show_interrupted()
 
 
@@ -777,7 +837,7 @@ class UIInterface:
     def start(self) -> None:
         _interrupt_ctrl.enter_input_mode()
         show_header(self._model)
-        self._session = _create_session()
+        self._session = _create_session(self._callbacks)
 
     def read_input(self) -> Optional[str]:
         if self._session is None:
@@ -787,7 +847,7 @@ class UIInterface:
         _interrupt_ctrl.enter_input_mode()
         line = read_input(self._session)
         if line is None:
-            self._session = _create_session()
+            self._session = _create_session(self._callbacks)
         return line
 
     def dispatch_command(self, cmd: str, args: str) -> bool:
@@ -801,7 +861,7 @@ class UIInterface:
 
     def on_interrupted(self) -> None:
         _interrupt_ctrl.enter_input_mode()
-        self._session = _create_session()
+        self._session = _create_session(self._callbacks)
 
     def begin_compressing(self) -> None:
         self._compress_stop = threading.Event()
@@ -854,11 +914,11 @@ _PROMPT_STYLE = Style.from_dict({
 })
 
 
-def _create_session() -> PromptSession:
+def _create_session(callbacks: SessionCallbacks) -> PromptSession:
     return PromptSession(
         style=_PROMPT_STYLE,
         multiline=True,
-        completer=_CMD_COMPLETER,
+        completer=_CommandCompleter(callbacks),
         key_bindings=_make_keybindings())
 
 

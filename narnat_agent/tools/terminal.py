@@ -1,6 +1,10 @@
 """Terminal工具 —— 多终端可持续SSH
 
-基于paramiko实现SSH交互式会话，AI可像人一样持续操控远程Linux设备。
+纯管道原则:
+- AI输入什么就发送什么，不做翻译/注入/截断
+- 设备输出什么就返回什么，不做裁剪
+- 超时只告知AI，不替AI杀进程
+- AI自己负责sudo密码、平台适配、输出裁剪
 
 核心设计:
 - 支持最多MAX_SESSIONS(5)个并发SSH会话，每个会话有唯一session_id(0-4)
@@ -8,16 +12,12 @@
 - 每个SSH连接是一个会话(session)，通过session_id标识
 - AI发命令 → 写入channel → 读取输出 → 返回给AI
 - 会话持久化，多次调用复用同一连接
-- 命令结束检测：发送唯一marker，读到marker即表示命令执行完毕
-- 每次exec后主动获取pwd，构造 user@host:path$ 给AI看
-- 超时后发送Ctrl+C中断远程命令，并排空channel缓冲区，防止后续命令被污染
+- 哨兵机制: 追加 echo __MARKER__$?; pwd -P; echo __PWD_MARKER__ 检测命令结束
+- timeout=0 无限等待，适合长命令(AI可去其他终端做别的事)
 
-输出解析(修复stdout丢失问题):
-- PTY invoke_shell模式下，shell回显命令文本与实际stdout混合
-- _strip_echo: 精确剥离命令回显(首行+续行"> "前缀)，保留纯stdout
-- _clean_output: 清洗ANSI码、内部标记(__NARNAT_*)、续行提示符
-- marker附加$?退出码: echo __MARKER__$?，一行同时标记结束和捕获退出码
-- prompt属性: 自动将/home/user缩写为~，与真实shell一致
+输出解析(PTY基础设施，不是翻译):
+- _strip_echo: 剥离PTY命令回显(不是AI命令的输出)
+- _clean_output: 清洗ANSI码、内部标记、\\r覆盖(PTY噪声)
 """
 
 import os
@@ -29,11 +29,8 @@ from typing import Callable, Optional
 import paramiko
 import socket
 
-from ..config.defaults import MAX_BASH_OUTPUT
 
-
-# ── 危险命令检测 ──
-
+# 删除命令正则（仅保留删除确认，其他全部放行）
 _RE_DELETE = re.compile(
     r"\b(rm\s|del\s|Remove-Item\s|rmdir\s|rd\s)",
     re.IGNORECASE,
@@ -43,12 +40,10 @@ _confirm_callback: Optional[Callable[[str], bool]] = None
 
 
 def set_confirm_callback(cb: Callable[[str], bool]):
-    """设置删除确认回调。cb返回True表示允许执行。由agent层注入。"""
+    """设置删除确认回调。cb返回True表示允许执行。"""
     global _confirm_callback
     _confirm_callback = cb
 
-
-# ── 会话管理 ──
 
 MAX_SESSIONS = 5  # 最多5个并发SSH会话
 
@@ -66,8 +61,6 @@ class SSHSession:
         self.username = username
         self.port = port
         self._cwd = "~"
-        # 保存密码，用于sudo等需要密码交互的场景
-        self._password = password
 
         self._client = paramiko.SSHClient()
         self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -89,6 +82,8 @@ class SSHSession:
         self._initial_output = self._read_until_prompt(timeout=5)
         self._update_cwd()
 
+        self._busy = False  # 通道是否被未完成的前台命令占用
+
     @property
     def prompt(self) -> str:
         """构造当前prompt: user@host:path$
@@ -106,22 +101,25 @@ class SSHSession:
             display_path = "~" + self._cwd[len(home_prefix):]
         return f"{self.username}@{self.host}:{display_path}$"
 
-    def execute(self, command: str, timeout: int = 30) -> str:
+    def execute(self, command: str, timeout: int = 0) -> str:
         """在远程shell中执行命令，返回输出+prompt
 
-        发送格式: command; echo __MARKER__$?; echo __PWD_MARKER__
-        - 用 $? 捕获退出码，附加在marker后，一行搞定
-        - pwd -P 独立获取路径，避免 $(pwd) 展开时序问题
+        纯管道原则: AI输入什么就发送什么，不做翻译/注入。
+        AI自己负责sudo密码处理(如写 echo PASS | sudo -S)。
 
-        sudo智能处理:
-        - 检测到sudo命令且session有密码时，自动转为 echo PASS | sudo -S 形式
-        - 避免PTY下sudo密码交互卡住的问题
+        哨兵机制: 追加 echo __MARKER__$?; pwd -P; echo __PWD_MARKER__
+        用于检测命令结束和捕获退出码，这是管道基础设施，不是翻译。
+
+        timeout:
+          >0  - 等待指定秒数，超时返回已收集输出+超时提示
+          0   - 无限等待，直到命令完成(适合长命令，AI可去其他终端做别的事)
         """
+        # 通道忙(上一个命令超时未完成)，直接告知AI
+        if self._busy:
+            return f"[上一个命令尚未完成，此终端暂不可用]\n{self.prompt}"
+
         # 发送新命令前，排空channel中可能残留的上次输出
         self._drain_stale_output()
-
-        # sudo智能处理: 有密码时自动注入，避免PTY下密码交互卡住
-        command = self._inject_sudo_password(command)
 
         marker = f"__NARNAT_MARKER_{time.time_ns()}__"
         pwd_marker = f"__NARNAT_PWD_{time.time_ns()}__"
@@ -132,43 +130,8 @@ class SSHSession:
 
         return self._read_until_marker(marker, pwd_marker, timeout=timeout)
 
-    def _inject_sudo_password(self, command: str) -> str:
-        """智能处理sudo命令的密码注入
-
-        在PTY模式下，sudo会直接在终端提示输入密码，
-        但通过channel无法可靠地交互式输入密码(时序问题)。
-
-        策略: 当检测到裸sudo命令(不含-S)且session有密码时，
-        自动转为 echo PASS | sudo -S 形式，通过管道非交互式输入密码。
-
-        不处理的场景:
-        - 已经是 sudo -S (AI已自行处理)
-        - 没有保存密码
-        - 命令中不含sudo
-        """
-        if not self._password or 'sudo' not in command:
-            return command
-
-        # 检测裸sudo(不含-S): 需要注入密码
-        # 匹配 sudo 但不匹配 sudo -S
-        if re.search(r'\bsudo\b', command) and not re.search(r'\bsudo\s+-S\b', command):
-            # 将 sudo 替换为 echo PASS | sudo -S
-            # 需要处理 sudo -k, sudo -v 等选项，保留它们
-            command = re.sub(
-                r'\bsudo\b',
-                f"echo '{self._password}' | sudo -S",
-                command
-            )
-
-        return command
-
     def close(self):
-        """关闭会话
-
-        改进: 关闭前先尝试让shell的子进程脱离当前session，
-        避免关闭channel时SIGHUP杀掉后台进程。
-        发送 disown -a 让所有后台job脱离，然后短暂等待。
-        """
+        """关闭会话，先disown后台进程避免被SIGHUP杀掉。"""
         try:
             # 让shell中的后台进程脱离，避免close时被SIGHUP杀掉
             try:
@@ -184,34 +147,8 @@ class SSHSession:
         except Exception:
             pass
 
-    def _drain_channel(self, duration: float = 1.5):
-        """排空channel缓冲区中的残留数据
-
-        超时后远程命令可能还在跑，需要：
-        1. 发Ctrl+C中断
-        2. 等一小段时间让输出排完
-        3. 丢弃所有残留数据
-        """
-        self._channel.send("\x03")
-        time.sleep(0.1)
-        self._channel.send("\n")
-
-        deadline = time.time() + duration
-        while time.time() < deadline:
-            try:
-                self._channel.recv(4096)
-            except socket.timeout:
-                break
-            except Exception:
-                break
-
-    def _try_read_residual(self, duration: float = 2.0) -> str:
-        """尝试读取channel中可能还在传输的残余数据
-
-        与_drain_channel不同，此方法不发送Ctrl+C，不中断任何命令，
-        只是安静地读取并返回所有可用数据。
-        用于超时处理前，尽可能收集已产生但尚未读取的输出。
-        """
+    def _try_read_residual(self, duration: float = 3.0) -> str:
+        """安静地读取channel中残余数据，不中断任何命令。"""
         result = ""
         deadline = time.time() + duration
         consecutive_timeouts = 0
@@ -223,34 +160,33 @@ class SSHSession:
                     consecutive_timeouts = 0
                 else:
                     consecutive_timeouts += 1
+                    if consecutive_timeouts >= 5:
+                        break
             except socket.timeout:
                 consecutive_timeouts += 1
-                if consecutive_timeouts >= 3:
+                if consecutive_timeouts >= 5:
                     break
             except Exception:
                 break
         return result
 
     def _drain_stale_output(self):
-        """排空channel中可能残留的旧输出
-
-        每次exec前调用，防止前一个命令的残留输出污染当前命令的返回。
-        只做非阻塞读取，不发送Ctrl+C（不中断任何正在运行的命令）。
-
-        改进: 使用极短超时(0.05s)快速排空，且限制最大排空时间(0.5s)，
-        避免在无残留数据时浪费等待时间，也避免在慢速网络下排空不充分。
-        """
+        """排空channel中残留的旧输出，防止污染当前命令。"""
         old_timeout = self._channel.gettimeout()
         try:
-            self._channel.settimeout(0.05)
-            deadline = time.time() + 0.5
+            self._channel.settimeout(0.02)
+            deadline = time.time() + 0.15
+            consecutive_timeouts = 0
             while time.time() < deadline:
                 try:
                     chunk = self._channel.recv(4096)
                     if not chunk:
                         break
+                    consecutive_timeouts = 0
                 except socket.timeout:
-                    break
+                    consecutive_timeouts += 1
+                    if consecutive_timeouts >= 2:
+                        break
         except Exception:
             pass
         finally:
@@ -259,7 +195,6 @@ class SSHSession:
     def _update_cwd(self, timeout: int = 3):
         """通过执行pwd命令更新当前工作目录"""
         marker = f"__NARNAT_CWD_{time.time_ns()}__"
-        # 用 pwd -P + marker，和 execute 同样的机制
         self._channel.send(f"pwd -P; echo {marker}\n")
 
         output = ""
@@ -288,41 +223,87 @@ class SSHSession:
                     self._cwd = cleaned
                     break
 
-    def _read_until_marker(self, marker: str, pwd_marker: str, timeout: int = 30) -> str:
-        """读取channel输出，直到读到pwd_marker。超时则中断命令并排空缓冲区。
+    def _start_busy_watcher(self, marker: str, pwd_marker: str):
+        """超时后启动后台线程，持续读channel，等命令完成后自动清除busy标记。"""
+        def _watch():
+            output = ""
+            while True:
+                try:
+                    chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
+                    output += chunk
+                    if pwd_marker in output:
+                        # 命令完成了，清除busy标记
+                        self._busy = False
+                        # 更新cwd
+                        before_marker = output.split(marker)[0]
+                        lines = before_marker.strip().split("\n")
+                        for line in reversed(lines):
+                            cleaned = self._clean_output(line).strip()
+                            if cleaned and (not cleaned.startswith("echo ")) and (("/" in cleaned) or (cleaned == "/")):
+                                self._cwd = cleaned
+                                break
+                        return
+                except socket.timeout:
+                    continue
+                except Exception:
+                    # channel断开等异常，清除busy
+                    self._busy = False
+                    return
 
-        改进(修复输出丢失):
-        - 找到pwd_marker后，继续读取直到连续N次recv超时，确保prompt等尾部数据到达
-        - 增大consecutive timeout阈值(5次)，适应慢速网络/VM环境
-        - 每次recv之间增加短暂sleep，给远程shell时间生成prompt
-        - 超时时先尝试读取残余数据再发Ctrl+C，尽可能保留部分输出
+        t = threading.Thread(target=_watch, daemon=True)
+        t.start()
+
+    def _read_until_marker(self, marker: str, pwd_marker: str, timeout: int = 0) -> str:
+        """读取channel输出，直到读到pwd_marker。
+
+        timeout:
+          >0  - 等待指定秒数，超时返回已收集输出+超时提示
+          0   - 无限等待，直到命令完成(适合长命令)
+
+        纯管道原则: 超时只告知AI，不替AI杀进程。
         """
         output = ""
-        deadline = time.time() + timeout
+        # timeout=0 表示无限等待
+        deadline = time.time() + timeout if timeout > 0 else float('inf')
         found = False
         # 找到marker后，连续recv超时次数达到此阈值才认为数据读完
-        # 增大到5次(每次0.5s超时)，给慢速网络/VM足够时间
-        DRAIN_CONSECUTIVE_TIMEOUTS = 5
+        DRAIN_CONSECUTIVE_TIMEOUTS = 3
 
         while time.time() < deadline:
             try:
                 chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
                 output += chunk
 
-                if not found and pwd_marker in output:
+                # 检测哨兵：跳过回显行（PTY会回显完整命令，含marker，不能误匹配）
+                # 回显是output的第一行，从第二行开始检测
+                first_newline = output.find('\n')
+                search_region = output[first_newline + 1:] if first_newline >= 0 else ""
+                if not found and pwd_marker in search_region:
                     found = True
-                    # 继续读取，直到连续多次recv超时(表示没有更多数据)
+                    # 继续读取，等待prompt出现或连续超时
+                    # prompt格式: user@host:path$ (可能含~缩写)
+                    prompt_pattern = re.compile(r'[#$>]\s*$')
                     consecutive_timeouts = 0
-                    while consecutive_timeouts < DRAIN_CONSECUTIVE_TIMEOUTS:
+                    # 最多再读3秒，确保prompt和尾部数据到达
+                    post_marker_deadline = time.time() + 3.0
+                    while time.time() < post_marker_deadline:
                         try:
                             extra = self._channel.recv(4096).decode("utf-8", errors="replace")
                             if extra:
                                 output += extra
-                                consecutive_timeouts = 0  # 有数据，重置计数
+                                consecutive_timeouts = 0
+                                # 检查是否已读到prompt(shell就绪)
+                                last_lines = output.rstrip().split('\n')
+                                if last_lines and prompt_pattern.search(last_lines[-1]):
+                                    break
                             else:
                                 consecutive_timeouts += 1
+                                if consecutive_timeouts >= DRAIN_CONSECUTIVE_TIMEOUTS:
+                                    break
                         except socket.timeout:
                             consecutive_timeouts += 1
+                            if consecutive_timeouts >= DRAIN_CONSECUTIVE_TIMEOUTS:
+                                break
                         except Exception:
                             break
                     break
@@ -334,34 +315,46 @@ class SSHSession:
             except Exception:
                 break
 
-        # 超时处理: 先尝试读取残余数据，再发Ctrl+C中断
+        # 超时处理: 纯管道原则 — 只告知超时，不替AI做决定
+        # AI收到超时提示后，自己决定是杀进程(Ctrl+C)还是继续等待
         if not found:
-            # 在发Ctrl+C前，先尝试读取可能还在传输中的输出
-            residual = self._try_read_residual(duration=2.0)
+            # 收集残余输出(不丢弃)，尽可能多读
+            residual = self._try_read_residual(duration=3.0)
             if residual:
                 output += residual
-                # 读完残余数据后再次检查marker
-                if pwd_marker in output:
+                # 跳过回显行检测哨兵
+                first_nl = output.find('\n')
+                check_region = output[first_nl + 1:] if first_nl >= 0 else ""
+                if pwd_marker in check_region:
                     found = True
 
-            if not found:
-                self._drain_channel(duration=1.5)
-                cmd_output = self._parse_partial_output(output, marker)
-                if len(cmd_output) > MAX_BASH_OUTPUT:
-                    cmd_output = cmd_output[:MAX_BASH_OUTPUT] + f"\n... (输出超过{MAX_BASH_OUTPUT}字符，已截断)"
-                self._update_cwd()
+            # 超时但marker最终出现了 → 走正常解析(命令实际完成了)
+            if found:
+                self._busy = False
+                cmd_output, cwd = self._parse_output(output, marker, pwd_marker)
+                if cwd:
+                    self._cwd = cwd
                 if cmd_output:
-                    return f"{cmd_output}\n[超时: 命令执行超过{timeout}秒，已发送Ctrl+C中断]\n{self.prompt}"
+                    return f"{cmd_output}\n[超时但命令已完成]\n{self.prompt}"
                 else:
-                    return f"[超时: 命令执行超过{timeout}秒，已发送Ctrl+C中断]\n{self.prompt}"
+                    return f"[超时但命令已完成]\n{self.prompt}"
+
+            # 超时且marker未出现 → 返回已收集的部分输出，告知超时
+            # 不发Ctrl+C，进程仍在运行，AI自己决定下一步
+            self._busy = True
+            # 启动后台线程：持续读channel，等命令完成后自动清除busy标记
+            self._start_busy_watcher(marker, pwd_marker)
+            cmd_output = self._parse_partial_output(output, marker)
+            if cmd_output:
+                return f"{cmd_output}\n[超时: 命令执行超过{timeout}秒，进程仍在运行]\n{self.prompt}"
+            else:
+                return f"[超时: 命令执行超过{timeout}秒，进程仍在运行]\n{self.prompt}"
 
         # 正常解析
+        self._busy = False
         cmd_output, cwd = self._parse_output(output, marker, pwd_marker)
         if cwd:
             self._cwd = cwd
-
-        if len(cmd_output) > MAX_BASH_OUTPUT:
-            cmd_output = cmd_output[:MAX_BASH_OUTPUT] + f"\n... (输出超过{MAX_BASH_OUTPUT}字符，已截断)"
 
         if cmd_output:
             return f"{cmd_output}\n{self.prompt}"
@@ -369,20 +362,7 @@ class SSHSession:
             return self.prompt
 
     def _parse_output(self, raw: str, marker: str, pwd_marker: str) -> tuple[str, Optional[str]]:
-        """解析正常完成的输出，返回 (命令输出, cwd)
-
-        原始输出结构(PTY回显+实际输出混合):
-          命令回显(含$?字面量, 可能多行PTY折行)
-          命令实际输出行1
-          命令实际输出行2
-          __MARKER__0    <-- marker + 退出码(shell展开$?)
-          /actual/working/dir    <-- pwd -P 的输出
-          __PWD_MARKER__
-          prompt
-
-        关键: PTY回显中marker是字面量(含$?), 而输出行中marker已被shell展开(含数字)
-        因此必须按行查找marker行(以marker开头), 而非简单的子串split
-        """
+        """解析正常完成的输出，返回 (命令输出, cwd)"""
         exit_code = None
         cwd = None
 
@@ -463,15 +443,7 @@ class SSHSession:
 
     @staticmethod
     def _strip_echo(raw: str) -> str:
-        """从PTY输出中精确剥离命令回显
-
-        PTY shell会回显用户输入的命令文本。在invoke_shell模式下，
-        发送 "command; echo MARKER..." 后，shell先回显这整行，
-        再输出命令的实际stdout。
-
-        策略: 找到第一个换行符，跳过该行（命令回显的首行），
-        然后继续跳过以 PS2 续行提示符("> "或">")开头的行。
-        """
+        """剥离PTY命令回显(第一行+续行"> "前缀)"""
         lines = raw.split("\n")
         if not lines:
             return raw
@@ -491,16 +463,12 @@ class SSHSession:
 
     @staticmethod
     def _clean_output(raw: str) -> str:
-        """清洗ANSI转义码、回车符、内部标记和续行提示符
-
-        回车覆盖合并: PTY中进度条(apt/ninja等)用\\r覆盖前一行，
-        清除\\r后所有帧拼接成超长行。此处模拟终端行为：
-        遇到\\r时，后续内容覆盖同行前面内容。
-        """
+        """清洗ANSI转义码、回车覆盖、内部标记(PTY噪声)"""
         ansi_re = re.compile(
             r'\x1b\[\??[0-9;]*[a-zA-Z]'
             r'|\x1b\].*?(?:\x07|\x1b\\)'
             r'|\x1b[()][A-Za-z0-9]'
+            r'|\x1b[0-9:;<=>?@[A-Z\[\]^_`]'  # DEC私有序列: ESC 7(保存光标), ESC 8(恢复光标)等
         )
         cleaned = ansi_re.sub('', raw)
 
@@ -537,7 +505,7 @@ class SSHSession:
         return cleaned.strip()
 
 
-# ── 公开接口 ──
+# 公开接口
 
 def execute(
     action: str = "exec",
@@ -547,7 +515,7 @@ def execute(
     key_path: str = "",
     password: str = "",
     command: str = "",
-    timeout: int = 30,
+    timeout: int = 0,
     session_id: int = -1,
 ) -> str:
     """
@@ -668,7 +636,7 @@ def _connect(host: str, username: str, port: int = 22,
         return f"错误: 连接失败({username}@{host}): {e}"
 
 
-def _exec(session_id: int, host: str, command: str, timeout: int = 30) -> str:
+def _exec(session_id: int, host: str, command: str, timeout: int = 0) -> str:
     """在指定会话中执行命令"""
     if not command:
         return "错误: exec需要提供command"
@@ -707,7 +675,8 @@ def _status() -> str:
             if sid in _sessions:
                 session = _sessions[sid]
                 alive = "活跃" if not session._channel.closed else "已断开"
-                lines.append(f"  终端{sid}: {session.username}@{session.host} [{alive}] {session.prompt}")
+                busy = "忙" if session._busy else "闲"
+                lines.append(f"  终端{sid}: {session.username}@{session.host} [{alive}|{busy}] {session.prompt}")
             else:
                 lines.append(f"  终端{sid}: (空闲)")
         return "SSH会话:\n" + "\n".join(lines)

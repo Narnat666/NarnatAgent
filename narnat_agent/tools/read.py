@@ -21,6 +21,10 @@ def execute(file_path: str, offset: int = 0, limit: int = 0,
     Returns:
         带行号的文件内容字符串，格式 "  行号→内容"
     """
+    # AI可能传字符串类型的数值参数，确保类型正确
+    offset = int(offset) if offset else 0
+    limit = int(limit) if limit else 0
+    remote = bool(remote)
     if remote:
         from .remote import remote_read, mark_remote_read
         result = remote_read(file_path, offset, limit, host)

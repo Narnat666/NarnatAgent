@@ -166,7 +166,7 @@ TOOL_DEFINITIONS: List[Dict] = [
                     "key_path": {"type": "string", "description": "SSH私钥路径，如 ~/.ssh/id_rsa"},
                     "password": {"type": "string", "description": "SSH密码（优先使用key_path）"},
                     "command": {"type": "string", "description": "要执行的命令（exec时必填）"},
-                    "timeout": {"type": "integer", "description": "命令超时秒数，默认30"},
+                    "timeout": {"type": "integer", "description": "超时秒数，0=无限等待(默认)，AI可按需设定"},
                     "session_id": {"type": "integer", "description": "终端编号0-4，-1为自动选择。connect时指定或自动分配，exec时指定在哪个终端执行"},
                 },
                 "required": ["action"],

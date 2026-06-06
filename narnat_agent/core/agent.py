@@ -75,6 +75,10 @@ class NarnatSessionCallbacks(SessionCallbacks):
             self._active_name = None
         return err
 
+    def on_list_names(self) -> list:
+        sessions = list_sessions(self._narnat_dir)
+        return [s["name"] for s in sessions]
+
     def on_exit(self) -> str:
         """退出时自动保存（仅当会话曾被/save过）。返回保存的会话名或空串。"""
         if self._active_name is None:
@@ -261,6 +265,12 @@ class Agent:
                 stream.abort()
             except Exception as e:
                 self._logger.error("core.agent", f"异常: {e}")
+                # 将AI已输出的部分内容追加到messages，避免丢失
+                if hasattr(self, '_last_content_parts') and self._last_content_parts:
+                    self._messages.append({
+                        "role": "assistant",
+                        "content": "".join(self._last_content_parts),
+                    })
                 stream.abort()
 
     def _agent_loop(self, stream):
@@ -271,6 +281,7 @@ class Agent:
 
             # b. 调用LLM
             content_parts = []
+            self._last_content_parts = content_parts  # 供异常处理时保存部分内容
             tool_calls_result = []
 
             for chunk in self._llm.chat_stream(self._messages):
