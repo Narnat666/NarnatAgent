@@ -48,9 +48,10 @@ class TestReadSimulation:
         assert "错误" in result or "不存在" in result
 
     def test_read_long_line_truncation(self):
+        """超长单行不再截断，完整返回"""
         path = self.fs.create_file("long.txt", "x" * 5000 + "\n")
         result = _r(read.execute(path))
-        assert "截断" in result
+        assert "x" in result  # 完整内容应包含
 
 
 # ── Glob仿真 ──

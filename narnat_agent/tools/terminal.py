@@ -1,9 +1,11 @@
-"""Terminal工具 —— 可持续SSH终端
+"""Terminal工具 —— 多终端可持续SSH
 
 基于paramiko实现SSH交互式会话，AI可像人一样持续操控远程Linux设备。
 
 核心设计:
-- 每个SSH连接是一个会话(session)，通过host标识
+- 支持最多MAX_SESSIONS(5)个并发SSH会话，每个会话有唯一session_id(0-4)
+- AI通过session_id指定在哪个终端操作，实现多终端并行
+- 每个SSH连接是一个会话(session)，通过session_id标识
 - AI发命令 → 写入channel → 读取输出 → 返回给AI
 - 会话持久化，多次调用复用同一连接
 - 命令结束检测：发送唯一marker，读到marker即表示命令执行完毕
@@ -48,7 +50,10 @@ def set_confirm_callback(cb: Callable[[str], bool]):
 
 # ── 会话管理 ──
 
-_sessions: dict[str, "SSHSession"] = {}
+MAX_SESSIONS = 5  # 最多5个并发SSH会话
+
+# session_id(0-4) → SSHSession
+_sessions: dict[int, "SSHSession"] = {}
 _sessions_lock = threading.Lock()
 
 
@@ -486,14 +491,41 @@ class SSHSession:
 
     @staticmethod
     def _clean_output(raw: str) -> str:
-        """清洗ANSI转义码、回车符、内部标记和续行提示符"""
+        """清洗ANSI转义码、回车符、内部标记和续行提示符
+
+        回车覆盖合并: PTY中进度条(apt/ninja等)用\\r覆盖前一行，
+        清除\\r后所有帧拼接成超长行。此处模拟终端行为：
+        遇到\\r时，后续内容覆盖同行前面内容。
+        """
         ansi_re = re.compile(
             r'\x1b\[\??[0-9;]*[a-zA-Z]'
             r'|\x1b\].*?(?:\x07|\x1b\\)'
             r'|\x1b[()][A-Za-z0-9]'
         )
         cleaned = ansi_re.sub('', raw)
-        cleaned = cleaned.replace('\r', '')
+
+        # 回车覆盖合并: \r后面的内容覆盖同行前面内容
+        # 逐行处理，每行内按\r分段，后段覆盖前段
+        lines = cleaned.split('\n')
+        merged_lines = []
+        for line in lines:
+            if '\r' not in line:
+                merged_lines.append(line)
+                continue
+            # 按\r分段，模拟终端覆盖行为
+            segments = line.split('\r')
+            # 每个segment覆盖前一个segment的对应位置
+            result = ""
+            for seg in segments:
+                if not seg:
+                    continue
+                # seg覆盖result的前len(seg)个字符
+                if len(seg) >= len(result):
+                    result = seg
+                else:
+                    result = seg + result[len(seg):]
+            merged_lines.append(result)
+        cleaned = '\n'.join(merged_lines)
 
         # 清理内部标记: __NARNAT_MARKER_xxx__, __NARNAT_CWD_xxx__, __NARNAT_PWD_xxx__
         cleaned = re.sub(r'__NARNAT_(?:MARKER|CWD|PWD)_\d+__', '', cleaned)
@@ -516,43 +548,99 @@ def execute(
     password: str = "",
     command: str = "",
     timeout: int = 30,
+    session_id: int = -1,
 ) -> str:
     """
-    Terminal工具：可持续SSH终端。
+    Terminal工具：多终端可持续SSH。
 
     action:
-      connect  - 建立SSH会话（首次连接或重连）
-      exec     - 在已连接的会话中执行命令
+      connect  - 建立SSH会话（首次连接或重连），自动分配或使用指定session_id
+      exec     - 在指定会话中执行命令
       status   - 查看当前所有会话状态
       close    - 关闭指定会话
+
+    session_id:
+      0-4  - 指定终端编号
+      -1   - 自动选择（connect时自动分配，exec时选唯一活跃会话）
     """
     if action == "connect":
-        return _connect(host, username, port, key_path, password)
+        return _connect(host, username, port, key_path, password, session_id)
     elif action == "exec":
-        return _exec(host, command, timeout)
+        return _exec(session_id, host, command, timeout)
     elif action == "status":
         return _status()
     elif action == "close":
-        return _close(host)
+        return _close(session_id, host)
     else:
         return f"错误: 未知action '{action}'，可选: connect/exec/status/close"
 
 
+def _allocate_session_id() -> int:
+    """分配一个空闲的session_id，返回-1表示已满"""
+    for i in range(MAX_SESSIONS):
+        if i not in _sessions:
+            return i
+    return -1
+
+
+def _resolve_session_id(session_id: int, host: str = "") -> tuple[int, "SSHSession"]:
+    """解析session_id，返回 (session_id, session) 或抛出ValueError
+
+    逻辑:
+    1. session_id >= 0: 直接查找
+    2. session_id == -1 且指定host: 按host模糊匹配
+    3. session_id == -1 且无host: 只有一个会话时自动选择
+    """
+    with _sessions_lock:
+        # 指定了session_id
+        if session_id >= 0:
+            if session_id not in _sessions:
+                raise ValueError(f"终端{session_id}未连接，请先connect")
+            return session_id, _sessions[session_id]
+
+        # 未指定session_id，按host匹配
+        if host:
+            for sid, session in _sessions.items():
+                if host in session.host or host in f"{session.username}@{session.host}":
+                    return sid, session
+            raise ValueError(f"未找到host={host}的会话，请先connect")
+
+        # 未指定session_id和host，自动选择唯一会话
+        if len(_sessions) == 1:
+            sid = list(_sessions.keys())[0]
+            return sid, _sessions[sid]
+        elif len(_sessions) == 0:
+            raise ValueError("无活跃会话，请先connect")
+        else:
+            keys = list(_sessions.keys())
+            raise ValueError(f"有多个会话，请指定session_id，当前终端: {keys}")
+
+
 def _connect(host: str, username: str, port: int = 22,
-             key_path: str = "", password: str = "") -> str:
+             key_path: str = "", password: str = "",
+             session_id: int = -1) -> str:
     """建立SSH会话"""
     if not host or not username:
         return "错误: connect需要提供host和username"
 
-    session_key = f"{username}@{host}"
-
     with _sessions_lock:
-        if session_key in _sessions:
-            session = _sessions[session_key]
-            if not session._channel.closed:
-                return f"会话已存在: {session_key}\n{session.prompt}"
-            else:
-                del _sessions[session_key]
+        # 指定了session_id
+        if session_id >= 0:
+            if session_id >= MAX_SESSIONS:
+                return f"错误: session_id范围0-{MAX_SESSIONS - 1}"
+            if session_id in _sessions:
+                session = _sessions[session_id]
+                if not session._channel.closed:
+                    return f"终端{session_id}已连接: {session.username}@{session.host}\n{session.prompt}"
+                else:
+                    del _sessions[session_id]
+            alloc_id = session_id
+        else:
+            # 自动分配
+            alloc_id = _allocate_session_id()
+            if alloc_id < 0:
+                active = list(_sessions.keys())
+                return f"错误: 已达最大会话数({MAX_SESSIONS})，当前终端: {active}，请先close释放"
 
     try:
         kwargs = {"host": host, "username": username, "port": port}
@@ -564,24 +652,24 @@ def _connect(host: str, username: str, port: int = 22,
         session = SSHSession(**kwargs)
 
         with _sessions_lock:
-            _sessions[session_key] = session
+            _sessions[alloc_id] = session
 
-        parts = [f"已连接: {session_key}"]
+        parts = [f"已连接终端{alloc_id}: {username}@{host}"]
         if session._initial_output:
             parts.append(session._initial_output)
         parts.append(session.prompt)
         return "\n".join(parts)
 
     except paramiko.AuthenticationException:
-        return f"错误: 认证失败({session_key})，请检查key_path或password"
+        return f"错误: 认证失败({username}@{host})，请检查key_path或password"
     except paramiko.SSHException as e:
-        return f"错误: SSH连接失败({session_key}): {e}"
+        return f"错误: SSH连接失败({username}@{host}): {e}"
     except Exception as e:
-        return f"错误: 连接失败({session_key}): {e}"
+        return f"错误: 连接失败({username}@{host}): {e}"
 
 
-def _exec(host: str, command: str, timeout: int = 30) -> str:
-    """在已连接的会话中执行命令"""
+def _exec(session_id: int, host: str, command: str, timeout: int = 30) -> str:
+    """在指定会话中执行命令"""
     if not command:
         return "错误: exec需要提供command"
 
@@ -590,75 +678,73 @@ def _exec(host: str, command: str, timeout: int = 30) -> str:
         if _confirm_callback and not _confirm_callback(command):
             return "操作已取消: 删除命令需用户确认"
 
-    if not host:
-        with _sessions_lock:
-            if len(_sessions) == 1:
-                session_key = list(_sessions.keys())[0]
-            else:
-                keys = list(_sessions.keys())
-                return f"错误: 需要指定host，当前会话: {keys}" if keys else "错误: 无活跃会话，请先connect"
-    else:
-        session_key = None
-        with _sessions_lock:
-            for k in _sessions:
-                if host in k:
-                    session_key = k
-                    break
-        if not session_key:
-            return f"错误: 未找到host={host}的会话，请先connect"
-
-    with _sessions_lock:
-        session = _sessions.get(session_key)
-
-    if session is None:
-        return f"错误: 会话不存在({session_key})，请先connect"
+    try:
+        sid, session = _resolve_session_id(session_id, host)
+    except ValueError as e:
+        return f"错误: {e}"
 
     if session._channel.closed:
         with _sessions_lock:
-            _sessions.pop(session_key, None)
-        return f"错误: 会话已断开({session_key})，请重新connect"
+            _sessions.pop(sid, None)
+        return f"错误: 终端{sid}会话已断开，请重新connect"
 
     try:
-        return session.execute(command, timeout=timeout)
+        result = session.execute(command, timeout=timeout)
+        # 在结果前标注终端编号
+        return f"[终端{sid}] {result}"
     except Exception as e:
-        return f"错误: 命令执行失败({session_key}): {e}"
+        return f"错误: 终端{sid}命令执行失败: {e}"
 
 
 def _status() -> str:
     """查看所有会话状态"""
     with _sessions_lock:
         if not _sessions:
-            return "(无活跃SSH会话)"
+            return f"(无活跃SSH会话，最多支持{MAX_SESSIONS}个并发终端)"
 
         lines = []
-        for key, session in _sessions.items():
-            alive = "活跃" if not session._channel.closed else "已断开"
-            lines.append(f"  {key} [{alive}] {session.prompt}")
+        for sid in range(MAX_SESSIONS):
+            if sid in _sessions:
+                session = _sessions[sid]
+                alive = "活跃" if not session._channel.closed else "已断开"
+                lines.append(f"  终端{sid}: {session.username}@{session.host} [{alive}] {session.prompt}")
+            else:
+                lines.append(f"  终端{sid}: (空闲)")
         return "SSH会话:\n" + "\n".join(lines)
 
 
-def _close(host: str) -> str:
+def _close(session_id: int, host: str) -> str:
     """关闭会话"""
     with _sessions_lock:
-        if not host:
+        if session_id < 0 and not host:
+            # 关闭所有
             for session in _sessions.values():
                 session.close()
             count = len(_sessions)
             _sessions.clear()
             return f"已关闭{count}个会话"
 
-        session_key = None
-        for k in _sessions:
-            if host in k:
-                session_key = k
+        # 指定了session_id
+        if session_id >= 0:
+            if session_id not in _sessions:
+                return f"终端{session_id}未连接"
+            _sessions[session_id].close()
+            del _sessions[session_id]
+            return f"已关闭终端{session_id}"
+
+        # 按host匹配
+        matched = None
+        for sid, session in _sessions.items():
+            if host in session.host or host in f"{session.username}@{session.host}":
+                matched = sid
                 break
 
-        if not session_key:
+        if matched is None:
             return f"未找到host={host}的会话"
 
-        _sessions[session_key].close()
-        del _sessions[session_key]
-        return f"已关闭: {session_key}"
+        _sessions[matched].close()
+        del _sessions[matched]
+        return f"已关闭终端{matched}"
 
 
 def cleanup():
@@ -669,12 +755,10 @@ def cleanup():
         _sessions.clear()
 
 
-def get_session(host: str = "") -> Optional[SSHSession]:
-    """获取指定host的SSH会话（供SFTP等内部使用）"""
-    with _sessions_lock:
-        if not host and len(_sessions) == 1:
-            return list(_sessions.values())[0]
-        for key, session in _sessions.items():
-            if host in key:
-                return session
-    return None
+def get_session(session_id: int = -1, host: str = "") -> Optional["SSHSession"]:
+    """获取指定SSH会话（供SFTP等内部使用）"""
+    try:
+        _, session = _resolve_session_id(session_id, host)
+        return session
+    except ValueError:
+        return None

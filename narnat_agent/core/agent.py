@@ -169,16 +169,18 @@ class Agent:
             summary = arguments.get("command", "")
         elif name == "Terminal":
             action = arguments.get("action", "")
+            sid = arguments.get("session_id", -1)
+            sid_str = f"[{sid}]" if sid >= 0 else ""
             if action == "connect":
                 host = arguments.get("host", "")
                 username = arguments.get("username", "")
-                summary = f"connect {username}@{host}"
+                summary = f"connect{sid_str} {username}@{host}"
             elif action == "exec":
-                summary = arguments.get("command", "")
+                summary = f"exec{sid_str} {arguments.get('command', '')}"
             elif action == "close":
-                summary = f"close {arguments.get('host', '')}"
+                summary = f"close{sid_str} {arguments.get('host', '')}"
             else:
-                summary = action
+                summary = f"{action}{sid_str}"
         elif name == "Grep":
             summary = arguments.get("pattern", "")
         elif name == "Glob":

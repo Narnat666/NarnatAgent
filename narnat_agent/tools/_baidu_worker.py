@@ -34,7 +34,6 @@ def _make_ua() -> str:
 
 _UA = _make_ua()
 _TIMEOUT_MS = 15000
-_SNIPPET_LEN = 200
 
 _RE_STRIP_TAG = re.compile(r"<[^>]+>")
 _RE_H3 = re.compile(r'<h3[^>]*>.*?href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL)
@@ -50,13 +49,14 @@ def _strip_tags(text: str) -> str:
 
 
 def _extract_snippet(html: str, start: int) -> str:
+    """提取百度摘要，完整返回不截断"""
     window = html[start:start + 1200]
     m = _RE_C_ABSTRACT.search(window)
     if m:
-        return _strip_tags(m.group(1))[:_SNIPPET_LEN]
+        return _strip_tags(m.group(1))
     m = _RE_CONTENT_RIGHT.search(window)
     if m:
-        return _strip_tags(m.group(1))[:_SNIPPET_LEN]
+        return _strip_tags(m.group(1))
     return ""
 
 

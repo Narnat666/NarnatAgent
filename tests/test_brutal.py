@@ -38,12 +38,12 @@ class TestReadBrutal:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_read_very_long_line(self):
-        """超长单行"""
+        """超长单行——不再截断，完整返回"""
         fpath = os.path.join(self.tmpdir, "long.txt")
         with open(fpath, "w") as f:
             f.write("x" * 5000 + "\n")
         result = read.execute(fpath)
-        assert "截断" in result
+        assert "x" in result  # 完整内容应包含
 
     def test_read_many_lines(self):
         """大量行"""

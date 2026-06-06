@@ -128,26 +128,27 @@ class TestReadDeep:
             os.unlink(path)
 
     def test_read_very_long_single_line(self):
-        """单行超过MAX_LINE_CHARS截断"""
+        """超长单行不再截断，完整返回"""
         from narnat_agent.config.defaults import MAX_LINE_CHARS
         long_line = "x" * (MAX_LINE_CHARS + 500)
         path = _create_temp_file(long_line)
         try:
             from narnat_agent.tools import read
             result = read.execute(path)
-            assert "截断" in result
+            assert "x" in result  # 完整内容应包含
         finally:
             os.unlink(path)
 
     def test_read_many_lines_truncation(self):
-        """超过MAX_FILE_LINES截断提示"""
+        """超过MAX_FILE_LINES不再截断，完整返回"""
         from narnat_agent.config.defaults import MAX_FILE_LINES
         content = "\n".join(f"line{i}" for i in range(MAX_FILE_LINES + 100))
         path = _create_temp_file(content)
         try:
             from narnat_agent.tools import read
             result = read.execute(path)
-            assert "仅显示前" in result or str(MAX_FILE_LINES) in result
+            # 完整内容应包含最后一行
+            assert f"line{MAX_FILE_LINES + 99}" in result
         finally:
             os.unlink(path)
 

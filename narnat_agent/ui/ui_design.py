@@ -468,10 +468,29 @@ class StreamingRenderer:
         self._buf_append(raw)
 
     def feed(self, chunk: str) -> None:
-        if self._in_code:
-            self._process_lines(chunk, self._on_code_line)
-        else:
-            self._process_lines(chunk, self._on_normal_line)
+        # 循环处理：handler可能切换状态（_in_code），
+        # 切换后需要用新handler继续处理剩余内容
+        self._buf_append(chunk)
+        raw = self._buf_get_and_clear()
+        while raw:
+            handler = self._on_code_line if self._in_code else self._on_normal_line
+            # 逐行处理
+            while "\n" in raw:
+                line, rest = raw.split("\n", 1)
+                if handler(line, rest):
+                    # handler返回True：状态已切换，用新handler继续处理rest
+                    raw = rest
+                    break
+                raw = rest
+            else:
+                # while正常结束（无更多完整行），剩余放回缓冲区
+                self._buf_append(raw)
+                return
+            # handler返回True后，raw=rest，继续外层while用新handler处理
+            # 但先合并缓冲区中可能新追加的内容
+            extra = self._buf_get_and_clear()
+            if extra:
+                raw = raw + extra
 
     def _on_code_line(self, line: str, rest: str) -> bool:
         stripped = line.strip()
@@ -481,7 +500,7 @@ class StreamingRenderer:
         if stripped == "```":
             self._flush_code_block()
             self._in_code = False
-            self._buf_append(rest)
+            # 不再放回rest，由feed()外层循环用新handler处理
             return True
         self._code_lines.append(line)
         return False
@@ -491,7 +510,7 @@ class StreamingRenderer:
         if stripped.startswith("```"):
             self._in_code = True
             self._code_lang = stripped[3:].strip()
-            self._buf_append(rest)
+            # 不再放回rest，由feed()外层循环用新handler处理
             return True
         rendered = render_line(line)
         if not rendered:

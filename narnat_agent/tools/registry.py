@@ -151,7 +151,7 @@ TOOL_DEFINITIONS: List[Dict] = [
         "type": "function",
         "function": {
             "name": "Terminal",
-            "description": "可持续SSH终端，用于远程操控Linux设备。connect建立会话，exec执行命令，会话持久化可复用",
+            "description": "多终端可持续SSH，最多5个并发终端。connect建立会话(可指定session_id或自动分配)，exec在指定终端执行命令，实现多终端并行操控",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -167,6 +167,7 @@ TOOL_DEFINITIONS: List[Dict] = [
                     "password": {"type": "string", "description": "SSH密码（优先使用key_path）"},
                     "command": {"type": "string", "description": "要执行的命令（exec时必填）"},
                     "timeout": {"type": "integer", "description": "命令超时秒数，默认30"},
+                    "session_id": {"type": "integer", "description": "终端编号0-4，-1为自动选择。connect时指定或自动分配，exec时指定在哪个终端执行"},
                 },
                 "required": ["action"],
             },
@@ -181,7 +182,7 @@ TOOL_DEFINITIONS: List[Dict] = [
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "搜索关键词"},
-                    "num": {"type": "integer", "description": "返回结果数，默认5"},
+                    "num": {"type": "integer", "description": "返回结果数，默认10"},
                     "lr": {"type": "string", "description": "语言限制，如lang_en/lang_zh-CN"},
                 },
                 "required": ["query"],

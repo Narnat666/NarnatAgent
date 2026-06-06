@@ -10,7 +10,6 @@ import difflib
 from typing import Optional
 
 from .terminal import get_session, SSHSession
-from ..config.defaults import MAX_FILE_LINES, MAX_LINE_CHARS
 from ..ui.ui_design import colorize_diff
 
 
@@ -44,13 +43,6 @@ def remote_read(file_path: str, offset: int = 0, limit: int = 0,
         content = raw.decode("utf-8", errors="replace")
 
     lines = content.splitlines(keepends=True)
-    total = len(lines)
-
-    if total > MAX_FILE_LINES and offset == 0 and limit == 0:
-        lines = lines[:MAX_FILE_LINES]
-        hint = f"\n... 文件共{total}行，仅显示前{MAX_FILE_LINES}行，可用offset/limit分段读取 ..."
-    else:
-        hint = ""
 
     start = max(offset - 1, 0) if offset > 0 else 0
     if limit > 0:
@@ -62,11 +54,9 @@ def remote_read(file_path: str, offset: int = 0, limit: int = 0,
     for i, line in enumerate(lines):
         line_num = start + i + 1
         text = line.rstrip("\n\r")
-        if len(text) > MAX_LINE_CHARS:
-            text = text[:MAX_LINE_CHARS] + "...(截断)"
         result.append(f"  {line_num}→{text}")
 
-    return "\n".join(result) + hint
+    return "\n".join(result)
 
 
 # ── 远程Write ──

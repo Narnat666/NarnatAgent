@@ -43,7 +43,6 @@ _UA = _make_ua()
 
 _TIMEOUT = 5           # HTTP请求超时秒数
 _MAX_RETRIES = 2       # 仅5xx重试
-_SNIPPET_LEN = 200     # 摘要最大长度
 _BAIDU_TIMEOUT = 20    # 百度子进程超时秒数
 
 # 预编译正则
@@ -121,28 +120,26 @@ def _relevance_score(result: Dict, query: str) -> float:
 
 
 def _format_results(results: List[Dict]) -> str:
-    """格式化搜索结果为可读文本"""
+    """格式化搜索结果为可读文本，完整返回摘要不截断"""
     lines = []
     for i, r in enumerate(results, 1):
         lines.append(f"{i}. {r['title']}")
         lines.append(f"   URL: {r['url']}")
         snippet = r.get("snippet", "")
         if snippet:
-            if len(snippet) > _SNIPPET_LEN:
-                snippet = snippet[:_SNIPPET_LEN - 3] + "..."
             lines.append(f"   {snippet}")
     return "\n".join(lines)
 
 
 # ── 主入口 ──
 
-def execute(query: str, num: int = 5, lr: str = "") -> str:
+def execute(query: str, num: int = 10, lr: str = "") -> str:
     """
     联网搜索（Bing + 百度）。
 
     Args:
         query: 搜索关键词
-        num: 返回结果数，默认5
+        num: 返回结果数，默认10
         lr: 语言限制（如lang_en/lang_zh-CN）
 
     Returns:
@@ -240,16 +237,16 @@ def _parse_bing(html: str, num: int) -> List[Dict]:
 
 
 def _extract_bing_snippet(html: str, start: int) -> str:
-    """从h2位置向后提取Bing摘要"""
+    """从h2位置向后提取Bing摘要，完整返回不截断"""
     window = html[start:start + 800]
     cap = _RE_BING_CAPTION.search(window)
     if cap:
         pm = _RE_P_TAG.search(cap.group(1))
         if pm:
-            return _strip_tags(pm.group(1))[:_SNIPPET_LEN]
+            return _strip_tags(pm.group(1))
     pm = _RE_P_TAG.search(window[:400])
     if pm:
-        return _strip_tags(pm.group(1))[:_SNIPPET_LEN]
+        return _strip_tags(pm.group(1))
     return ""
 
 
@@ -401,12 +398,12 @@ def _parse_baidu(html: str, num: int) -> List[Dict]:
 
 
 def _extract_baidu_snippet(html: str, start: int) -> str:
-    """从h3位置向后提取百度摘要"""
+    """从h3位置向后提取百度摘要，完整返回不截断"""
     window = html[start:start + 1200]
     m = _RE_BAIDU_C_ABSTRACT.search(window)
     if m:
-        return _strip_tags(m.group(1))[:_SNIPPET_LEN]
+        return _strip_tags(m.group(1))
     m = _RE_BAIDU_CONTENT_RIGHT.search(window)
     if m:
-        return _strip_tags(m.group(1))[:_SNIPPET_LEN]
+        return _strip_tags(m.group(1))
     return ""

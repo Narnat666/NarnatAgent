@@ -788,15 +788,15 @@ class TestBrutalExtreme:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_read_very_large_file(self):
-        """读取超大文件截断"""
+        """读取超大文件不再截断，完整返回"""
         path = os.path.join(self.tmpdir, "large.txt")
         with open(path, "w", encoding="utf-8") as f:
             for i in range(5000):
                 f.write(f"line {i}\n")
         result = _r(read_tool.execute(path))
         assert isinstance(result, str)
-        # 应有截断提示
-        assert len(result) > 0
+        # 完整内容应包含最后一行
+        assert "line 4999" in result
 
     def test_read_path_with_special_chars(self):
         """路径含特殊字符"""
