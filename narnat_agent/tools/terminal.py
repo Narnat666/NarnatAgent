@@ -38,11 +38,20 @@ _RE_DELETE = re.compile(
 
 _confirm_callback: Optional[Callable[[str], bool]] = None
 
+# 中断检查回调，由agent层注入（返回True表示用户按了ESC）
+_interrupt_check: Optional[Callable[[], bool]] = None
+
 
 def set_confirm_callback(cb: Callable[[str], bool]):
     """设置删除确认回调。cb返回True表示允许执行。"""
     global _confirm_callback
     _confirm_callback = cb
+
+
+def set_interrupt_check(cb: Callable[[], bool]):
+    """设置中断检查回调。cb返回True表示用户请求中断。"""
+    global _interrupt_check
+    _interrupt_check = cb
 
 
 MAX_SESSIONS = 5  # 最多5个并发SSH会话
@@ -147,12 +156,24 @@ class SSHSession:
         except Exception:
             pass
 
+    def _interrupt_remote(self):
+        """向远程shell发送Ctrl+C中断当前命令，排空残留输出，重置busy标志。"""
+        try:
+            self._channel.send('\x03')  # Ctrl+C
+            time.sleep(0.3)
+            self._drain_stale_output()
+        except Exception:
+            pass
+        self._busy = False
+
     def _try_read_residual(self, duration: float = 3.0) -> str:
         """安静地读取channel中残余数据，不中断任何命令。"""
         result = ""
         deadline = time.time() + duration
         consecutive_timeouts = 0
         while time.time() < deadline:
+            if _interrupt_check and _interrupt_check():
+                break
             try:
                 chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
                 if chunk:
@@ -200,6 +221,8 @@ class SSHSession:
         output = ""
         deadline = time.time() + timeout
         while time.time() < deadline:
+            if _interrupt_check and _interrupt_check():
+                break
             try:
                 chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
                 output += chunk
@@ -228,6 +251,9 @@ class SSHSession:
         def _watch():
             output = ""
             while True:
+                if _interrupt_check and _interrupt_check():
+                    self._busy = False
+                    return
                 try:
                     chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
                     output += chunk
@@ -261,6 +287,7 @@ class SSHSession:
           0   - 无限等待，直到命令完成(适合长命令)
 
         纯管道原则: 超时只告知AI，不替AI杀进程。
+        ESC铁律: 用户按ESC立即中断，发Ctrl+C，宁可丢数据不卡住。
         """
         output = ""
         # timeout=0 表示无限等待
@@ -270,6 +297,11 @@ class SSHSession:
         DRAIN_CONSECUTIVE_TIMEOUTS = 3
 
         while time.time() < deadline:
+            # ESC铁律: 检查用户中断
+            if _interrupt_check and _interrupt_check():
+                self._interrupt_remote()
+                return "[用户中断]"
+
             try:
                 chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
                 output += chunk
@@ -287,6 +319,10 @@ class SSHSession:
                     # 最多再读3秒，确保prompt和尾部数据到达
                     post_marker_deadline = time.time() + 3.0
                     while time.time() < post_marker_deadline:
+                        # ESC铁律: post_marker阶段也检查中断
+                        if _interrupt_check and _interrupt_check():
+                            self._interrupt_remote()
+                            return "[用户中断]"
                         try:
                             extra = self._channel.recv(4096).decode("utf-8", errors="replace")
                             if extra:
@@ -314,6 +350,11 @@ class SSHSession:
                 continue
             except Exception:
                 break
+
+        # ESC铁律: 循环结束后再检查一次中断（可能在超时处理前被触发）
+        if _interrupt_check and _interrupt_check():
+            self._interrupt_remote()
+            return "[用户中断]"
 
         # 超时处理: 纯管道原则 — 只告知超时，不替AI做决定
         # AI收到超时提示后，自己决定是杀进程(Ctrl+C)还是继续等待

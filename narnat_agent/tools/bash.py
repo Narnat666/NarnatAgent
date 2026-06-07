@@ -6,6 +6,7 @@ AI自己负责写正确语法，我们只管送达和返回。
 
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -66,6 +67,28 @@ def _decode_output(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def _kill_proc_tree(proc: subprocess.Popen) -> None:
+    """杀掉整个进程树，确保&&链式命令的所有子进程都被终止。"""
+    try:
+        if sys.platform == "win32":
+            # Windows: taskkill /F /T /PID 杀整棵进程树
+            subprocess.call(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        else:
+            # Unix: 杀整个进程组
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
 def execute(
     command: str,
     timeout: int = 120000,
@@ -108,34 +131,69 @@ def execute(
         return _run_background(shell_cmd, command)
 
     # 前台运行模式
+    # Unix: 用新进程组，确保能killpg杀整棵树
+    popen_kwargs = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "cwd": os.getcwd(),
+    }
+    if sys.platform != "win32":
+        popen_kwargs["start_new_session"] = True
+
     try:
-        proc = subprocess.Popen(
-            shell_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=os.getcwd(),
-        )
+        proc = subprocess.Popen(shell_cmd, **popen_kwargs)
     except FileNotFoundError as e:
         return f"错误: Shell未找到: {e}"
     except OSError as e:
         return f"错误: 启动失败: {e}"
 
+    # 非阻塞读取: 用线程读stdout/stderr，主线程轮询中断+超时
+    stdout_chunks = []
+    stderr_chunks = []
+
+    def _reader(stream, chunks):
+        try:
+            while True:
+                data = stream.read(4096)
+                if not data:
+                    break
+                chunks.append(data)
+        except Exception:
+            pass
+
+    t_out = threading.Thread(target=_reader, args=(proc.stdout, stdout_chunks), daemon=True)
+    t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_chunks), daemon=True)
+    t_out.start()
+    t_err.start()
+
+    deadline = time.time() + timeout_sec
     interrupted = False
-    try:
-        def _interrupt_watcher():
-            while proc.poll() is None:
-                if _interrupt_check and _interrupt_check():
-                    proc.kill()
-                    return
-                time.sleep(0.05)
+    timed_out = False
 
-        watcher = threading.Thread(target=_interrupt_watcher, daemon=True)
-        watcher.start()
+    # 主循环: 等待进程结束，同时轮询中断
+    while proc.poll() is None:
+        if _interrupt_check and _interrupt_check():
+            _kill_proc_tree(proc)
+            interrupted = True
+            break
+        if time.time() >= deadline:
+            # 超时不杀进程（纯管道原则），但给读取线程一点时间收尾
+            timed_out = True
+            break
+        time.sleep(0.05)
 
-        stdout, stderr = proc.communicate(timeout=timeout_sec)
-    except subprocess.TimeoutExpired:
-        # 纯管道: 超时不杀进程，返回已收集输出，AI自己决定
-        stdout, stderr = proc.communicate()
+    # 等待读取线程结束（最多3秒，中断场景下不无限等）
+    wait_time = 3.0 if interrupted else 5.0
+    t_out.join(timeout=wait_time)
+    t_err.join(timeout=wait_time)
+
+    stdout = b"".join(stdout_chunks)
+    stderr = b"".join(stderr_chunks)
+
+    if interrupted:
+        return "[用户中断]"
+
+    if timed_out:
         out = _decode_output(stdout)
         err = _decode_output(stderr)
         parts = []
@@ -145,15 +203,6 @@ def execute(
             parts.append(f"[stderr]\n{err.strip()}")
         parts.append(f"[超时: 命令执行超过{timeout_sec:.0f}秒，进程仍在运行]")
         return "\n".join(parts)
-    except Exception:
-        proc.kill()
-        stdout, stderr = proc.communicate()
-
-    if _interrupt_check and _interrupt_check():
-        interrupted = True
-
-    if interrupted:
-        return "[用户中断]"
 
     out = _decode_output(stdout)
     err = _decode_output(stderr)

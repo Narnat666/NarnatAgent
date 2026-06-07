@@ -122,6 +122,7 @@ class Agent:
         bash_tool.set_confirm_callback(self._confirm_delete)
         bash_tool.set_interrupt_check(lambda: _interrupt_ctrl.is_set)
         terminal_tool.set_confirm_callback(self._confirm_delete)
+        terminal_tool.set_interrupt_check(lambda: _interrupt_ctrl.is_set)
         todo_tool.set_ui_callback(self._on_todo_update)
         # 统计
         self._total_input_tokens = 0
@@ -173,6 +174,9 @@ class Agent:
             summary = arguments.get("command", "")
         elif name == "Terminal":
             action = arguments.get("action", "")
+            # action默认值为"exec"，AI省略action时按exec处理
+            if not action and arguments.get("command", ""):
+                action = "exec"
             sid = arguments.get("session_id", -1)
             sid_str = f"[{sid}]" if sid >= 0 else ""
             if action == "connect":
@@ -180,11 +184,14 @@ class Agent:
                 username = arguments.get("username", "")
                 summary = f"connect{sid_str} {username}@{host}"
             elif action == "exec":
-                summary = f"exec{sid_str} {arguments.get('command', '')}"
+                cmd = arguments.get("command", "")
+                summary = f"exec{sid_str} {cmd}" if cmd else f"exec{sid_str} (空命令)"
+            elif action == "status":
+                summary = "status"
             elif action == "close":
                 summary = f"close{sid_str} {arguments.get('host', '')}"
             else:
-                summary = f"{action}{sid_str}"
+                summary = f"{action or '(未知)'}{sid_str}"
         elif name == "Grep":
             summary = arguments.get("pattern", "")
         elif name == "Glob":

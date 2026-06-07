@@ -131,23 +131,34 @@ class InterruptController:
             self._poll_thread.join(timeout=1.0)
         self._poll_thread = None
         self._interrupt.clear()
-        if self._saved_sigint is not None:
-            signal.signal(signal.SIGINT, self._saved_sigint)
-            self._saved_sigint = None
-        else:
-            signal.signal(signal.SIGINT, signal.default_int_handler)
+        # signal.signal只能在主线程调用
+        if threading.current_thread() is threading.main_thread():
+            if self._saved_sigint is not None:
+                signal.signal(signal.SIGINT, self._saved_sigint)
+                self._saved_sigint = None
+            else:
+                # 编译为exe后Ctrl+C会直接杀进程导致崩溃，忽略SIGINT，用ESC中断
+                if getattr(sys, 'frozen', False):
+                    signal.signal(signal.SIGINT, signal.SIG_IGN)
+                else:
+                    signal.signal(signal.SIGINT, signal.default_int_handler)
 
     def enter_run_mode(self) -> None:
         self._interrupt.clear()
         self._stop_poll.clear()
         self._poll_thread = threading.Thread(target=self._poll_esc, daemon=True)
         self._poll_thread.start()
-        # 恢复SIGINT为默认行为（编译为exe后Ctrl+C直接退出，不拦截）
-        if self._saved_sigint is not None:
-            signal.signal(signal.SIGINT, self._saved_sigint)
-            self._saved_sigint = None
-        else:
-            signal.signal(signal.SIGINT, signal.default_int_handler)
+        # signal.signal只能在主线程调用
+        if threading.current_thread() is threading.main_thread():
+            if self._saved_sigint is not None:
+                signal.signal(signal.SIGINT, self._saved_sigint)
+                self._saved_sigint = None
+            else:
+                # 编译为exe后Ctrl+C会直接杀进程导致崩溃，忽略SIGINT，用ESC中断
+                if getattr(sys, 'frozen', False):
+                    signal.signal(signal.SIGINT, signal.SIG_IGN)
+                else:
+                    signal.signal(signal.SIGINT, signal.default_int_handler)
 
     def _poll_esc(self) -> None:
         """轮询ESC键。Windows使用msvcrt，Unix使用select+termios。"""
@@ -157,18 +168,24 @@ class InterruptController:
             self._poll_esc_unix()
 
     def _poll_esc_windows(self) -> None:
-        """Windows原生控制台下使用msvcrt检测ESC键。"""
+        """Windows下检测ESC键。优先msvcrt，非原生控制台回退ReadConsoleInput。"""
         try:
             import msvcrt
             import ctypes
             kernel32 = ctypes.windll.kernel32
             handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
             mode = ctypes.c_ulong()
-            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-                return  # 非原生控制台
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                # 原生控制台: 使用msvcrt
+                self._poll_esc_windows_native(msvcrt)
+            else:
+                # 非原生控制台(Windows Terminal等): 使用ReadConsoleInput
+                self._poll_esc_windows_coninput(kernel32)
         except (ImportError, OSError, AttributeError):
-            return
+            pass
 
+    def _poll_esc_windows_native(self, msvcrt) -> None:
+        """原生CMD下使用msvcrt检测ESC键。"""
         while not self._stop_poll.is_set():
             try:
                 if msvcrt.kbhit():
@@ -184,6 +201,58 @@ class InterruptController:
             except OSError:
                 break
             self._stop_poll.wait(0.03)
+
+    def _poll_esc_windows_coninput(self, kernel32) -> None:
+        """非原生控制台(Windows Terminal等)下使用ReadConsoleInput检测ESC键。"""
+        import ctypes
+
+        handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+
+        # INPUT_RECORD 结构体: 20 bytes (EventType 2bytes + padding 2bytes + Event 16bytes)
+        # KEY_EVENT_RECORD: bKeyDown(4) + wRepeatCount(2) + wVirtualKeyCode(2) + wVirtualScanCode(2) + UnicodeChar(2) + dwControlKeyState(4)
+        INPUT_RECORD_SIZE = 20
+        KEY_EVENT = 0x0001
+        VK_ESCAPE = 0x1B
+
+        buf = (ctypes.c_char * (INPUT_RECORD_SIZE * 8))()  # 一次读8条
+        records_read = ctypes.c_ulong()
+
+        while not self._stop_poll.is_set():
+            try:
+                # WaitForSingleObject 等待控制台输入，超时50ms
+                result = kernel32.WaitForSingleObject(handle, 50)
+                if result != 0:  # WAIT_TIMEOUT=0x102, WAIT_FAILED=0xFFFFFFFF
+                    continue
+
+                # 读取输入记录
+                if not kernel32.ReadConsoleInputW(
+                    handle, buf, 8, ctypes.byref(records_read)
+                ):
+                    break
+
+                for i in range(records_read.value):
+                    offset = i * INPUT_RECORD_SIZE
+                    event_type = int.from_bytes(
+                        buf[offset:offset+2], byteorder='little', signed=False
+                    )
+                    if event_type != KEY_EVENT:
+                        continue
+                    # KEY_EVENT_RECORD 偏移4字节处是 bKeyDown (BOOL, 4 bytes)
+                    key_down = int.from_bytes(
+                        buf[offset+4:offset+8], byteorder='little', signed=False
+                    )
+                    if not key_down:
+                        continue
+                    # wVirtualKeyCode 偏移10字节处 (2 bytes)
+                    vk_code = int.from_bytes(
+                        buf[offset+10:offset+12], byteorder='little', signed=False
+                    )
+                    if vk_code == VK_ESCAPE:
+                        self._interrupt.set()
+                        return
+            except (OSError, ValueError):
+                break
+            self._stop_poll.wait(0.02)
 
     def _poll_esc_unix(self) -> None:
         """Unix/Linux/macOS下使用select+termios检测ESC键。"""
