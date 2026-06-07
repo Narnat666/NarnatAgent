@@ -4,6 +4,7 @@ Windows用PowerShell，Linux/macOS用bash。
 AI自己负责写正确语法，我们只管送达和返回。
 """
 
+import base64
 import os
 import re
 import signal
@@ -112,12 +113,14 @@ def execute(
 
     # Windows: 统一用PowerShell，AI输入什么就执行什么
     # 优先pwsh(PowerShell 7+，原生支持&&/||)，回退powershell 5.x
+    # 用-EncodedCommand传Base64，避免-Command对$_等特殊字符的二次解析
     if sys.platform == "win32":
         ps = _find_executable("pwsh", "powershell")
         if ps is None:
             return "错误: 未找到PowerShell，请安装后重试"
-        shell_cmd = [ps, "-NoProfile", "-Command",
-                     "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + command]
+        full_cmd = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + command
+        encoded = base64.b64encode(full_cmd.encode("utf-16-le")).decode("ascii")
+        shell_cmd = [ps, "-NoProfile", "-EncodedCommand", encoded]
     else:
         shell = _find_executable("bash", "sh")
         if shell is None:
