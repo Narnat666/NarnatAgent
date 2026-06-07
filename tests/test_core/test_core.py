@@ -127,7 +127,7 @@ class TestCompressor:
         result = comp.build_compress_messages(messages)
         assert len(result) == 3
         assert result[-1]["role"] == "user"
-        assert "总结" in result[-1]["content"]
+        assert "Summarize" in result[-1]["content"]
 
     def test_write_summary(self):
         comp = Compressor(self.narnat_dir)

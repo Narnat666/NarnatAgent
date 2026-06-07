@@ -3,10 +3,19 @@
 import fnmatch
 import os
 import re
-from typing import Optional
+from typing import Optional, Callable
 
 
 _IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache"}
+
+# 中断检查回调，由agent层注入（返回True表示用户按了ESC）
+_interrupt_check: Optional[Callable[[], bool]] = None
+
+
+def set_interrupt_check(cb: Callable[[], bool]):
+    """设置中断检查回调。cb返回True表示用户请求中断。"""
+    global _interrupt_check
+    _interrupt_check = cb
 
 
 def execute(
@@ -65,24 +74,31 @@ def execute(
     results = []
     file_matches = _search_files(root, regex, glob, output_mode, n, A, B, head_limit)
 
+    # ESC铁律: 搜索被中断时返回已有结果+中断标记
+    interrupted = _interrupt_check and _interrupt_check()
+
     if output_mode == "files_with_matches":
         for rel_path in file_matches:
             results.append(rel_path)
             if head_limit and len(results) >= head_limit:
                 break
-        return "\n".join(results) if results else "(无匹配)"
+        output = "\n".join(results) if results else "(无匹配)"
     elif output_mode == "count":
         for rel_path, count in file_matches:
             results.append(f"{rel_path}:{count}")
             if head_limit and len(results) >= head_limit:
                 break
-        return "\n".join(results) if results else "(无匹配)"
+        output = "\n".join(results) if results else "(无匹配)"
     else:  # content
         for item in file_matches:
             results.append(item)
             if head_limit and len(results) >= head_limit:
                 break
-        return "\n".join(results) if results else "(无匹配)"
+        output = "\n".join(results) if results else "(无匹配)"
+
+    if interrupted:
+        output += "\n[用户中断]"
+    return output
 
 
 def _search_single_file(file_path, regex, output_mode, show_n, A, B, head_limit):
@@ -141,6 +157,9 @@ def _search_files(root, regex, glob_filter, output_mode, show_n, A, B, head_limi
 
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in _IGNORE_DIRS]
+        # ESC铁律: 每遍历一个目录检查一次中断
+        if _interrupt_check and _interrupt_check():
+            return results
         for fname in filenames:
             if glob_filter and not fnmatch.fnmatch(fname, glob_filter):
                 continue

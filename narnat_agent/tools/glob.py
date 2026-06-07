@@ -3,10 +3,20 @@
 import os
 import fnmatch
 from pathlib import PurePath
+from typing import Optional, Callable
 
 
 # 忽略的目录
 _IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache"}
+
+# 中断检查回调，由agent层注入（返回True表示用户按了ESC）
+_interrupt_check: Optional[Callable[[], bool]] = None
+
+
+def set_interrupt_check(cb: Callable[[], bool]):
+    """设置中断检查回调。cb返回True表示用户请求中断。"""
+    global _interrupt_check
+    _interrupt_check = cb
 
 
 def execute(pattern: str, path: str = "") -> str:
@@ -28,6 +38,9 @@ def execute(pattern: str, path: str = "") -> str:
     for dirpath, dirnames, filenames in os.walk(root):
         # 原地修改dirnames跳过忽略目录
         dirnames[:] = [d for d in dirnames if d not in _IGNORE_DIRS]
+        # ESC铁律: 每遍历一个目录检查一次中断
+        if _interrupt_check and _interrupt_check():
+            return "[用户中断]"
         for fname in filenames:
             full = os.path.join(dirpath, fname)
             rel = os.path.relpath(full, root)

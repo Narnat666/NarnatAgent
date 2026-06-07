@@ -18,11 +18,20 @@ import sys
 import time
 import platform
 from html import unescape as _html_unescape
-from typing import List, Dict
+from typing import List, Dict, Optional, Callable
 from urllib.parse import quote_plus, urlparse
 
 
 # ── 常量 ──
+
+# 中断检查回调，由agent层注入（返回True表示用户按了ESC）
+_interrupt_check: Optional[Callable[[], bool]] = None
+
+
+def set_interrupt_check(cb: Callable[[], bool]):
+    """设置中断检查回调。cb返回True表示用户请求中断。"""
+    global _interrupt_check
+    _interrupt_check = cb
 
 def _make_ua() -> str:
     """根据当前平台生成 User-Agent 字符串。"""
@@ -160,6 +169,12 @@ def execute(query: str, num: int = 10, lr: str = "") -> str:
             seen.add(key)
             results.append(r)
 
+    # ESC铁律: Bing完成后检查中断，跳过百度
+    if _interrupt_check and _interrupt_check():
+        if not results:
+            return "[用户中断]"
+        return _format_results(results[:num]) + "\n[用户中断]"
+
     # 2. 百度 — Playwright子进程，中文搜索更强
     baidu_seen: set = set()
     for r in _search_baidu(query, num):
@@ -171,6 +186,10 @@ def execute(query: str, num: int = 10, lr: str = "") -> str:
 
     if not results:
         return "(无搜索结果)"
+
+    # ESC铁律: 百度完成后也检查中断
+    if _interrupt_check and _interrupt_check():
+        return _format_results(results[:num]) + "\n[用户中断]"
 
     # 按相关性排序
     results.sort(key=lambda r: _relevance_score(r, query), reverse=True)
