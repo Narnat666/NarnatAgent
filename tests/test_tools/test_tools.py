@@ -774,6 +774,17 @@ class TestTerminalBasic:
         result = terminal.execute(action="invalid")
         assert "错误" in result
 
+    def test_input_no_content(self):
+        """input缺少内容"""
+        result = terminal.execute(action="input")
+        assert "错误" in result
+
+    def test_input_no_session(self):
+        """input时无活跃会话"""
+        terminal._sessions.clear()
+        result = terminal.execute(action="input", input="mypassword")
+        assert "错误" in result
+
     def test_connect_unreachable_host(self):
         """连接不可达主机应返回错误而非崩溃"""
         result = terminal.execute(

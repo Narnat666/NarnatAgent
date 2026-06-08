@@ -151,21 +151,23 @@ TOOL_DEFINITIONS: List[Dict] = [
         "type": "function",
         "function": {
             "name": "Terminal",
-            "description": "多终端可持续SSH，最多5个并发终端。connect建立会话(可指定session_id或自动分配)，exec在指定终端执行命令，实现多终端并行操控",
+            "description": "多终端可持续SSH，最多5个并发终端。connect建立会话(可指定session_id或自动分配)，exec在指定终端执行命令，input发送交互输入(如sudo密码)，实现多终端并行操控",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["connect", "exec", "status", "close"],
-                        "description": "操作: connect=建立SSH会话, exec=执行命令, status=查看会话, close=关闭会话",
+                        "enum": ["connect", "exec", "input", "status", "close"],
+                        "description": "操作: connect=建立SSH会话, exec=执行命令, input=发送交互输入(如sudo密码), status=查看会话, close=关闭会话",
                     },
                     "host": {"type": "string", "description": "远程主机IP或域名"},
                     "username": {"type": "string", "description": "SSH用户名"},
                     "port": {"type": "integer", "description": "SSH端口，默认22"},
                     "key_path": {"type": "string", "description": "SSH私钥路径，如 ~/.ssh/id_rsa"},
                     "password": {"type": "string", "description": "SSH密码（优先使用key_path）"},
+                    "sudo_password": {"type": "string", "description": "sudo密码（connect时设置，后续exec遇到sudo提示自动注入）"},
                     "command": {"type": "string", "description": "要执行的命令（exec时必填）"},
+                    "input": {"type": "string", "description": "交互输入内容（input时必填，如sudo密码、确认y/n）"},
                     "timeout": {"type": "integer", "description": "超时秒数，0=无限等待(默认)，AI可按需设定"},
                     "session_id": {"type": "integer", "description": "终端编号0-4，-1为自动选择。connect时指定或自动分配，exec时指定在哪个终端执行"},
                 },
@@ -177,13 +179,12 @@ TOOL_DEFINITIONS: List[Dict] = [
         "type": "function",
         "function": {
             "name": "WebSearch",
-            "description": "联网搜索，获取实时信息或在线文档",
+            "description": "联网搜索（Bing+Baidu双引擎并行），获取实时信息或在线文档",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "搜索关键词"},
-                    "num": {"type": "integer", "description": "返回结果数，默认10"},
-                    "lr": {"type": "string", "description": "语言限制，如lang_en/lang_zh-CN"},
+                    "num": {"type": "integer", "description": "返回结果数，默认5"},
                 },
                 "required": ["query"],
             },

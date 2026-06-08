@@ -194,6 +194,8 @@ class InterruptController:
                         time.sleep(0.02)
                         if not msvcrt.kbhit():
                             self._interrupt.set()
+                            from ..core.llm import abort_active_llm_request
+                            abort_active_llm_request()
                             break
                         # 转义序列，消费掉后续字符
                         while msvcrt.kbhit():
@@ -249,6 +251,8 @@ class InterruptController:
                     )
                     if vk_code == VK_ESCAPE:
                         self._interrupt.set()
+                        from ..core.llm import abort_active_llm_request
+                        abort_active_llm_request()
                         return
             except (OSError, ValueError):
                 break
@@ -284,6 +288,8 @@ class InterruptController:
                             ready2, _, _ = select.select([sys.stdin], [], [], 0.01)
                             if not ready2:
                                 self._interrupt.set()
+                                from ..core.llm import abort_active_llm_request
+                                abort_active_llm_request()
                                 break
                             # 转义序列，消费掉后续字符
                             while True:

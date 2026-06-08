@@ -1,6 +1,6 @@
 """仿真HTTP服务器 —— 本地闭环测试WebSearch工具
 
-启动本地HTTP服务器，返回预设的搜索结果页面。
+模拟 Open WebSearch daemon 的 API 接口。
 WebSearch工具连上去，搜到预设结果，无需真实网络。
 
 用法:
@@ -8,9 +8,8 @@ WebSearch工具连上去，搜到预设结果，无需真实网络。
         server.add_search_result("python教程", [
             {"title": "Python官方教程", "url": "https://docs.python.org/3/tutorial/", "snippet": "Welcome to Python"},
         ])
-        server.add_page("https://example.com/test.html", "<html>test content</html>")
 
-        # WebSearch使用server.host:server.port作为代理
+        # WebSearch使用server.base_url作为daemon地址
 """
 
 import json
@@ -23,38 +22,51 @@ from urllib.parse import urlparse, parse_qs
 
 
 class _MockHTTPHandler(BaseHTTPRequestHandler):
-    """处理HTTP请求"""
+    """处理HTTP请求 — 模拟 Open WebSearch daemon"""
 
     def do_GET(self):
         server = self.server.mock_server
         parsed = urlparse(self.path)
         path = parsed.path
-        params = parse_qs(parsed.query)
 
-        # 搜索API端点
+        # 健康检查端点
+        if path == "/health":
+            self._send_json({"status": "ok", "message": "open-websearch daemon running"})
+            return
+
+        self._send_json({"error": "not found"}, 404)
+
+    def do_POST(self):
+        server = self.server.mock_server
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        # 搜索API端点 — 模拟 Open WebSearch daemon 的 /search
         if path == "/search":
-            query = params.get("q", [""])[0]
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self._send_json({"error": "invalid json"}, 400)
+                return
+
+            query = data.get("query", "")
+            engine = data.get("engine", "bing")
+            max_results = data.get("maxResults", 5)
+
+            # 查找预设结果
             results = server._search_results.get(query, [])
-            self._send_json({"results": results})
-            return
+            # 限制返回数量
+            results = results[:max_results]
 
-        # 预设页面
-        if path in server._pages:
-            self._send_html(server._pages[path])
-            return
-
-        # Bing搜索页面模拟
-        if "bing.com" in self.headers.get("Host", "") or path == "/bing/search":
-            query = params.get("q", [""])[0]
-            html = server._generate_bing_html(query)
-            self._send_html(html)
-            return
-
-        # 百度搜索页面模拟
-        if "baidu.com" in self.headers.get("Host", "") or path == "/baidu/s":
-            query = params.get("wd", params.get("q", [""])[0])[0] if "wd" in params else params.get("q", [""])[0]
-            html = server._generate_baidu_html(query)
-            self._send_html(html)
+            self._send_json({
+                "data": {
+                    "results": results,
+                    "query": query,
+                    "engine": engine,
+                }
+            })
             return
 
         self._send_json({"error": "not found"}, 404)
@@ -67,20 +79,12 @@ class _MockHTTPHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_html(self, html: str, status: int = 200):
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        body = html.encode("utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
     def log_message(self, format, *args):
         pass
 
 
 class MockHTTPServer:
-    """仿真HTTP服务器
+    """仿真HTTP服务器 — 模拟 Open WebSearch daemon
 
     用法:
         with MockHTTPServer() as server:
@@ -93,7 +97,6 @@ class MockHTTPServer:
         self.host = "127.0.0.1"
         self.port = 0
         self._search_results = {}
-        self._pages = {}
         self._server = None
         self._thread = None
 
@@ -131,38 +134,3 @@ class MockHTTPServer:
             results: [{"title": "...", "url": "...", "snippet": "..."}, ...]
         """
         self._search_results[query] = results
-
-    def add_page(self, url: str, html: str):
-        """添加预设页面"""
-        parsed = urlparse(url)
-        self._pages[parsed.path] = html
-
-    def _generate_bing_html(self, query: str) -> str:
-        """生成Bing搜索结果HTML"""
-        results = self._search_results.get(query, [])
-        items = ""
-        for r in results:
-            items += f'''
-            <li class="b_algo">
-                <h2><a href="{r['url']}">{r['title']}</a></h2>
-                <p>{r.get('snippet', '')}</p>
-            </li>'''
-        return f'''<html><body>
-            <div id="b_results">
-                <ol>{items}</ol>
-            </div>
-        </body></html>'''
-
-    def _generate_baidu_html(self, query: str) -> str:
-        """生成百度搜索结果HTML"""
-        results = self._search_results.get(query, [])
-        items = ""
-        for r in results:
-            items += f'''
-            <div class="result c-container">
-                <h3 class="t"><a href="{r['url']}">{r['title']}</a></h3>
-                <span class="content-right_8Zs40">{r.get('snippet', '')}</span>
-            </div>'''
-        return f'''<html><body>
-            <div id="content_left">{items}</div>
-        </body></html>'''

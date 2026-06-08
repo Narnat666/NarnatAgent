@@ -137,16 +137,34 @@ class TestSudoInjection:
         terminal.cleanup()
         self.server.stop()
 
-    def test_sudo_whoami(self):
-        _connect(self.server)
+    def test_sudo_whoami_with_password(self):
+        """connect时设置sudo_password，exec sudo命令自动注入"""
+        _connect(self.server, sudo_password="0")
         result = _exec(self.server.host, "sudo whoami")
-        # sudo注入后应返回root
-        assert "root" in result or "sudo" in result
+        assert "root" in result
 
-    def test_sudo_apt(self):
-        _connect(self.server)
+    def test_sudo_apt_with_password(self):
+        """sudo apt命令自动注入密码"""
+        _connect(self.server, sudo_password="0")
         result = _exec(self.server.host, "sudo apt install build-essential")
         assert isinstance(result, str)
+
+    def test_sudo_without_password_set(self):
+        """未设置sudo_password时，检测到密码提示返回提示信息"""
+        _connect(self.server)
+        result = _exec(self.server.host, "sudo whoami")
+        # 应返回密码提示信息
+        assert "密码" in result or "password" in result or "sudo" in result
+
+    def test_input_action_for_sudo(self):
+        """用input action手动输入sudo密码"""
+        _connect(self.server)
+        # 先exec sudo命令，会返回密码提示
+        result1 = _exec(self.server.host, "sudo whoami")
+        # 如果检测到密码提示，用input action输入
+        if "密码" in result1 or "password" in result1:
+            result2 = terminal.execute(action="input", host=self.server.host, input="0", timeout=15)
+            assert isinstance(result2, str)
 
 
 # ── close保护 ──
@@ -311,6 +329,12 @@ class TestSimulatedShellUnit:
         shell = SimulatedShell()
         result = shell.execute("echo 'wrong' | sudo -S whoami")
         assert "Sorry" in result
+
+    def test_sudo_prompts_password(self):
+        """sudo cmd(不带-S)返回密码提示"""
+        shell = SimulatedShell()
+        result = shell.execute("sudo whoami")
+        assert "password" in result
 
     def test_nohup(self):
         shell = SimulatedShell()

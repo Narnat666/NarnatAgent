@@ -200,6 +200,9 @@ class SimulatedShell:
         return "\n".join(outputs)
 
     def _split_commands(self, command: str) -> list:
+        # 包含sudo的命令不分割（sudo可能需要密码交互）
+        if "sudo" in command:
+            return [command]
         return command.split(";")
 
     def _resolve_path(self, path: str) -> str:
@@ -504,12 +507,15 @@ class SimulatedShell:
         return ""
 
     def _handle_sudo(self, cmd: str) -> str:
-        if "echo" in cmd and "sudo -S" in cmd:
-            m = re.search(r"echo\s+['\"]?(\S+?)['\"]?\s*\|\s*sudo\s+-S", cmd)
+        # 提取sudo部分（忽略;后面的marker等附加命令）
+        sudo_part = cmd.split(";")[0].strip() if ";" in cmd else cmd
+
+        if "echo" in sudo_part and "sudo -S" in sudo_part:
+            m = re.search(r"echo\s+['\"]?(\S+?)['\"]?\s*\|\s*sudo\s+-S", sudo_part)
             if m:
                 pwd = m.group(1)
                 if pwd == self.sudo_password:
-                    rest = cmd.split("sudo -S", 1)[1].strip()
+                    rest = sudo_part.split("sudo -S", 1)[1].strip()
                     if rest:
                         # sudo后以root身份执行
                         result = self._execute_single(rest.lstrip())
@@ -519,9 +525,10 @@ class SimulatedShell:
                         return result
                     return "root"
                 return "Sorry, try again.\n[sudo] password for testuser:"
-        if cmd.strip() == "sudo whoami":
-            return "root"
-        if "apt" in cmd:
+        # sudo cmd (不带-S): 返回密码提示，PTY层会处理密码输入
+        if sudo_part.strip() == "sudo whoami" or sudo_part.strip().startswith("sudo "):
+            return "[sudo] password for testuser:"
+        if "apt" in sudo_part:
             return "Reading package lists... Done\n0 upgraded, 0 newly installed."
         return ""
 
@@ -848,6 +855,8 @@ class MockSSHServer:
             return
 
         cmd_buffer = ""
+        sudo_pending_cmd = ""  # 等待密码输入的sudo命令
+        sudo_pending_full = ""  # 完整命令(含marker部分)
         while self._running:
             try:
                 chan.settimeout(1.0)
@@ -859,6 +868,8 @@ class MockSSHServer:
 
                 if "\x03" in text:
                     cmd_buffer = ""
+                    sudo_pending_cmd = ""
+                    sudo_pending_full = ""
                     chan.send(f"^C\n{shell.prompt}")
                     continue
 
@@ -878,6 +889,35 @@ class MockSSHServer:
                         break
 
                     line = line.strip()
+
+                    # sudo密码输入状态
+                    if sudo_pending_cmd:
+                        # line是密码输入
+                        if line == shell.sudo_password:
+                            # 密码正确，执行sudo后的命令
+                            sudo_part = sudo_pending_cmd.split(None, 1)[1] if " " in sudo_pending_cmd else ""
+                            if sudo_part.strip() == "whoami":
+                                chan.send(f"root\r\n")
+                            elif sudo_part.strip():
+                                result = shell.execute(sudo_part)
+                                if result:
+                                    chan.send(f"{result}\r\n")
+                            # 执行marker部分(原始命令中;后面的部分)
+                            marker_part = sudo_pending_full.split(";", 1)[1].strip() if ";" in sudo_pending_full else ""
+                            if marker_part:
+                                marker_output = shell.execute(marker_part)
+                                if marker_output:
+                                    chan.send(f"{marker_output}\r\n{shell.prompt}")
+                                else:
+                                    chan.send(shell.prompt)
+                            else:
+                                chan.send(shell.prompt)
+                        else:
+                            chan.send(f"Sorry, try again.\r\n{shell.prompt}")
+                        sudo_pending_cmd = ""
+                        sudo_pending_full = ""
+                        continue
+
                     if not line:
                         chan.send(shell.prompt)
                         continue
@@ -886,7 +926,12 @@ class MockSSHServer:
                     chan.send(line + "\r\n")
 
                     output = shell.execute(line)
-                    if output:
+                    # 检测sudo密码提示
+                    if output and "[sudo] password" in output:
+                        sudo_pending_cmd = line.split(";")[0].strip()  # 只取sudo部分
+                        sudo_pending_full = line  # 保存完整命令(含marker)
+                        chan.send(f"{output}\r\n")
+                    elif output:
                         chan.send(f"{output}\r\n{shell.prompt}")
                     else:
                         chan.send(shell.prompt)

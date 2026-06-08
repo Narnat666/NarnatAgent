@@ -206,30 +206,14 @@ class TestWebSearchInterrupt:
     def teardown_method(self):
         web_search.set_interrupt_check(None)
 
-    def test_interrupt_before_bing(self):
-        """Bing搜索前就中断"""
+    def test_interrupt_at_entry(self):
+        """入口处就中断"""
         web_search.set_interrupt_check(lambda: True)
-        # Bing 返回空列表（被中断跳过），然后检查中断
         result = web_search.execute("test query")
         assert "[用户中断]" in result
 
-    def test_interrupt_after_bing_before_baidu(self):
-        """Bing完成后、百度前中断"""
-        # 模拟：Bing正常返回结果，但在百度前被中断
-        call_count = [0]
-
-        def interrupt_after_bing():
-            call_count[0] += 1
-            # Bing 内部不检查中断，所以第一次检查在 Bing 之后
-            return call_count[0] >= 1
-
-        web_search.set_interrupt_check(interrupt_after_bing)
-        result = web_search.execute("test query")
-        # 要么被中断，要么正常完成（取决于 Bing 是否有结果）
-        assert isinstance(result, str)
-
     def test_no_interrupt_normal_flow(self):
-        """无中断时正常执行（可能无网络，但不应崩溃）"""
+        """无中断时正常执行（可能daemon未运行，但不应崩溃）"""
         web_search.set_interrupt_check(lambda: False)
         result = web_search.execute("test query")
         assert isinstance(result, str)

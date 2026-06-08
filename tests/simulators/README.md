@@ -134,10 +134,10 @@ with MockLLMServer() as server:
 **对应模块**: `narnat_agent/tools/web_search.py`
 
 **能力**:
-- 搜索API端点（/search?q=xxx）
-- Bing搜索HTML模拟
-- 百度搜索HTML模拟
-- 预设页面
+- 模拟 Open WebSearch daemon 的 API 接口
+- 健康检查端点（GET /health）
+- 搜索API端点（POST /search，JSON格式）
+- 预设搜索结果
 
 **用法**:
 ```python
@@ -148,7 +148,7 @@ with MockHTTPServer() as server:
         {"title": "Python官方教程", "url": "https://docs.python.org/3/tutorial/",
          "snippet": "Welcome to Python"},
     ])
-    server.add_page("https://example.com/test.html", "<html>test</html>")
+    # server.base_url 可作为 daemon 地址
 ```
 
 ### 2.4 MockFileSystem — 文件系统仿真

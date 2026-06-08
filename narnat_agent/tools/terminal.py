@@ -4,7 +4,6 @@
 - AI输入什么就发送什么，不做翻译/注入/截断
 - 设备输出什么就返回什么，不做裁剪
 - 超时只告知AI，不替AI杀进程
-- AI自己负责sudo密码、平台适配、输出裁剪
 
 核心设计:
 - 支持最多MAX_SESSIONS(5)个并发SSH会话，每个会话有唯一session_id(0-4)
@@ -14,6 +13,11 @@
 - 会话持久化，多次调用复用同一连接
 - 哨兵机制: 追加 echo __MARKER__$?; pwd -P; echo __PWD_MARKER__ 检测命令结束
 - timeout=0 无限等待，适合长命令(AI可去其他终端做别的事)
+
+sudo密码自动注入:
+- connect时可选设置sudo_password，后续exec遇到sudo密码提示自动注入
+- 密码通过channel直接写入，不经过shell命令行，不出现在ps/历史记录中
+- 未设置sudo_password时，检测到密码提示返回提示信息，AI可用input action手动输入
 
 输出解析(PTY基础设施，不是翻译):
 - _strip_echo: 剥离PTY命令回显(不是AI命令的输出)
@@ -33,6 +37,15 @@ import socket
 # 删除命令正则（仅保留删除确认，其他全部放行）
 _RE_DELETE = re.compile(
     r"\b(rm\s|del\s|Remove-Item\s|rmdir\s|rd\s)",
+    re.IGNORECASE,
+)
+
+# sudo/密码提示检测正则（用于自动注入sudo_password）
+_RE_PASSWORD_PROMPT = re.compile(
+    r"\[sudo\].*password"
+    r"|Password\s*[:：]"
+    r"|密码\s*[:：]"
+    r"|passphrase\s*for\s+key",
     re.IGNORECASE,
 )
 
@@ -65,11 +78,13 @@ class SSHSession:
     """一个SSH交互式会话"""
 
     def __init__(self, host: str, username: str, port: int = 22,
-                 key_path: Optional[str] = None, password: Optional[str] = None):
+                 key_path: Optional[str] = None, password: Optional[str] = None,
+                 sudo_password: Optional[str] = None):
         self.host = host
         self.username = username
         self.port = port
         self._cwd = "~"
+        self._sudo_password = sudo_password  # 用于自动注入sudo密码
 
         self._client = paramiko.SSHClient()
         self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -114,7 +129,7 @@ class SSHSession:
         """在远程shell中执行命令，返回输出+prompt
 
         纯管道原则: AI输入什么就发送什么，不做翻译/注入。
-        AI自己负责sudo密码处理(如写 echo PASS | sudo -S)。
+        sudo密码自动注入: 检测到密码提示时，若session有sudo_password则自动注入。
 
         哨兵机制: 追加 echo __MARKER__$?; pwd -P; echo __PWD_MARKER__
         用于检测命令结束和捕获退出码，这是管道基础设施，不是翻译。
@@ -136,6 +151,30 @@ class SSHSession:
         # 用 $? 捕获退出码附加在marker行，pwd -P 独立获取路径
         full_cmd = f"{command}; echo {marker}$?; pwd -P; echo {pwd_marker}\n"
         self._channel.send(full_cmd)
+
+        return self._read_until_marker(marker, pwd_marker, timeout=timeout)
+
+    def send_input(self, text: str, timeout: int = 0) -> str:
+        """向当前终端发送交互输入（如sudo密码、确认提示等）
+
+        直接通过channel写入文本+换行，然后读取直到下一个prompt。
+        不追加哨兵marker，因为这是对已有交互提示的响应。
+
+        Args:
+            text: 要输入的文本（如密码、y/n确认等）
+            timeout: 等待响应的超时秒数，0=无限等待
+        """
+        if self._busy:
+            return f"[上一个命令尚未完成，此终端暂不可用]\n{self.prompt}"
+
+        # 直接写入channel，不经过shell命令行
+        self._channel.send(text + "\n")
+
+        # 读取后续输出，等待命令完成(用marker机制)
+        marker = f"__NARNAT_MARKER_{time.time_ns()}__"
+        pwd_marker = f"__NARNAT_PWD_{time.time_ns()}__"
+        # 发送一个空命令来获取marker，检测输入后的命令是否完成
+        self._channel.send(f"echo {marker}$?; pwd -P; echo {pwd_marker}\n")
 
         return self._read_until_marker(marker, pwd_marker, timeout=timeout)
 
@@ -288,6 +327,7 @@ class SSHSession:
 
         纯管道原则: 超时只告知AI，不替AI杀进程。
         ESC铁律: 用户按ESC立即中断，发Ctrl+C，宁可丢数据不卡住。
+        sudo注入: 检测到密码提示时自动注入sudo_password(若有)。
         """
         output = ""
         # timeout=0 表示无限等待
@@ -295,6 +335,8 @@ class SSHSession:
         found = False
         # 找到marker后，连续recv超时次数达到此阈值才认为数据读完
         DRAIN_CONSECUTIVE_TIMEOUTS = 3
+        # sudo密码注入状态: 是否已注入过(防止重复注入)
+        sudo_injected = False
 
         while time.time() < deadline:
             # ESC铁律: 检查用户中断
@@ -305,6 +347,18 @@ class SSHSession:
             try:
                 chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
                 output += chunk
+
+                # sudo密码提示检测与自动注入
+                if not sudo_injected and not found:
+                    cleaned_chunk = self._clean_output(output)
+                    if _RE_PASSWORD_PROMPT.search(cleaned_chunk):
+                        if self._sudo_password:
+                            # 自动注入: 通过channel直接写入，不经过shell命令行
+                            self._channel.send(self._sudo_password + "\n")
+                            sudo_injected = True
+                        else:
+                            # 未设置sudo_password，告知AI
+                            return f"{self._clean_output(self._strip_echo(output))}\n[检测到密码提示，请用input action输入密码，或在connect时设置sudo_password]"
 
                 # 检测哨兵：跳过回显行（PTY会回显完整命令，含marker，不能误匹配）
                 # 回显是output的第一行，从第二行开始检测
@@ -555,7 +609,9 @@ def execute(
     port: int = 22,
     key_path: str = "",
     password: str = "",
+    sudo_password: str = "",
     command: str = "",
+    input: str = "",
     timeout: int = 0,
     session_id: int = -1,
 ) -> str:
@@ -565,23 +621,29 @@ def execute(
     action:
       connect  - 建立SSH会话（首次连接或重连），自动分配或使用指定session_id
       exec     - 在指定会话中执行命令
+      input    - 向终端发送交互输入（如sudo密码、确认提示等）
       status   - 查看当前所有会话状态
       close    - 关闭指定会话
 
     session_id:
       0-4  - 指定终端编号
       -1   - 自动选择（connect时自动分配，exec时选唯一活跃会话）
+
+    sudo_password:
+      connect时设置，后续exec遇到sudo密码提示自动注入
     """
     if action == "connect":
-        return _connect(host, username, port, key_path, password, session_id)
+        return _connect(host, username, port, key_path, password, sudo_password, session_id)
     elif action == "exec":
         return _exec(session_id, host, command, timeout)
+    elif action == "input":
+        return _input(session_id, host, input, timeout)
     elif action == "status":
         return _status()
     elif action == "close":
         return _close(session_id, host)
     else:
-        return f"错误: 未知action '{action}'，可选: connect/exec/status/close"
+        return f"错误: 未知action '{action}'，可选: connect/exec/input/status/close"
 
 
 def _allocate_session_id() -> int:
@@ -627,6 +689,7 @@ def _resolve_session_id(session_id: int, host: str = "") -> tuple[int, "SSHSessi
 
 def _connect(host: str, username: str, port: int = 22,
              key_path: str = "", password: str = "",
+             sudo_password: str = "",
              session_id: int = -1) -> str:
     """建立SSH会话"""
     if not host or not username:
@@ -657,6 +720,8 @@ def _connect(host: str, username: str, port: int = 22,
             kwargs["key_path"] = key_path
         if password:
             kwargs["password"] = password
+        if sudo_password:
+            kwargs["sudo_password"] = sudo_password
 
         session = SSHSession(**kwargs)
 
@@ -703,6 +768,28 @@ def _exec(session_id: int, host: str, command: str, timeout: int = 0) -> str:
         return f"[终端{sid}] {result}"
     except Exception as e:
         return f"错误: 终端{sid}命令执行失败: {e}"
+
+
+def _input(session_id: int, host: str, input: str, timeout: int = 0) -> str:
+    """向终端发送交互输入"""
+    if not input:
+        return "错误: input需要提供input内容"
+
+    try:
+        sid, session = _resolve_session_id(session_id, host)
+    except ValueError as e:
+        return f"错误: {e}"
+
+    if session._channel.closed:
+        with _sessions_lock:
+            _sessions.pop(sid, None)
+        return f"错误: 终端{sid}会话已断开，请重新connect"
+
+    try:
+        result = session.send_input(input, timeout=timeout)
+        return f"[终端{sid}] {result}"
+    except Exception as e:
+        return f"错误: 终端{sid}输入发送失败: {e}"
 
 
 def _status() -> str:

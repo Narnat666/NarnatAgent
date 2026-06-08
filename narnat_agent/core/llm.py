@@ -15,6 +15,20 @@ from typing import List, Dict, Any, Iterator, Optional
 from ..config.loader import AIConfig
 from ..tools.registry import get_tool_definitions
 
+# ESC中断：持有当前活跃的LLM HTTP连接，供ESC轮询线程关闭
+_active_llm_response = None
+
+
+def abort_active_llm_request():
+    """关闭当前LLM请求的HTTP连接，解除流式迭代器的阻塞。"""
+    global _active_llm_response
+    resp = _active_llm_response
+    if resp is not None:
+        try:
+            resp.close()
+        except Exception:
+            pass
+
 
 class LLMClient:
     """
@@ -86,60 +100,66 @@ class _OpenAIBackend:
             yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
             return
 
-        tool_calls_buffer = {}      # tc_id → {id, name, arguments}
-        _index_to_id = {}           # index → tc_id（用于增量chunk匹配）
-        content_buffer = []
-        _tc_idx = 0
+        global _active_llm_response
+        _active_llm_response = stream
 
-        for chunk in stream:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            finish_reason = chunk.choices[0].finish_reason
+        try:
+            tool_calls_buffer = {}      # tc_id → {id, name, arguments}
+            _index_to_id = {}           # index → tc_id（用于增量chunk匹配）
+            content_buffer = []
+            _tc_idx = 0
 
-            if delta.content:
-                content_buffer.append(delta.content)
-                yield {"content": delta.content}
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                finish_reason = chunk.choices[0].finish_reason
 
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    tc_index = getattr(tc, 'index', None)
-                    if tc.id:
-                        # 新tool_call的开始chunk（含id和name）
-                        tc_id = tc.id
-                        if tc_index is not None:
-                            _index_to_id[tc_index] = tc_id
-                    elif tc_index is not None and tc_index in _index_to_id:
-                        # 增量chunk（无id但有index）→ 匹配已有buffer
-                        tc_id = _index_to_id[tc_index]
+                if delta.content:
+                    content_buffer.append(delta.content)
+                    yield {"content": delta.content}
+
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        tc_index = getattr(tc, 'index', None)
+                        if tc.id:
+                            # 新tool_call的开始chunk（含id和name）
+                            tc_id = tc.id
+                            if tc_index is not None:
+                                _index_to_id[tc_index] = tc_id
+                        elif tc_index is not None and tc_index in _index_to_id:
+                            # 增量chunk（无id但有index）→ 匹配已有buffer
+                            tc_id = _index_to_id[tc_index]
+                        else:
+                            # 兜底：无id无index，生成fallback id
+                            tc_id = f"_tc_{_tc_idx}"
+                            _tc_idx += 1
+                        buf = tool_calls_buffer.setdefault(
+                            tc_id, {"id": tc_id, "name": "", "arguments": ""},
+                        )
+                        if tc.function.name:
+                            buf["name"] += tc.function.name
+                        if tc.function.arguments:
+                            buf["arguments"] += tc.function.arguments
+
+                if finish_reason:
+                    if tool_calls_buffer:
+                        completed_calls = []
+                        for tc_id, buf in tool_calls_buffer.items():
+                            completed_calls.append({
+                                "id": buf["id"],
+                                "type": "function",
+                                "function": {"name": buf["name"], "arguments": buf["arguments"]},
+                            })
+                        yield {"tool_calls": completed_calls, "finish_reason": finish_reason}
                     else:
-                        # 兜底：无id无index，生成fallback id
-                        tc_id = f"_tc_{_tc_idx}"
-                        _tc_idx += 1
-                    buf = tool_calls_buffer.setdefault(
-                        tc_id, {"id": tc_id, "name": "", "arguments": ""},
-                    )
-                    if tc.function.name:
-                        buf["name"] += tc.function.name
-                    if tc.function.arguments:
-                        buf["arguments"] += tc.function.arguments
+                        yield {"finish_reason": finish_reason}
 
-            if finish_reason:
-                if tool_calls_buffer:
-                    completed_calls = []
-                    for tc_id, buf in tool_calls_buffer.items():
-                        completed_calls.append({
-                            "id": buf["id"],
-                            "type": "function",
-                            "function": {"name": buf["name"], "arguments": buf["arguments"]},
-                        })
-                    yield {"tool_calls": completed_calls, "finish_reason": finish_reason}
-                else:
-                    yield {"finish_reason": finish_reason}
-
-                if self._logger:
-                    total_out = len("".join(content_buffer))
-                    self._logger.info("core.llm", f"响应完成, content_len={total_out}")
+                    if self._logger:
+                        total_out = len("".join(content_buffer))
+                        self._logger.info("core.llm", f"响应完成, content_len={total_out}")
+        finally:
+            _active_llm_response = None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -207,88 +227,94 @@ class _AnthropicBackend:
             return
 
         # 解析 Anthropic SSE 流
-        content_buffer = []
-        tool_use_blocks = {}  # index → {id, name, input_json}
+        global _active_llm_response
+        _active_llm_response = resp
 
-        for raw_line in resp.iter_lines(decode_unicode=True):
-            line = (raw_line or "").strip()
-            if not line.startswith("data:"):
-                continue
-            data_str = line[5:].strip()
-            if not data_str:
-                continue
+        try:
+            content_buffer = []
+            tool_use_blocks = {}  # index → {id, name, input_json}
 
-            try:
-                data = json.loads(data_str)
-            except json.JSONDecodeError:
-                continue
+            for raw_line in resp.iter_lines(decode_unicode=True):
+                line = (raw_line or "").strip()
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if not data_str:
+                    continue
 
-            dtype = data.get("type", "")
+                try:
+                    data = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
 
-            if dtype == "content_block_start":
-                cb = data.get("content_block", {})
-                idx = data.get("index", 0)
-                ctype = cb.get("type", "")
-                if ctype == "tool_use":
-                    tool_use_blocks[idx] = {
-                        "id": cb.get("id", ""),
-                        "name": cb.get("name", ""),
-                        "input_json": "",
-                    }
+                dtype = data.get("type", "")
 
-            elif dtype == "content_block_delta":
-                delta = data.get("delta", {})
-                idx = data.get("index", 0)
-                d_type = delta.get("type", "")
+                if dtype == "content_block_start":
+                    cb = data.get("content_block", {})
+                    idx = data.get("index", 0)
+                    ctype = cb.get("type", "")
+                    if ctype == "tool_use":
+                        tool_use_blocks[idx] = {
+                            "id": cb.get("id", ""),
+                            "name": cb.get("name", ""),
+                            "input_json": "",
+                        }
 
-                if d_type == "text_delta":
-                    text = delta.get("text", "")
-                    if text:
-                        content_buffer.append(text)
-                        yield {"content": text}
+                elif dtype == "content_block_delta":
+                    delta = data.get("delta", {})
+                    idx = data.get("index", 0)
+                    d_type = delta.get("type", "")
 
-                elif d_type == "input_json_delta":
-                    pj = delta.get("partial_json", "")
-                    if idx in tool_use_blocks:
-                        tool_use_blocks[idx]["input_json"] += pj
+                    if d_type == "text_delta":
+                        text = delta.get("text", "")
+                        if text:
+                            content_buffer.append(text)
+                            yield {"content": text}
 
-            elif dtype == "message_delta":
-                stop_reason = data.get("delta", {}).get("stop_reason", "")
-                if stop_reason:
-                    # 转换 stop_reason → finish_reason
-                    if stop_reason == "end_turn":
-                        finish_reason = "stop"
-                    elif stop_reason == "tool_use":
-                        finish_reason = "tool_calls"
-                    else:
-                        # max_tokens / stop_sequence 等都映射为 stop
-                        finish_reason = "stop"
+                    elif d_type == "input_json_delta":
+                        pj = delta.get("partial_json", "")
+                        if idx in tool_use_blocks:
+                            tool_use_blocks[idx]["input_json"] += pj
 
-                    # 转换 tool_use_blocks → OpenAI tool_calls 格式
-                    if tool_use_blocks:
-                        completed_calls = []
-                        for idx in sorted(tool_use_blocks.keys()):
-                            tu = tool_use_blocks[idx]
-                            completed_calls.append({
-                                "id": tu["id"],
-                                "type": "function",
-                                "function": {
-                                    "name": tu["name"],
-                                    "arguments": tu["input_json"],
-                                },
-                            })
-                        yield {"tool_calls": completed_calls, "finish_reason": finish_reason}
-                    else:
-                        yield {"finish_reason": finish_reason}
+                elif dtype == "message_delta":
+                    stop_reason = data.get("delta", {}).get("stop_reason", "")
+                    if stop_reason:
+                        # 转换 stop_reason → finish_reason
+                        if stop_reason == "end_turn":
+                            finish_reason = "stop"
+                        elif stop_reason == "tool_use":
+                            finish_reason = "tool_calls"
+                        else:
+                            # max_tokens / stop_sequence 等都映射为 stop
+                            finish_reason = "stop"
 
-                    if self._logger:
-                        total_out = len("".join(content_buffer))
-                        self._logger.info("core.llm", f"响应完成, content_len={total_out}")
+                        # 转换 tool_use_blocks → OpenAI tool_calls 格式
+                        if tool_use_blocks:
+                            completed_calls = []
+                            for idx in sorted(tool_use_blocks.keys()):
+                                tu = tool_use_blocks[idx]
+                                completed_calls.append({
+                                    "id": tu["id"],
+                                    "type": "function",
+                                    "function": {
+                                        "name": tu["name"],
+                                        "arguments": tu["input_json"],
+                                    },
+                                })
+                            yield {"tool_calls": completed_calls, "finish_reason": finish_reason}
+                        else:
+                            yield {"finish_reason": finish_reason}
 
-            elif dtype == "error":
-                err_msg = data.get("error", {}).get("message", "未知错误")
-                yield {"content": f"错误: {err_msg}", "finish_reason": "error"}
-                return
+                        if self._logger:
+                            total_out = len("".join(content_buffer))
+                            self._logger.info("core.llm", f"响应完成, content_len={total_out}")
+
+                elif dtype == "error":
+                    err_msg = data.get("error", {}).get("message", "未知错误")
+                    yield {"content": f"错误: {err_msg}", "finish_reason": "error"}
+                    return
+        finally:
+            _active_llm_response = None
 
     # ── 消息格式转换：OpenAI → Anthropic ──
 
