@@ -16,7 +16,7 @@ import json
 import re
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Optional, Callable
+from typing import List, Dict, Optional
 from urllib.parse import urlparse
 
 
@@ -26,15 +26,6 @@ _DAEMON_URL = "http://127.0.0.1:3210"
 _ANYSEARCH_URL = "https://api.anysearch.com/mcp"
 _TIMEOUT = 10
 _ANYSEARCH_TIMEOUT = 15
-
-# 中断检查回调
-_interrupt_check: Optional[Callable[[], bool]] = None
-
-
-def set_interrupt_check(cb: Callable[[], bool]):
-    """设置中断检查回调。cb返回True表示用户请求中断。"""
-    global _interrupt_check
-    _interrupt_check = cb
 
 
 # ── 工具函数 ──
@@ -177,9 +168,6 @@ def execute(query: str, num: int = 5) -> str:
     Returns:
         格式化的搜索结果，每条含标题、URL、描述
     """
-    if _interrupt_check and _interrupt_check():
-        return "[用户中断]"
-
     results: List[Dict] = []
 
     # ── Tier 1: AnySearch ──
@@ -196,9 +184,6 @@ def execute(query: str, num: int = 5) -> str:
         return ("搜索失败: AnySearch 不可用，且 Open WebSearch daemon 未运行。\n"
                 "请先启动: $env:MODE='http'; open-websearch serve")
 
-    if _interrupt_check and _interrupt_check():
-        return "[用户中断]"
-
     all_results: List[Dict] = []
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {
@@ -206,10 +191,6 @@ def execute(query: str, num: int = 5) -> str:
             pool.submit(_search_ows, query, "baidu", num): "baidu",
         }
         for fut in as_completed(futures):
-            if _interrupt_check and _interrupt_check():
-                if not all_results:
-                    return "[用户中断]"
-                return _format_results(all_results[:num]) + "\n[用户中断]"
             try:
                 all_results.extend(fut.result())
             except Exception:
@@ -226,9 +207,6 @@ def execute(query: str, num: int = 5) -> str:
         if key and key not in seen:
             seen.add(key)
             unique.append(r)
-
-    if _interrupt_check and _interrupt_check():
-        return _format_results(unique[:num]) + "\n[用户中断]"
 
     unique.sort(key=lambda r: _relevance_score(r, query), reverse=True)
     return _format_results(unique[:num])

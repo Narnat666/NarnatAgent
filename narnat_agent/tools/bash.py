@@ -7,7 +7,6 @@ AI自己负责写正确语法，我们只管送达和返回。
 import base64
 import os
 import re
-import signal
 import subprocess
 import sys
 import threading
@@ -24,23 +23,26 @@ _RE_DELETE = re.compile(
 # 后台进程注册表 {pid: (proc, start_time)}
 _background_procs: dict = {}
 
+# 当前运行的前台进程（agent层ESC打断后可调用kill_active杀掉）
+_active_proc: Optional[subprocess.Popen] = None
+_active_proc_lock = threading.Lock()
+
 # 权限确认回调，由agent层注入
 _confirm_callback: Optional[Callable[[str], bool]] = None
 
-# 中断检查回调，由agent层注入（返回True表示用户按了ESC）
-_interrupt_check: Optional[Callable[[], bool]] = None
+
+def kill_active():
+    """杀掉当前正在运行的前台子进程（ESC打断时由agent调用）"""
+    with _active_proc_lock:
+        proc = _active_proc
+    if proc is not None and proc.poll() is None:
+        _kill_proc_tree(proc)
 
 
 def set_confirm_callback(cb: Callable[[str], bool]):
     """设置删除确认回调。cb返回True表示允许执行。"""
     global _confirm_callback
     _confirm_callback = cb
-
-
-def set_interrupt_check(cb: Callable[[], bool]):
-    """设置中断检查回调。cb返回True表示用户请求中断。"""
-    global _interrupt_check
-    _interrupt_check = cb
 
 
 def _find_executable(*names: str) -> Optional[str]:
@@ -68,25 +70,25 @@ def _decode_output(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _kill_proc_tree(proc: subprocess.Popen) -> None:
-    """杀掉整个进程树，确保&&链式命令的所有子进程都被终止。"""
-    try:
-        if sys.platform == "win32":
-            # Windows: taskkill /F /T /PID 杀整棵进程树
-            subprocess.call(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-        else:
-            # Unix: 杀整个进程组
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                proc.kill()
-    except Exception:
+def _kill_proc_tree(proc: subprocess.Popen):
+    """杀掉进程树（Unix用killpg，Windows用taskkill）"""
+    if proc.poll() is not None:
+        return
+    pid = proc.pid
+    if sys.platform == "win32":
         try:
-            proc.kill()
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                timeout=5,
+            )
         except Exception:
+            pass
+    else:
+        import signal
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
             pass
 
 
@@ -150,74 +152,72 @@ def execute(
     except OSError as e:
         return f"错误: 启动失败: {e}"
 
-    # 非阻塞读取: 用线程读stdout/stderr，主线程轮询中断+超时
-    stdout_chunks = []
-    stderr_chunks = []
+    # 注册到_active_proc，agent层ESC打断后可调用kill_active杀掉
+    with _active_proc_lock:
+        global _active_proc
+        _active_proc = proc
 
-    def _reader(stream, chunks):
-        try:
-            while True:
-                data = stream.read(4096)
-                if not data:
-                    break
-                chunks.append(data)
-        except Exception:
-            pass
+    try:
+        # 非阻塞读取: 用线程读stdout/stderr，主线程轮询超时
+        stdout_chunks = []
+        stderr_chunks = []
 
-    t_out = threading.Thread(target=_reader, args=(proc.stdout, stdout_chunks), daemon=True)
-    t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_chunks), daemon=True)
-    t_out.start()
-    t_err.start()
+        def _reader(stream, chunks):
+            try:
+                while True:
+                    data = stream.read(4096)
+                    if not data:
+                        break
+                    chunks.append(data)
+            except Exception:
+                pass
 
-    deadline = time.time() + timeout_sec
-    interrupted = False
-    timed_out = False
+        t_out = threading.Thread(target=_reader, args=(proc.stdout, stdout_chunks), daemon=True)
+        t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_chunks), daemon=True)
+        t_out.start()
+        t_err.start()
 
-    # 主循环: 等待进程结束，同时轮询中断
-    while proc.poll() is None:
-        if _interrupt_check and _interrupt_check():
-            _kill_proc_tree(proc)
-            interrupted = True
-            break
-        if time.time() >= deadline:
-            # 超时不杀进程（纯管道原则），但给读取线程一点时间收尾
-            timed_out = True
-            break
-        time.sleep(0.05)
+        deadline = time.time() + timeout_sec
+        timed_out = False
 
-    # 等待读取线程结束（最多3秒，中断场景下不无限等）
-    wait_time = 3.0 if interrupted else 5.0
-    t_out.join(timeout=wait_time)
-    t_err.join(timeout=wait_time)
+        while proc.poll() is None:
+            if time.time() >= deadline:
+                timed_out = True
+                break
+            time.sleep(0.05)
 
-    stdout = b"".join(stdout_chunks)
-    stderr = b"".join(stderr_chunks)
+        # 等待读取线程结束
+        t_out.join(timeout=5.0)
+        t_err.join(timeout=5.0)
 
-    if interrupted:
-        return "[用户中断]"
+        stdout = b"".join(stdout_chunks)
+        stderr = b"".join(stderr_chunks)
 
-    if timed_out:
+        if timed_out:
+            out = _decode_output(stdout)
+            err = _decode_output(stderr)
+            parts = []
+            if out.strip():
+                parts.append(out.strip())
+            if err.strip():
+                parts.append(f"[stderr]\n{err.strip()}")
+            parts.append(f"[超时: 命令执行超过{timeout_sec:.0f}秒，进程仍在运行]")
+            return "\n".join(parts)
+
         out = _decode_output(stdout)
         err = _decode_output(stderr)
+
         parts = []
         if out.strip():
             parts.append(out.strip())
         if err.strip():
             parts.append(f"[stderr]\n{err.strip()}")
-        parts.append(f"[超时: 命令执行超过{timeout_sec:.0f}秒，进程仍在运行]")
+        parts.append(f"[exit code: {proc.returncode}]")
+
         return "\n".join(parts)
-
-    out = _decode_output(stdout)
-    err = _decode_output(stderr)
-
-    parts = []
-    if out.strip():
-        parts.append(out.strip())
-    if err.strip():
-        parts.append(f"[stderr]\n{err.strip()}")
-    parts.append(f"[exit code: {proc.returncode}]")
-
-    return "\n".join(parts)
+    finally:
+        with _active_proc_lock:
+            _active_proc = None
 
 
 def _run_background(shell_cmd: list, original_command: str) -> str:

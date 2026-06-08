@@ -51,9 +51,6 @@ _RE_PASSWORD_PROMPT = re.compile(
 
 _confirm_callback: Optional[Callable[[str], bool]] = None
 
-# 中断检查回调，由agent层注入（返回True表示用户按了ESC）
-_interrupt_check: Optional[Callable[[], bool]] = None
-
 
 def set_confirm_callback(cb: Callable[[str], bool]):
     """设置删除确认回调。cb返回True表示允许执行。"""
@@ -61,17 +58,24 @@ def set_confirm_callback(cb: Callable[[str], bool]):
     _confirm_callback = cb
 
 
-def set_interrupt_check(cb: Callable[[], bool]):
-    """设置中断检查回调。cb返回True表示用户请求中断。"""
-    global _interrupt_check
-    _interrupt_check = cb
-
-
 MAX_SESSIONS = 5  # 最多5个并发SSH会话
 
 # session_id(0-4) → SSHSession
 _sessions: dict[int, "SSHSession"] = {}
 _sessions_lock = threading.Lock()
+
+# 当前正在执行命令的SSH会话（agent层ESC打断后调用kill_active_exec杀死远程进程）
+_active_exec_session: Optional["SSHSession"] = None
+_active_exec_lock = threading.Lock()
+
+
+def kill_active_exec():
+    """ESC打断：设置中断标志，让工具线程内部的阻塞读取检测到后自然退出。
+    不关闭channel/transport，会话保持存活可复用。"""
+    with _active_exec_lock:
+        session = _active_exec_session
+    if session is not None:
+        session._interrupt.set()
 
 
 class SSHSession:
@@ -103,10 +107,14 @@ class SSHSession:
         self._channel = self._client.invoke_shell(term="xterm", width=200, height=50)
         self._channel.settimeout(0.5)
 
+        self._busy = False  # 通道是否被未完成的前台命令占用
+        self._interrupt = threading.Event()  # ESC中断标志，各读取方法检测此标志退出
+
+    def _initialize(self):
+        """阻塞初始化：读初始输出、更新cwd。必须在 connect 中注册 _active_exec_session 之后调用，
+        这样 ESC 打断 connect 时能通过 kill_active_exec() 关闭此会话。"""
         self._initial_output = self._read_until_prompt(timeout=5)
         self._update_cwd()
-
-        self._busy = False  # 通道是否被未完成的前台命令占用
 
     @property
     def prompt(self) -> str:
@@ -179,31 +187,22 @@ class SSHSession:
         return self._read_until_marker(marker, pwd_marker, timeout=timeout)
 
     def close(self):
-        """关闭会话，先disown后台进程避免被SIGHUP杀掉。"""
+        """关闭会话。channel立即关闭，transport在后台线程关闭，
+        避免Windows closesocket不打断recv导致的5秒阻塞。"""
         try:
-            # 让shell中的后台进程脱离，避免close时被SIGHUP杀掉
-            try:
-                self._channel.send("disown -a 2>/dev/null\n")
-                time.sleep(0.3)
-            except Exception:
-                pass
             self._channel.close()
         except Exception:
             pass
+        # 后台线程关闭transport，不阻塞调用者
+        t = threading.Thread(target=self._close_transport, daemon=True)
+        t.start()
+
+    def _close_transport(self):
+        """后台线程：关闭paramiko transport，回收TCP连接。"""
         try:
             self._client.close()
         except Exception:
             pass
-
-    def _interrupt_remote(self):
-        """向远程shell发送Ctrl+C中断当前命令，排空残留输出，重置busy标志。"""
-        try:
-            self._channel.send('\x03')  # Ctrl+C
-            time.sleep(0.3)
-            self._drain_stale_output()
-        except Exception:
-            pass
-        self._busy = False
 
     def _try_read_residual(self, duration: float = 3.0) -> str:
         """安静地读取channel中残余数据，不中断任何命令。"""
@@ -211,8 +210,6 @@ class SSHSession:
         deadline = time.time() + duration
         consecutive_timeouts = 0
         while time.time() < deadline:
-            if _interrupt_check and _interrupt_check():
-                break
             try:
                 chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
                 if chunk:
@@ -223,6 +220,8 @@ class SSHSession:
                     if consecutive_timeouts >= 5:
                         break
             except socket.timeout:
+                if self._interrupt.is_set():
+                    break
                 consecutive_timeouts += 1
                 if consecutive_timeouts >= 5:
                     break
@@ -260,14 +259,14 @@ class SSHSession:
         output = ""
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if _interrupt_check and _interrupt_check():
-                break
             try:
                 chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
                 output += chunk
                 if marker in output:
                     break
             except socket.timeout:
+                if self._interrupt.is_set():
+                    break
                 continue
             except Exception:
                 break
@@ -290,9 +289,6 @@ class SSHSession:
         def _watch():
             output = ""
             while True:
-                if _interrupt_check and _interrupt_check():
-                    self._busy = False
-                    return
                 try:
                     chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
                     output += chunk
@@ -309,6 +305,9 @@ class SSHSession:
                                 break
                         return
                 except socket.timeout:
+                    if self._interrupt.is_set():
+                        self._busy = False
+                        return
                     continue
                 except Exception:
                     # channel断开等异常，清除busy
@@ -339,10 +338,6 @@ class SSHSession:
         sudo_injected = False
 
         while time.time() < deadline:
-            # ESC铁律: 检查用户中断
-            if _interrupt_check and _interrupt_check():
-                self._interrupt_remote()
-                return "[用户中断]"
 
             try:
                 chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
@@ -373,10 +368,6 @@ class SSHSession:
                     # 最多再读3秒，确保prompt和尾部数据到达
                     post_marker_deadline = time.time() + 3.0
                     while time.time() < post_marker_deadline:
-                        # ESC铁律: post_marker阶段也检查中断
-                        if _interrupt_check and _interrupt_check():
-                            self._interrupt_remote()
-                            return "[用户中断]"
                         try:
                             extra = self._channel.recv(4096).decode("utf-8", errors="replace")
                             if extra:
@@ -391,6 +382,8 @@ class SSHSession:
                                 if consecutive_timeouts >= DRAIN_CONSECUTIVE_TIMEOUTS:
                                     break
                         except socket.timeout:
+                            if self._interrupt.is_set():
+                                break
                             consecutive_timeouts += 1
                             if consecutive_timeouts >= DRAIN_CONSECUTIVE_TIMEOUTS:
                                 break
@@ -399,16 +392,11 @@ class SSHSession:
                     break
 
             except socket.timeout:
-                if found:
+                if self._interrupt.is_set() or found:
                     break
                 continue
             except Exception:
                 break
-
-        # ESC铁律: 循环结束后再检查一次中断（可能在超时处理前被触发）
-        if _interrupt_check and _interrupt_check():
-            self._interrupt_remote()
-            return "[用户中断]"
 
         # 超时处理: 纯管道原则 — 只告知超时，不替AI做决定
         # AI收到超时提示后，自己决定是杀进程(Ctrl+C)还是继续等待
@@ -435,7 +423,7 @@ class SSHSession:
                     return f"[超时但命令已完成]\n{self.prompt}"
 
             # 超时且marker未出现 → 返回已收集的部分输出，告知超时
-            # 不发Ctrl+C，进程仍在运行，AI自己决定下一步
+            # 不杀进程，AI自己决定下一步（kill或继续等）
             self._busy = True
             # 启动后台线程：持续读channel，等命令完成后自动清除busy标记
             self._start_busy_watcher(marker, pwd_marker)
@@ -531,6 +519,8 @@ class SSHSession:
                 if re.search(r'[#$>]\s*$', output.strip()):
                     break
             except socket.timeout:
+                if self._interrupt.is_set():
+                    break
                 continue
             except Exception:
                 break
@@ -705,6 +695,7 @@ def _connect(host: str, username: str, port: int = 22,
                 if not session._channel.closed:
                     return f"终端{session_id}已连接: {session.username}@{session.host}\n{session.prompt}"
                 else:
+                    session.close()
                     del _sessions[session_id]
             alloc_id = session_id
         else:
@@ -724,6 +715,16 @@ def _connect(host: str, username: str, port: int = 22,
             kwargs["sudo_password"] = sudo_password
 
         session = SSHSession(**kwargs)
+
+        # 注册活跃会话，让 ESC 能在 connect 的阻塞初始化阶段打断
+        with _active_exec_lock:
+            global _active_exec_session
+            _active_exec_session = session
+        try:
+            session._initialize()
+        finally:
+            with _active_exec_lock:
+                _active_exec_session = None
 
         with _sessions_lock:
             _sessions[alloc_id] = session
@@ -760,10 +761,19 @@ def _exec(session_id: int, host: str, command: str, timeout: int = 0) -> str:
     if session._channel.closed:
         with _sessions_lock:
             _sessions.pop(sid, None)
+        session.close()
         return f"错误: 终端{sid}会话已断开，请重新connect"
 
     try:
-        result = session.execute(command, timeout=timeout)
+        # 注册活跃会话，agent层ESC打断后可通过kill_active_exec发送Ctrl+C
+        with _active_exec_lock:
+            global _active_exec_session
+            _active_exec_session = session
+        try:
+            result = session.execute(command, timeout=timeout)
+        finally:
+            with _active_exec_lock:
+                _active_exec_session = None
         # 在结果前标注终端编号
         return f"[终端{sid}] {result}"
     except Exception as e:
@@ -783,6 +793,7 @@ def _input(session_id: int, host: str, input: str, timeout: int = 0) -> str:
     if session._channel.closed:
         with _sessions_lock:
             _sessions.pop(sid, None)
+        session.close()
         return f"错误: 终端{sid}会话已断开，请重新connect"
 
     try:
@@ -845,7 +856,7 @@ def _close(session_id: int, host: str) -> str:
 
 
 def cleanup():
-    """程序退出时清理所有会话"""
+    """程序退出时清理所有会话。channel立即关闭，transport后台回收。"""
     with _sessions_lock:
         for session in _sessions.values():
             session.close()

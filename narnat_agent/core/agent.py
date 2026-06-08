@@ -4,12 +4,15 @@
 
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from typing import List, Dict, Any, Optional, Tuple
 
 from .llm import LLMClient
 from .context import ContextManager
 from .compressor import Compressor
+from ..tools.bash import kill_active as _kill_bash
+from ..tools.terminal import kill_active_exec as _kill_terminal_exec
 from ..config.loader import AppConfig, load_config
 from ..config.session_store import save_session, load_session, list_sessions, delete_session, format_session_list
 from ..tools.registry import execute as tool_execute
@@ -123,16 +126,13 @@ class Agent:
         self._ui = UIInterface(self._config.ai.model, callbacks)
         # 注入工具回调
         bash_tool.set_confirm_callback(self._confirm_delete)
-        bash_tool.set_interrupt_check(lambda: _interrupt_ctrl.is_set)
         terminal_tool.set_confirm_callback(self._confirm_delete)
-        terminal_tool.set_interrupt_check(lambda: _interrupt_ctrl.is_set)
-        glob_tool.set_interrupt_check(lambda: _interrupt_ctrl.is_set)
-        grep_tool.set_interrupt_check(lambda: _interrupt_ctrl.is_set)
-        web_search_tool.set_interrupt_check(lambda: _interrupt_ctrl.is_set)
         todo_tool.set_ui_callback(self._on_todo_update)
         # 统计
         self._total_input_tokens = 0
         self._total_output_tokens = 0
+        # 持久线程池：避免每次打断创建新executor导致线程泄漏
+        self._tool_executor = ThreadPoolExecutor(max_workers=16)
 
     def _auto_save_on_exit(self):
         """退出时自动保存已命名的会话"""
@@ -222,69 +222,74 @@ class Agent:
         self._ui.start()
         self._logger.info("core.agent", f"Agent启动, model={self._config.ai.model}")
 
-        while True:
-            # 1. 读取用户输入
-            user_input = self._ui.read_input()
-            if user_input is None:
-                continue
-
-            stripped = user_input.strip()
-            if not stripped:
-                continue
-
-            # /exit 退出
-            if stripped == "/exit":
-                self._auto_save_on_exit()
-                self._logger.info("core.agent", "用户退出")
-                self._logger.close()
-                return
-
-            # 命令分发
-            if stripped.startswith("/"):
-                parts = stripped.split(None, 1)
-                cmd = parts[0]
-                args = parts[1] if len(parts) > 1 else ""
-                if self._ui.dispatch_command(cmd, args):
+        try:
+            while True:
+                # 1. 读取用户输入
+                user_input = self._ui.read_input()
+                if user_input is None:
                     continue
 
-            # 2. 轮次计数
-            warn = self._context.increment()
-            if warn:
-                print(f"  ⚠ {warn}")
+                stripped = user_input.strip()
+                if not stripped:
+                    continue
 
-            # 3. 压缩检查
-            compress_ok = False
-            if self._context.need_compress():
-                compress_ok = self._handle_compress(stripped)
+                # /exit 退出
+                if stripped == "/exit":
+                    self._auto_save_on_exit()
+                    self._logger.info("core.agent", "用户退出")
+                    self._logger.close()
+                    return
+
+                # 命令分发
+                if stripped.startswith("/"):
+                    parts = stripped.split(None, 1)
+                    cmd = parts[0]
+                    args = parts[1] if len(parts) > 1 else ""
+                    if self._ui.dispatch_command(cmd, args):
+                        continue
+
+                # 2. 轮次计数
+                warn = self._context.increment()
+                if warn:
+                    print(f"  ⚠ {warn}")
+
+                # 3. 压缩检查
+                compress_ok = False
+                if self._context.need_compress():
+                    compress_ok = self._handle_compress(stripped)
+                    if not compress_ok:
+                        continue
+                    # 压缩成功：pending_input已在messages中，跳过追加，直接走AI调度
+
+                # 4. 追加用户消息（压缩成功时已追加，跳过）
                 if not compress_ok:
-                    continue
-                # 压缩成功：pending_input已在messages中，跳过追加，直接走AI调度
+                    # 修复messages：打断可能留下不完整的tool_call
+                    self._repair_messages()
+                    self._messages.append({"role": "user", "content": stripped})
+                    self._logger.info("core.agent", f"用户输入: {stripped[:100]}")
 
-            # 4. 追加用户消息（压缩成功时已追加，跳过）
-            if not compress_ok:
-                # 修复messages：打断可能留下不完整的tool_call
-                self._repair_messages()
-                self._messages.append({"role": "user", "content": stripped})
-                self._logger.info("core.agent", f"用户输入: {stripped[:100]}")
+                # 5. 创建流式输出
+                stream = self._ui.create_stream()
 
-            # 5. 创建流式输出
-            stream = self._ui.create_stream()
+                try:
+                    # 6. 工具调度内循环
+                    self._agent_loop(stream)
+                except KeyboardInterrupt:
+                    self._ui.on_interrupted()
+                    stream.abort()
+                except Exception as e:
+                    self._logger.error("core.agent", f"异常: {e}")
+                    # 将AI已输出的部分内容追加到messages，避免丢失
+                    if hasattr(self, '_last_content_parts') and self._last_content_parts:
+                        self._messages.append({
+                            "role": "assistant",
+                            "content": "".join(self._last_content_parts),
+                        })
+                    stream.abort()
 
-            try:
-                # 6. 工具调度内循环
-                self._agent_loop(stream)
-            except KeyboardInterrupt:
-                self._ui.on_interrupted()
-                stream.abort()
-            except Exception as e:
-                self._logger.error("core.agent", f"异常: {e}")
-                # 将AI已输出的部分内容追加到messages，避免丢失
-                if hasattr(self, '_last_content_parts') and self._last_content_parts:
-                    self._messages.append({
-                        "role": "assistant",
-                        "content": "".join(self._last_content_parts),
-                    })
-                stream.abort()
+        finally:
+            self._tool_executor.shutdown(wait=False)
+            terminal_tool.cleanup()
 
     def _agent_loop(self, stream):
         """工具调度内循环"""
@@ -297,7 +302,7 @@ class Agent:
             self._last_content_parts = content_parts  # 供异常处理时保存部分内容
             tool_calls_result = []
 
-            for chunk in self._llm.chat_stream(self._messages):
+            for chunk in self._llm.chat_stream(self._messages, cancel_check=lambda: stream.cancelled):
                 # b. 检查中断
                 if stream.cancelled:
                     # 将已收到的部分内容追加为assistant消息，保持messages完整
@@ -328,6 +333,13 @@ class Agent:
                             self._total_output_tokens,
                         )
                         return
+
+            # 中断检查：chat_stream可能因cancel_check提前返回（0个chunk），
+            # 此时上面的 for 循环体不执行，需在此处检查
+            if stream.cancelled:
+                stream.abort()
+                self._ui.on_interrupted()
+                return
 
             # 有tool_call → 执行工具 → 继续内循环
             if tool_calls_result:
@@ -472,41 +484,83 @@ class Agent:
         if readonly_group:
             self._run_parallel(readonly_group, results, stream)
 
+        # 阶段间中断检查
+        if stream.cancelled:
+            _kill_bash()
+            _kill_terminal_exec()
+            return [results[i] for i in range(len(parsed)) if i in results]
+
         # ── 阶段2：写入工具按文件分组 ──
         # 同文件串行，不同文件并行
         if write_group:
             # 将每个文件组作为一个并行单元
             file_groups = list(write_group.values())
             if len(file_groups) == 1:
-                # 单文件组，直接串行
+                # 单文件组，后台线程执行，主线程wait轮询
                 for item in file_groups[0]:
                     idx, tc_id, name, arguments = item
                     if stream.cancelled:
                         break
-                    result = self._run_single(tc_id, name, arguments, stream)
-                    results[idx] = (tc_id, result)
+                    fut = self._tool_executor.submit(self._run_single, tc_id, name, arguments, stream)
+                    while not fut.done():
+                        if stream.cancelled:
+                            _kill_bash()
+                            _kill_terminal_exec()
+                            break
+                        time.sleep(0.2)
+                    if stream.cancelled:
+                        break
+                    try:
+                        result = fut.result()
+                        results[idx] = (tc_id, result)
+                    except Exception as e:
+                        results[idx] = (tc_id, f"错误: 工具执行失败: {e}")
             else:
                 # 多文件组并行，组内串行
-                with ThreadPoolExecutor(max_workers=len(file_groups)) as executor:
-                    futures = {}
-                    for group in file_groups:
-                        fut = executor.submit(
-                            self._run_sequential_group, group, results, stream
-                        )
-                        futures[fut] = group
-                    for fut in as_completed(futures):
+                futures = {}
+                for group in file_groups:
+                    fut = self._tool_executor.submit(
+                        self._run_sequential_group, group, results, stream
+                    )
+                    futures[fut] = group
+                # 用 wait() 轮询替代 as_completed()，每 0.2s 检查一次中断
+                remaining = set(futures.keys())
+                while remaining:
+                    if stream.cancelled:
+                        _kill_bash()
+                        _kill_terminal_exec()
+                        break
+                    done, remaining = wait(remaining, timeout=0.2, return_when=FIRST_COMPLETED)
+                    for fut in done:
                         try:
                             fut.result()
                         except Exception:
                             pass  # _run_sequential_group内部已处理
 
-        # ── 阶段3：串行工具 ──
-        for item in serial_group:
-            idx, tc_id, name, arguments = item
-            if stream.cancelled:
-                break
-            result = self._run_single(tc_id, name, arguments, stream)
-            results[idx] = (tc_id, result)
+        # 阶段间中断检查
+        if stream.cancelled:
+            return [results[i] for i in range(len(parsed)) if i in results]
+
+        # ── 阶段3：串行工具（后台线程执行，主线程wait轮询） ──
+        if serial_group:
+            for item in serial_group:
+                idx, tc_id, name, arguments = item
+                if stream.cancelled:
+                    break
+                fut = self._tool_executor.submit(self._run_single, tc_id, name, arguments, stream)
+                while not fut.done():
+                    if stream.cancelled:
+                        _kill_bash()
+                        _kill_terminal_exec()
+                        break
+                    time.sleep(0.2)
+                if stream.cancelled:
+                    break
+                try:
+                    result = fut.result()
+                    results[idx] = (tc_id, result)
+                except Exception as e:
+                    results[idx] = (tc_id, f"错误: 工具执行失败: {e}")
 
         # 按原始顺序返回
         return [results[i] for i in range(len(parsed)) if i in results]
@@ -557,20 +611,37 @@ class Agent:
         if len(group) == 1:
             idx, tc_id, name, arguments = group[0]
             if not stream.cancelled:
-                result = self._run_single(tc_id, name, arguments, stream)
-                results[idx] = (tc_id, result)
+                fut = self._tool_executor.submit(self._run_single, tc_id, name, arguments, stream)
+                while not fut.done():
+                    if stream.cancelled:
+                        _kill_bash()
+                        _kill_terminal_exec()
+                        break
+                    time.sleep(0.2)
+                if stream.cancelled:
+                    return
+                try:
+                    result = fut.result()
+                    results[idx] = (tc_id, result)
+                except Exception as e:
+                    results[idx] = (tc_id, f"错误: 工具执行失败({name}): {e}")
             return
 
-        with ThreadPoolExecutor(max_workers=len(group)) as executor:
-            futures = {}
-            for idx, tc_id, name, arguments in group:
-                if stream.cancelled:
-                    break
-                fut = executor.submit(self._run_single, tc_id, name, arguments, stream)
-                futures[fut] = (idx, tc_id, name)
-            for fut in as_completed(futures):
-                if stream.cancelled:
-                    break
+        futures = {}
+        for idx, tc_id, name, arguments in group:
+            if stream.cancelled:
+                break
+            fut = self._tool_executor.submit(self._run_single, tc_id, name, arguments, stream)
+            futures[fut] = (idx, tc_id, name)
+        # 用 wait() 轮询替代 as_completed()，每 0.2s 检查一次中断
+        remaining = set(futures.keys())
+        while remaining:
+            if stream.cancelled:
+                _kill_bash()
+                _kill_terminal_exec()
+                break
+            done, remaining = wait(remaining, timeout=0.2, return_when=FIRST_COMPLETED)
+            for fut in done:
                 idx, tc_id, name = futures[fut]
                 try:
                     result = fut.result()
@@ -611,7 +682,7 @@ class Agent:
         # 4. 发送压缩请求，收集AI输出
         summary_content = []
         llm_error = False
-        for chunk in self._llm.chat_stream(compress_messages, no_tools=True):
+        for chunk in self._llm.chat_stream(compress_messages, no_tools=True, cancel_check=lambda: stream.cancelled):
             # 压缩过程中也检查中断
             if _interrupt_ctrl.is_set:
                 self._ui.end_compressing()

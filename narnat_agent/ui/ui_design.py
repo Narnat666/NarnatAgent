@@ -830,6 +830,7 @@ class UIStreamSession:
         self._spinner_stop = threading.Event()
         self._spinner_thread: Optional[threading.Thread] = None
         self._started = False
+        self._aborted = False  # abort后resume_spinner不应再启动新spinner
         self._spinner_pause_count = 0  # 并行工具pause计数，归零才恢复spinner
 
     @property
@@ -867,6 +868,8 @@ class UIStreamSession:
 
     def resume_spinner(self) -> None:
         """恢复spinner（工具执行后调用），所有并行工具完成后才真正恢复"""
+        if self._aborted:
+            return
         self._spinner_pause_count = max(0, self._spinner_pause_count - 1)
         if self._spinner_pause_count == 0 and not self._started:
             self._spinner_stop.clear()
@@ -888,6 +891,7 @@ class UIStreamSession:
         show_stats(input_tokens, output_tokens, cache, cost)
 
     def abort(self) -> None:
+        self._aborted = True  # 标记已打断，防止后台线程resume_spinner重启
         _interrupt_ctrl.enter_input_mode()  # 立即停止ESC轮询
         self._spinner_stop.set()
         if self._spinner_thread is not None:

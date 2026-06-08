@@ -179,7 +179,7 @@ TOOL_DEFINITIONS: List[Dict] = [
         "type": "function",
         "function": {
             "name": "WebSearch",
-            "description": "联网搜索（Bing+Baidu双引擎并行），获取实时信息或在线文档",
+            "description": "联网搜索（AnySearch主引擎，可搜GitHub代码/技术文档/官方文档；失败自动降级Bing+Baidu）。搜完后必须在回复末尾附上Sources链接",
             "parameters": {
                 "type": "object",
                 "properties": {

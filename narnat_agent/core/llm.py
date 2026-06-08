@@ -9,7 +9,10 @@ LLM调用层 —— 双协议支持（OpenAI兼容 + Anthropic兼容），流式
 """
 
 import json
+import queue
 import re
+import threading
+import httpx
 from typing import List, Dict, Any, Iterator, Optional
 
 from ..config.loader import AIConfig
@@ -18,9 +21,12 @@ from ..tools.registry import get_tool_definitions
 # ESC中断：持有当前活跃的LLM HTTP连接，供ESC轮询线程关闭
 _active_llm_response = None
 
+# 队列哨兵值，标记流结束
+_STREAM_END = object()
+
 
 def abort_active_llm_request():
-    """关闭当前LLM请求的HTTP连接，解除流式迭代器的阻塞。"""
+    """关闭当前LLM请求的HTTP连接。"""
     global _active_llm_response
     resp = _active_llm_response
     if resp is not None:
@@ -28,6 +34,17 @@ def abort_active_llm_request():
             resp.close()
         except Exception:
             pass
+
+
+def _iter_to_queue(iterator, q):
+    """后台线程：将迭代器的元素逐个放入队列，最后放入_STREAM_END。"""
+    try:
+        for item in iterator:
+            q.put(item)
+    except Exception:
+        pass  # 连接关闭等异常，主线程通过取消检查来处理
+    finally:
+        q.put(_STREAM_END)
 
 
 class LLMClient:
@@ -47,9 +64,10 @@ class LLMClient:
         else:
             self._backend = _OpenAIBackend(config, self._tool_defs, logger)
 
-    def chat_stream(self, messages: List[Dict[str, Any]], no_tools: bool = False) -> Iterator:
-        """流式调用LLM，yield OpenAI格式chunk。no_tools=True时不传工具定义（压缩请求用）"""
-        return self._backend.chat_stream(messages, no_tools=no_tools)
+    def chat_stream(self, messages: List[Dict[str, Any]], no_tools: bool = False, cancel_check=None) -> Iterator:
+        """流式调用LLM，yield OpenAI格式chunk。no_tools=True时不传工具定义（压缩请求用）。
+        cancel_check: 可选的 callable，返回 True 表示用户请求中断。"""
+        return self._backend.chat_stream(messages, no_tools=no_tools, cancel_check=cancel_check)
 
     def count_tokens(self, messages: List[Dict[str, Any]]) -> int:
         """粗略估算token数（中文1字≈2token，英文1词≈1token）"""
@@ -79,29 +97,37 @@ class _OpenAIBackend:
         self._client = OpenAI(
             api_key=config.api_key,
             base_url=config.base_url,
+            max_retries=0,  # 禁用SDK层重试，否则httpx超时和连接关闭会被拦截重试
         )
 
-    def chat_stream(self, messages, no_tools=False):
+    def chat_stream(self, messages, no_tools=False, cancel_check=None):
+        """OpenAI 流式调用。cancel_check 为 callable，返回 True 表示应中断。"""
         if self._logger:
             self._logger.info("core.llm", f"发送请求(OpenAI), messages={len(messages)}条")
+
+        global _active_llm_response
+        _active_llm_response = self._client  # create()前暴露，ESC可关闭连接
 
         try:
             kwargs = dict(
                 model=self._config.model,
                 messages=messages,
                 stream=True,
+                timeout=httpx.Timeout(connect=5.0, read=0.2, write=30.0, pool=30.0),
             )
             if not no_tools:
                 kwargs["tools"] = self._tool_defs
             stream = self._client.chat.completions.create(**kwargs)
         except Exception as e:
+            _active_llm_response = None
+            if cancel_check and cancel_check():
+                return  # 用户取消，不报错
             if self._logger:
                 self._logger.error("core.llm", f"API调用失败: {e}")
             yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
             return
 
-        global _active_llm_response
-        _active_llm_response = stream
+        _active_llm_response = stream  # 切换到stream对象
 
         try:
             tool_calls_buffer = {}      # tc_id → {id, name, arguments}
@@ -109,7 +135,22 @@ class _OpenAIBackend:
             content_buffer = []
             _tc_idx = 0
 
-            for chunk in stream:
+            # 后台线程读取stream，主线程通过Queue消费——主线程永不阻塞在C级别recv()
+            chunk_queue = queue.Queue()
+            reader = threading.Thread(
+                target=_iter_to_queue, args=(iter(stream), chunk_queue), daemon=True)
+            reader.start()
+
+            while True:
+                try:
+                    chunk = chunk_queue.get(timeout=0.1)
+                except queue.Empty:
+                    if cancel_check and cancel_check():
+                        return
+                    continue
+                if chunk is _STREAM_END:
+                    break
+
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -123,15 +164,12 @@ class _OpenAIBackend:
                     for tc in delta.tool_calls:
                         tc_index = getattr(tc, 'index', None)
                         if tc.id:
-                            # 新tool_call的开始chunk（含id和name）
                             tc_id = tc.id
                             if tc_index is not None:
                                 _index_to_id[tc_index] = tc_id
                         elif tc_index is not None and tc_index in _index_to_id:
-                            # 增量chunk（无id但有index）→ 匹配已有buffer
                             tc_id = _index_to_id[tc_index]
                         else:
-                            # 兜底：无id无index，生成fallback id
                             tc_id = f"_tc_{_tc_idx}"
                             _tc_idx += 1
                         buf = tool_calls_buffer.setdefault(
@@ -189,7 +227,7 @@ class _AnthropicBackend:
             "Content-Type": "application/json",
         }
 
-    def chat_stream(self, messages, no_tools=False):
+    def chat_stream(self, messages, no_tools=False, cancel_check=None):
         if self._logger:
             self._logger.info("core.llm", f"发送请求(Anthropic), messages={len(messages)}条")
 
@@ -213,28 +251,52 @@ class _AnthropicBackend:
             body["tools"] = anthropic_tools
 
         # 发送请求
+        import requests
+        session = requests.Session()
+        global _active_llm_response
+        _active_llm_response = session  # post()前暴露，ESC可关闭连接
+
         try:
-            import requests
-            resp = requests.post(
+            resp = session.post(
                 self._url, headers=self._headers, json=body,
                 stream=True, timeout=120.0,
             )
             resp.raise_for_status()
         except Exception as e:
+            _active_llm_response = None
+            session.close()
+            if cancel_check and cancel_check():
+                return  # 用户取消，不报错
             if self._logger:
                 self._logger.error("core.llm", f"API调用失败: {e}")
             yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
             return
 
-        # 解析 Anthropic SSE 流
-        global _active_llm_response
-        _active_llm_response = resp
+        # 解析 Anthropic SSE 流（后台线程读，主线程Queue消费）
+        _active_llm_response = resp  # 切换到response对象
 
         try:
             content_buffer = []
             tool_use_blocks = {}  # index → {id, name, input_json}
 
-            for raw_line in resp.iter_lines(decode_unicode=True):
+            line_queue = queue.Queue()
+            reader = threading.Thread(
+                target=_iter_to_queue,
+                args=(resp.iter_lines(decode_unicode=True), line_queue),
+                daemon=True,
+            )
+            reader.start()
+
+            while True:
+                try:
+                    raw_line = line_queue.get(timeout=0.1)
+                except queue.Empty:
+                    if cancel_check and cancel_check():
+                        return
+                    continue
+                if raw_line is _STREAM_END:
+                    break
+
                 line = (raw_line or "").strip()
                 if not line.startswith("data:"):
                     continue
@@ -279,16 +341,13 @@ class _AnthropicBackend:
                 elif dtype == "message_delta":
                     stop_reason = data.get("delta", {}).get("stop_reason", "")
                     if stop_reason:
-                        # 转换 stop_reason → finish_reason
                         if stop_reason == "end_turn":
                             finish_reason = "stop"
                         elif stop_reason == "tool_use":
                             finish_reason = "tool_calls"
                         else:
-                            # max_tokens / stop_sequence 等都映射为 stop
                             finish_reason = "stop"
 
-                        # 转换 tool_use_blocks → OpenAI tool_calls 格式
                         if tool_use_blocks:
                             completed_calls = []
                             for idx in sorted(tool_use_blocks.keys()):
@@ -315,6 +374,7 @@ class _AnthropicBackend:
                     return
         finally:
             _active_llm_response = None
+            session.close()
 
     # ── 消息格式转换：OpenAI → Anthropic ──
 
