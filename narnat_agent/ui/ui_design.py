@@ -145,8 +145,10 @@ class InterruptController:
 
     def enter_run_mode(self) -> None:
         self._interrupt.clear()
-        self._stop_poll.clear()
-        self._poll_thread = threading.Thread(target=self._poll_esc, daemon=True)
+        # 每个轮询线程用自己独立的stop event，避免旧线程被新线程的clear唤醒
+        self._stop_poll = threading.Event()
+        self._poll_thread = threading.Thread(target=self._poll_esc,
+                                             args=(self._stop_poll,), daemon=True)
         self._poll_thread.start()
         # signal.signal只能在主线程调用
         if threading.current_thread() is threading.main_thread():
@@ -160,14 +162,14 @@ class InterruptController:
                 else:
                     signal.signal(signal.SIGINT, signal.default_int_handler)
 
-    def _poll_esc(self) -> None:
+    def _poll_esc(self, stop: threading.Event) -> None:
         """轮询ESC键。Windows使用msvcrt，Unix使用select+termios。"""
         if sys.platform == "win32":
-            self._poll_esc_windows()
+            self._poll_esc_windows(stop)
         else:
-            self._poll_esc_unix()
+            self._poll_esc_unix(stop)
 
-    def _poll_esc_windows(self) -> None:
+    def _poll_esc_windows(self, stop: threading.Event) -> None:
         """Windows下检测ESC键。优先msvcrt，非原生控制台回退ReadConsoleInput。"""
         try:
             import msvcrt
@@ -177,16 +179,20 @@ class InterruptController:
             mode = ctypes.c_ulong()
             if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                 # 原生控制台: 使用msvcrt
-                self._poll_esc_windows_native(msvcrt)
+                # 清空残留输入：prompt_toolkit退出后msvcrt缓冲区可能有残留的转义序列字节
+                time.sleep(0.05)
+                while msvcrt.kbhit():
+                    msvcrt.getch()
+                self._poll_esc_windows_native(stop, msvcrt)
             else:
                 # 非原生控制台(Windows Terminal等): 使用ReadConsoleInput
-                self._poll_esc_windows_coninput(kernel32)
+                self._poll_esc_windows_coninput(stop, kernel32)
         except (ImportError, OSError, AttributeError):
             pass
 
-    def _poll_esc_windows_native(self, msvcrt) -> None:
+    def _poll_esc_windows_native(self, stop: threading.Event, msvcrt) -> None:
         """原生CMD下使用msvcrt检测ESC键。"""
-        while not self._stop_poll.is_set():
+        while not stop.is_set():
             try:
                 if msvcrt.kbhit():
                     ch = msvcrt.getch()
@@ -202,9 +208,9 @@ class InterruptController:
                             msvcrt.getch()
             except OSError:
                 break
-            self._stop_poll.wait(0.03)
+            stop.wait(0.03)
 
-    def _poll_esc_windows_coninput(self, kernel32) -> None:
+    def _poll_esc_windows_coninput(self, stop: threading.Event, kernel32) -> None:
         """非原生控制台(Windows Terminal等)下使用ReadConsoleInput检测ESC键。"""
         import ctypes
 
@@ -219,7 +225,7 @@ class InterruptController:
         buf = (ctypes.c_char * (INPUT_RECORD_SIZE * 8))()  # 一次读8条
         records_read = ctypes.c_ulong()
 
-        while not self._stop_poll.is_set():
+        while not stop.is_set():
             try:
                 # WaitForSingleObject 等待控制台输入，超时50ms
                 result = kernel32.WaitForSingleObject(handle, 50)
@@ -256,9 +262,9 @@ class InterruptController:
                         return
             except (OSError, ValueError):
                 break
-            self._stop_poll.wait(0.02)
+            stop.wait(0.02)
 
-    def _poll_esc_unix(self) -> None:
+    def _poll_esc_unix(self, stop: threading.Event) -> None:
         """Unix/Linux/macOS下使用select+termios检测ESC键。"""
         try:
             import select
@@ -276,7 +282,7 @@ class InterruptController:
             return  # 无法设置终端模式（如管道输入）
 
         try:
-            while not self._stop_poll.is_set():
+            while not stop.is_set():
                 try:
                     # 使用select检测stdin是否有数据，超时30ms
                     ready, _, _ = select.select([sys.stdin], [], [], 0.03)
@@ -657,13 +663,15 @@ def show_interrupted() -> None:
 
 
 def show_stats(input_tokens: int, output_tokens: int,
-               cache: int = 0, cost: float = 0.0) -> None:
+               cache: int = 0, cost: float = 0.0,
+               balance: float = 0.0) -> None:
     si = f"{input_tokens / 1000:.1f}k" if input_tokens >= 1000 else str(input_tokens)
     so = f"{output_tokens / 1000:.1f}k" if output_tokens >= 1000 else str(output_tokens)
     _sep()
     cs = f"  缓存:{cache / 1000:.1f}k" if cache > 0 else ""
-    co = f"  费用:${cost:.4f}" if cost > 0 else ""
-    sys.stdout.write(f"  {G}输入:{si} 输出:{so}{cs}{R}{Y}{co}{R}\n")
+    co = f"  费用:¥{cost:.4f}" if cost > 0 else ""
+    ba = f"  余额:¥{balance:.2f}" if balance > 0 else ""
+    sys.stdout.write(f"  {G}输入:{si} 输出:{so}{cs}{R}{Y}{co}{ba}{R}\n")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -879,7 +887,8 @@ class UIStreamSession:
             self._spinner_thread.start()
 
     def finish(self, input_tokens: int = 0, output_tokens: int = 0,
-               cache: int = 0, cost: float = 0.0) -> None:
+               cache: int = 0, cost: float = 0.0,
+               balance: float = 0.0) -> None:
         _interrupt_ctrl.enter_input_mode()  # 立即停止ESC轮询，防止误触发
         self._spinner_stop.set()
         if self._spinner_thread is not None:
@@ -888,7 +897,7 @@ class UIStreamSession:
         sys.stdout.write("\r\x1b[K")
         sys.stdout.flush()
         self._renderer.flush()
-        show_stats(input_tokens, output_tokens, cache, cost)
+        show_stats(input_tokens, output_tokens, cache, cost, balance)
 
     def abort(self) -> None:
         self._aborted = True  # 标记已打断，防止后台线程resume_spinner重启

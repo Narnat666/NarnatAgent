@@ -11,6 +11,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from .llm import LLMClient
 from .context import ContextManager
 from .compressor import Compressor
+from .billing import calculate_cost, fetch_balance
 from ..tools.bash import kill_active as _kill_bash
 from ..tools.terminal import kill_active_exec as _kill_terminal_exec
 from ..config.loader import AppConfig, load_config
@@ -131,6 +132,10 @@ class Agent:
         # 统计
         self._total_input_tokens = 0
         self._total_output_tokens = 0
+        self._total_cache_tokens = 0
+        self._total_cost = 0.0
+        self._balance_to_show = 0.0
+        self._round = 0
         # 持久线程池：避免每次打断创建新executor导致线程泄漏
         self._tool_executor = ThreadPoolExecutor(max_workers=16)
 
@@ -238,7 +243,7 @@ class Agent:
                     self._auto_save_on_exit()
                     self._logger.info("core.agent", "用户退出")
                     self._logger.close()
-                    return
+                    os._exit(0)
 
                 # 命令分发
                 if stripped.startswith("/"):
@@ -249,9 +254,18 @@ class Agent:
                         continue
 
                 # 2. 轮次计数
+                self._round += 1
                 warn = self._context.increment()
                 if warn:
                     print(f"  ⚠ {warn}")
+
+                # 每10轮查询一次余额
+                self._balance_to_show = 0.0
+                api_key = getattr(self._config.ai, 'api_key', None)
+                if api_key and self._round % 10 == 0:
+                    bal = fetch_balance(api_key)
+                    if bal:
+                        self._balance_to_show = bal["total"]
 
                 # 3. 压缩检查
                 compress_ok = False
@@ -301,6 +315,7 @@ class Agent:
             content_parts = []
             self._last_content_parts = content_parts  # 供异常处理时保存部分内容
             tool_calls_result = []
+            call_usage = None  # API返回的真实token数
 
             for chunk in self._llm.chat_stream(self._messages, cancel_check=lambda: stream.cancelled):
                 # b. 检查中断
@@ -324,7 +339,11 @@ class Agent:
                     stream.feed(chunk["content"])
                     content_parts.append(chunk["content"])
 
-                # e. 处理结束
+                # e. 捕获真实usage（API返回）
+                if "usage" in chunk:
+                    call_usage = chunk["usage"]
+
+                # f. 处理结束
                 if "finish_reason" in chunk:
                     reason = chunk["finish_reason"]
                     if reason == "error":
@@ -376,9 +395,17 @@ class Agent:
                         "content": result,
                     })
 
-                # 更新token统计（tool_call轮次也需统计）
-                self._total_output_tokens += sum(len(p) for p in content_parts)
-                self._total_input_tokens = self._llm.count_tokens(self._messages)
+                # 更新token统计（tool_call轮次也需统计，真实API数据）
+                if call_usage:
+                    self._total_output_tokens += call_usage["completion_tokens"]
+                    self._total_input_tokens = call_usage["prompt_tokens"]
+                    self._total_cache_tokens = call_usage.get("cached_tokens", 0)
+                    self._total_cost += calculate_cost(
+                        self._config.ai.model,
+                        call_usage["prompt_tokens"],
+                        call_usage["completion_tokens"],
+                        call_usage.get("cached_tokens", 0),
+                    )
 
                 # 继续内循环
                 continue
@@ -391,13 +418,24 @@ class Agent:
                     "content": "".join(content_parts),
                 })
 
-            # 更新token统计（仅统计本轮新增的输出token）
-            self._total_output_tokens += sum(len(p) for p in content_parts)
-            self._total_input_tokens = self._llm.count_tokens(self._messages)
+            # 更新token统计（真实API数据）
+            if call_usage:
+                self._total_output_tokens += call_usage["completion_tokens"]
+                self._total_input_tokens = call_usage["prompt_tokens"]
+                self._total_cache_tokens = call_usage.get("cached_tokens", 0)
+                self._total_cost += calculate_cost(
+                    self._config.ai.model,
+                    call_usage["prompt_tokens"],
+                    call_usage["completion_tokens"],
+                    call_usage.get("cached_tokens", 0),
+                )
 
             stream.finish(
                 self._total_input_tokens,
                 self._total_output_tokens,
+                cache=self._total_cache_tokens,
+                cost=self._total_cost,
+                balance=self._balance_to_show,
             )
             break
 

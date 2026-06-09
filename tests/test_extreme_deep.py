@@ -1142,55 +1142,7 @@ class TestCompressorDeep:
 # ═══════════════════════════════════════════════════════════════
 
 class TestLLMDeep:
-    """LLMClient - token计数与协议选择深度测试"""
-
-    def test_count_tokens_empty_messages(self):
-        """空消息token=0"""
-        from narnat_agent.core.llm import LLMClient
-        from narnat_agent.config.loader import AIConfig
-        config = AIConfig(api_key="test", base_url="https://api.test.com", model="test")
-        client = LLMClient(config)
-        assert client.count_tokens([]) == 0
-
-    def test_count_tokens_none_content(self):
-        """content=None的消息token=0"""
-        from narnat_agent.core.llm import LLMClient
-        from narnat_agent.config.loader import AIConfig
-        config = AIConfig(api_key="test", base_url="https://api.test.com", model="test")
-        client = LLMClient(config)
-        msgs = [{"role": "assistant", "content": None}]
-        assert client.count_tokens(msgs) == 0
-
-    def test_count_tokens_chinese(self):
-        """中文token估算(1字≈2token)"""
-        from narnat_agent.core.llm import LLMClient
-        from narnat_agent.config.loader import AIConfig
-        config = AIConfig(api_key="test", base_url="https://api.test.com", model="test")
-        client = LLMClient(config)
-        msgs = [{"role": "user", "content": "你好世界"}]
-        tokens = client.count_tokens(msgs)
-        # 4个中文字 ≈ 8 token (至少大于0)
-        assert tokens > 0
-
-    def test_count_tokens_english(self):
-        """英文token估算(1词≈1token)"""
-        from narnat_agent.core.llm import LLMClient
-        from narnat_agent.config.loader import AIConfig
-        config = AIConfig(api_key="test", base_url="https://api.test.com", model="test")
-        client = LLMClient(config)
-        msgs = [{"role": "user", "content": "hello world test"}]
-        tokens = client.count_tokens(msgs)
-        assert tokens > 0
-
-    def test_count_tokens_mixed(self):
-        """中英混合token估算"""
-        from narnat_agent.core.llm import LLMClient
-        from narnat_agent.config.loader import AIConfig
-        config = AIConfig(api_key="test", base_url="https://api.test.com", model="test")
-        client = LLMClient(config)
-        msgs = [{"role": "user", "content": "你好 hello 世界 world"}]
-        tokens = client.count_tokens(msgs)
-        assert tokens > 0
+    """LLMClient - 协议选择深度测试"""
 
     def test_anthropic_backend_selection(self):
         """base_url含anthropic选择Anthropic后端"""

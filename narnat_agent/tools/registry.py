@@ -138,10 +138,8 @@ TOOL_DEFINITIONS: List[Dict] = [
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": f"shell命令(语法: {__import__('sys').platform})"},
-                    "description": {"type": "string", "description": "命令描述(5-10字)"},
                     "timeout": {"type": "integer", "description": "超时毫秒数，默认120000，最大600000"},
                     "run_in_background": {"type": "boolean", "description": "后台运行"},
-                    "dangerouslyDisableSandbox": {"type": "boolean", "description": "禁用沙箱"},
                 },
                 "required": ["command"],
             },

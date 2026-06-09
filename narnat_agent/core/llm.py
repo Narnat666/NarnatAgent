@@ -69,17 +69,6 @@ class LLMClient:
         cancel_check: 可选的 callable，返回 True 表示用户请求中断。"""
         return self._backend.chat_stream(messages, no_tools=no_tools, cancel_check=cancel_check)
 
-    def count_tokens(self, messages: List[Dict[str, Any]]) -> int:
-        """粗略估算token数（中文1字≈2token，英文1词≈1token）"""
-        total = 0
-        for m in messages:
-            content = m.get("content") or ""
-            if not content:
-                continue
-            cn_chars = sum(1 for c in content if '\u4e00' <= c <= '\u9fff')
-            en_words = len(content.split())
-            total += cn_chars * 2 + en_words
-        return total
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -113,6 +102,7 @@ class _OpenAIBackend:
                 model=self._config.model,
                 messages=messages,
                 stream=True,
+                stream_options={"include_usage": True},
                 timeout=httpx.Timeout(connect=5.0, read=0.2, write=30.0, pool=30.0),
             )
             if not no_tools:
@@ -150,6 +140,21 @@ class _OpenAIBackend:
                     continue
                 if chunk is _STREAM_END:
                     break
+
+                # 捕获usage（OpenAI stream_options={"include_usage": True} 的最后chunk）
+                usage = getattr(chunk, 'usage', None)
+                if usage:
+                    cached = 0
+                    details = getattr(usage, 'prompt_tokens_details', None)
+                    if details:
+                        cached = getattr(details, 'cached_tokens', 0)
+                    yield {
+                        "usage": {
+                            "prompt_tokens": usage.prompt_tokens,
+                            "completion_tokens": usage.completion_tokens,
+                            "cached_tokens": cached,
+                        }
+                    }
 
                 if not chunk.choices:
                     continue
@@ -367,6 +372,13 @@ class _AnthropicBackend:
                         if self._logger:
                             total_out = len("".join(content_buffer))
                             self._logger.info("core.llm", f"响应完成, content_len={total_out}")
+
+                    # 捕获usage（Anthropic message_delta 中的 usage）
+                    usage = data.get("usage", {})
+                    if usage:
+                        prompt = usage.get("input_tokens", 0)
+                        cached = usage.get("cache_read_input_tokens", 0)
+                        yield {"usage": {"prompt_tokens": prompt + cached, "completion_tokens": usage.get("output_tokens", 0), "cached_tokens": cached}}
 
                 elif dtype == "error":
                     err_msg = data.get("error", {}).get("message", "未知错误")

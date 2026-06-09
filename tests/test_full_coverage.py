@@ -875,23 +875,6 @@ class TestBrutalExtreme:
             # 不应崩溃，可能返回错误或成功
             assert isinstance(err, str)
 
-    def test_llm_count_tokens_edge_cases(self):
-        """LLM token计数边界"""
-        config = AIConfig(api_key="test", base_url="http://localhost/v1", model="mock")
-        client = LLMClient(config)
-        # 空消息
-        assert client.count_tokens([]) == 0
-        # None content
-        assert client.count_tokens([{"role": "assistant", "content": None}]) == 0
-        # 纯中文
-        cn_count = client.count_tokens([{"role": "user", "content": "你好世界"}])
-        assert cn_count > 0
-        # 纯英文
-        en_count = client.count_tokens([{"role": "user", "content": "hello world"}])
-        assert en_count > 0
-        # 中文token应约为英文的2倍（每字2token vs 每词1token）
-        assert cn_count >= en_count
-
     def test_anthropic_message_conversion(self):
         """Anthropic消息格式转换"""
         config = AIConfig(api_key="test", base_url="https://anthropic.api/v1", model="mock")

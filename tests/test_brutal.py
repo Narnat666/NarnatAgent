@@ -391,23 +391,6 @@ class TestSessionStoreBrutal:
 # LLM Token计数 暴力测试
 # ═══════════════════════════════════════════════════════════════
 
-class TestLLMTokenCountBrutal:
-    def test_large_messages(self):
-        """大量messages的token计数"""
-        config = AIConfig(api_key="test", base_url="https://api.test.com", model="test")
-        client = LLMClient(config)
-        messages = [{"role": "user", "content": f"This is message number {i} with some content"} for i in range(100)]
-        count = client.count_tokens(messages)
-        assert count > 0
-        assert count < 100000  # 合理范围
-
-    def test_mixed_language(self):
-        """中英混合内容"""
-        config = AIConfig(api_key="test", base_url="https://api.test.com", model="test")
-        client = LLMClient(config)
-        messages = [{"role": "user", "content": "请用Python实现quicksort算法"}]
-        count = client.count_tokens(messages)
-        assert count > 0
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -771,19 +754,6 @@ class TestAnthropicBackend:
 
 class TestAuditRound2Fixes:
     """验证第二轮审核修复"""
-
-    def test_count_tokens_handles_none_content(self):
-        """严重1修复：count_tokens对content=None不崩溃"""
-        from narnat_agent.core.llm import LLMClient
-        from narnat_agent.config.loader import AIConfig
-        config = AIConfig(api_key="test", base_url="https://api.test.com", model="test")
-        client = LLMClient(config)
-        # content=None的消息不应崩溃
-        result = client.count_tokens([
-            {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "type": "function", "function": {"name": "Read", "arguments": "{}"}}]},
-            {"role": "user", "content": "hello"},
-        ])
-        assert result > 0
 
     def test_anthropic_stop_reason_mapping(self):
         """严重2修复：Anthropic stop_reason正确映射"""

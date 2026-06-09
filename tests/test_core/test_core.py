@@ -7,8 +7,6 @@ import pytest
 
 from narnat_agent.core.context import ContextManager
 from narnat_agent.core.compressor import Compressor
-from narnat_agent.core.llm import LLMClient
-from narnat_agent.config.loader import AIConfig
 from narnat_agent.config.defaults import WARN_TURN_1, WARN_TURN_2, COMPRESS_TURN
 
 
@@ -171,40 +169,4 @@ class TestCompressor:
         assert messages[0]["content"] == "You are a helper."
 
 
-# ═══════════════════════════════════════════════════════════════
-# LLMClient token计数测试
-# ═══════════════════════════════════════════════════════════════
 
-class TestLLMTokenCount:
-    def test_count_english(self):
-        config = AIConfig(api_key="test", base_url="https://api.test.com", model="test")
-        client = LLMClient(config)
-        messages = [{"role": "user", "content": "hello world"}]
-        count = client.count_tokens(messages)
-        assert count > 0
-
-    def test_count_chinese(self):
-        config = AIConfig(api_key="test", base_url="https://api.test.com", model="test")
-        client = LLMClient(config)
-        messages = [{"role": "user", "content": "你好世界"}]
-        count = client.count_tokens(messages)
-        assert count > 0
-        # 中文token应比英文多
-        en_count = client.count_tokens([{"role": "user", "content": "abcd"}])
-        assert count > en_count
-
-    def test_count_empty(self):
-        config = AIConfig(api_key="test", base_url="https://api.test.com", model="test")
-        client = LLMClient(config)
-        count = client.count_tokens([])
-        assert count == 0
-
-    def test_count_mixed(self):
-        config = AIConfig(api_key="test", base_url="https://api.test.com", model="test")
-        client = LLMClient(config)
-        messages = [
-            {"role": "system", "content": "You are a helper"},
-            {"role": "user", "content": "帮我写代码"},
-        ]
-        count = client.count_tokens(messages)
-        assert count > 0
