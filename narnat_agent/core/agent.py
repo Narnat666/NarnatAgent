@@ -398,8 +398,8 @@ class Agent:
                 # 更新token统计（tool_call轮次也需统计，真实API数据）
                 if call_usage:
                     self._total_output_tokens += call_usage["completion_tokens"]
-                    self._total_input_tokens = call_usage["prompt_tokens"]
-                    self._total_cache_tokens = call_usage.get("cached_tokens", 0)
+                    self._total_input_tokens += call_usage["prompt_tokens"]
+                    self._total_cache_tokens += call_usage.get("cached_tokens", 0)
                     self._total_cost += calculate_cost(
                         self._config.ai.model,
                         call_usage["prompt_tokens"],
@@ -421,8 +421,8 @@ class Agent:
             # 更新token统计（真实API数据）
             if call_usage:
                 self._total_output_tokens += call_usage["completion_tokens"]
-                self._total_input_tokens = call_usage["prompt_tokens"]
-                self._total_cache_tokens = call_usage.get("cached_tokens", 0)
+                self._total_input_tokens += call_usage["prompt_tokens"]
+                self._total_cache_tokens += call_usage.get("cached_tokens", 0)
                 self._total_cost += calculate_cost(
                     self._config.ai.model,
                     call_usage["prompt_tokens"],
