@@ -417,6 +417,11 @@ class Agent:
                     "role": "assistant",
                     "content": "".join(content_parts),
                 })
+            else:
+                # 空回复：追加空assistant + 追问消息，让AI重新生成
+                self._messages.append({"role": "assistant", "content": ""})
+                self._messages.append({"role": "user", "content": "请继续完成你的回复"})
+                continue
 
             # 更新token统计（真实API数据）
             if call_usage:
