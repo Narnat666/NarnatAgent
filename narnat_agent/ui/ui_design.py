@@ -18,6 +18,7 @@ import shutil
 import signal
 import threading
 import time
+import unicodedata
 from typing import Optional, Callable, List, Match
 
 from prompt_toolkit import PromptSession
@@ -33,34 +34,91 @@ if sys.platform == "win32":
 
 # ═══════════════════════════════════════════════════════════════
 # ANSI 转义序列常量  (Salt Flow 配色 - 椒盐音乐风格)
+# 可通过 .narnat/style.json 自定义
 # ═══════════════════════════════════════════════════════════════
 
-RST = "\x1b[0m"
-BLD = "\x1b[1m"
-DIM = "\x1b[2m"
+class _Color:
+    """可变颜色容器：f"{R}text{R}" 直接可用，apply_style() 更新 _value 全局生效"""
+    __slots__ = ('_value',)
+    def __init__(self, value: str):
+        self._value = value
+    def __str__(self):
+        return self._value
+    def __repr__(self):
+        return self._value
+
+
+RST = _Color("\x1b[0m")
+BLD = _Color("\x1b[1m")
+DIM = _Color("\x1b[2m")
 
 # 核心中性色（灰蓝调，现代沉浸感）
-GRY = "\x1b[38;2;100;116;139m"      # 灰蓝 #64748B（次要文字、分隔线）
+GRY = _Color("\x1b[38;2;100;116;139m")      # 灰蓝 #64748B（次要文字、分隔线）
 
 # 主题流光色（青绿/蓝紫为主，低饱和舒适）
-CYN = "\x1b[38;2;94;234;212m"       # 流光青 #5EEAD4（主题主色、标题）
-GRN = "\x1b[38;2;52;211;153m"       # 薄荷绿 #34D399（成功、添加行）
-YLW = "\x1b[38;2;251;191;36m"       # 暖琥珀 #FBBF24（行内代码、提示）
-RED = "\x1b[38;2;248;113;113m"      # 珊瑚红 #F87171（错误、删除行）
-BLU = "\x1b[38;2;167;139;250m"      # 薰衣草紫 #A78BFA（链接、交互）
-MAG = "\x1b[38;2;232;121;249m"      # 粉紫流光 #E879F9（装饰、品牌色）
-ORG = "\x1b[38;2;251;146;60m"       # 桃橙色 #FB923C（强调、spinner）
+CYN = _Color("\x1b[38;2;94;234;212m")       # 流光青 #5EEAD4（主题主色、标题）
+GRN = _Color("\x1b[38;2;52;211;153m")       # 薄荷绿 #34D399（成功、添加行）
+YLW = _Color("\x1b[38;2;251;191;36m")       # 暖琥珀 #FBBF24（行内代码、提示）
+RED = _Color("\x1b[38;2;248;113;113m")      # 珊瑚红 #F87171（错误、删除行）
+BLU = _Color("\x1b[38;2;167;139;250m")      # 薰衣草紫 #A78BFA（链接、交互）
+MAG = _Color("\x1b[38;2;232;121;249m")      # 粉紫流光 #E879F9（装饰、品牌色）
+ORG = _Color("\x1b[38;2;251;146;60m")       # 桃橙色 #FB923C（强调、spinner）
 
 # 背景色（深夜蓝黑，沉浸式代码块背景）
-BG8 = "\x1b[48;2;15;23;42m"         # 深夜蓝 #0F172A
+BG8 = _Color("\x1b[48;2;15;23;42m")         # 深夜蓝 #0F172A
 
 # 文字色（保持不变）
-WHT = "\x1b[38;2;255;255;255m"      # 极致白色 #FFFFFF（用户输入）❗ 不变
-WHT7 = "\x1b[38;2;255;255;208m"     # 偏黄米白 #FFFFD0（AI输出）❗ 不变
+WHT = _Color("\x1b[38;2;255;255;255m")      # 极致白色 #FFFFFF（用户输入）
+WHT7 = _Color("\x1b[38;2;255;255;208m")     # 偏黄米白 #FFFFD0（AI输出）
 
 R, B, D, G, C = RST, BLD, DIM, GRY, CYN
 E, Y, X, U, M, O, BG = GRN, YLW, RED, BLU, MAG, ORG, BG8
 W, W7 = WHT, WHT7
+
+_STYLE_KEY_MAP = {
+    "用户输入色":   ("WHT",  False),
+    "AI输出色":     ("WHT7", False),
+    "标题色":       ("CYN",  False),
+    "成功色":       ("GRN",  False),
+    "行内代码色":   ("YLW",  False),
+    "错误色":       ("RED",  False),
+    "链接色":       ("BLU",  False),
+    "装饰色":       ("MAG",  False),
+    "加载动画色":   ("ORG",  False),
+    "次要文字色":   ("GRY",  False),
+    "代码块背景色":  ("BG8",  True),
+}
+
+SHOW_COST = False
+SHOW_BALANCE = False
+
+
+def apply_style(narnat_dir: str) -> bool:
+    """从 .narnat/style.json 加载自定义颜色。成功返回 True，失败返回 False。"""
+    import json
+    path = os.path.join(narnat_dir, "style.json")
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    def _hex_to_ansi(hex_str: str, bg: bool = False) -> str:
+        h = hex_str.lstrip("#")
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        code = "48" if bg else "38"
+        return f"\x1b[{code};2;{r};{g};{b}m"
+
+    for key, (var_name, is_bg) in _STYLE_KEY_MAP.items():
+        if key in data:
+            globals()[var_name]._value = _hex_to_ansi(data[key], bg=is_bg)
+    if "显示费用" in data:
+        globals()["SHOW_COST"] = bool(data["显示费用"])
+    if "显示余额" in data:
+        globals()["SHOW_BALANCE"] = bool(data["显示余额"])
+    return True
 
 
 def _terminal_width() -> int:
@@ -68,6 +126,18 @@ def _terminal_width() -> int:
         return min(shutil.get_terminal_size().columns, 160)
     except Exception:
         return 120
+
+
+_re_ansi = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _display_width(text: str) -> int:
+    """终端显示宽度：CJK字符=2列，跳过ANSI转义序列。"""
+    text = _re_ansi.sub("", text)
+    w = 0
+    for ch in text:
+        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return w
 
 
 def colorize_diff(diff_text: str) -> str:
@@ -522,6 +592,7 @@ class StreamingRenderer:
         self._code_lang = ""
         self._code_lines: List[str] = []
         self._normal_line_count = 0
+        self._table_rows: List[List[str]] = []
 
     def _buf_append(self, text: str) -> None:
         self._buf_parts.append(text)
@@ -591,16 +662,50 @@ class StreamingRenderer:
         if stripped.startswith("```"):
             self._in_code = True
             self._code_lang = stripped[3:].strip()
-            # 不再放回rest，由feed()外层循环用新handler处理
             return True
+        # 表格行：缓冲后统一对齐渲染
+        is_table = "|" in stripped and stripped.count("|") >= 2
+        if is_table:
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            if not _is_table_separator(cells):
+                self._table_rows.append(cells)
+            return False
+        # 非表格行：先刷出缓冲的表格
+        if self._table_rows:
+            self._flush_table()
         rendered = render_line(line)
         if not rendered:
-            # 跳过空行，避免段落间多余换行
             return False
         sys.stdout.write(rendered + "\n")
         sys.stdout.flush()
         self._normal_line_count += 1
         return False
+
+    def _flush_table(self) -> None:
+        if not self._table_rows:
+            return
+        cols = max(len(row) for row in self._table_rows)
+        widths = [0] * cols
+        rendered = [[InlineRules.render(c) for c in row] for row in self._table_rows]
+        for row in rendered:
+            for i, c in enumerate(row):
+                w = _display_width(c)
+                if w > widths[i]:
+                    widths[i] = w
+
+        sep = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+        border = f"    {BLU}{sep}{R}"
+
+        def _row(cells):
+            parts = [" " + c + " " * (widths[i] - _display_width(c) + 1) for i, c in enumerate(cells)]
+            return f"    {BLU}|{R}{W7}" + f"{BLU}|{R}{W7}".join(parts) + f"{BLU}|{R}"
+
+        sys.stdout.write(border + "\n")
+        for row in rendered:
+            sys.stdout.write(_row(row) + "\n")
+            sys.stdout.write(border + "\n")
+        sys.stdout.flush()
+        self._table_rows.clear()
 
     def _flush_code_block(self) -> None:
         if self._code_lines:
@@ -617,6 +722,8 @@ class StreamingRenderer:
         if self._in_code:
             self._flush_code_block()
             self._in_code = False
+        if self._table_rows:
+            self._flush_table()
         remaining = self._buf_get_and_clear()
         if remaining.strip():
             sys.stdout.write(render_line(remaining) + "\n")
@@ -669,8 +776,8 @@ def show_stats(input_tokens: int, output_tokens: int,
     so = f"{output_tokens / 1000:.1f}k" if output_tokens >= 1000 else str(output_tokens)
     _sep()
     cs = f"  缓存:{cache / 1000:.1f}k" if cache > 0 else ""
-    co = f"  费用:¥{cost:.4f}" if cost > 0 else ""
-    ba = f"  余额:¥{balance:.2f}" if balance > 0 else ""
+    co = f"  费用:¥{cost:.4f}" if SHOW_COST and cost > 0 else ""
+    ba = f"  余额:¥{balance:.2f}" if SHOW_BALANCE and balance > 0 else ""
     sys.stdout.write(f"  {G}输入:{si} 输出:{so}{cs}{R}{Y}{co}{ba}{R}\n")
 
 

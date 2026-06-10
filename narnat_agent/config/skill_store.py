@@ -13,16 +13,18 @@ def load_skill(exe_dir: str, name: str) -> tuple:
     1. skills/<name>.md       (扁平结构)
     2. skills/<name>/*.md      (目录结构，取目录下任意 .md 文件)
     """
+    if ".." in name or "/" in name or "\\" in name:
+        return "", f"技能不存在: {name}"
     skills_dir = os.path.join(exe_dir, "skills")
     path = os.path.join(skills_dir, f"{name}.md")
     if os.path.isfile(path):
-        return _read(path)
+        return _read(os.path.realpath(path))
     subdir = os.path.join(skills_dir, name)
     if os.path.isdir(subdir):
         try:
             for f in os.listdir(subdir):
                 if f.endswith(".md"):
-                    return _read(os.path.join(subdir, f))
+                    return _read(os.path.realpath(os.path.join(subdir, f)))
         except OSError:
             pass
     return "", f"技能不存在: {name}"

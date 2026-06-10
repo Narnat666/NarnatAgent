@@ -25,7 +25,7 @@ from ..tools import todo_write as todo_tool
 from ..tools import glob as glob_tool
 from ..tools import grep as grep_tool
 from ..tools import web_search as web_search_tool
-from ..ui.ui_design import UIInterface, SessionCallbacks, _interrupt_ctrl, D, E, R, Y, G, B, C
+from ..ui.ui_design import UIInterface, SessionCallbacks, _interrupt_ctrl, apply_style, D, E, R, Y, G, B, C
 from ..logger import AgentLogger
 
 # ── 工具分类 ──
@@ -115,6 +115,8 @@ class Agent:
     def __init__(self, project_root: Optional[str] = None, debug: bool = False):
         # 加载配置
         self._config = load_config(project_root)
+        # 加载自定义配色（不存在则使用默认）
+        apply_style(self._config.narnat_dir)
         # 初始化日志（仅debug模式启用）
         self._logger = AgentLogger(self._config.project_root)
         if debug:
