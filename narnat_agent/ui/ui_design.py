@@ -708,13 +708,21 @@ class SessionCallbacks:
         """退出时自动保存，返回保存的会话名或空串"""
         return ""
 
+    def on_skill(self, name: str) -> str:
+        """加载指定技能，返回错误提示或空串"""
+        return ""
+
+    def on_list_skill_names(self) -> list:
+        """返回所有可用技能的名称列表，供Tab补全使用"""
+        return []
+
 
 # ═══════════════════════════════════════════════════════════════
 # Tab 补全
 # ═══════════════════════════════════════════════════════════════
 
 class _CommandCompleter(Completer):
-    """命令补全：/enter /delete 动态补全会话名，其余命令静态补全"""
+    """命令补全：/enter /delete 动态补全会话名，/skill 动态补全技能名，其余命令静态补全"""
 
     _COMMANDS = {
         "/clear":  "清理屏幕",
@@ -722,10 +730,15 @@ class _CommandCompleter(Completer):
         "/show":   "显示所有会话",
         "/enter":  "进入历史会话",
         "/delete": "删除会话",
+        "/skill":  "加载技能",
         "/exit":   "退出程序",
     }
-    # 需要动态补全会话名的命令
-    _NAME_COMMANDS = {"/enter", "/delete"}
+    # 命令→动态补全回调方法名
+    _NAME_COMMANDS = {
+        "/enter":  "on_list_names",
+        "/delete": "on_list_names",
+        "/skill":  "on_list_skill_names",
+    }
 
     def __init__(self, callbacks: SessionCallbacks):
         self._cb = callbacks
@@ -755,8 +768,7 @@ class _CommandCompleter(Completer):
         if num_parts >= 1:
             cmd = parts[0].lower()
             if cmd in self._NAME_COMMANDS:
-                # 动态获取会话名
-                names = self._cb.on_list_names()
+                names = getattr(self._cb, self._NAME_COMMANDS[cmd])()
                 if num_parts == 1 and text.endswith(" "):
                     # 刚输入完命令+空格，补全所有会话名
                     for name in names:
@@ -803,6 +815,16 @@ def _dispatch_command(cmd: str, args: str, cb: SessionCallbacks) -> bool:
             print(f"  {X}{result}{R}")
         else:
             print(f"  {E}已进入会话: {C}{args}{R}")
+        return True
+    if cmd == "skill":
+        if not args:
+            print(f"  {Y}用法: /skill <名称>{R}")
+            return True
+        result = cb.on_skill(args)
+        if result:
+            print(f"  {X}{result}{R}")
+        else:
+            print(f"  {E}已加载技能: {C}{args}{R}")
         return True
     if cmd == "delete":
         if not args:

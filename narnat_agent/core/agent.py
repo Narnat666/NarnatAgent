@@ -16,6 +16,7 @@ from ..tools.bash import kill_active as _kill_bash
 from ..tools.terminal import kill_active_exec as _kill_terminal_exec
 from ..config.loader import AppConfig, load_config
 from ..config.session_store import save_session, load_session, list_sessions, delete_session, format_session_list
+from ..config.skill_store import load_skill, list_skill_names
 from ..tools.registry import execute as tool_execute
 from ..tools import write as write_tool
 from ..tools import bash as bash_tool
@@ -96,6 +97,16 @@ class NarnatSessionCallbacks(SessionCallbacks):
             return ""  # 保存失败，不返回名字
         self._active_name = None
         return name
+
+    def on_skill(self, name: str) -> str:
+        content, err = load_skill(os.path.dirname(self._narnat_dir), name)
+        if err:
+            return err
+        self._get_messages().append({"role": "system", "content": content})
+        return ""
+
+    def on_list_skill_names(self) -> list:
+        return list_skill_names(os.path.dirname(self._narnat_dir))
 
 
 class Agent:
