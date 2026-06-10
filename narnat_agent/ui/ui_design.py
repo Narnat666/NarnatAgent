@@ -533,7 +533,7 @@ BLOCK_RULES: List[BlockRule] = sorted([
     BlockRule(40, "ul",          lambda s: _re_ul.match(s),     _render_ul),
     BlockRule(50, "ol",          lambda s: _re_ol.match(s),     _render_ol),
     BlockRule(60, "blockquote",  lambda s: s.startswith(">"),   _render_blockquote),
-    BlockRule(70, "table",       lambda s: "|" in s and s.count("|") >= 2, _render_table_row),
+    BlockRule(70, "table",       lambda s: (s.startswith("|") or s.endswith("|")) and s.count("|") >= 2, _render_table_row),
     BlockRule(100, "paragraph",  lambda s: True,                _render_paragraph),
 ], key=lambda r: r.priority)
 
@@ -592,7 +592,8 @@ class StreamingRenderer:
         self._code_lang = ""
         self._code_lines: List[str] = []
         self._normal_line_count = 0
-        self._table_rows: List[List[str]] = []
+        self._table_rows: List[str] = []       # 缓存原始行（非分隔行）
+        self._table_has_separator = False      # 是否见过分隔行
 
     def _buf_append(self, text: str) -> None:
         self._buf_parts.append(text)
@@ -663,16 +664,19 @@ class StreamingRenderer:
             self._in_code = True
             self._code_lang = stripped[3:].strip()
             return True
-        # 表格行：缓冲后统一对齐渲染
-        is_table = "|" in stripped and stripped.count("|") >= 2
+        # 表格候选行：首尾有|且≥2个|。全部缓冲，flush时统一判断
+        is_table = (stripped.startswith("|") or stripped.endswith("|")) and stripped.count("|") >= 2
         if is_table:
             cells = [c.strip() for c in stripped.strip("|").split("|")]
-            if not _is_table_separator(cells):
-                self._table_rows.append(cells)
+            if _is_table_separator(cells):
+                self._table_has_separator = True
+            self._table_rows.append(stripped)
             return False
-        # 非表格行：先刷出缓冲的表格
+        # 非竖线行：先刷出缓冲；若缓冲为空则清标志位防跨表格污染
         if self._table_rows:
             self._flush_table()
+        else:
+            self._table_has_separator = False
         rendered = render_line(line)
         if not rendered:
             return False
@@ -683,10 +687,55 @@ class StreamingRenderer:
 
     def _flush_table(self) -> None:
         if not self._table_rows:
+            self._table_has_separator = False
             return
-        cols = max(len(row) for row in self._table_rows)
+        if not self._table_has_separator:
+            # 无分隔行 → 不是表格，逐行按段落输出
+            for line in self._table_rows:
+                rendered = _render_paragraph(line, None)
+                if rendered:
+                    sys.stdout.write(rendered + "\n")
+            sys.stdout.flush()
+            self._table_rows.clear()
+            return
+        # 有分隔行 → 拆分表头和数据
+        # 找出分隔行位置（第一个全由---组成的分隔行）
+        sep_idx = -1
+        for i, raw in enumerate(self._table_rows):
+            cells = [c.strip() for c in raw.strip("|").split("|")]
+            if _is_table_separator(cells):
+                sep_idx = i
+                break
+        # 表头行=分隔行之前的行，数据行=分隔行之后的行
+        header_rows = self._table_rows[:sep_idx] if sep_idx >= 0 else self._table_rows
+        data_rows = self._table_rows[sep_idx + 1:] if sep_idx >= 0 else []
+        # 无数据行 → 不是真正的表格（只有表头+分隔行或孤立分隔行）
+        if not data_rows:
+            for line in self._table_rows:
+                rendered = _render_paragraph(line, None)
+                if rendered:
+                    sys.stdout.write(rendered + "\n")
+            sys.stdout.flush()
+            self._table_rows.clear()
+            self._table_has_separator = False
+            return
+        # 数据行全部为空 → 不算表格
+        data_cells = [[c.strip() for c in line.strip("|").split("|")] for line in data_rows]
+        if not any(any(c for c in row) for row in data_cells):
+            for line in self._table_rows:
+                rendered = _render_paragraph(line, None)
+                if rendered:
+                    sys.stdout.write(rendered + "\n")
+            sys.stdout.flush()
+            self._table_rows.clear()
+            self._table_has_separator = False
+            return
+        # 合并表头和数据行计算列宽
+        all_rows = header_rows + data_rows
+        rows_cells = [[c.strip() for c in line.strip("|").split("|")] for line in all_rows]
+        cols = max(len(row) for row in rows_cells)
         widths = [0] * cols
-        rendered = [[InlineRules.render(c) for c in row] for row in self._table_rows]
+        rendered = [[InlineRules.render(c) for c in row] for row in rows_cells]
         for row in rendered:
             for i, c in enumerate(row):
                 w = _display_width(c)
@@ -706,6 +755,7 @@ class StreamingRenderer:
             sys.stdout.write(border + "\n")
         sys.stdout.flush()
         self._table_rows.clear()
+        self._table_has_separator = False
 
     def _flush_code_block(self) -> None:
         if self._code_lines:
@@ -724,6 +774,7 @@ class StreamingRenderer:
             self._in_code = False
         if self._table_rows:
             self._flush_table()
+            self._table_has_separator = False
         remaining = self._buf_get_and_clear()
         if remaining.strip():
             sys.stdout.write(render_line(remaining) + "\n")
