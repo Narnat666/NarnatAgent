@@ -91,6 +91,8 @@ Rule: decide what you need to READ before running the command. Don't dump what y
 
 - `codegraph init -i` outputs ANSI progress bars that flood context (~35K chars for 500+ files).
   Always suppress them: `codegraph init -i > $null 2>&1`, then verify with `codegraph status`.
+- `codegraph sync` also outputs ANSI progress bars (~32K chars for 350+ files).
+  Always suppress them: `codegraph sync > $null 2>&1`.
 
 ## Rules
 
@@ -105,7 +107,7 @@ Rule: decide what you need to READ before running the command. Don't dump what y
 4. **Go deeper on demand**: When impact is insufficient, trace call chains with
    `codegraph callers &lt;symbol&gt;` / `codegraph callees &lt;symbol&gt;`, or locate
    definitions with `codegraph query &lt;symbol&gt;`.
-5. **Sync after changes**: Run `codegraph sync` after file modifications.
+5. **Sync after changes**: Run `codegraph sync > $null 2>&1` after file modifications (suppress progress bars, same as init).
 
 # WebSearch Fallback
 

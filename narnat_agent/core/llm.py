@@ -10,8 +10,10 @@ LLM调用层 —— 双协议支持（OpenAI兼容 + Anthropic兼容），流式
 
 import json
 import queue
+import random
 import re
 import threading
+import time
 import httpx
 from typing import List, Dict, Any, Iterator, Optional
 
@@ -23,6 +25,29 @@ _active_llm_response = None
 
 # 队列哨兵值，标记流结束
 _STREAM_END = object()
+
+# 重试参数
+_MAX_NETWORK_RETRIES = 3   # 网络/服务端错误
+_MAX_RATE_RETRIES = 5      # 429 速率限制
+_RETRY_BACKOFF_BASE = [1, 2, 4, 8, 8]  # 1s起步，8s封顶
+
+
+def _retry_sleep(attempt: int, cancel_check=None) -> bool:
+    """指数退避休眠，带 jitter 和中断检查。返回 False 表示用户取消。"""
+    base = _RETRY_BACKOFF_BASE[min(attempt, len(_RETRY_BACKOFF_BASE) - 1)]
+    jitter = base * 0.25 * (random.random() * 2 - 1)  # ±25%
+    sleep_time = max(0, base + jitter)
+    deadline = time.time() + sleep_time
+    while time.time() < deadline:
+        if cancel_check and cancel_check():
+            return False
+        time.sleep(min(0.2, deadline - time.time()))
+    return True
+
+
+def _is_retryable_http(status: int) -> bool:
+    """判断 HTTP 状态码是否可重试（不含 429，429 单独处理）"""
+    return status in (408, 409) or status >= 500
 
 
 def abort_active_llm_request():
@@ -79,14 +104,17 @@ class _OpenAIBackend:
     """OpenAI SDK 后端"""
 
     def __init__(self, config, tool_defs, logger):
-        from openai import OpenAI
+        from openai import OpenAI, APIStatusError, APIConnectionError, APITimeoutError
+        self._APIStatusError = APIStatusError
+        self._APIConnectionError = APIConnectionError
+        self._APITimeoutError = APITimeoutError
         self._config = config
         self._tool_defs = tool_defs
         self._logger = logger
         self._client = OpenAI(
             api_key=config.api_key,
             base_url=config.base_url,
-            max_retries=0,  # 禁用SDK层重试，否则httpx超时和连接关闭会被拦截重试
+            max_retries=0,  # 禁用SDK层重试（我们自己控制）
         )
 
     def chat_stream(self, messages, no_tools=False, cancel_check=None):
@@ -95,27 +123,86 @@ class _OpenAIBackend:
             self._logger.info("core.llm", f"发送请求(OpenAI), messages={len(messages)}条")
 
         global _active_llm_response
-        _active_llm_response = self._client  # create()前暴露，ESC可关闭连接
 
-        try:
-            kwargs = dict(
-                model=self._config.model,
-                messages=messages,
-                stream=True,
-                stream_options={"include_usage": True},
-                timeout=httpx.Timeout(connect=5.0, read=0.2, write=30.0, pool=30.0),
-            )
-            if not no_tools:
-                kwargs["tools"] = self._tool_defs
-            stream = self._client.chat.completions.create(**kwargs)
-        except Exception as e:
-            _active_llm_response = None
-            if cancel_check and cancel_check():
-                return  # 用户取消，不报错
-            if self._logger:
-                self._logger.error("core.llm", f"API调用失败: {e}")
-            yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
-            return
+        network_retries = 0
+        rate_retries = 0
+        stream = None
+
+        while True:
+            _active_llm_response = self._client
+            try:
+                kwargs = dict(
+                    model=self._config.model,
+                    messages=messages,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                    timeout=httpx.Timeout(connect=5.0, read=0.2, write=30.0, pool=30.0),
+                )
+                if not no_tools:
+                    kwargs["tools"] = self._tool_defs
+                stream = self._client.chat.completions.create(**kwargs)
+                break
+            except self._APIStatusError as e:
+                _active_llm_response = None
+                status = e.status_code
+
+                # 不重试
+                if status in (400, 401, 403, 404, 422):
+                    if self._logger:
+                        self._logger.error("core.llm", f"API调用失败(不可重试): {e}")
+                    yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
+                    return
+
+                if cancel_check and cancel_check():
+                    return
+
+                # 429 速率限制
+                if status == 429 and rate_retries < _MAX_RATE_RETRIES:
+                    rate_retries += 1
+                    if self._logger:
+                        self._logger.warning("core.llm", f"API返回429(第{rate_retries}次重试)...")
+                    if not _retry_sleep(rate_retries - 1, cancel_check):
+                        return
+                    continue
+
+                # 可重试服务端错误
+                if _is_retryable_http(status) and network_retries < _MAX_NETWORK_RETRIES:
+                    network_retries += 1
+                    if self._logger:
+                        self._logger.warning("core.llm", f"API返回{status}(第{network_retries}次重试)...")
+                    if not _retry_sleep(network_retries - 1, cancel_check):
+                        return
+                    continue
+
+                if self._logger:
+                    self._logger.error("core.llm", f"API调用失败(重试耗尽): {e}")
+                yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
+                return
+
+            except (self._APIConnectionError, self._APITimeoutError) as e:
+                _active_llm_response = None
+                if cancel_check and cancel_check():
+                    return
+                if network_retries < _MAX_NETWORK_RETRIES:
+                    network_retries += 1
+                    if self._logger:
+                        self._logger.warning("core.llm", f"网络错误(第{network_retries}次重试): {e}")
+                    if not _retry_sleep(network_retries - 1, cancel_check):
+                        return
+                    continue
+                if self._logger:
+                    self._logger.error("core.llm", f"网络错误(重试耗尽): {e}")
+                yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
+                return
+
+            except Exception as e:
+                _active_llm_response = None
+                if cancel_check and cancel_check():
+                    return
+                if self._logger:
+                    self._logger.error("core.llm", f"API调用失败: {e}")
+                yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
+                return
 
         _active_llm_response = stream  # 切换到stream对象
 
@@ -255,27 +342,114 @@ class _AnthropicBackend:
         if anthropic_tools and not no_tools:
             body["tools"] = anthropic_tools
 
-        # 发送请求
+        # 发送请求（带重试）
         import requests
         session = requests.Session()
         global _active_llm_response
-        _active_llm_response = session  # post()前暴露，ESC可关闭连接
 
-        try:
-            resp = session.post(
-                self._url, headers=self._headers, json=body,
-                stream=True, timeout=120.0,
-            )
-            resp.raise_for_status()
-        except Exception as e:
-            _active_llm_response = None
-            session.close()
-            if cancel_check and cancel_check():
-                return  # 用户取消，不报错
-            if self._logger:
-                self._logger.error("core.llm", f"API调用失败: {e}")
-            yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
-            return
+        network_retries = 0
+        rate_retries = 0
+
+        while True:
+            _active_llm_response = session
+            try:
+                resp = session.post(
+                    self._url, headers=self._headers, json=body,
+                    stream=True, timeout=120.0,
+                )
+                status = resp.status_code
+
+                # 不重试
+                if status in (400, 401, 403, 404, 422):
+                    resp.raise_for_status()
+
+                # 429 速率限制
+                if status == 429:
+                    if rate_retries < _MAX_RATE_RETRIES:
+                        session.close()
+                        rate_retries += 1
+                        if self._logger:
+                            self._logger.warning("core.llm", f"API返回429(第{rate_retries}次重试)...")
+                        if not _retry_sleep(rate_retries - 1, cancel_check):
+                            _active_llm_response = None
+                            return
+                        session = requests.Session()
+                        continue
+                    _active_llm_response = None
+                    session.close()
+                    yield {"content": f"错误: API返回429速率限制(已重试{_MAX_RATE_RETRIES}次)", "finish_reason": "error"}
+                    return
+
+                # 可重试服务端错误
+                if _is_retryable_http(status):
+                    if network_retries < _MAX_NETWORK_RETRIES:
+                        session.close()
+                        network_retries += 1
+                        if self._logger:
+                            self._logger.warning("core.llm", f"API返回{status}(第{network_retries}次重试)...")
+                        if not _retry_sleep(network_retries - 1, cancel_check):
+                            _active_llm_response = None
+                            return
+                        session = requests.Session()
+                        continue
+                    _active_llm_response = None
+                    session.close()
+                    yield {"content": f"错误: API返回{status}错误(已重试{_MAX_NETWORK_RETRIES}次)", "finish_reason": "error"}
+                    return
+
+                # 成功或其他码
+                resp.raise_for_status()
+                break
+
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout,
+                    requests.exceptions.SSLError) as e:
+                _active_llm_response = None
+                session.close()
+                if cancel_check and cancel_check():
+                    return
+                if network_retries < _MAX_NETWORK_RETRIES:
+                    network_retries += 1
+                    if self._logger:
+                        self._logger.warning("core.llm", f"网络错误(第{network_retries}次重试): {e}")
+                    if not _retry_sleep(network_retries - 1, cancel_check):
+                        return
+                    session = requests.Session()
+                    continue
+                if self._logger:
+                    self._logger.error("core.llm", f"网络错误(重试耗尽): {e}")
+                yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
+                return
+
+            except requests.exceptions.HTTPError as e:
+                _active_llm_response = None
+                session.close()
+                status = e.response.status_code if e.response is not None else 0
+
+                # 不重试
+                if status in (400, 401, 403, 404, 422):
+                    if self._logger:
+                        self._logger.error("core.llm", f"API调用失败(不可重试): {e}")
+                    yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
+                    return
+
+                if cancel_check and cancel_check():
+                    return
+
+                if self._logger:
+                    self._logger.error("core.llm", f"API调用失败: {e}")
+                yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
+                return
+
+            except Exception as e:
+                _active_llm_response = None
+                session.close()
+                if cancel_check and cancel_check():
+                    return
+                if self._logger:
+                    self._logger.error("core.llm", f"API调用失败: {e}")
+                yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
+                return
 
         # 解析 Anthropic SSE 流（后台线程读，主线程Queue消费）
         _active_llm_response = resp  # 切换到response对象
