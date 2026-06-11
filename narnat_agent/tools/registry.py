@@ -52,7 +52,7 @@ TOOL_DEFINITIONS: List[Dict] = [
         "type": "function",
         "function": {
             "name": "Glob",
-            "description": "Search files by name pattern (non-recursive, searches specified directory only), e.g. *.py. Results truncated to 500 by default, truncation notice returned when exceeded, increase max_results for full list",
+            "description": "Search files by name pattern recursively in all subdirectories, e.g. *.py. Results truncated to 500 by default, truncation notice returned when exceeded, increase max_results for full list",
             "parameters": {
                 "type": "object",
                 "properties": {
