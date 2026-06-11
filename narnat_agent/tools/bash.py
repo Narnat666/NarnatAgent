@@ -20,6 +20,12 @@ _RE_DELETE = re.compile(
     re.IGNORECASE,
 )
 
+# PowerShell CLIXML 噪音正则（模块加载进度记录，对AI无意义）
+_RE_CLIXML = re.compile(
+    r'#<\s*CLIXML\s*\n.*?</Objs>',
+    re.DOTALL,
+)
+
 # 后台进程注册表 {pid: (proc, start_time)}
 _background_procs: dict = {}
 
@@ -68,6 +74,13 @@ def _decode_output(raw: bytes) -> str:
         except UnicodeDecodeError:
             pass
     return raw.decode("utf-8", errors="replace")
+
+
+def _strip_clixml(text: str) -> str:
+    """清洗PowerShell CLIXML噪音（模块加载进度记录，对AI无意义，仅输出优化）"""
+    text = _RE_CLIXML.sub("", text)
+    text = re.sub(r'\n{3,}', '\n\n', text)  # 压缩多余空行
+    return text.strip()
 
 
 def _kill_proc_tree(proc: subprocess.Popen):
@@ -206,7 +219,7 @@ def execute(
 
         if timed_out:
             out = _decode_output(stdout)
-            err = _decode_output(stderr)
+            err = _strip_clixml(_decode_output(stderr))
             parts = []
             if out.strip():
                 parts.append(out.strip())
@@ -216,7 +229,7 @@ def execute(
             return _truncate_output("\n".join(parts), max_output_chars)
 
         out = _decode_output(stdout)
-        err = _decode_output(stderr)
+        err = _strip_clixml(_decode_output(stderr))
 
         parts = []
         if out.strip():
