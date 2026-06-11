@@ -89,11 +89,14 @@ Rule: decide what you need to READ before running the command. Don't dump what y
 - Codegraph is a local command-line tool that has been installed on this device.
 **Before preparing to read and edit the code project, you must ensure that you have used the Codegraph tool.**
 
+- `codegraph init -i` outputs ANSI progress bars that flood context (~35K chars for 500+ files).
+  Always suppress them: `codegraph init -i > $null 2>&1`, then verify with `codegraph status`.
+
 ## Rules
 
 1. **Index first**: Run `codegraph status` on entering a project. If not indexed
-   or stale, run `codegraph init -i`. Verify with `codegraph query <symbol>` —
-   if status says `[OK]` but a known symbol is missing, run `codegraph init -i`.
+   or stale, run `codegraph init -i > $null 2>&1`, then verify with `codegraph status`.
+   If status says `[OK]` but a known symbol is missing, re-run `codegraph init -i > $null 2>&1`.
 2. **Understand structure**: Run `codegraph files --format tree` to see the
    project skeleton. Use `codegraph impact &lt;symbol&gt;` to map a key symbol's
    radius before reading files blindly.
@@ -103,3 +106,32 @@ Rule: decide what you need to READ before running the command. Don't dump what y
    `codegraph callers &lt;symbol&gt;` / `codegraph callees &lt;symbol&gt;`, or locate
    definitions with `codegraph query &lt;symbol&gt;`.
 5. **Sync after changes**: Run `codegraph sync` after file modifications.
+
+# WebSearch Fallback
+
+When AnySearch is unavailable, fall back to local Open WebSearch daemon. If the daemon is not running, start it in background.
+
+**This machine has PowerShell ExecutionPolicy Restricted — `npm`/`npx` cannot run via PowerShell. Always use `cmd /c` as the shell wrapper.**
+
+Startup time: ~20s cold (npx downloads 188MB), ~1.2s warm (cached).
+
+1. **Start the daemon via cmd /c**:
+   ```
+   cmd /c "npx open-websearch serve > nul 2>&1"
+   ```
+
+2. **Poll until healthy (max 30s)**:
+   ```
+   for ($i = 0; $i -lt 30; $i++) {
+       Start-Sleep -Seconds 1
+       try {
+           $r = curl.exe -s http://127.0.0.1:3210/health 2>$null | ConvertFrom-Json
+           if ($r.status -eq "ok") { break }
+       } catch {}
+   }
+   ```
+
+3. **Use `curl.exe` (not `curl`) for health checks** — `curl` is a PowerShell alias that triggers security prompts:
+   ```
+   curl.exe -s http://127.0.0.1:3210/health
+   ```
