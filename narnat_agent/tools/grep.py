@@ -19,7 +19,7 @@ def execute(
     A: int = 0,
     B: int = 0,
     C: int = 0,
-    head_limit: int = 0,
+    head_limit: int = 100,
 ) -> str:
     """
     按正则搜索文件内容。
@@ -63,25 +63,32 @@ def execute(
 
     results = []
     file_matches = _search_files(root, regex, glob, output_mode, n, A, B, head_limit)
+    truncated = False
 
     if output_mode == "files_with_matches":
         for rel_path in file_matches:
             results.append(rel_path)
             if head_limit and len(results) >= head_limit:
+                truncated = True
                 break
         output = "\n".join(results) if results else "(无匹配)"
     elif output_mode == "count":
         for rel_path, count in file_matches:
             results.append(f"{rel_path}:{count}")
             if head_limit and len(results) >= head_limit:
+                truncated = True
                 break
         output = "\n".join(results) if results else "(无匹配)"
     else:  # content
         for item in file_matches:
             results.append(item)
             if head_limit and len(results) >= head_limit:
+                truncated = True
                 break
         output = "\n".join(results) if results else "(无匹配)"
+
+    if truncated:
+        output += f"\n...[已截断: 超出head_limit({head_limit})限制, 增大head_limit获取完整结果]"
 
     return output
 
@@ -101,8 +108,11 @@ def _search_single_file(file_path, regex, output_mode, show_n, A, B, head_limit)
         return f"{file_path}:{len(matches)}" if matches else "(无匹配)"
     else:  # content
         lines = content.split("\n")
-        results, _ = _match_lines(file_path, lines, regex, A, B, head_limit)
-        return "\n".join(results) if results else "(无匹配)"
+        results, count = _match_lines(file_path, lines, regex, A, B, head_limit)
+        output = "\n".join(results) if results else "(无匹配)"
+        if head_limit and count >= head_limit:
+            output += f"\n...[已截断: 超出head_limit({head_limit})限制, 增大head_limit获取完整结果]"
+        return output
 
 
 def _match_lines(path_label, lines, regex, A, B, head_limit):

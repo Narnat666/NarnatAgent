@@ -9,13 +9,14 @@ from pathlib import PurePath
 _IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache"}
 
 
-def execute(pattern: str, path: str = "") -> str:
+def execute(pattern: str, path: str = "", max_results: int = 500) -> str:
     """
     按glob模式搜索文件。
 
     Args:
         pattern: glob模式，如 **/*.py
         path: 搜索根目录，空串为当前工作目录
+        max_results: 最大返回结果数，默认500。必须为正整数
 
     Returns:
         匹配的文件路径列表，每行一个，按修改时间倒序
@@ -42,8 +43,18 @@ def execute(pattern: str, path: str = "") -> str:
     if not matches:
         return "(无匹配文件)"
 
+    if max_results <= 0:
+        return "(max_results必须为正整数)"
+
+    total = len(matches)
     # 按修改时间倒序
     matches.sort(key=lambda x: x[1], reverse=True)
+
+    if total > max_results:
+        shown = matches[:max_results]
+        result = "\n".join(m[0] for m in shown)
+        return f"{result}\n...[已截断: 共{total}个匹配文件, 当前显示前{max_results}个。增大max_results可获取完整列表]"
+
     return "\n".join(m[0] for m in matches)
 
 

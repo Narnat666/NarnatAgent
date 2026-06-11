@@ -92,10 +92,20 @@ def _kill_proc_tree(proc: subprocess.Popen):
             pass
 
 
+def _truncate_output(text: str, max_chars: int) -> str:
+    """截断输出到指定字符数，超出部分附加提示"""
+    if max_chars <= 0:
+        return "(max_output_chars必须为正整数)"
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n...[已截断: 输出共{len(text)}字符, 当前显示前{max_chars}字符。增大max_output_chars可获取完整输出]"
+
+
 def execute(
     command: str,
     timeout: int = 120000,
     run_in_background: bool = False,
+    max_output_chars: int = 2000,
 ) -> str:
     """
     执行shell命令。AI写什么就执行什么，不做翻译。
@@ -104,6 +114,7 @@ def execute(
         command: shell命令
         timeout: 超时毫秒数
         run_in_background: 后台运行，立即返回
+        max_output_chars: 返回内容最大字符数，默认2000。设为0或负数表示不限制
 
     Returns:
         stdout + stderr + 退出码
@@ -202,7 +213,7 @@ def execute(
             if err.strip():
                 parts.append(f"[stderr]\n{err.strip()}")
             parts.append(f"[超时: 命令执行超过{timeout_sec:.0f}秒，进程仍在运行]")
-            return "\n".join(parts)
+            return _truncate_output("\n".join(parts), max_output_chars)
 
         out = _decode_output(stdout)
         err = _decode_output(stderr)
@@ -214,7 +225,7 @@ def execute(
             parts.append(f"[stderr]\n{err.strip()}")
         parts.append(f"[exit code: {proc.returncode}]")
 
-        return "\n".join(parts)
+        return _truncate_output("\n".join(parts), max_output_chars)
     finally:
         with _active_proc_lock:
             _active_proc = None

@@ -512,12 +512,13 @@ class TestGrepBoundary:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_grep_head_limit(self):
-        """head_limit限制输出"""
+        """head_limit限制输出并将返回截断提示"""
         with open(os.path.join(self.tmpdir, "many.py"), "w") as f:
             for i in range(100):
                 f.write(f"x = {i}\n")
         result = grep.execute("x = ", self.tmpdir, output_mode="content", head_limit=3)
-        lines = [l for l in result.split("\n") if l.strip() and "无匹配" not in l]
+        assert "已截断" in result
+        lines = [l for l in result.split("\n") if l.strip() and "无匹配" not in l and "已截断" not in l]
         assert len(lines) <= 3
 
     def test_grep_context_lines(self):
@@ -890,3 +891,219 @@ class TestTerminalBrutal:
         for kwargs in actions:
             result = terminal.execute(**kwargs)
             assert isinstance(result, str)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 输出截断测试（max_output_chars）
+# ═══════════════════════════════════════════════════════════════
+
+class TestTruncateOutput:
+    """_truncate_output 函数单元测试"""
+
+    def test_short_text_unchanged(self):
+        result = bash._truncate_output("hello", 2000)
+        assert result == "hello"
+
+    def test_exact_limit_unchanged(self):
+        text = "a" * 2000
+        result = bash._truncate_output(text, 2000)
+        assert result == text
+        assert "已截断" not in result
+
+    def test_long_text_truncated(self):
+        text = "a" * 3000
+        result = bash._truncate_output(text, 2000)
+        assert len(result) > 2000  # 包含截断提示
+        assert result[:2000] == text[:2000]
+        assert "已截断" in result
+        assert "3000" in result  # 总字符数
+        assert "2000" in result  # 当前显示数
+        assert "max_output_chars" in result
+
+    def test_zero_returns_error(self):
+        text = "a" * 5000
+        result = bash._truncate_output(text, 0)
+        assert "必须为正整数" in result
+
+    def test_negative_returns_error(self):
+        text = "a" * 5000
+        result = bash._truncate_output(text, -1)
+        assert "必须为正整数" in result
+
+    def test_empty_string(self):
+        result = bash._truncate_output("", 2000)
+        assert result == ""
+
+    def test_chinese_text_truncated(self):
+        text = "你好" * 1500  # 3000 chars
+        result = bash._truncate_output(text, 2000)
+        assert "已截断" in result
+        assert "3000" in result
+
+
+class TestBashTruncation:
+    """bash.execute 截断集成测试"""
+
+    def test_default_truncates_large_output(self):
+        # 生成约4000字符的输出
+        result = bash.execute("python -c \"print('x' * 4000)\"")
+        assert "已截断" in result
+        assert "max_output_chars" in result
+
+    def test_zero_returns_error(self):
+        result = bash.execute(
+            "python -c \"print('x' * 3000)\"",
+            max_output_chars=0,
+        )
+        assert "必须为正整数" in result
+
+    def test_short_output_not_truncated(self):
+        result = bash.execute("echo hello world")
+        assert "已截断" not in result
+        assert "exit code: 0" in result
+        assert "hello" in result  # PowerShell echo 会输出 "hello" 和 "world" 两行
+
+    def test_custom_limit(self):
+        result = bash.execute(
+            "python -c \"print('x' * 5000)\"",
+            max_output_chars=500,
+        )
+        assert "已截断" in result
+        assert "500" in result  # 当前显示限制
+
+    def test_stderr_not_affected_by_truncation_default(self):
+        """默认截断不影响stderr的基本行为"""
+        result = bash.execute("python -c \"import sys; [sys.stderr.write('e' * 100) for _ in range(3)]; print('o' * 100)\"")
+        assert "exit code: 0" in result
+        # stderr和stdout都被截断（如果有超限），但"已截断"只会出现一次
+        truncated_count = result.count("已截断")
+        assert truncated_count <= 1  # 顶多出现一次
+
+    def test_original_params_still_work(self):
+        """原有参数（timeout, run_in_background）仍正常工作"""
+        result = bash.execute("echo test", timeout=60000)
+        assert "test" in result
+        assert "exit code: 0" in result
+
+
+class TestTerminalTruncation:
+    """terminal 截断单元测试（不依赖真实SSH连接）"""
+
+    def test_truncate_function_available(self):
+        assert hasattr(terminal, '_truncate_output')
+        result = terminal._truncate_output("a" * 3000, 2000)
+        assert "已截断" in result
+
+    def test_max_output_chars_in_execute_signature(self):
+        """execute() 接受 max_output_chars 参数"""
+        import inspect
+        sig = inspect.signature(terminal.execute)
+        assert 'max_output_chars' in sig.parameters
+        param = sig.parameters['max_output_chars']
+        assert param.default == 2000
+
+
+# ═══════════════════════════════════════════════════════════════
+# Grep/Glob 限制测试
+# ═══════════════════════════════════════════════════════════════
+
+class TestGrepLimit:
+    """grep head_limit 默认100"""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_default_head_limit(self):
+        import inspect
+        sig = inspect.signature(grep.execute)
+        assert sig.parameters['head_limit'].default == 100
+
+    def test_grep_still_works_with_default(self):
+        """默认 head_limit=100 不影响正常搜索"""
+        with open(os.path.join(self.tmpdir, "test.py"), "w") as f:
+            f.write("hello world\n" * 5)
+        result = grep.execute("hello", self.tmpdir)
+        assert "test.py" in result
+
+    def test_grep_many_matches_truncated(self):
+        """超过100行匹配时截断"""
+        # 创建150行匹配
+        with open(os.path.join(self.tmpdir, "many.py"), "w") as f:
+            for i in range(150):
+                f.write(f"match_{i}\n")
+        result = grep.execute("match_", self.tmpdir, output_mode="content")
+        # 默认head_limit=100，应不超过100条
+        lines = [l for l in result.split("\n") if l.startswith("many.py")]
+        assert len(lines) <= 100
+
+
+class TestGlobLimit:
+    """Glob max_results 默认500"""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_default_max_results(self):
+        import inspect
+        sig = inspect.signature(glob.execute)
+        assert sig.parameters['max_results'].default == 500
+
+    def test_short_result_not_truncated(self):
+        for name in ["a.py", "b.py", "c.py"]:
+            with open(os.path.join(self.tmpdir, name), "w") as f:
+                f.write("")
+        result = glob.execute("*.py", self.tmpdir)
+        assert "已截断" not in result
+        assert "a.py" in result
+        assert "b.py" in result
+
+    def test_zero_returns_error(self):
+        # max_results=0 返回错误
+        for i in range(10):
+            with open(os.path.join(self.tmpdir, f"f{i}.py"), "w") as f:
+                f.write("")
+        result = glob.execute("*.py", self.tmpdir, max_results=0)
+        assert "必须为正整数" in result
+
+    def test_truncated_shows_hint(self):
+        # 创建550个文件
+        for i in range(550):
+            with open(os.path.join(self.tmpdir, f"f{i}.py"), "w") as f:
+                f.write("")
+        result = glob.execute("*.py", self.tmpdir)
+        assert "已截断" in result
+        assert "550" in result  # 总数
+        assert "500" in result  # 限制数
+        assert "max_results" in result
+
+
+class TestRegistryToolDefinitions:
+    """验证 TOOL_DEFINITIONS 暴露了限制参数"""
+
+    def test_shell_exposes_max_output_chars(self):
+        from narnat_agent.tools.registry import TOOL_DEFINITIONS
+        shell = next(t for t in TOOL_DEFINITIONS if t["function"]["name"] == "Shell")
+        assert "max_output_chars" in shell["function"]["parameters"]["properties"]
+
+    def test_terminal_exposes_max_output_chars(self):
+        from narnat_agent.tools.registry import TOOL_DEFINITIONS
+        terminal = next(t for t in TOOL_DEFINITIONS if t["function"]["name"] == "Terminal")
+        assert "max_output_chars" in terminal["function"]["parameters"]["properties"]
+
+    def test_glob_exposes_max_results(self):
+        from narnat_agent.tools.registry import TOOL_DEFINITIONS
+        glob_def = next(t for t in TOOL_DEFINITIONS if t["function"]["name"] == "Glob")
+        assert "max_results" in glob_def["function"]["parameters"]["properties"]
+
+    def test_grep_exposes_head_limit(self):
+        from narnat_agent.tools.registry import TOOL_DEFINITIONS
+        grep_def = next(t for t in TOOL_DEFINITIONS if t["function"]["name"] == "Grep")
+        desc = grep_def["function"]["parameters"]["properties"]["head_limit"]["description"]
+        assert "默认100" in desc
+        assert "必须为正整数" in desc

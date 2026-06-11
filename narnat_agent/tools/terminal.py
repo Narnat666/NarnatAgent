@@ -133,7 +133,7 @@ class SSHSession:
             display_path = "~" + self._cwd[len(home_prefix):]
         return f"{self.username}@{self.host}:{display_path}$"
 
-    def execute(self, command: str, timeout: int = 0) -> str:
+    def execute(self, command: str, timeout: int = 0, max_output_chars: int = 2000) -> str:
         """在远程shell中执行命令，返回输出+prompt
 
         纯管道原则: AI输入什么就发送什么，不做翻译/注入。
@@ -145,6 +145,8 @@ class SSHSession:
         timeout:
           >0  - 等待指定秒数，超时返回已收集输出+超时提示
           0   - 无限等待，直到命令完成(适合长命令，AI可去其他终端做别的事)
+        max_output_chars:
+          返回内容最大字符数，默认2000。设为0或负数表示不限制
         """
         # 通道忙(上一个命令超时未完成)，直接告知AI
         if self._busy:
@@ -160,9 +162,10 @@ class SSHSession:
         full_cmd = f"{command}; echo {marker}$?; pwd -P; echo {pwd_marker}\n"
         self._channel.send(full_cmd)
 
-        return self._read_until_marker(marker, pwd_marker, timeout=timeout)
+        result = self._read_until_marker(marker, pwd_marker, timeout=timeout)
+        return _truncate_output(result, max_output_chars)
 
-    def send_input(self, text: str, timeout: int = 0) -> str:
+    def send_input(self, text: str, timeout: int = 0, max_output_chars: int = 2000) -> str:
         """向当前终端发送交互输入（如sudo密码、确认提示等）
 
         直接通过channel写入文本+换行，然后读取直到下一个prompt。
@@ -171,6 +174,7 @@ class SSHSession:
         Args:
             text: 要输入的文本（如密码、y/n确认等）
             timeout: 等待响应的超时秒数，0=无限等待
+            max_output_chars: 返回内容最大字符数，默认2000。设为0或负数表示不限制
         """
         if self._busy:
             return f"[上一个命令尚未完成，此终端暂不可用]\n{self.prompt}"
@@ -184,7 +188,8 @@ class SSHSession:
         # 发送一个空命令来获取marker，检测输入后的命令是否完成
         self._channel.send(f"echo {marker}$?; pwd -P; echo {pwd_marker}\n")
 
-        return self._read_until_marker(marker, pwd_marker, timeout=timeout)
+        result = self._read_until_marker(marker, pwd_marker, timeout=timeout)
+        return _truncate_output(result, max_output_chars)
 
     def close(self):
         """关闭会话。channel立即关闭，transport在后台线程关闭，
@@ -592,6 +597,15 @@ class SSHSession:
 
 # 公开接口
 
+def _truncate_output(text: str, max_chars: int) -> str:
+    """截断输出到指定字符数，超出部分附加提示"""
+    if max_chars <= 0:
+        return "(max_output_chars必须为正整数)"
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n...[已截断: 输出共{len(text)}字符, 当前显示前{max_chars}字符。增大max_output_chars可获取完整输出]"
+
+
 def execute(
     action: str = "exec",
     host: str = "",
@@ -604,6 +618,7 @@ def execute(
     input: str = "",
     timeout: int = 0,
     session_id: int = -1,
+    max_output_chars: int = 2000,
 ) -> str:
     """
     Terminal工具：多终端可持续SSH。
@@ -621,13 +636,16 @@ def execute(
 
     sudo_password:
       connect时设置，后续exec遇到sudo密码提示自动注入
+
+    max_output_chars:
+      返回内容最大字符数，默认2000。设为0或负数表示不限制
     """
     if action == "connect":
         return _connect(host, username, port, key_path, password, sudo_password, session_id)
     elif action == "exec":
-        return _exec(session_id, host, command, timeout)
+        return _exec(session_id, host, command, timeout, max_output_chars)
     elif action == "input":
-        return _input(session_id, host, input, timeout)
+        return _input(session_id, host, input, timeout, max_output_chars)
     elif action == "status":
         return _status()
     elif action == "close":
@@ -743,7 +761,7 @@ def _connect(host: str, username: str, port: int = 22,
         return f"错误: 连接失败({username}@{host}): {e}"
 
 
-def _exec(session_id: int, host: str, command: str, timeout: int = 0) -> str:
+def _exec(session_id: int, host: str, command: str, timeout: int = 0, max_output_chars: int = 2000) -> str:
     """在指定会话中执行命令"""
     if not command:
         return "错误: exec需要提供command"
@@ -770,7 +788,7 @@ def _exec(session_id: int, host: str, command: str, timeout: int = 0) -> str:
             global _active_exec_session
             _active_exec_session = session
         try:
-            result = session.execute(command, timeout=timeout)
+            result = session.execute(command, timeout=timeout, max_output_chars=max_output_chars)
         finally:
             with _active_exec_lock:
                 _active_exec_session = None
@@ -780,7 +798,7 @@ def _exec(session_id: int, host: str, command: str, timeout: int = 0) -> str:
         return f"错误: 终端{sid}命令执行失败: {e}"
 
 
-def _input(session_id: int, host: str, input: str, timeout: int = 0) -> str:
+def _input(session_id: int, host: str, input: str, timeout: int = 0, max_output_chars: int = 2000) -> str:
     """向终端发送交互输入"""
     if not input:
         return "错误: input需要提供input内容"
@@ -797,7 +815,7 @@ def _input(session_id: int, host: str, input: str, timeout: int = 0) -> str:
         return f"错误: 终端{sid}会话已断开，请重新connect"
 
     try:
-        result = session.send_input(input, timeout=timeout)
+        result = session.send_input(input, timeout=timeout, max_output_chars=max_output_chars)
         return f"[终端{sid}] {result}"
     except Exception as e:
         return f"错误: 终端{sid}输入发送失败: {e}"
