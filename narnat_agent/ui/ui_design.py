@@ -792,15 +792,36 @@ def show_header(msg: str) -> None:
 
 
 def _spinner_thread(stop: threading.Event) -> None:
-    frames = (f"{B}{O}*{R}", f"{D}{O}\u2736{R}")
+    """显示思考中动画。先等待666ms，避免串行工具间的短暂空白闪烁。
+    666ms后屏幕仍空白才启动动画，4帧循环：* 思考中 → * 思考中. → * 思考中.. → * 思考中...
+    左侧 * 粗细交替，右侧 ... 从0到3循环，"思考中"三字位置锁定。
+    线程只管写入，不负责清理——清理统一由 _stop_spinner 处理。"""
+    # 延迟666ms，期间每50ms检查一次stop
+    delay = 0.666
+    elapsed = 0.0
+    tick = 0.05
+    while elapsed < delay:
+        if stop.is_set():
+            return
+        time.sleep(tick)
+        elapsed += tick
+
+    # 隐藏光标
+    sys.stdout.write("\x1b[?25l")
+    sys.stdout.flush()
+
+    frames = (
+        f"{B}{O}* {R}{O}思考中   {R}",
+        f"{D}{O}* {R}{O}思考中.  {R}",
+        f"{B}{O}* {R}{O}思考中.. {R}",
+        f"{D}{O}* {R}{O}思考中...{R}",
+    )
     i = 0
     while not stop.is_set():
-        sys.stdout.write(f"\r  {frames[i]} {O}思考中...{R}")
+        sys.stdout.write(f"\r  {frames[i]}")
         sys.stdout.flush()
-        i = (i + 1) % 2
+        i = (i + 1) % 4
         stop.wait(0.15)
-    sys.stdout.write("\r\x1b[K")
-    sys.stdout.flush()
 
 
 def _compress_thread(stop: threading.Event) -> None:
@@ -1017,37 +1038,50 @@ class UIStreamSession:
         self._renderer = StreamingRenderer()
         self._spinner_stop = threading.Event()
         self._spinner_thread: Optional[threading.Thread] = None
-        self._started = False
+        self._started = False  # 仅用于flush_renderer守卫，不干预spinner
         self._aborted = False  # abort后resume_spinner不应再启动新spinner
         self._spinner_pause_count = 0  # 并行工具pause计数，归零才恢复spinner
 
-    @property
-    def cancelled(self) -> bool:
-        return _interrupt_ctrl.is_set
-
-    def begin(self) -> None:
+    def _start_spinner(self) -> None:
+        """启动spinner线程（带666ms延迟），如果已有则不重复启动"""
+        if self._spinner_thread is not None:
+            return
         self._spinner_stop.clear()
         self._spinner_thread = threading.Thread(
             target=_spinner_thread,
             args=(self._spinner_stop,), daemon=True)
         self._spinner_thread.start()
 
+    def _stop_spinner(self) -> None:
+        """停止spinner线程并等待其退出，主动清理避免竞态残留"""
+        if self._spinner_thread is None:
+            return
+        self._spinner_stop.set()
+        self._spinner_thread.join(timeout=0.5)
+        self._spinner_thread = None
+        # 清理：擦除动画行 + 恢复光标
+        sys.stdout.write("\r\x1b[K")
+        sys.stdout.write("\x1b[?25h")
+        sys.stdout.flush()
+
+    @property
+    def cancelled(self) -> bool:
+        return _interrupt_ctrl.is_set
+
+    def begin(self) -> None:
+        self._start_spinner()
+
     def feed(self, chunk: str) -> None:
         if not self._started:
             self._started = True
-            self._spinner_stop.set()
-            if self._spinner_thread is not None:
-                self._spinner_thread.join(timeout=0.5)
+        self._stop_spinner()
         self._renderer.feed(chunk)
 
     def pause_spinner(self) -> None:
-        """暂停spinner（工具执行前调用），清除当前行避免闪烁"""
+        """暂停spinner（工具执行前调用），避免与工具输出竞争同一行"""
         self._spinner_pause_count += 1
-        if self._spinner_pause_count == 1 and not self._started and self._spinner_thread is not None and self._spinner_thread.is_alive():
-            self._spinner_stop.set()
-            # 清除spinner行
-            sys.stdout.write("\r\x1b[K")
-            sys.stdout.flush()
+        if self._spinner_pause_count == 1:
+            self._stop_spinner()
 
     def flush_renderer(self) -> None:
         """flush渲染器缓冲区，确保之前的文字已完整输出到终端"""
@@ -1059,35 +1093,21 @@ class UIStreamSession:
         if self._aborted:
             return
         self._spinner_pause_count = max(0, self._spinner_pause_count - 1)
-        if self._spinner_pause_count == 0 and not self._started:
-            self._spinner_stop.clear()
-            self._spinner_thread = threading.Thread(
-                target=_spinner_thread,
-                args=(self._spinner_stop,), daemon=True)
-            self._spinner_thread.start()
+        if self._spinner_pause_count == 0:
+            self._start_spinner()
 
     def finish(self, input_tokens: int = 0, output_tokens: int = 0,
                cache: int = 0, cost: float = 0.0,
                balance: float = 0.0) -> None:
         _interrupt_ctrl.enter_input_mode()  # 立即停止ESC轮询，防止误触发
-        self._spinner_stop.set()
-        if self._spinner_thread is not None:
-            self._spinner_thread.join(timeout=0.5)
-        # 清除spinner残留行
-        sys.stdout.write("\r\x1b[K")
-        sys.stdout.flush()
+        self._stop_spinner()
         self._renderer.flush()
         show_stats(input_tokens, output_tokens, cache, cost, balance)
 
     def abort(self) -> None:
         self._aborted = True  # 标记已打断，防止后台线程resume_spinner重启
         _interrupt_ctrl.enter_input_mode()  # 立即停止ESC轮询
-        self._spinner_stop.set()
-        if self._spinner_thread is not None:
-            self._spinner_thread.join(timeout=0.5)
-        # 清除spinner残留行
-        sys.stdout.write("\r\x1b[K")
-        sys.stdout.flush()
+        self._stop_spinner()
         show_interrupted()
 
 

@@ -641,7 +641,7 @@ class Agent:
         stream.pause_spinner()
         stream.flush_renderer()
         self._show_tool_call(name, arguments)
-        # 工具摘要已输出，恢复spinner让用户知道程序还在运行
+        # 恢复spinner（666ms延迟，足够工具print完成，不会竞争同一行）
         stream.resume_spinner()
 
         # 执行工具 → 返回 (llm_result, color_diff)
