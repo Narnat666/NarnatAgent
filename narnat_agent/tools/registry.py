@@ -168,7 +168,7 @@ TOOL_DEFINITIONS: List[Dict] = [
                     "sudo_password": {"type": "string", "description": "Sudo password (set at connect time, auto-injected when subsequent exec encounters sudo prompt)"},
                     "command": {"type": "string", "description": "Command to execute (required when action=exec)"},
                     "input": {"type": "string", "description": "Interactive input (required when action=input, e.g. sudo password, y/n confirmation)"},
-                    "timeout": {"type": "integer", "description": "Timeout in seconds, 0=wait indefinitely (default), AI may adjust as needed"},
+                    "timeout": {"type": "integer", "description": "Command timeout in seconds, default 120s. AI will be notified if command is still running after timeout. Set a positive integer to customize"},
                     "session_id": {"type": "integer", "description": "Terminal ID 0-4, default -1 auto-select. Specified or auto-assigned during connect, specifies which terminal on exec"},
                     "max_output_chars": {"type": "integer", "description": "Max output chars, default 2000. Must be a positive integer"},
                 },

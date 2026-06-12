@@ -12,7 +12,7 @@
 - AI发命令 → 写入channel → 读取输出 → 返回给AI
 - 会话持久化，多次调用复用同一连接
 - 哨兵机制: 追加 echo __MARKER__$?; pwd -P; echo __PWD_MARKER__ 检测命令结束
-- timeout=0 无限等待，适合长命令(AI可去其他终端做别的事)
+- timeout默认120秒，超时告知AI命令仍在运行（AI可去其他终端继续工作）
 
 sudo密码自动注入:
 - connect时可选设置sudo_password，后续exec遇到sudo密码提示自动注入
@@ -144,7 +144,7 @@ class SSHSession:
 
         timeout:
           >0  - 等待指定秒数，超时返回已收集输出+超时提示
-          0   - 无限等待，直到命令完成(适合长命令，AI可去其他终端做别的事)
+          ≤0  - 等价于0（由上层校验保证不传，此处仅兜底）
         max_output_chars:
           返回内容最大字符数，默认2000。设为0或负数表示不限制
         """
@@ -173,7 +173,7 @@ class SSHSession:
 
         Args:
             text: 要输入的文本（如密码、y/n确认等）
-            timeout: 等待响应的超时秒数，0=无限等待
+            timeout: 等待响应的超时秒数，默认由上层传入120秒
             max_output_chars: 返回内容最大字符数，默认2000。设为0或负数表示不限制
         """
         if self._busy:
@@ -327,14 +327,14 @@ class SSHSession:
 
         timeout:
           >0  - 等待指定秒数，超时返回已收集输出+超时提示
-          0   - 无限等待，直到命令完成(适合长命令)
+          ≤0  - 兜底：上层调用保证传入正数
 
         纯管道原则: 超时只告知AI，不替AI杀进程。
         ESC铁律: 用户按ESC立即中断，发Ctrl+C，宁可丢数据不卡住。
         sudo注入: 检测到密码提示时自动注入sudo_password(若有)。
         """
         output = ""
-        # timeout=0 表示无限等待
+        # timeout≤0 兜底为无限等待（上层调用保证传正数）
         deadline = time.time() + timeout if timeout > 0 else float('inf')
         found = False
         # 找到marker后，连续recv超时次数达到此阈值才认为数据读完
@@ -616,7 +616,7 @@ def execute(
     sudo_password: str = "",
     command: str = "",
     input: str = "",
-    timeout: int = 0,
+    timeout: int = 120,
     session_id: int = -1,
     max_output_chars: int = 2000,
 ) -> str:
@@ -761,10 +761,12 @@ def _connect(host: str, username: str, port: int = 22,
         return f"错误: 连接失败({username}@{host}): {e}"
 
 
-def _exec(session_id: int, host: str, command: str, timeout: int = 0, max_output_chars: int = 2000) -> str:
+def _exec(session_id: int, host: str, command: str, timeout: int = 120, max_output_chars: int = 2000) -> str:
     """在指定会话中执行命令"""
     if not command:
         return "错误: exec需要提供command"
+    if timeout <= 0:
+        return "错误: timeout必须为正整数（秒），默认120秒"
 
     # 安全检查：删除命令需用户确认
     if _RE_DELETE.search(command):
@@ -798,10 +800,12 @@ def _exec(session_id: int, host: str, command: str, timeout: int = 0, max_output
         return f"错误: 终端{sid}命令执行失败: {e}"
 
 
-def _input(session_id: int, host: str, input: str, timeout: int = 0, max_output_chars: int = 2000) -> str:
+def _input(session_id: int, host: str, input: str, timeout: int = 120, max_output_chars: int = 2000) -> str:
     """向终端发送交互输入"""
     if not input:
         return "错误: input需要提供input内容"
+    if timeout <= 0:
+        return "错误: timeout必须为正整数（秒），默认120秒"
 
     try:
         sid, session = _resolve_session_id(session_id, host)

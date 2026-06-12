@@ -641,8 +641,6 @@ class Agent:
         stream.pause_spinner()
         stream.flush_renderer()
         self._show_tool_call(name, arguments)
-        # 恢复spinner（666ms延迟，足够工具print完成，不会竞争同一行）
-        stream.resume_spinner()
 
         # 执行工具 → 返回 (llm_result, color_diff)
         llm_result, color_diff = tool_execute(name, arguments)
@@ -657,9 +655,10 @@ class Agent:
 
         # 展示着色diff（Edit/Write编辑文件后）
         if color_diff:
-            stream.pause_spinner()
             self._show_diff(color_diff)
-            stream.resume_spinner()
+
+        # 工具全部执行完毕，恢复spinner填补等待LLM下一轮token的空白
+        stream.resume_spinner()
 
         return llm_result
 
