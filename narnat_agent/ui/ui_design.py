@@ -556,18 +556,13 @@ def render_line(line: str) -> str:
 class CodeBlockRenderer:
     """渲染围栏代码块：语言标签 + 行号 + ANSI 着色"""
 
-    MAX_LINE_LEN_MARGIN = 8
-
     @staticmethod
     def render(lang: str, body: str, width: int) -> str:
         color = _COLOR_MAP.get(
             _LANG_COLOR_MAP.get(lang.strip().lower(), "gray"), G)
-        max_content = width - CodeBlockRenderer.MAX_LINE_LEN_MARGIN
         lines = []
         for i, raw in enumerate(body.split("\n"), 1):
             stripped = raw.rstrip()
-            if len(stripped) > max_content:
-                stripped = stripped[:max_content - 3] + "..."
             lines.append(f" {BG} {G}{i:>3} {R}{color}{stripped}{R}")
         label = lang.strip().lower() or "code"
         header = f"{G}{BG}  -- {label} --{R}"
