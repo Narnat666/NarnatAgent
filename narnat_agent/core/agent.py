@@ -320,6 +320,7 @@ class Agent:
 
     def _agent_loop(self, stream):
         """工具调度内循环"""
+        empty_retries = 0
         while True:
             # a. 修复messages：如果有未回复的tool_call，补上空结果
             self._repair_messages()
@@ -431,10 +432,15 @@ class Agent:
                     "content": "".join(content_parts),
                 })
             else:
-                # 空回复：追加空assistant + 追问消息，让AI重新生成
-                self._messages.append({"role": "assistant", "content": ""})
-                self._messages.append({"role": "user", "content": "请继续完成你的回复"})
-                continue
+                # 空回复：重试一次，如果还为空则上报用户
+                empty_retries += 1
+                if empty_retries <= 1:
+                    self._messages.append({"role": "assistant", "content": ""})
+                    self._messages.append({"role": "user", "content": "请继续完成你的回复"})
+                    continue
+                stream.feed("\n\n⚠ AI 连续两次返回空回复，请尝试缩短对话或稍后重试。\n")
+                stream.finish()
+                return
 
             # 更新token统计（真实API数据）
             if call_usage:
@@ -635,6 +641,8 @@ class Agent:
         stream.pause_spinner()
         stream.flush_renderer()
         self._show_tool_call(name, arguments)
+        # 工具摘要已输出，恢复spinner让用户知道程序还在运行
+        stream.resume_spinner()
 
         # 执行工具 → 返回 (llm_result, color_diff)
         llm_result, color_diff = tool_execute(name, arguments)
@@ -649,10 +657,10 @@ class Agent:
 
         # 展示着色diff（Edit/Write编辑文件后）
         if color_diff:
+            stream.pause_spinner()
             self._show_diff(color_diff)
+            stream.resume_spinner()
 
-        # UI: 恢复spinner
-        stream.resume_spinner()
         return llm_result
 
     def _run_parallel(

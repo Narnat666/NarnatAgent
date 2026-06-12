@@ -545,7 +545,7 @@ class _AnthropicBackend:
 
                         if self._logger:
                             total_out = len("".join(content_buffer))
-                            self._logger.info("core.llm", f"响应完成, content_len={total_out}")
+                            self._logger.info("core.llm", f"响应完成, content_len={total_out}, stop_reason={stop_reason}")
 
                     # 捕获usage（Anthropic message_delta 中的 usage）
                     usage = data.get("usage", {})
