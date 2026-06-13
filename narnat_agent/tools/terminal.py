@@ -70,12 +70,15 @@ _active_exec_lock = threading.Lock()
 
 
 def kill_active_exec():
-    """ESC打断：设置中断标志，让工具线程内部的阻塞读取检测到后自然退出。
-    不关闭channel/transport，会话保持存活可复用。"""
+    """ESC打断：发Ctrl+C终止远程进程，设中断标志让本地读取线程退出。"""
     with _active_exec_lock:
         session = _active_exec_session
     if session is not None:
         session._interrupt.set()
+        try:
+            session._channel.send("\x03")
+        except Exception:
+            pass
 
 
 class SSHSession:
@@ -215,6 +218,8 @@ class SSHSession:
         deadline = time.time() + duration
         consecutive_timeouts = 0
         while time.time() < deadline:
+            if self._interrupt.is_set():
+                break
             try:
                 chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
                 if chunk:
@@ -264,8 +269,12 @@ class SSHSession:
         output = ""
         deadline = time.time() + timeout
         while time.time() < deadline:
+            if self._interrupt.is_set():
+                break
             try:
                 chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
+                if not chunk:
+                    break
                 output += chunk
                 if marker in output:
                     break
@@ -294,8 +303,15 @@ class SSHSession:
         def _watch():
             output = ""
             while True:
+                if self._interrupt.is_set():
+                    self._busy = False
+                    return
                 try:
                     chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
+                    if not chunk:
+                        # channel关闭/EOF，清除busy
+                        self._busy = False
+                        return
                     output += chunk
                     if pwd_marker in output:
                         # 命令完成了，清除busy标记
@@ -343,9 +359,15 @@ class SSHSession:
         sudo_injected = False
 
         while time.time() < deadline:
+            # 中断检查：ESC打断时立即退出（数据路径中也检查，不只依赖timeout分支）
+            if self._interrupt.is_set():
+                break
 
             try:
                 chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
+                # EOF检测：channel关闭/远端断开时recv返回空字节，必须立即退出
+                if not chunk:
+                    break
                 output += chunk
 
                 # sudo密码提示检测与自动注入
@@ -373,19 +395,22 @@ class SSHSession:
                     # 最多再读3秒，确保prompt和尾部数据到达
                     post_marker_deadline = time.time() + 3.0
                     while time.time() < post_marker_deadline:
+                        if self._interrupt.is_set():
+                            break
                         try:
                             extra = self._channel.recv(4096).decode("utf-8", errors="replace")
-                            if extra:
-                                output += extra
-                                consecutive_timeouts = 0
-                                # 检查是否已读到prompt(shell就绪)
-                                last_lines = output.rstrip().split('\n')
-                                if last_lines and prompt_pattern.search(last_lines[-1]):
-                                    break
-                            else:
+                            # EOF检测：channel关闭时立即退出
+                            if not extra:
                                 consecutive_timeouts += 1
                                 if consecutive_timeouts >= DRAIN_CONSECUTIVE_TIMEOUTS:
                                     break
+                                continue
+                            output += extra
+                            consecutive_timeouts = 0
+                            # 检查是否已读到prompt(shell就绪)
+                            last_lines = output.rstrip().split('\n')
+                            if last_lines and prompt_pattern.search(last_lines[-1]):
+                                break
                         except socket.timeout:
                             if self._interrupt.is_set():
                                 break
@@ -403,10 +428,16 @@ class SSHSession:
             except Exception:
                 break
 
-        # 超时处理: 纯管道原则 — 只告知超时，不替AI做决定
-        # AI收到超时提示后，自己决定是杀进程(Ctrl+C)还是继续等待
+        # 超时/中断处理: 发送Ctrl+C终止远程进程，排空channel后恢复正常
         if not found:
-            # 收集残余输出(不丢弃)，尽可能多读
+            # 发送Ctrl+C终止远程正在运行的进程
+            try:
+                self._channel.send("\x03")
+            except Exception:
+                pass
+            # 清除中断标志，允许排空阶段正常读取（中断只针对循环，排空需要正常收数据）
+            self._interrupt.clear()
+            # 等待远程进程终止、shell恢复并输出哨兵
             residual = self._try_read_residual(duration=3.0)
             if residual:
                 output += residual
@@ -416,27 +447,25 @@ class SSHSession:
                 if pwd_marker in check_region:
                     found = True
 
-            # 超时但marker最终出现了 → 走正常解析(命令实际完成了)
+            # Ctrl+C后哨兵出现了 → 走正常解析(远程进程已被终止)
             if found:
                 self._busy = False
                 cmd_output, cwd = self._parse_output(output, marker, pwd_marker)
                 if cwd:
                     self._cwd = cwd
                 if cmd_output:
-                    return f"{cmd_output}\n[超时但命令已完成]\n{self.prompt}"
+                    return f"{cmd_output}\n[已中断]\n{self.prompt}"
                 else:
-                    return f"[超时但命令已完成]\n{self.prompt}"
+                    return f"[已中断]\n{self.prompt}"
 
-            # 超时且marker未出现 → 返回已收集的部分输出，告知超时
-            # 不杀进程，AI自己决定下一步（kill或继续等）
-            self._busy = True
-            # 启动后台线程：持续读channel，等命令完成后自动清除busy标记
-            self._start_busy_watcher(marker, pwd_marker)
+            # 哨兵仍未出现（极少见：进程忽略信号或shell异常）
+            # 不再启动busy_watcher，直接标记空闲
+            self._busy = False
             cmd_output = self._parse_partial_output(output, marker)
             if cmd_output:
-                return f"{cmd_output}\n[超时: 命令执行超过{timeout}秒，进程仍在运行]\n{self.prompt}"
+                return f"{cmd_output}\n[已中断，但未收到哨兵]\n{self.prompt}"
             else:
-                return f"[超时: 命令执行超过{timeout}秒，进程仍在运行]\n{self.prompt}"
+                return f"[已中断，但未收到哨兵]\n{self.prompt}"
 
         # 正常解析
         self._busy = False
@@ -518,8 +547,12 @@ class SSHSession:
         output = ""
         deadline = time.time() + timeout
         while time.time() < deadline:
+            if self._interrupt.is_set():
+                break
             try:
                 chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
+                if not chunk:
+                    break
                 output += chunk
                 if re.search(r'[#$>]\s*$', output.strip()):
                     break
