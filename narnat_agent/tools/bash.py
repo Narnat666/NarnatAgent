@@ -116,7 +116,7 @@ def _truncate_output(text: str, max_chars: int) -> str:
 
 def execute(
     command: str,
-    timeout: int = 120000,
+    timeout: int = 120,
     run_in_background: bool = False,
     max_output_chars: int = 2000,
 ) -> str:
@@ -125,7 +125,7 @@ def execute(
 
     Args:
         command: shell命令
-        timeout: 超时毫秒数
+        timeout: 超时秒数
         run_in_background: 后台运行，立即返回
         max_output_chars: 返回内容最大字符数，默认2000。设为0或负数表示不限制
 
@@ -153,7 +153,7 @@ def execute(
             return "错误: 未找到shell，请安装bash或sh后重试"
         shell_cmd = [shell, "-c", command]
 
-    timeout_sec = min(timeout / 1000, 600)
+    timeout_sec = min(timeout, 600)
 
     # 后台运行模式
     if run_in_background:

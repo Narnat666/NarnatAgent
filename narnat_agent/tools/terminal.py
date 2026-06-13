@@ -430,6 +430,8 @@ class SSHSession:
 
         # 超时/中断处理: 发送Ctrl+C终止远程进程，排空channel后恢复正常
         if not found:
+            # 记录触发来源（必须在clear()之前，之后flag就丢了）
+            interrupted = self._interrupt.is_set()
             # 发送Ctrl+C终止远程正在运行的进程
             try:
                 self._channel.send("\x03")
@@ -453,19 +455,21 @@ class SSHSession:
                 cmd_output, cwd = self._parse_output(output, marker, pwd_marker)
                 if cwd:
                     self._cwd = cwd
+                tag = "[ESC中断]" if interrupted else f"[超时中断: {timeout}秒]"
                 if cmd_output:
-                    return f"{cmd_output}\n[已中断]\n{self.prompt}"
+                    return f"{cmd_output}\n{tag}\n{self.prompt}"
                 else:
-                    return f"[已中断]\n{self.prompt}"
+                    return f"{tag}\n{self.prompt}"
 
             # 哨兵仍未出现（极少见：进程忽略信号或shell异常）
             # 不再启动busy_watcher，直接标记空闲
             self._busy = False
             cmd_output = self._parse_partial_output(output, marker)
+            tag = "[ESC中断，未收到哨兵]" if interrupted else f"[超时中断: {timeout}秒，未收到哨兵]"
             if cmd_output:
-                return f"{cmd_output}\n[已中断，但未收到哨兵]\n{self.prompt}"
+                return f"{cmd_output}\n{tag}\n{self.prompt}"
             else:
-                return f"[已中断，但未收到哨兵]\n{self.prompt}"
+                return f"{tag}\n{self.prompt}"
 
         # 正常解析
         self._busy = False

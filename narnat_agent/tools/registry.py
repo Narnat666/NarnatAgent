@@ -139,7 +139,7 @@ TOOL_DEFINITIONS: List[Dict] = [
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": f"Shell command (syntax: {__import__('sys').platform})"},
-                    "timeout": {"type": "integer", "description": "Timeout in ms, default 120000, max 600000"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds, default 120, max 600"},
                     "run_in_background": {"type": "boolean", "description": "Run in background"},
                     "max_output_chars": {"type": "integer", "description": "Max output chars, default 2000. Must be a positive integer"},
                 },

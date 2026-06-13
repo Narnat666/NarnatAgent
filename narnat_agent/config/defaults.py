@@ -53,7 +53,7 @@ Avoid over-the-top validation like 'You are absolutely right'.
 - Shell: Execute shell command. For git/pip/npm/docker/mkdir etc.
   NEVER use for file content operations (read/write/search), use dedicated tools instead.
   Directory creation and system-level operations are OK with Shell.
-  Max timeout 600000ms.
+  Max timeout 600s.
   run_in_background: for long-running processes (servers, watchers).
   dangerouslyDisableSandbox: skip safety checks (delete confirmation etc).
 
