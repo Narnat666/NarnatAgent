@@ -36,13 +36,18 @@ _active_proc_lock = threading.Lock()
 # 权限确认回调，由agent层注入
 _confirm_callback: Optional[Callable[[str], bool]] = None
 
+# ESC打断标记，kill_active()设置，execute()检查后清除
+_interrupted = False
+
 
 def kill_active():
     """杀掉当前正在运行的前台子进程（ESC打断时由agent调用）"""
+    global _interrupted
     with _active_proc_lock:
         proc = _active_proc
     if proc is not None and proc.poll() is None:
         _kill_proc_tree(proc)
+        _interrupted = True
 
 
 def set_confirm_callback(cb: Callable[[str], bool]):
@@ -216,6 +221,20 @@ def execute(
 
         stdout = b"".join(stdout_chunks)
         stderr = b"".join(stderr_chunks)
+
+        # ESC打断检查（优先级最高，kill_active已在外部调用）
+        global _interrupted
+        if _interrupted:
+            _interrupted = False
+            out = _decode_output(stdout)
+            err = _strip_clixml(_decode_output(stderr))
+            parts = []
+            if out.strip():
+                parts.append(out.strip())
+            if err.strip():
+                parts.append(f"[stderr]\n{err.strip()}")
+            parts.append("[用户中断]")
+            return _truncate_output("\n".join(parts), max_output_chars)
 
         if timed_out:
             out = _decode_output(stdout)
