@@ -790,7 +790,7 @@ def _spinner_thread(stop: threading.Event) -> None:
     """显示思考中动画。先等待666ms，避免串行工具间的短暂空白闪烁。
     666ms后屏幕仍空白才启动动画，4帧循环：* 思考中 → * 思考中. → * 思考中.. → * 思考中...
     左侧 * 粗细交替，右侧 ... 从0到3循环，"思考中"三字位置锁定。
-    线程只管写入，不负责清理——清理统一由 _stop_spinner 处理。"""
+    退出前自清屏幕残留，与 _stop_spinner 形成双道防护。"""
     # 延迟666ms，期间每50ms检查一次stop
     delay = 0.666
     elapsed = 0.0
@@ -817,6 +817,11 @@ def _spinner_thread(stop: threading.Event) -> None:
         sys.stdout.flush()
         i = (i + 1) % 4
         stop.wait(0.15)
+
+    # 退出前自清：擦除动画行 + 恢复光标（与 _stop_spinner 形成双道防护）
+    sys.stdout.write("\r\x1b[K")
+    sys.stdout.write("\x1b[?25h")
+    sys.stdout.flush()
 
 
 def _compress_thread(stop: threading.Event) -> None:
