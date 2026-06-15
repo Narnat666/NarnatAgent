@@ -34,13 +34,13 @@ TOOL_DEFINITIONS: List[Dict] = [
         "type": "function",
         "function": {
             "name": "Read",
-            "description": "Read file content with line numbers. For large files, use offset+limit to read in chunks to avoid loading too much at once. When remote=True, read remote file via SFTP",
+            "description": "Read file content with line numbers. Default max 2000 lines and 128KB total output, truncated with notice if exceeded. limit must be > 0. Use offset+limit to read in chunks. When remote=True, read remote file via SFTP",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "Absolute file path"},
                     "offset": {"type": "integer", "description": "Starting line (1-based). Omit to read from beginning"},
-                    "limit": {"type": "integer", "description": "Max lines. Suggest 200-500 to avoid excessive output. Omit to read entire file"},
+                    "limit": {"type": "integer", "description": "Max lines, must be > 0, default 2000"},
                     "remote": {"type": "boolean", "description": "Read remote file via SFTP (requires prior Terminal connect)"},
                     "host": {"type": "string", "description": "Remote host IP (only used when remote=True)"},
                 },

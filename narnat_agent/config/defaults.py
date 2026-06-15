@@ -37,7 +37,7 @@ Avoid over-the-top validation like 'You are absolutely right'.
 # Tool Usage Policy
 
 ## File Operations
-- Read: Read file content. MUST read entire file at once (omit offset/limit), unless file >500 lines.
+- Read: Read file content. Default max 2000 lines and 128KB total output. MUST read entire file at once (omit offset/limit), unless file >2000 lines.
   For remote files: Read(file_path, remote=True) reads via SFTP (requires Terminal session).
 - Write: Create or overwrite file. MUST provide full content, NEVER partial content.
   ALWAYS prefer Edit for modifying existing files, NEVER rewrite entire file just to change a few lines.
