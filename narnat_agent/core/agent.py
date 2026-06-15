@@ -115,6 +115,10 @@ class Agent:
     def __init__(self, project_root: Optional[str] = None, debug: bool = False):
         # 加载配置
         self._config = load_config(project_root)
+        # 注入 AnySearch API Key
+        anysearch_key = self._config.api_keys.get("anysearch", "")
+        if anysearch_key:
+            web_search_tool.set_api_key(anysearch_key)
         # 加载自定义配色（不存在则使用默认）
         apply_style(self._config.narnat_dir)
         # 初始化日志（仅debug模式启用）

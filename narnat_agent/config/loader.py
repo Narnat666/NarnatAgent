@@ -28,6 +28,7 @@ class AIConfig:
 class AppConfig:
     """应用总配置"""
     ai: AIConfig = field(default_factory=AIConfig)
+    api_keys: dict = field(default_factory=dict)
     system_prompt: str = ""
     narnat_dir: str = ""
     project_root: str = ""
@@ -97,21 +98,23 @@ def _find_project_root() -> str:
     return cwd
 
 
-def _load_json(narnat_dir: str) -> AIConfig:
-    """读取 narnat.json，解析失败返回默认配置"""
+def _load_json(narnat_dir: str) -> tuple[AIConfig, dict]:
+    """读取 narnat.json，返回 (AIConfig, api_keys)。解析失败返回默认配置"""
     path = os.path.join(narnat_dir, NARNAT_JSON)
     if not os.path.isfile(path):
-        return AIConfig()
+        return AIConfig(), {}
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return AIConfig(
+        ai_config = AIConfig(
             api_key=data.get("api_key", DEFAULT_API_KEY),
             base_url=data.get("base_url", DEFAULT_BASE_URL),
             model=data.get("model", DEFAULT_MODEL),
         )
+        api_keys = data.get("api_keys", {})
+        return ai_config, api_keys
     except (json.JSONDecodeError, OSError):
-        return AIConfig()
+        return AIConfig(), {}
 
 
 def _load_user_md(narnat_dir: str) -> str:
@@ -164,11 +167,14 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
                         "api_key": DEFAULT_API_KEY,
                         "base_url": DEFAULT_BASE_URL,
                         "model": DEFAULT_MODEL,
+                        "api_keys": {
+                            "anysearch": ""
+                        },
                     }, f, indent=2, ensure_ascii=False)
                 else:
                     f.write("")
 
-    ai_config = _load_json(narnat_dir)
+    ai_config, api_keys = _load_json(narnat_dir)
     user_md = _load_user_md(narnat_dir)
     system_prompt = _build_system_prompt(
         model=ai_config.model,
@@ -180,6 +186,7 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
 
     return AppConfig(
         ai=ai_config,
+        api_keys=api_keys,
         system_prompt=system_prompt,
         narnat_dir=narnat_dir,
         project_root=root,

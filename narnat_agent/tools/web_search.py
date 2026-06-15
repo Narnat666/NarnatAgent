@@ -24,8 +24,15 @@ from urllib.parse import urlparse
 
 _DAEMON_URL = "http://127.0.0.1:3210"
 _ANYSEARCH_URL = "https://api.anysearch.com/mcp"
+_ANYSEARCH_API_KEY = ""
 _TIMEOUT = 10
 _ANYSEARCH_TIMEOUT = 15
+
+
+def set_api_key(key: str):
+    """设置 AnySearch API Key（由 agent 层在启动时注入）"""
+    global _ANYSEARCH_API_KEY
+    _ANYSEARCH_API_KEY = key
 
 
 # ── 工具函数 ──
@@ -109,10 +116,10 @@ def _search_anysearch(query: str, max_results: int) -> List[Dict]:
             "query": query, "max_results": max_results, "zone": "cn"
         }}
     }).encode("utf-8")
-    req = urllib.request.Request(
-        _ANYSEARCH_URL, data=data,
-        headers={"Content-Type": "application/json"}
-    )
+    headers = {"Content-Type": "application/json"}
+    if _ANYSEARCH_API_KEY:
+        headers["X-API-Key"] = _ANYSEARCH_API_KEY
+    req = urllib.request.Request(_ANYSEARCH_URL, data=data, headers=headers)
     resp = urllib.request.urlopen(req, timeout=_ANYSEARCH_TIMEOUT)
     raw = json.loads(resp.read())
     # 提取所有 text 内容块
@@ -171,13 +178,14 @@ def execute(query: str, num: int = 5) -> str:
     results: List[Dict] = []
 
     # ── Tier 1: AnySearch ──
-    try:
-        results = _search_anysearch(query, num)
-        if results:
-            results.sort(key=lambda r: _relevance_score(r, query), reverse=True)
-            return _format_results(results[:num])
-    except Exception:
-        pass
+    if _ANYSEARCH_API_KEY:
+        try:
+            results = _search_anysearch(query, num)
+            if results:
+                results.sort(key=lambda r: _relevance_score(r, query), reverse=True)
+                return _format_results(results[:num])
+        except Exception:
+            pass
 
     # ── Tier 2: Open WebSearch (Bing + Baidu 并行) ──
     if not _check_daemon():
