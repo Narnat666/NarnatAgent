@@ -94,6 +94,13 @@ class LLMClient:
         cancel_check: 可选的 callable，返回 True 表示用户请求中断。"""
         return self._backend.chat_stream(messages, no_tools=no_tools, cancel_check=cancel_check)
 
+    @property
+    def raw_sse(self):
+        """空回复调试：返回上轮 Anthropic 原始 SSE 数据。若非 Anthropic 后端返回 None。"""
+        if hasattr(self._backend, '_last_raw_sse'):
+            return list(self._backend._last_raw_sse)
+        return None
+
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -313,13 +320,23 @@ class _AnthropicBackend:
         self._tool_defs = tool_defs
         self._logger = logger
         self._url = f"{config.base_url.rstrip('/')}/v1/messages"
+        self._last_raw_sse = []  # 空回复调试：缓存本轮原始SSE数据
         self._headers = {
             "x-api-key": config.api_key,
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
         }
 
+    @staticmethod
+    def _get_max_tokens():
+        try:
+            from ..ui.ui_design import MAX_TOKENS
+            return MAX_TOKENS
+        except Exception:
+            return 128000
+
     def chat_stream(self, messages, no_tools=False, cancel_check=None):
+        self._last_raw_sse.clear()
         if self._logger:
             self._logger.info("core.llm", f"发送请求(Anthropic), messages={len(messages)}条")
 
@@ -334,7 +351,7 @@ class _AnthropicBackend:
         body = {
             "model": self._config.model,
             "messages": anthropic_msgs,
-            "max_tokens": 8192,
+            "max_tokens": self._get_max_tokens(),
             "stream": True,
         }
         if system:
@@ -483,6 +500,8 @@ class _AnthropicBackend:
                 if not data_str:
                     continue
 
+                self._last_raw_sse.append(data_str)
+
                 try:
                     data = json.loads(data_str)
                 except json.JSONDecodeError:
@@ -524,8 +543,14 @@ class _AnthropicBackend:
                             finish_reason = "stop"
                         elif stop_reason == "tool_use":
                             finish_reason = "tool_calls"
+                        elif stop_reason in ("max_tokens", "length"):
+                            finish_reason = "max_tokens"
+                        elif stop_reason == "content_filter":
+                            finish_reason = "content_filter"
+                        elif stop_reason == "insufficient_system_resource":
+                            finish_reason = "server_busy"
                         else:
-                            finish_reason = "stop"
+                            finish_reason = stop_reason
 
                         if tool_use_blocks:
                             completed_calls = []

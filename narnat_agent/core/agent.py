@@ -25,7 +25,7 @@ from ..tools import todo_write as todo_tool
 from ..tools import glob as glob_tool
 from ..tools import grep as grep_tool
 from ..tools import web_search as web_search_tool
-from ..ui.ui_design import UIInterface, SessionCallbacks, _interrupt_ctrl, apply_style, D, E, R, Y, G, B, C
+from ..ui.ui_design import UIInterface, SessionCallbacks, _interrupt_ctrl, _stdout_write, apply_style, D, E, R, Y, G, B, C
 from ..logger import AgentLogger
 
 # ── 工具分类 ──
@@ -156,7 +156,7 @@ class Agent:
         """退出时自动保存已命名的会话"""
         saved_name = self._ui.auto_save()
         if saved_name:
-            print(f"  {D}会话已自动保存: {E}{saved_name}{R}")
+            _stdout_write(f"  {D}会话已自动保存: {E}{saved_name}{R}\n")
 
     def _confirm_delete(self, command: str) -> bool:
         """删除命令确认回调"""
@@ -184,7 +184,7 @@ class Agent:
                 icon = f"{G}○{R}"
                 line = f"  {icon} {D}{content}{R}"
 
-            print(line)
+            _stdout_write(line + "\n")
 
     def _show_tool_call(self, name: str, arguments: dict):
         """在终端显示工具调用摘要，让用户看到AI正在做什么"""
@@ -224,16 +224,15 @@ class Agent:
             summary = arguments.get("query", "")
 
         if summary:
-            print(f"  {D}[{label}] {summary}{R}")
+            _stdout_write(f"  {D}[{label}] {summary}{R}\n")
         else:
-            print(f"  {D}[{label}]{R}")
+            _stdout_write(f"  {D}[{label}]{R}\n")
 
     def _show_diff(self, color_diff: str):
         """在终端展示着色diff"""
         # 每行缩进2空格，与工具调用摘要对齐
-        for line in color_diff.split("\n"):
-            print(f"  {line}")
-        print()  # diff后空一行，与后续输出分隔
+        buf = "\n".join(f"  {line}" for line in color_diff.split("\n"))
+        _stdout_write(buf + "\n\n")  # diff后空一行，与后续输出分隔
 
     def run(self):
         """主循环"""
@@ -270,7 +269,7 @@ class Agent:
                 self._round += 1
                 warn = self._context.increment()
                 if warn:
-                    print(f"  ⚠ {warn}")
+                    _stdout_write(f"  ⚠ {warn}\n")
 
                 # 每10轮查询一次余额
                 self._balance_to_show = 0.0
@@ -320,7 +319,6 @@ class Agent:
 
     def _agent_loop(self, stream):
         """工具调度内循环"""
-        empty_retries = 0
         while True:
             # a. 修复messages：如果有未回复的tool_call，补上空结果
             self._repair_messages()
@@ -330,6 +328,7 @@ class Agent:
             self._last_content_parts = content_parts  # 供异常处理时保存部分内容
             tool_calls_result = []
             call_usage = None  # API返回的真实token数
+            parsed_finish_reason = None  # 空回复调试
 
             for chunk in self._llm.chat_stream(self._messages, cancel_check=lambda: stream.cancelled):
                 # b. 检查中断
@@ -359,8 +358,8 @@ class Agent:
 
                 # f. 处理结束
                 if "finish_reason" in chunk:
-                    reason = chunk["finish_reason"]
-                    if reason == "error":
+                    parsed_finish_reason = chunk["finish_reason"]
+                    if parsed_finish_reason == "error":
                         stream.finish(
                             self._total_input_tokens,
                             self._total_output_tokens,
@@ -432,14 +431,25 @@ class Agent:
                     "content": "".join(content_parts),
                 })
             else:
-                # 空回复：重试一次，如果还为空则上报用户
-                empty_retries += 1
-                if empty_retries <= 1:
-                    self._messages.append({"role": "assistant", "content": ""})
-                    self._messages.append({"role": "user", "content": "请继续完成你的回复"})
-                    continue
-                stream.feed("\n\n⚠ AI 连续两次返回空回复，请尝试缩短对话或稍后重试。\n")
-                stream.finish()
+                # 空回复：根据 finish_reason 给出不同提示
+                self._dump_empty_debug(content_parts, tool_calls_result, parsed_finish_reason, call_usage)
+                _empty_msgs = {
+                    "stop": "⚠ AI 返回了空回复，请尝试缩短对话或稍后重试。",
+                    "max_tokens": "⚠ AI 思考超过了最大输出限制，请增大限制或缩短对话。",
+                    "content_filter": "⚠ AI 返回被安全策略拦截，请调整提问内容。",
+                    "server_busy": "⚠ 服务器繁忙，请稍后重试。",
+                    "error": "⚠ AI 调用出错，请查看上方错误信息。",
+                }
+                reason = parsed_finish_reason or "stop"
+                msg = _empty_msgs.get(reason, f"⚠ AI 返回异常（{reason}），请稍后重试。")
+                stream.feed(f"\n\n{msg}\n")
+                stream.finish(
+                    self._total_input_tokens,
+                    self._total_output_tokens,
+                    cache=self._total_cache_tokens,
+                    cost=self._total_cost,
+                    balance=self._balance_to_show,
+                )
                 return
 
             # 更新token统计（真实API数据）
@@ -462,6 +472,32 @@ class Agent:
                 balance=self._balance_to_show,
             )
             break
+
+    def _dump_empty_debug(self, content_parts, tool_calls_result, finish_reason, call_usage):
+        """空回复时写调试日志到 .narnat/debug_empty_<时间戳>.json"""
+        debug_path = os.path.join(
+            self._config.narnat_dir,
+            f"debug_empty_{time.strftime('%Y%m%d_%H%M%S')}.json"
+        )
+        debug_data = {
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "request": {
+                "messages": self._messages,
+            },
+            "response": {
+                "raw_sse_lines": self._llm.raw_sse or [],
+                "parsed_content": "".join(content_parts),
+                "parsed_tool_calls": tool_calls_result,
+                "parsed_finish_reason": finish_reason,
+                "call_usage": call_usage,
+            },
+        }
+        try:
+            with open(debug_path, "w", encoding="utf-8") as f:
+                json.dump(debug_data, f, ensure_ascii=False, indent=2)
+            _stdout_write(f"  ⚠ 调试日志已写入: {debug_path}\n")
+        except OSError:
+            pass
 
     def _repair_messages(self):
         """修复messages：打断后可能留下不完整的消息序列。

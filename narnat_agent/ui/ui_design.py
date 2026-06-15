@@ -32,6 +32,29 @@ if sys.platform == "win32":
     except (AttributeError, OSError):
         pass
 
+# ── stdout 并发写入锁 ── spinner 用 try_write（拿不到跳帧），其余阻塞 ──
+_stdout_lock = threading.Lock()
+
+
+def _stdout_write(text: str) -> None:
+    """阻塞拿锁写入 stdout + flush。每次写前 \r 归位列0，防止 spinner 残留光标。"""
+    with _stdout_lock:
+        sys.stdout.write("\r" + text)
+        sys.stdout.flush()
+
+
+def _stdout_try_write(text: str) -> bool:
+    """非阻塞拿锁写入。spinner/compress 动画帧专用，拿不到跳过该帧。"""
+    if _stdout_lock.acquire(blocking=False):
+        try:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+            return True
+        finally:
+            _stdout_lock.release()
+    return False
+
+
 # ═══════════════════════════════════════════════════════════════
 # ANSI 转义序列常量  (Salt Flow 配色 - 椒盐音乐风格)
 # 可通过 .narnat/style.json 自定义
@@ -91,6 +114,7 @@ _STYLE_KEY_MAP = {
 
 SHOW_COST = False
 SHOW_BALANCE = False
+MAX_TOKENS = 128000  # LLM max_tokens，可通过 style.json 的 "最大输出token数" 覆盖
 
 
 def apply_style(narnat_dir: str) -> bool:
@@ -118,6 +142,8 @@ def apply_style(narnat_dir: str) -> bool:
         globals()["SHOW_COST"] = bool(data["显示费用"])
     if "显示余额" in data:
         globals()["SHOW_BALANCE"] = bool(data["显示余额"])
+    if "最大输出token数" in data:
+        globals()["MAX_TOKENS"] = int(data["最大输出token数"])
     return True
 
 
@@ -169,7 +195,7 @@ def colorize_diff(diff_text: str) -> str:
 
 
 def _sep() -> None:
-    sys.stdout.write(f"  {G}{'─' * (_terminal_width() - 2)}{R}\n")
+    _stdout_write(f"  {G}{'─' * (_terminal_width() - 2)}{R}\n")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -675,8 +701,7 @@ class StreamingRenderer:
         rendered = render_line(line)
         if not rendered:
             return False
-        sys.stdout.write(rendered + "\n")
-        sys.stdout.flush()
+        _stdout_write(rendered + "\n")
         self._normal_line_count += 1
         return False
 
@@ -689,8 +714,7 @@ class StreamingRenderer:
             for line in self._table_rows:
                 rendered = _render_paragraph(line, None)
                 if rendered:
-                    sys.stdout.write(rendered + "\n")
-            sys.stdout.flush()
+                    _stdout_write(rendered + "\n")
             self._table_rows.clear()
             return
         # 有分隔行 → 拆分表头和数据
@@ -709,8 +733,7 @@ class StreamingRenderer:
             for line in self._table_rows:
                 rendered = _render_paragraph(line, None)
                 if rendered:
-                    sys.stdout.write(rendered + "\n")
-            sys.stdout.flush()
+                    _stdout_write(rendered + "\n")
             self._table_rows.clear()
             self._table_has_separator = False
             return
@@ -720,8 +743,7 @@ class StreamingRenderer:
             for line in self._table_rows:
                 rendered = _render_paragraph(line, None)
                 if rendered:
-                    sys.stdout.write(rendered + "\n")
-            sys.stdout.flush()
+                    _stdout_write(rendered + "\n")
             self._table_rows.clear()
             self._table_has_separator = False
             return
@@ -744,11 +766,11 @@ class StreamingRenderer:
             parts = [" " + c + " " * (widths[i] - _display_width(c) + 1) for i, c in enumerate(cells)]
             return f"    {BLU}|{R}{W7}" + f"{BLU}|{R}{W7}".join(parts) + f"{BLU}|{R}"
 
-        sys.stdout.write(border + "\n")
+        parts = [border]
         for row in rendered:
-            sys.stdout.write(_row(row) + "\n")
-            sys.stdout.write(border + "\n")
-        sys.stdout.flush()
+            parts.append(_row(row))
+            parts.append(border)
+        _stdout_write("\n".join(parts) + "\n")
         self._table_rows.clear()
         self._table_has_separator = False
 
@@ -758,10 +780,9 @@ class StreamingRenderer:
                 self._code_lang,
                 "\n".join(self._code_lines),
                 self.width)
-            sys.stdout.write(rendered + "\n")
+            _stdout_write(rendered + "\n")
         self._code_lines.clear()
         self._code_lang = ""
-        sys.stdout.flush()
 
     def flush(self) -> None:
         if self._in_code:
@@ -772,9 +793,7 @@ class StreamingRenderer:
             self._table_has_separator = False
         remaining = self._buf_get_and_clear()
         if remaining.strip():
-            sys.stdout.write(render_line(remaining) + "\n")
-            sys.stdout.flush()
-        sys.stdout.flush()
+            _stdout_write(render_line(remaining) + "\n")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -782,7 +801,7 @@ class StreamingRenderer:
 # ═══════════════════════════════════════════════════════════════
 
 def show_header(msg: str) -> None:
-    print(f"  {C}{msg}{R}")
+    _stdout_write(f"  {C}{msg}{R}\n")
     _sep()
 
 
@@ -801,9 +820,8 @@ def _spinner_thread(stop: threading.Event) -> None:
         time.sleep(tick)
         elapsed += tick
 
-    # 隐藏光标
-    sys.stdout.write("\x1b[?25l")
-    sys.stdout.flush()
+    # 隐藏光标（阻塞锁，必须执行）
+    _stdout_write("\x1b[?25l")
 
     frames = (
         f"{B}{O}* {R}{O}思考中   {R}",
@@ -813,32 +831,27 @@ def _spinner_thread(stop: threading.Event) -> None:
     )
     i = 0
     while not stop.is_set():
-        sys.stdout.write(f"\r  {frames[i]}")
-        sys.stdout.flush()
+        _stdout_try_write(f"\r  {frames[i]}\x1b[K")
         i = (i + 1) % 4
         stop.wait(0.15)
 
-    # 退出前自清：擦除动画行 + 恢复光标（与 _stop_spinner 形成双道防护）
-    sys.stdout.write("\r\x1b[K")
-    sys.stdout.write("\x1b[?25h")
-    sys.stdout.flush()
+    # 退出前自清：擦除动画行 + 恢复光标（阻塞锁，必须执行）
+    _stdout_write("\r\x1b[K")
+    _stdout_write("\x1b[?25h")
 
 
 def _compress_thread(stop: threading.Event) -> None:
     frames = (f"{B}{O}*{R}", f"{D}{O}\u2736{R}")
     i = 0
     while not stop.is_set():
-        sys.stdout.write(f"\r  {frames[i]} {O}正在压缩...{R}")
-        sys.stdout.flush()
+        _stdout_try_write(f"\r  {frames[i]} {O}正在压缩...{R}\x1b[K")
         i = (i + 1) % 2
         stop.wait(0.15)
-    sys.stdout.write("\r\x1b[K")
-    sys.stdout.flush()
+    _stdout_write("\r\x1b[K")
 
 
 def show_interrupted() -> None:
-    sys.stdout.write(f"\n  {Y}已打断{R}\n  {G}继续...{R}\n")
-    sys.stdout.flush()
+    _stdout_write(f"\n  {Y}已打断{R}\n  {G}继续...{R}\n")
 
 
 def show_stats(input_tokens: int, output_tokens: int,
@@ -846,11 +859,12 @@ def show_stats(input_tokens: int, output_tokens: int,
                balance: float = 0.0) -> None:
     si = f"{input_tokens / 1000:.1f}k" if input_tokens >= 1000 else str(input_tokens)
     so = f"{output_tokens / 1000:.1f}k" if output_tokens >= 1000 else str(output_tokens)
+    mt = f"{MAX_TOKENS / 1000:.0f}k" if MAX_TOKENS >= 1000 else str(MAX_TOKENS)
     _sep()
     cs = f"  缓存:{cache / 1000:.1f}k" if cache > 0 else ""
     co = f"  费用:¥{cost:.4f}" if SHOW_COST and cost > 0 else ""
     ba = f"  余额:¥{balance:.2f}" if SHOW_BALANCE and balance > 0 else ""
-    sys.stdout.write(f"  {G}输入:{si} 输出:{so}{cs}{R}{Y}{co}{ba}{R}\n")
+    _stdout_write(f"  {G}输入:{si} 输出:{so}{cs}  最大输出:{mt}{R}{Y}{co}{ba}{R}\n")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -970,50 +984,50 @@ def _dispatch_command(cmd: str, args: str, cb: SessionCallbacks) -> bool:
         return True
     if cmd == "save":
         if not args:
-            print(f"  {Y}用法: /save <名称>{R}")
+            _stdout_write(f"  {Y}用法: /save <名称>{R}\n")
             return True
         result = cb.on_save(args)
         if result:
-            print(f"  {X}{result}{R}")
+            _stdout_write(f"  {X}{result}{R}\n")
         else:
-            print(f"  {E}会话已保存: {C}{args}{R}")
+            _stdout_write(f"  {E}会话已保存: {C}{args}{R}\n")
         return True
     if cmd == "show":
         result = cb.on_show()
         if result:
-            print(result)
+            _stdout_write(result + "\n")
         else:
-            print(f"  {G}(无已保存会话){R}")
+            _stdout_write(f"  {G}(无已保存会话){R}\n")
         return True
     if cmd == "enter":
         if not args:
-            print(f"  {Y}用法: /enter <名称>{R}")
+            _stdout_write(f"  {Y}用法: /enter <名称>{R}\n")
             return True
         result = cb.on_enter(args)
         if result:
-            print(f"  {X}{result}{R}")
+            _stdout_write(f"  {X}{result}{R}\n")
         else:
-            print(f"  {E}已进入会话: {C}{args}{R}")
+            _stdout_write(f"  {E}已进入会话: {C}{args}{R}\n")
         return True
     if cmd == "skill":
         if not args:
-            print(f"  {Y}用法: /skill <名称>{R}")
+            _stdout_write(f"  {Y}用法: /skill <名称>{R}\n")
             return True
         result = cb.on_skill(args)
         if result:
-            print(f"  {X}{result}{R}")
+            _stdout_write(f"  {X}{result}{R}\n")
         else:
-            print(f"  {E}已加载技能: {C}{args}{R}")
+            _stdout_write(f"  {E}已加载技能: {C}{args}{R}\n")
         return True
     if cmd == "delete":
         if not args:
-            print(f"  {Y}用法: /delete <名称 | --all>{R}")
+            _stdout_write(f"  {Y}用法: /delete <名称 | --all>{R}\n")
             return True
         result = cb.on_delete(args)
         if result:
-            print(f"  {X}{result}{R}")
+            _stdout_write(f"  {X}{result}{R}\n")
         else:
-            print(f"  {E}已删除: {C}{args}{R}")
+            _stdout_write(f"  {E}已删除: {C}{args}{R}\n")
         return True
     return False
 
@@ -1060,9 +1074,8 @@ class UIStreamSession:
         self._spinner_thread.join(timeout=0.5)
         self._spinner_thread = None
         # 清理：擦除动画行 + 恢复光标
-        sys.stdout.write("\r\x1b[K")
-        sys.stdout.write("\x1b[?25h")
-        sys.stdout.flush()
+        _stdout_write("\r\x1b[K")
+        _stdout_write("\x1b[?25h")
 
     @property
     def cancelled(self) -> bool:
