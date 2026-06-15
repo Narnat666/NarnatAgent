@@ -518,7 +518,7 @@ class _AnthropicBackend:
                             tool_use_blocks[idx]["input_json"] += pj
 
                 elif dtype == "message_delta":
-                    stop_reason = data.get("delta", {}).get("stop_reason", "")
+                    stop_reason = data.get("delta", {}).get("stop_reason") or "end_turn"
                     if stop_reason:
                         if stop_reason == "end_turn":
                             finish_reason = "stop"
