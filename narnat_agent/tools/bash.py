@@ -33,9 +33,6 @@ _background_procs: dict = {}
 _active_proc: Optional[subprocess.Popen] = None
 _active_proc_lock = threading.Lock()
 
-# 权限确认回调，由agent层注入
-_confirm_callback: Optional[Callable[[str], bool]] = None
-
 # ESC打断标记，kill_active()设置，execute()检查后清除
 _interrupted = False
 
@@ -48,12 +45,6 @@ def kill_active():
     if proc is not None and proc.poll() is None:
         _kill_proc_tree(proc)
         _interrupted = True
-
-
-def set_confirm_callback(cb: Callable[[str], bool]):
-    """设置删除确认回调。cb返回True表示允许执行。"""
-    global _confirm_callback
-    _confirm_callback = cb
 
 
 def _find_executable(*names: str) -> Optional[str]:
@@ -124,6 +115,7 @@ def execute(
     timeout: int = 120,
     run_in_background: bool = False,
     max_output_chars: int = 2000,
+    _tool_context=None,
 ) -> str:
     """
     执行shell命令。AI写什么就执行什么，不做翻译。
@@ -133,13 +125,14 @@ def execute(
         timeout: 超时秒数
         run_in_background: 后台运行，立即返回
         max_output_chars: 返回内容最大字符数，默认2000。设为0或负数表示不限制
+        _tool_context: 工具运行时上下文（内部参数，由registry注入）
 
     Returns:
         stdout + stderr + 退出码
     """
     # 安全检查：仅删除命令需确认
     if _RE_DELETE.search(command):
-        if _confirm_callback and not _confirm_callback(command):
+        if _tool_context and _tool_context.confirm_callback and not _tool_context.confirm_callback(command):
             return "操作已取消: 删除命令需用户确认"
 
     # Windows: 统一用PowerShell，AI输入什么就执行什么

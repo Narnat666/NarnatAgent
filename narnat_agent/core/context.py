@@ -17,11 +17,15 @@ class ContextManager:
     - 警告提示
     """
 
-    def __init__(self, logger=None):
+    def __init__(self, logger=None, warn_turn_1: int = WARN_TURN_1,
+                 warn_turn_2: int = WARN_TURN_2, compress_turn: int = COMPRESS_TURN):
         self._turn_count = 0
         self._logger = logger
-        self._warned_50 = False
-        self._warned_100 = False
+        self._warn_turn_1 = warn_turn_1
+        self._warn_turn_2 = warn_turn_2
+        self._compress_turn = compress_turn
+        self._warned_1 = False
+        self._warned_2 = False
 
     @property
     def turn_count(self) -> int:
@@ -30,22 +34,19 @@ class ContextManager:
     def increment(self) -> str:
         """
         轮次+1，返回警告提示（空串表示无警告）。
-
-        Returns:
-            警告提示字符串，空串表示无警告
         """
         self._turn_count += 1
 
-        if self._turn_count == WARN_TURN_1 and not self._warned_50:
-            self._warned_50 = True
-            msg = f"对话已达{WARN_TURN_1}轮，注意上下文长度"
+        if self._turn_count == self._warn_turn_1 and not self._warned_1:
+            self._warned_1 = True
+            msg = f"对话已达{self._warn_turn_1}轮，注意上下文长度"
             if self._logger:
                 self._logger.warning("core.context", msg)
             return msg
 
-        if self._turn_count == WARN_TURN_2 and not self._warned_100:
-            self._warned_100 = True
-            msg = f"对话已达{WARN_TURN_2}轮，建议开启新对话"
+        if self._turn_count == self._warn_turn_2 and not self._warned_2:
+            self._warned_2 = True
+            msg = f"对话已达{self._warn_turn_2}轮，建议开启新对话"
             if self._logger:
                 self._logger.warning("core.context", msg)
             return msg
@@ -54,22 +55,22 @@ class ContextManager:
 
     def need_compress(self) -> bool:
         """是否需要压缩"""
-        return self._turn_count >= COMPRESS_TURN
+        return self._turn_count >= self._compress_turn
 
     def reset(self):
         """重置（新会话开始时调用）"""
         self._turn_count = 0
-        self._warned_50 = False
-        self._warned_100 = False
+        self._warned_1 = False
+        self._warned_2 = False
 
     def set_retry_soon(self):
         """压缩失败后设置近期重试（10轮后再次触发压缩）"""
-        self._turn_count = max(0, COMPRESS_TURN - 10)
+        self._turn_count = max(0, self._compress_turn - 10)
 
     def get_summary(self) -> Dict[str, Any]:
         """获取上下文摘要"""
         return {
             "turn_count": self._turn_count,
-            "warned_50": self._warned_50,
-            "warned_100": self._warned_100,
+            "warned_1": self._warned_1,
+            "warned_2": self._warned_2,
         }

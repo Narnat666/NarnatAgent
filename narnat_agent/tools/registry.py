@@ -6,6 +6,7 @@ import json
 from typing import Dict, List, Any, Callable, Optional
 
 from . import read, glob, grep, edit, write, bash, terminal, web_search, todo_write
+from .tool_context import ToolContext
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -230,13 +231,14 @@ TOOL_DEFINITIONS: List[Dict] = [
 ]
 
 
-def execute(name: str, arguments: Dict[str, Any]) -> tuple:
+def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolContext] = None) -> tuple:
     """
     执行指定工具。
 
     Args:
         name: 工具名称
         arguments: 工具参数字典
+        tool_context: 工具运行时上下文（回调和状态）
 
     Returns:
         (llm_result, color_diff) 元组:
@@ -247,8 +249,14 @@ def execute(name: str, arguments: Dict[str, Any]) -> tuple:
     if impl is None:
         return (f"错误: 未知工具: {name}", "")
 
+    # 需要tool_context的工具：注入上下文参数
+    _CONTEXT_TOOLS = {"Shell", "Terminal", "TodoWrite", "WebSearch", "Write", "Read"}
+
     try:
-        result = impl(**arguments)
+        if tool_context and name in _CONTEXT_TOOLS:
+            result = impl(**arguments, _tool_context=tool_context)
+        else:
+            result = impl(**arguments)
         # Edit/Write 返回 (llm_result, color_diff) 元组
         if isinstance(result, tuple):
             return result

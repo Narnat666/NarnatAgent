@@ -10,7 +10,7 @@ import difflib
 from typing import Optional
 
 from .terminal import get_session, SSHSession
-from ..ui.ui_design import colorize_diff
+from .diff_utils import colorize_diff
 
 
 def _get_sftp(session: SSHSession):
@@ -61,17 +61,8 @@ def remote_read(file_path: str, offset: int = 0, limit: int = 0,
 
 # ── 远程Write ──
 
-# 跟踪已Read过的远程文件
-_read_remote_files: set = set()
 
-
-def mark_remote_read(file_path: str, host: str = ""):
-    """标记远程文件已被Read"""
-    key = f"{host}:{file_path}" if host else file_path
-    _read_remote_files.add(key)
-
-
-def remote_write(file_path: str, content: str, host: str = "") -> tuple:
+def remote_write(file_path: str, content: str, host: str = "", _tool_context=None) -> tuple:
     """通过SFTP写入远程文件"""
     session = get_session(host=host)
     if session is None:
@@ -88,7 +79,7 @@ def remote_write(file_path: str, content: str, host: str = "") -> tuple:
         except IOError:
             file_exists = False
 
-        if file_exists and key not in _read_remote_files:
+        if file_exists and _tool_context and not _tool_context.is_remote_read(file_path, host):
             sftp.close()
             return ((f"错误: 覆写已有远程文件前必须先Read确认当前内容。"
                      f"请先Read {file_path}，再决定用Edit还是Write。"), "")
@@ -114,7 +105,8 @@ def remote_write(file_path: str, content: str, host: str = "") -> tuple:
     except Exception as e:
         return (f"错误: 远程写入失败: {e}", "")
 
-    _read_remote_files.add(key)
+    if _tool_context:
+        _tool_context.mark_remote_read(file_path, host)
     byte_count = len(content.encode("utf-8"))
     return (f"已写入(远程): {file_path} ({byte_count}字节)", color_diff)
 

@@ -3,25 +3,12 @@
 import os
 import difflib
 
-from ..ui.ui_design import colorize_diff
-
-
-# 跟踪已Read过的文件，Write覆写前需确认
-_read_files: set = set()
-
-
-def mark_read(file_path: str):
-    """标记文件已被Read（由Read工具调用）"""
-    _read_files.add(os.path.abspath(file_path))
-
-
-def clear_read_files():
-    """清空已读文件记录（压缩后调用，防止旧标记残留）"""
-    _read_files.clear()
+from .diff_utils import colorize_diff
 
 
 def execute(file_path: str, content: str,
-            remote: bool = False, host: str = "") -> tuple:
+            remote: bool = False, host: str = "",
+            _tool_context=None) -> tuple:
     """
     创建或覆写文件。
 
@@ -30,6 +17,7 @@ def execute(file_path: str, content: str,
         content: 完整文件内容
         remote: 通过SFTP写入远程文件（需先Terminal connect）
         host: 远程主机（仅remote=True时使用）
+        _tool_context: 工具运行时上下文（内部参数，由registry注入）
 
     Returns:
         (llm_result, color_diff) 元组:
@@ -39,12 +27,12 @@ def execute(file_path: str, content: str,
     remote = bool(remote)
     if remote:
         from .remote import remote_write
-        return remote_write(file_path, content, host)
+        return remote_write(file_path, content, host, _tool_context=_tool_context)
     abs_path = os.path.abspath(file_path)
 
     # 覆写已有文件前检查是否Read过
     if os.path.isfile(abs_path):
-        if abs_path not in _read_files:
+        if _tool_context and not _tool_context.is_read(abs_path):
             return ((f"错误: 覆写已有文件前必须先Read确认当前内容。"
                      f"请先Read {file_path}，再决定用Edit还是Write。"), "")
 
@@ -72,7 +60,8 @@ def execute(file_path: str, content: str,
 
     byte_count = len(content.encode("utf-8"))
     # 写入后标记为已读
-    _read_files.add(abs_path)
+    if _tool_context:
+        _tool_context.mark_read(abs_path)
     return (f"已写入: {file_path} ({byte_count}字节)", color_diff)
 
 

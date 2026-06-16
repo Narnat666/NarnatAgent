@@ -9,7 +9,8 @@ MAX_OUTPUT_CHARS = 128 * 1024  # 128KB 总输出上限
 
 
 def execute(file_path: str, offset: int = 0, limit: int = 2000,
-            remote: bool = False, host: str = "") -> str:
+            remote: bool = False, host: str = "",
+            _tool_context=None) -> str:
     """
     读取文件内容。
 
@@ -19,6 +20,7 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
         limit: 最大行数，必须>0，默认2000
         remote: 通过SFTP读取远程文件（需先Terminal connect）
         host: 远程主机IP（仅remote=True时使用）
+        _tool_context: 工具运行时上下文（内部参数，由registry注入）
 
     Returns:
         带行号的文件内容字符串，格式 "  行号→内容"
@@ -30,13 +32,17 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
         return "错误: limit必须>0"
     remote = bool(remote)
     if remote:
-        from .remote import remote_read, mark_remote_read
+        from .remote import remote_read
         result = remote_read(file_path, offset, limit, host)
-        if "错误" not in result:
-            mark_remote_read(file_path, host)
+        if "错误" not in result and _tool_context:
+            _tool_context.mark_remote_read(file_path, host)
         return result
     if not os.path.isfile(file_path):
         return f"错误: 文件不存在: {file_path}"
+
+    # 标记文件已被Read（供Write检查）
+    if _tool_context:
+        _tool_context.mark_read(file_path)
 
     try:
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:

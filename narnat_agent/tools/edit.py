@@ -17,7 +17,7 @@
 import os
 import difflib
 
-from ..ui.ui_design import colorize_diff
+from .diff_utils import colorize_diff
 
 
 def execute(file_path: str, old_string: str = "", new_string: str = "",

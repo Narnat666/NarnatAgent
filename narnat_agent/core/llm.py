@@ -19,6 +19,7 @@ from typing import List, Dict, Any, Iterator, Optional
 
 from ..config.loader import AIConfig
 from ..tools.registry import get_tool_definitions
+from .interrupt import register_abort
 
 # ESC中断：持有当前活跃的LLM HTTP连接，供ESC轮询线程关闭
 _active_llm_response = None
@@ -61,6 +62,10 @@ def abort_active_llm_request():
             pass
 
 
+# 模块加载时注册中断回调，ui层通过interrupt模块触发，不再直接导入此函数
+register_abort(abort_active_llm_request)
+
+
 def _iter_to_queue(iterator, q):
     """后台线程：将迭代器的元素逐个放入队列，最后放入_STREAM_END。"""
     try:
@@ -79,13 +84,14 @@ class LLMClient:
     对外接口统一：chat_stream() yield OpenAI 格式的 chunk。
     """
 
-    def __init__(self, config: AIConfig, logger=None):
+    def __init__(self, config: AIConfig, logger=None, max_output_tokens: int = 128000):
         self._config = config
         self._logger = logger
         self._tool_defs = get_tool_definitions()
+        self._max_output_tokens = max_output_tokens
 
         if "anthropic" in config.base_url.lower():
-            self._backend = _AnthropicBackend(config, self._tool_defs, logger)
+            self._backend = _AnthropicBackend(config, self._tool_defs, logger, max_output_tokens)
         else:
             self._backend = _OpenAIBackend(config, self._tool_defs, logger)
 
@@ -319,10 +325,11 @@ class _AnthropicBackend:
     对外统一 yield OpenAI 格式的 chunk。
     """
 
-    def __init__(self, config, tool_defs, logger):
+    def __init__(self, config, tool_defs, logger, max_output_tokens=128000):
         self._config = config
         self._tool_defs = tool_defs
         self._logger = logger
+        self._max_output_tokens = max_output_tokens
         self._url = f"{config.base_url.rstrip('/')}/v1/messages"
         self._last_raw_sse = []  # 空回复调试：缓存本轮原始SSE数据
         self._headers = {
@@ -330,14 +337,6 @@ class _AnthropicBackend:
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
         }
-
-    @staticmethod
-    def _get_max_tokens():
-        try:
-            from ..ui.ui_design import MAX_TOKENS
-            return MAX_TOKENS
-        except Exception:
-            return 128000
 
     def chat_stream(self, messages, no_tools=False, cancel_check=None):
         self._last_raw_sse.clear()
@@ -355,7 +354,7 @@ class _AnthropicBackend:
         body = {
             "model": self._config.model,
             "messages": anthropic_msgs,
-            "max_tokens": self._get_max_tokens(),
+            "max_tokens": self._max_output_tokens,
             "stream": True,
         }
         if system:

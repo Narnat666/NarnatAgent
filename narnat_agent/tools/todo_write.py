@@ -4,22 +4,13 @@ import json
 from typing import List, Dict, Any, Optional, Callable
 
 
-# UI更新回调，由agent层注入
-_ui_callback: Optional[Callable[[List[Dict]], None]] = None
-
-
-def set_ui_callback(cb: Callable[[List[Dict]], None]):
-    """设置UI更新回调"""
-    global _ui_callback
-    _ui_callback = cb
-
-
-def execute(todos: List[Dict[str, Any]]) -> str:
+def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
     """
     创建/更新任务列表。
 
     Args:
         todos: 任务列表，每项含content/activeForm/status
+        _tool_context: 工具运行时上下文（内部参数，由registry注入）
 
     Returns:
         空串（UI侧更新显示）
@@ -44,7 +35,7 @@ def execute(todos: List[Dict[str, Any]]) -> str:
         return f"错误: 最多1个in_progress任务，当前有{in_progress_count}个"
 
     # 通知UI更新
-    if _ui_callback:
-        _ui_callback(todos)
+    if _tool_context and _tool_context.ui_callback:
+        _tool_context.ui_callback(todos)
 
     return f"任务列表已更新({len(todos)}项)"

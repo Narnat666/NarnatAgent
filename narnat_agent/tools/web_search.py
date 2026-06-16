@@ -29,12 +29,6 @@ _TIMEOUT = 10
 _ANYSEARCH_TIMEOUT = 15
 
 
-def set_api_key(key: str):
-    """设置 AnySearch API Key（由 agent 层在启动时注入）"""
-    global _ANYSEARCH_API_KEY
-    _ANYSEARCH_API_KEY = key
-
-
 # ── 工具函数 ──
 
 def _url_key(url: str) -> str:
@@ -164,17 +158,23 @@ def _check_daemon() -> bool:
 
 # ── 主入口 ──
 
-def execute(query: str, num: int = 5) -> str:
+def execute(query: str, num: int = 5, _tool_context=None) -> str:
     """
     联网搜索。主引擎 AnySearch，失败则降级到 Open WebSearch。
 
     Args:
         query: 搜索关键词
         num: 返回结果数，默认5
+        _tool_context: 工具运行时上下文（内部参数，由registry注入）
 
     Returns:
         格式化的搜索结果，每条含标题、URL、描述
     """
+    # 从tool_context注入API Key
+    global _ANYSEARCH_API_KEY
+    if _tool_context and _tool_context.api_keys:
+        _ANYSEARCH_API_KEY = _tool_context.api_keys.get("anysearch", _ANYSEARCH_API_KEY)
+
     results: List[Dict] = []
 
     # ── Tier 1: AnySearch ──
