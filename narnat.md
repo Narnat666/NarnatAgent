@@ -68,6 +68,22 @@ When entering an unfamiliar project, your first job is to map its structure with
 
 Rule: codegraph substitutes for blind Glob. If codegraph can answer the structural question, don't Glob. When you must Glob, always scope to source directories by language extension.
 
+## Search Scope (Mandatory)
+
+`codegraph files --format tree` only lists source directories. Everything else (build outputs, vendored libs, session dumps, etc.) is excluded.
+
+**After step 2, you already know the source directories. Never Grep or Glob from root — always scope to those directories with `path`:**
+
+```correct
+Grep(pattern="main", path="src", glob="*.py")
+Glob(pattern="*.py", path="tests")
+```
+
+```wrong
+Grep(pattern="main")
+Glob(pattern="**/*")
+```
+
 # Shell Output Control (Mandatory)
 
 All Shell stdout/stderr is written directly into context. You must control what enters the prompt.
