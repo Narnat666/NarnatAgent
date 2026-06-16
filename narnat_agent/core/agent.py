@@ -135,6 +135,7 @@ class Agent:
             confirm_callback=self._confirm_delete,
             ui_callback=self._on_todo_update,
             api_keys=self._config.api_keys,
+            ignore_dirs=self._config.ignore_dirs,
         )
 
         # 初始化子模块

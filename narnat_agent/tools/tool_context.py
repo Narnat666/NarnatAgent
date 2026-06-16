@@ -5,7 +5,7 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Any, Dict
+from typing import Optional, Callable, Any, Dict, List
 
 
 @dataclass
@@ -20,6 +20,9 @@ class ToolContext:
 
     # API密钥组（web_search使用）
     api_keys: Dict[str, str] = field(default_factory=dict)
+
+    # 忽略目录（glob/grep使用）
+    ignore_dirs: List[str] = field(default_factory=list)
 
     # 已Read过的本地文件集合（write使用）
     read_files: set = field(default_factory=set)

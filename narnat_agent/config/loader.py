@@ -90,7 +90,6 @@ class AppConfig:
     compress_turn: int = COMPRESS_TURN
     warn_turn_1: int = WARN_TURN_1
     warn_turn_2: int = WARN_TURN_2
-    shell_timeout: int = 120
     ignore_dirs: List[str] = field(default_factory=lambda: list(_DEFAULT_IGNORE_DIRS))
 
 
@@ -336,6 +335,5 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
         compress_turn=int(data.get("压缩轮次", COMPRESS_TURN)),
         warn_turn_1=int(data.get("警告轮次1", WARN_TURN_1)),
         warn_turn_2=int(data.get("警告轮次2", WARN_TURN_2)),
-        shell_timeout=int(data.get("Shell超时", 120)),
         ignore_dirs=data.get("忽略目录", list(_DEFAULT_IGNORE_DIRS)),
     )

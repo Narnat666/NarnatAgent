@@ -5,7 +5,7 @@ import os
 import re
 
 
-_IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache"}
+_DEFAULT_IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache"}
 
 
 def execute(
@@ -20,6 +20,7 @@ def execute(
     B: int = 0,
     C: int = 0,
     head_limit: int = 100,
+    _tool_context=None,
 ) -> str:
     """
     按正则搜索文件内容。
@@ -61,8 +62,12 @@ def execute(
     if not os.path.isdir(root):
         return f"错误: 路径不存在: {root}"
 
+    ignore_dirs = _DEFAULT_IGNORE_DIRS
+    if _tool_context and _tool_context.ignore_dirs:
+        ignore_dirs = set(_tool_context.ignore_dirs)
+
     results = []
-    file_matches = _search_files(root, regex, glob, output_mode, n, A, B, head_limit)
+    file_matches = _search_files(root, regex, glob, output_mode, n, A, B, head_limit, ignore_dirs)
     truncated = False
 
     if output_mode == "files_with_matches":
@@ -144,14 +149,14 @@ def _match_lines(path_label, lines, regex, A, B, head_limit):
     return results, count
 
 
-def _search_files(root, regex, glob_filter, output_mode, show_n, A, B, head_limit):
+def _search_files(root, regex, glob_filter, output_mode, show_n, A, B, head_limit, ignore_dirs):
     """遍历文件执行搜索"""
 
     results = []
     count = 0
 
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _IGNORE_DIRS]
+        dirnames[:] = [d for d in dirnames if d not in ignore_dirs]
         for fname in filenames:
             if glob_filter and not fnmatch.fnmatch(fname, glob_filter):
                 continue

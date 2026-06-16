@@ -5,11 +5,11 @@ import fnmatch
 from pathlib import PurePath
 
 
-# 忽略的目录
-_IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache"}
+# 默认忽略的目录（硬编码兜底）
+_DEFAULT_IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache"}
 
 
-def execute(pattern: str, path: str = "", max_results: int = 500) -> str:
+def execute(pattern: str, path: str = "", max_results: int = 500, _tool_context=None) -> str:
     """
     按glob模式搜索文件。
 
@@ -25,10 +25,14 @@ def execute(pattern: str, path: str = "", max_results: int = 500) -> str:
     if not os.path.isdir(root):
         return f"错误: 目录不存在: {root}"
 
+    ignore_dirs = _DEFAULT_IGNORE_DIRS
+    if _tool_context and _tool_context.ignore_dirs:
+        ignore_dirs = set(_tool_context.ignore_dirs)
+
     matches = []
     for dirpath, dirnames, filenames in os.walk(root):
         # 原地修改dirnames跳过忽略目录
-        dirnames[:] = [d for d in dirnames if d not in _IGNORE_DIRS]
+        dirnames[:] = [d for d in dirnames if d not in ignore_dirs]
         for fname in filenames:
             full = os.path.join(dirpath, fname)
             rel = os.path.relpath(full, root)

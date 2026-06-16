@@ -250,7 +250,7 @@ def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolCon
         return (f"错误: 未知工具: {name}", "")
 
     # 需要tool_context的工具：注入上下文参数
-    _CONTEXT_TOOLS = {"Shell", "Terminal", "TodoWrite", "WebSearch", "Write", "Read"}
+    _CONTEXT_TOOLS = {"Shell", "Terminal", "TodoWrite", "WebSearch", "Write", "Read", "Glob", "Grep"}
 
     try:
         if tool_context and name in _CONTEXT_TOOLS:
