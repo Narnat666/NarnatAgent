@@ -22,6 +22,8 @@ class AIConfig:
     api_key: str = DEFAULT_API_KEY
     base_url: str = DEFAULT_BASE_URL
     model: str = DEFAULT_MODEL
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
 
 
 @dataclass
@@ -98,6 +100,16 @@ def _find_project_root() -> str:
     return cwd
 
 
+def _coerce(v, target_type):
+    """字符串/数字 → target_type，空串/非法值 → None"""
+    if v in (None, ""):
+        return None
+    try:
+        return target_type(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _load_json(narnat_dir: str) -> tuple[AIConfig, dict]:
     """读取 narnat.json，返回 (AIConfig, api_keys)。解析失败返回默认配置"""
     path = os.path.join(narnat_dir, NARNAT_JSON)
@@ -110,6 +122,8 @@ def _load_json(narnat_dir: str) -> tuple[AIConfig, dict]:
             api_key=data.get("api_key", DEFAULT_API_KEY),
             base_url=data.get("base_url", DEFAULT_BASE_URL),
             model=data.get("model", DEFAULT_MODEL),
+            temperature=_coerce(data.get("temperature"), float),
+            max_tokens=_coerce(data.get("max_tokens"), int),
         )
         api_keys = data.get("api_keys", {})
         return ai_config, api_keys

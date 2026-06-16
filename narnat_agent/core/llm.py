@@ -143,10 +143,14 @@ class _OpenAIBackend:
                     messages=messages,
                     stream=True,
                     stream_options={"include_usage": True},
-                    timeout=httpx.Timeout(connect=5.0, read=0.2, write=30.0, pool=30.0),
+                    timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=30.0),
                 )
                 if not no_tools:
                     kwargs["tools"] = self._tool_defs
+                if self._config.temperature is not None:
+                    kwargs["temperature"] = self._config.temperature
+                if self._config.max_tokens is not None:
+                    kwargs["max_tokens"] = self._config.max_tokens
                 stream = self._client.chat.completions.create(**kwargs)
                 break
             except self._APIStatusError as e:
@@ -358,6 +362,10 @@ class _AnthropicBackend:
             body["system"] = system
         if anthropic_tools and not no_tools:
             body["tools"] = anthropic_tools
+        if self._config.temperature is not None:
+            body["temperature"] = self._config.temperature
+        if self._config.max_tokens is not None:
+            body["max_tokens"] = self._config.max_tokens
 
         # 发送请求（带重试）
         import requests
@@ -471,6 +479,11 @@ class _AnthropicBackend:
         # 解析 Anthropic SSE 流（后台线程读，主线程Queue消费）
         _active_llm_response = resp  # 切换到response对象
 
+        # 确定编码：优先 Content-Type 声明的 charset，未声明则 utf-8
+        ctype = resp.headers.get("Content-Type", "")
+        m = re.search(r"charset=([^\s;]+)", ctype)
+        encoding = m.group(1) if m else "utf-8"
+
         try:
             content_buffer = []
             tool_use_blocks = {}  # index → {id, name, input_json}
@@ -478,7 +491,7 @@ class _AnthropicBackend:
             line_queue = queue.Queue()
             reader = threading.Thread(
                 target=_iter_to_queue,
-                args=(resp.iter_lines(decode_unicode=True), line_queue),
+                args=(resp.iter_lines(decode_unicode=False), line_queue),
                 daemon=True,
             )
             reader.start()
@@ -493,6 +506,8 @@ class _AnthropicBackend:
                 if raw_line is _STREAM_END:
                     break
 
+                if isinstance(raw_line, bytes):
+                    raw_line = raw_line.decode(encoding)
                 line = (raw_line or "").strip()
                 if not line.startswith("data:"):
                     continue

@@ -785,15 +785,19 @@ class StreamingRenderer:
         self._code_lang = ""
 
     def flush(self) -> None:
+        # 先消费缓冲区残留行（流式输出最后一行常不带 \n）
+        remaining = self._buf_get_and_clear()
+        if remaining.strip():
+            self._on_normal_line(remaining, "")
         if self._in_code:
             self._flush_code_block()
             self._in_code = False
         if self._table_rows:
             self._flush_table()
             self._table_has_separator = False
-        remaining = self._buf_get_and_clear()
-        if remaining.strip():
-            _stdout_write(render_line(remaining) + "\n")
+        leftover = self._buf_get_and_clear()
+        if leftover.strip():
+            _stdout_write(render_line(leftover) + "\n")
 
 
 # ═══════════════════════════════════════════════════════════════
