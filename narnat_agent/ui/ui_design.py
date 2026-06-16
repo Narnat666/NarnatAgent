@@ -30,7 +30,7 @@ if sys.platform == "win32":
 from .colors import (
     _Color, RST, BLD, DIM, GRY, CYN, GRN, YLW, RED, BLU, MAG, ORG, BG8, WHT, WHT7,
     R, B, D, G, C, E, Y, X, U, M, O, BG, W, W7,
-    _STYLE_KEY_MAP, SHOW_COST, SHOW_BALANCE, MAX_TOKENS,
+    _STYLE_KEY_MAP,
     _stdout_lock, _stdout_write, _stdout_try_write,
     apply_style,
 )
@@ -105,13 +105,19 @@ def show_interrupted() -> None:
 def show_stats(input_tokens: int, output_tokens: int,
                cache: int = 0, cost: float = 0.0,
                balance: float = 0.0) -> None:
+    # 动态从 colors 模块读取，确保 apply_style 修改后生效
+    from . import colors as _colors
+    _show_cost = _colors.SHOW_COST
+    _show_balance = _colors.SHOW_BALANCE
+    _max_tokens = _colors.MAX_TOKENS
+
     si = f"{input_tokens / 1000:.1f}k" if input_tokens >= 1000 else str(input_tokens)
     so = f"{output_tokens / 1000:.1f}k" if output_tokens >= 1000 else str(output_tokens)
-    mt = f"{MAX_TOKENS / 1000:.0f}k" if MAX_TOKENS >= 1000 else str(MAX_TOKENS)
+    mt = f"{_max_tokens / 1000:.0f}k" if _max_tokens >= 1000 else str(_max_tokens)
     _sep()
     cs = f"  缓存:{cache / 1000:.1f}k" if cache > 0 else ""
-    co = f"  费用:¥{cost:.4f}" if SHOW_COST and cost > 0 else ""
-    ba = f"  余额:¥{balance:.2f}" if SHOW_BALANCE and balance > 0 else ""
+    co = f"  费用:¥{cost:.4f}" if _show_cost and cost > 0 else ""
+    ba = f"  余额:¥{balance:.2f}" if _show_balance and balance > 0 else ""
     _stdout_write(f"  {G}输入:{si} 输出:{so}{cs}  最大输出:{mt}{R}{Y}{co}{ba}{R}\n")
 
 
