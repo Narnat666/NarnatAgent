@@ -97,9 +97,9 @@ class Compressor:
         """
         创建新会话的messages。
 
-        system_prompt末尾追加总结作为"上一轮对话成果"。
+        压缩摘要作为独立的system消息注入，与skill格式一致。
         """
-        new_system = system_prompt
+        messages = [{"role": "system", "content": system_prompt}]
         if summary:
-            new_system += f"\n\n# 上一轮对话成果\n\n{summary}"
-        return [{"role": "system", "content": new_system}]
+            messages.append({"role": "system", "content": f"# 上一轮对话成果\n\n{summary}"})
+        return messages

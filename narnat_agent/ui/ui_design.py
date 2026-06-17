@@ -89,13 +89,25 @@ def _spinner_thread(stop: threading.Event) -> None:
 
 
 def _compress_thread(stop: threading.Event) -> None:
-    frames = (f"{B}{O}*{R}", f"{D}{O}✶{R}")
+    """压缩动画，与思考中动画风格一致。4帧循环：* 正在压缩 → * 正在压缩. → * 正在压缩.. → * 正在压缩..."""
+    # 隐藏光标
+    _stdout_write("\x1b[?25l")
+
+    frames = (
+        f"{B}{O}* {R}{O}正在压缩   {R}",
+        f"{D}{O}* {R}{O}正在压缩.  {R}",
+        f"{B}{O}* {R}{O}正在压缩.. {R}",
+        f"{D}{O}* {R}{O}正在压缩...{R}",
+    )
     i = 0
     while not stop.is_set():
-        _stdout_try_write(f"\r  {frames[i]} {O}正在压缩...{R}\x1b[K")
-        i = (i + 1) % 2
+        _stdout_try_write(f"\r  {frames[i]}\x1b[K")
+        i = (i + 1) % 4
         stop.wait(0.15)
+
+    # 退出前自清：擦除动画行 + 恢复光标
     _stdout_write("\r\x1b[K")
+    _stdout_write("\x1b[?25h")
 
 
 def show_interrupted() -> None:

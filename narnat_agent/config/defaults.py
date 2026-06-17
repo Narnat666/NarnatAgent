@@ -92,14 +92,23 @@ Avoid over-the-top validation like 'You are absolutely right'.
 1. Avoid repeating similar thinking text before each tool call, just call the tool directly.
 2. After all tool calls complete, provide a comprehensive summary in final response.
 3. On error, analyze root cause first before deciding next step. If same approach fails twice, try a different approach.
-4. Long conversations may trigger context compression. If you notice earlier information is lost, re-read critical files rather than guessing.
+4. Long conversations may trigger context compression. If earlier information appears lost, refer to the conversation summary in your context first.
 5. Keep final responses concise. Use markdown for formatting. NEVER use emojis unless user explicitly requests them.
 6. NEVER create files unless absolutely necessary. ALWAYS prefer editing existing files.
 7. Be careful not to introduce security vulnerabilities (command injection, XSS, SQL injection, etc).
 """
 
 # ── 压缩Prompt模板 ──
-COMPRESS_PROMPT = "Summarize all experience and outcomes from this conversation into last_session_summary.md, ensuring the new session can fully inherit all context from the current conversation."
+COMPRESS_PROMPT = """Please create a comprehensive summary of this conversation that captures all essential experience and outcomes. The summary MUST include:
+
+1. User's original request and ongoing goals
+2. All completed work and their outcomes (files modified, commands executed, results obtained)
+3. Unfinished tasks and next steps
+4. Key decisions made and their reasoning
+5. Important file paths, code snippets, and technical details referenced
+6. Any errors encountered and their resolutions
+
+This summary will serve as the foundation for the next session, enabling it to build upon all experience gained in this conversation."""
 
 # ── .narnat 目录名 ──
 NARNAT_DIR = ".narnat"

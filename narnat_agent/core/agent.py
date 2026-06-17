@@ -130,10 +130,20 @@ class Agent:
         # 初始化压缩器
         self._compressor = Compressor(self._config.narnat_dir, self._logger)
 
+        # 崩溃恢复：检查是否有残留的压缩摘要
+        recovered_summary = ""
+        if self._compressor.verify_summary():
+            recovered_summary = self._compressor.read_summary()
+            self._compressor.reset_summary()
+            if self._logger:
+                self._logger.info("core.agent", "崩溃恢复: 已加载残留的压缩摘要")
+
         # 初始化messages
         self._messages: List[Dict[str, Any]] = [
             {"role": "system", "content": self._config.system_prompt}
         ]
+        if recovered_summary:
+            self._messages.append({"role": "system", "content": f"# 上一轮对话成果\n\n{recovered_summary}"})
 
         # 初始化UI
         callbacks = NarnatSessionCallbacks(
@@ -444,5 +454,6 @@ class Agent:
         )
         if result:
             self._ui.end_compressing()
+            self._context.reset()
             self._tool_context.clear_read_files()
         return result
