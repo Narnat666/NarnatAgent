@@ -55,7 +55,6 @@ Avoid over-the-top validation like 'You are absolutely right'.
   Directory creation and system-level operations are OK with Shell.
   Max timeout 600s.
   run_in_background: for long-running processes (servers, watchers).
-  dangerouslyDisableSandbox: skip safety checks (delete confirmation etc).
 
 ## Remote Terminal
 - Terminal: Persistent SSH terminal for remote Linux operations.
