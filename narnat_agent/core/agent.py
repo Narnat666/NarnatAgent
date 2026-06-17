@@ -31,62 +31,75 @@ from ..logger import AgentLogger
 class NarnatSessionCallbacks(SessionCallbacks):
     """会话命令回调实现"""
 
-    def __init__(self, narnat_dir: str, get_messages_func, set_messages_func):
+    def __init__(self, narnat_dir: str, get_messages_func):
         self._narnat_dir = narnat_dir
         self._get_messages = get_messages_func
-        self._set_messages = set_messages_func
         self._active_name: Optional[str] = None
 
     def on_save(self, name: str) -> str:
         if not name:
             return "错误: 请指定会话名称"
         msgs = self._get_messages()
-        err = save_session(os.path.dirname(self._narnat_dir), name, msgs)
+        err = save_session(self._narnat_dir, name, msgs)
         if err:
             return err
         self._active_name = name
         return ""
 
-    def on_load(self, name: str) -> str:
+    def on_show(self) -> str:
+        """列出所有已保存会话"""
+        from ..config.session_store import list_sessions as _list_sessions
+        sessions = _list_sessions(self._narnat_dir)
+        return format_session_list(sessions)
+
+    def on_enter(self, name: str) -> str:
+        """进入历史会话"""
         if not name:
             return "错误: 请指定会话名称"
-        msgs = load_session(os.path.dirname(self._narnat_dir), name)
-        if msgs is None:
-            return f"错误: 会话 '{name}' 不存在"
-        self._set_messages(msgs)
+        msgs, err = load_session(self._narnat_dir, name)
+        if err:
+            return err
+        # 清空并填充原列表，保持MessageManager等模块的引用不断裂
+        current = self._get_messages()
+        current.clear()
+        current.extend(msgs)
         self._active_name = name
         return ""
-
-    def on_list(self) -> str:
-        return format_session_list(os.path.dirname(self._narnat_dir))
 
     def on_delete(self, name: str) -> str:
         if not name:
             return "错误: 请指定会话名称"
-        err = delete_session(os.path.dirname(self._narnat_dir), name)
+        err = delete_session(self._narnat_dir, name)
         if err:
             return err
         if self._active_name == name:
             self._active_name = None
         return ""
 
-    def on_show(self) -> str:
-        if not self._active_name:
-            return "当前无已保存的会话"
-        return f"当前会话: {self._active_name}"
-
-    def on_enter(self, path: str) -> str:
-        return ""
+    def on_list_names(self) -> list:
+        """返回所有已保存会话的名称列表，供Tab补全使用"""
+        from ..config.session_store import list_sessions as _list_sessions
+        return [s["name"] for s in _list_sessions(self._narnat_dir)]
 
     def on_skill(self, name: str) -> str:
-        content, err = load_skill(os.path.dirname(self._narnat_dir), name)
+        content, err = load_skill(self._narnat_dir, name)
         if err:
             return err
         self._get_messages().append({"role": "system", "content": content})
         return ""
 
+    def on_exit(self) -> str:
+        """退出时自动保存已命名的会话，返回保存的会话名或空串"""
+        if not self._active_name:
+            return ""
+        msgs = self._get_messages()
+        err = save_session(self._narnat_dir, self._active_name, msgs)
+        if err:
+            return ""
+        return self._active_name
+
     def on_list_skill_names(self) -> list:
-        return list_skill_names(os.path.dirname(self._narnat_dir))
+        return list_skill_names(self._narnat_dir)
 
 
 class Agent:
@@ -100,9 +113,9 @@ class Agent:
         apply_style(self._config)
 
         # 初始化日志
-        self._logger = AgentLogger(self._config.project_root)
+        self._logger = AgentLogger(self._config.logs_dir)
         if debug:
-            self._logger.start(self._config.project_root)
+            self._logger.start(self._config.logs_dir)
 
         # 初始化LLM
         self._llm = LLMClient(
@@ -126,7 +139,6 @@ class Agent:
         callbacks = NarnatSessionCallbacks(
             self._config.narnat_dir,
             lambda: self._messages,
-            lambda msgs: setattr(self, '_messages', msgs),
         )
         self._ui = UIInterface(self._config.ai.model, callbacks)
 
@@ -387,7 +399,7 @@ class Agent:
     def _dump_empty_debug(self, content_parts, tool_calls_result, finish_reason, call_usage):
         """空回复时写调试日志"""
         debug_path = os.path.join(
-            self._config.narnat_dir,
+            self._config.data_dir,
             f"debug_empty_{time.strftime('%Y%m%d_%H%M%S')}.json"
         )
         debug_data = {

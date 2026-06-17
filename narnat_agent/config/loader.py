@@ -15,6 +15,7 @@ from typing import Optional, Dict, List
 from .defaults import (
     BASE_PROMPT_TEMPLATE, IRON_RULES, COMPRESS_PROMPT,
     NARNAT_DIR, NARNAT_JSON, NARNAT_MD, LAST_SESSION_SUMMARY,
+    CONFIG_SUBDIR, DATA_SUBDIR, LOGS_SUBDIR,
     DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL,
     WARN_TURN_1, WARN_TURN_2, COMPRESS_TURN,
 )
@@ -84,6 +85,10 @@ class AppConfig:
     system_prompt: str = ""
     narnat_dir: str = ""
     project_root: str = ""
+    # 子目录路径（由 load_config 计算）
+    config_dir: str = ""    # .narnat/config/
+    data_dir: str = ""      # .narnat/data/
+    logs_dir: str = ""      # .narnat/logs/
     # 新增配置项
     pricing: PricingConfig = field(default_factory=PricingConfig)
     ui: UIConfig = field(default_factory=UIConfig)
@@ -181,9 +186,9 @@ def _parse_pricing(data: dict) -> Dict[str, Dict[str, float]]:
     return result
 
 
-def _load_json(narnat_dir: str) -> dict:
+def _load_json(config_dir: str) -> dict:
     """读取 narnat.json，返回原始数据字典。解析失败返回空字典"""
-    path = os.path.join(narnat_dir, NARNAT_JSON)
+    path = os.path.join(config_dir, NARNAT_JSON)
     if not os.path.isfile(path):
         return {}
     try:
@@ -193,9 +198,9 @@ def _load_json(narnat_dir: str) -> dict:
         return {}
 
 
-def _load_style_json(narnat_dir: str) -> dict:
+def _load_style_json(config_dir: str) -> dict:
     """读取旧版 style.json（兼容迁移）。不存在返回空字典"""
-    path = os.path.join(narnat_dir, "style.json")
+    path = os.path.join(config_dir, "style.json")
     if not os.path.isfile(path):
         return {}
     try:
@@ -248,9 +253,9 @@ def _build_pricing_config(data: dict) -> PricingConfig:
     )
 
 
-def _load_user_md(narnat_dir: str) -> str:
+def _load_user_md(config_dir: str) -> str:
     """读取 narnat.md 用户自定义指令，不存在或为空返回空串"""
-    path = os.path.join(narnat_dir, NARNAT_MD)
+    path = os.path.join(config_dir, NARNAT_MD)
     if not os.path.isfile(path):
         return ""
     try:
@@ -278,20 +283,25 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
     加载全部配置。
 
     1. 定位项目根目录（含 .narnat 的目录）
-    2. 读取 narnat.json → 全部配置
-    3. 兼容读取旧版 style.json
+    2. 创建 .narnat 子目录结构（config/ data/ logs/）
+    3. 读取 narnat.json → 全部配置
     4. 读取 narnat.md → 用户自定义指令
     5. 拼接系统prompt
     """
     root = os.path.abspath(project_root or _find_project_root())
     narnat_dir = os.path.join(root, NARNAT_DIR)
+    config_dir = os.path.join(narnat_dir, CONFIG_SUBDIR)
+    data_dir = os.path.join(narnat_dir, DATA_SUBDIR)
+    logs_dir = os.path.join(narnat_dir, LOGS_SUBDIR)
 
-    # 确保 .narnat 目录存在
-    os.makedirs(narnat_dir, exist_ok=True)
+    # 确保 .narnat 及子目录存在
+    os.makedirs(config_dir, exist_ok=True)
+    os.makedirs(data_dir, exist_ok=True)
+    os.makedirs(logs_dir, exist_ok=True)
 
-    # 确保关键文件存在
-    for fname in (NARNAT_JSON, NARNAT_MD, LAST_SESSION_SUMMARY):
-        fpath = os.path.join(narnat_dir, fname)
+    # 确保关键配置文件存在
+    for fname in (NARNAT_JSON, NARNAT_MD):
+        fpath = os.path.join(config_dir, fname)
         if not os.path.isfile(fpath):
             with open(fpath, "w", encoding="utf-8") as f:
                 if fname == NARNAT_JSON:
@@ -304,9 +314,15 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
                 else:
                     f.write("")
 
+    # 确保压缩摘要文件存在
+    summary_path = os.path.join(data_dir, LAST_SESSION_SUMMARY)
+    if not os.path.isfile(summary_path):
+        with open(summary_path, "w", encoding="utf-8") as f:
+            f.write("")
+
     # 读取配置
-    data = _load_json(narnat_dir)
-    style_data = _load_style_json(narnat_dir)
+    data = _load_json(config_dir)
+    style_data = _load_style_json(config_dir)
 
     # 构建各子配置
     ai_config = _build_ai_config(data)
@@ -315,7 +331,7 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
     ui_config = _build_ui_config(data, style_data)
 
     # 读取用户自定义指令
-    user_md = _load_user_md(narnat_dir)
+    user_md = _load_user_md(config_dir)
     system_prompt = _build_system_prompt(
         model=ai_config.model,
         user_md=user_md,
@@ -330,6 +346,9 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
         system_prompt=system_prompt,
         narnat_dir=narnat_dir,
         project_root=root,
+        config_dir=config_dir,
+        data_dir=data_dir,
+        logs_dir=logs_dir,
         pricing=pricing_config,
         ui=ui_config,
         compress_turn=int(data.get("压缩轮次", COMPRESS_TURN)),

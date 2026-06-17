@@ -103,14 +103,20 @@ COMPRESS_PROMPT = "Summarize all experience and outcomes from this conversation 
 
 # ── .narnat 目录名 ──
 NARNAT_DIR = ".narnat"
+
+# ── .narnat 内部子目录 ──
+CONFIG_SUBDIR = "config"       # 配置层：静态、用户可编辑
+DATA_SUBDIR = "data"           # 数据层：运行时持久化
+LOGS_SUBDIR = "logs"           # 日志层：可清理
+
+# ── 配置文件名（相对于 config/ 子目录） ──
 NARNAT_JSON = "narnat.json"
 NARNAT_MD = "narnat.md"
+
+# ── 数据文件名（相对于 data/ 子目录） ──
 LAST_SESSION_SUMMARY = "last_session_summary.md"
 
 # ── 默认AI配置 ──
 DEFAULT_API_KEY = ""
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
-
-# ── 日志目录 ──
-LOG_DIR = "logs"

@@ -1,21 +1,23 @@
 """
-技能加载 —— 从 skills/ 目录读取技能文件
+技能加载 —— 从 .narnat/config/skills/ 目录读取技能文件
 """
 
 import os
 from typing import List
 
+from .defaults import CONFIG_SUBDIR
 
-def load_skill(exe_dir: str, name: str) -> tuple:
+
+def load_skill(narnat_dir: str, name: str) -> tuple:
     """加载技能内容。返回 (content, error)。
     
     查找顺序:
-    1. skills/<name>.md       (扁平结构)
-    2. skills/<name>/*.md      (目录结构，取目录下任意 .md 文件)
+    1. config/skills/<name>.md       (扁平结构)
+    2. config/skills/<name>/*.md      (目录结构，取目录下任意 .md 文件)
     """
     if ".." in name or "/" in name or "\\" in name:
         return "", f"技能不存在: {name}"
-    skills_dir = os.path.join(exe_dir, "skills")
+    skills_dir = os.path.join(narnat_dir, CONFIG_SUBDIR, "skills")
     path = os.path.join(skills_dir, f"{name}.md")
     if os.path.isfile(path):
         return _read(os.path.realpath(path))
@@ -30,14 +32,14 @@ def load_skill(exe_dir: str, name: str) -> tuple:
     return "", f"技能不存在: {name}"
 
 
-def list_skill_names(exe_dir: str) -> List[str]:
+def list_skill_names(narnat_dir: str) -> List[str]:
     """列出所有可用技能名。
     
-    返回 skills/ 下:
+    返回 config/skills/ 下:
     - *.md 文件名（不含后缀）
     - 含 .md 文件的子目录名
     """
-    skills_dir = os.path.join(exe_dir, "skills")
+    skills_dir = os.path.join(narnat_dir, CONFIG_SUBDIR, "skills")
     if not os.path.isdir(skills_dir):
         return []
     names = set()

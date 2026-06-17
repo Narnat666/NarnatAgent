@@ -5,7 +5,7 @@
 import os
 from typing import List, Dict, Any, Optional
 
-from ..config.defaults import COMPRESS_PROMPT, LAST_SESSION_SUMMARY
+from ..config.defaults import COMPRESS_PROMPT, DATA_SUBDIR, LAST_SESSION_SUMMARY
 
 
 class Compressor:
@@ -27,7 +27,7 @@ class Compressor:
     def __init__(self, narnat_dir: str, logger=None):
         self._narnat_dir = narnat_dir
         self._logger = logger
-        self._summary_path = os.path.join(narnat_dir, LAST_SESSION_SUMMARY)
+        self._summary_path = os.path.join(narnat_dir, DATA_SUBDIR, LAST_SESSION_SUMMARY)
 
     def build_compress_messages(
         self, messages: List[Dict[str, Any]]

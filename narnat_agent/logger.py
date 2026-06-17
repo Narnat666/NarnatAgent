@@ -9,8 +9,6 @@ import re
 import time
 from typing import Optional
 
-from .config.defaults import LOG_DIR
-
 
 # 敏感信息脱敏：匹配 sk-xxx / api_key=xxx / key=xxx 等
 _RE_SECRET = re.compile(
@@ -44,24 +42,23 @@ class AgentLogger:
     - 自动脱敏
     """
 
-    def __init__(self, project_root: str = ""):
+    def __init__(self, logs_dir: str = ""):
         self._logger: Optional[logging.Logger] = None
         self._handler: Optional[logging.FileHandler] = None
-        self._project_root = project_root
+        self._logs_dir = logs_dir
 
-    def start(self, project_root: Optional[str] = None) -> str:
+    def start(self, logs_dir: Optional[str] = None) -> str:
         """
         初始化日志，创建新文件。返回日志文件路径。
         可重复调用（先关闭旧handler再创建新的）。
         """
-        if project_root:
-            self._project_root = project_root
+        if logs_dir:
+            self._logs_dir = logs_dir
 
-        log_dir = os.path.join(self._project_root, LOG_DIR)
-        os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(self._logs_dir, exist_ok=True)
 
         filename = time.strftime("%Y-%m-%d_%H-%M-%S") + ".log"
-        filepath = os.path.join(log_dir, filename)
+        filepath = os.path.join(self._logs_dir, filename)
 
         # 关闭旧handler
         if self._handler:

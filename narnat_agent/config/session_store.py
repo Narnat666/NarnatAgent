@@ -7,7 +7,7 @@ import os
 import time
 from typing import List, Dict, Any, Optional
 
-from .defaults import NARNAT_DIR
+from .defaults import DATA_SUBDIR
 
 # 会话存储子目录
 _SESSIONS_SUBDIR = "sessions"
@@ -15,7 +15,7 @@ _SESSIONS_SUBDIR = "sessions"
 
 def _sessions_dir(narnat_dir: str) -> str:
     """获取会话存储目录，不存在则创建"""
-    d = os.path.join(narnat_dir, _SESSIONS_SUBDIR)
+    d = os.path.join(narnat_dir, DATA_SUBDIR, _SESSIONS_SUBDIR)
     os.makedirs(d, exist_ok=True)
     return d
 
