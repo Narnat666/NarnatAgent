@@ -16,6 +16,9 @@ import paramiko
 
 from .ssh_session import SSHSession, _truncate_output
 
+# 公开接口：供remote.py和其他模块使用
+__all__ = ["execute", "DEFINITION", "get_session", "SSHSession", "kill_active_exec", "cleanup", "set_max_sessions"]
+
 
 # 删除命令正则（仅保留删除确认，其他全部放行）
 _RE_DELETE = re.compile(
@@ -23,7 +26,13 @@ _RE_DELETE = re.compile(
     re.IGNORECASE,
 )
 
-MAX_SESSIONS = 5  # 最多5个并发SSH会话
+MAX_SESSIONS = 5  # 默认5个并发SSH会话，可通过set_max_sessions修改
+
+
+def set_max_sessions(n: int) -> None:
+    """设置最大SSH会话数（由Agent初始化时从配置读取）"""
+    global MAX_SESSIONS
+    MAX_SESSIONS = max(1, min(n, 10))  # 限制1-10
 
 # session_id(0-4) → SSHSession
 _sessions: dict[int, "SSHSession"] = {}
@@ -32,6 +41,36 @@ _sessions_lock = threading.Lock()
 # 当前正在执行命令的SSH会话（agent层ESC打断后调用kill_active_exec杀死远程进程）
 _active_exec_session: Optional["SSHSession"] = None
 _active_exec_lock = threading.Lock()
+
+DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "Terminal",
+        "description": "Multi-terminal persistent SSH, max 5 concurrent terminals. connect to establish session (with optional or auto session_id), exec to run commands on a terminal, input to send interactive input (e.g. sudo password), enabling parallel multi-terminal control. Output truncated to 2000 chars by default, truncation notice returned when exceeded, increase max_output_chars for full output",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["connect", "exec", "input", "status", "close"],
+                    "description": "Action, default exec: connect=establish SSH session, exec=execute command, input=send interactive input (e.g. sudo password), status=view sessions, close=close session",
+                },
+                "host": {"type": "string", "description": "Remote host IP or domain"},
+                "username": {"type": "string", "description": "SSH username"},
+                "port": {"type": "integer", "description": "SSH port, default 22"},
+                "key_path": {"type": "string", "description": "SSH private key path, e.g. ~/.ssh/id_rsa"},
+                "password": {"type": "string", "description": "SSH password (key_path takes priority if set)"},
+                "sudo_password": {"type": "string", "description": "Sudo password (set at connect time, auto-injected when subsequent exec encounters sudo prompt)"},
+                "command": {"type": "string", "description": "Command to execute (required when action=exec)"},
+                "input": {"type": "string", "description": "Interactive input (required when action=input, e.g. sudo password, y/n confirmation)"},
+                "timeout": {"type": "integer", "description": "Command timeout in seconds, default 120s. AI will be notified if command is still running after timeout. Set a positive integer to customize"},
+                "session_id": {"type": "integer", "description": "Terminal ID 0-4, default -1 auto-select. Specified or auto-assigned during connect, specifies which terminal on exec"},
+                "max_output_chars": {"type": "integer", "description": "Max output chars, default 2000. Must be a positive integer"},
+            },
+            "required": [],
+        },
+    },
+}
 
 
 def kill_active_exec():

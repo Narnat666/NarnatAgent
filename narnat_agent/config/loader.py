@@ -24,17 +24,6 @@ from .defaults import (
 # ── 默认忽略目录 ──
 _DEFAULT_IGNORE_DIRS = [".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache"]
 
-# ── 默认定价（元/百万tokens） ──
-_DEFAULT_PRICING = {
-    "deepseek-v4-pro": {"input": 3.0, "cache_hit": 0.025, "output": 6.0},
-    "deepseek-v4-flash": {"input": 1.0, "cache_hit": 0.02, "output": 2.0},
-    "deepseek-chat": {"input": 1.0, "cache_hit": 0.02, "output": 2.0},
-    "deepseek-reasoner": {"input": 1.0, "cache_hit": 0.02, "output": 2.0},
-}
-
-# ── 默认余额查询地址 ──
-_DEFAULT_BALANCE_URL = "https://api.deepseek.com/user/balance"
-
 
 @dataclass
 class AIConfig:
@@ -52,7 +41,7 @@ class PricingConfig:
     # 用户自定义定价（中文key映射到英文key）
     # 格式: {"模型名": {"输入": x, "缓存命中": y, "输出": z}}
     user_pricing: Dict[str, Dict[str, float]] = field(default_factory=dict)
-    balance_url: str = _DEFAULT_BALANCE_URL
+    balance_url: str = ""  # 空串=不查询余额
 
 
 @dataclass
@@ -96,6 +85,8 @@ class AppConfig:
     warn_turn_1: int = WARN_TURN_1
     warn_turn_2: int = WARN_TURN_2
     ignore_dirs: List[str] = field(default_factory=lambda: list(_DEFAULT_IGNORE_DIRS))
+    ssh_max_sessions: int = 5
+    llm_retry_count: int = 3
 
 
 def _is_nuitka_onefile() -> bool:
@@ -249,7 +240,7 @@ def _build_pricing_config(data: dict) -> PricingConfig:
     user_pricing = _parse_pricing(raw_pricing) if raw_pricing else {}
     return PricingConfig(
         user_pricing=user_pricing,
-        balance_url=data.get("余额查询地址", _DEFAULT_BALANCE_URL),
+        balance_url=data.get("余额查询地址", ""),
     )
 
 
@@ -355,4 +346,6 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
         warn_turn_1=int(data.get("警告轮次1", WARN_TURN_1)),
         warn_turn_2=int(data.get("警告轮次2", WARN_TURN_2)),
         ignore_dirs=data.get("忽略目录", list(_DEFAULT_IGNORE_DIRS)),
+        ssh_max_sessions=int(data.get("SSH最大会话数", 5)),
+        llm_retry_count=int(data.get("LLM重试次数", 3)),
     )

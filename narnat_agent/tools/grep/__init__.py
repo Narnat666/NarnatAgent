@@ -7,6 +7,35 @@ import re
 
 _DEFAULT_IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache"}
 
+DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "Grep",
+        "description": "Search file content by regex to locate key lines. Results truncated to 100 by default (controlled by head_limit), truncation notice returned when exceeded, increase head_limit for full results",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Regex pattern"},
+                "path": {"type": "string", "description": "Search path. Suggest specifying a specific directory or file. Use glob to limit file types to avoid excessive output"},
+                "glob": {"type": "string", "description": "Limit file types, e.g. *.py"},
+                "output_mode": {
+                    "type": "string",
+                    "enum": ["files_with_matches", "content", "count"],
+                    "description": "Output format, default files_with_matches",
+                },
+                "i": {"type": "boolean", "description": "Case insensitive"},
+                "n": {"type": "boolean", "description": "Show line numbers (content mode)"},
+                "multiline": {"type": "boolean", "description": "Multiline matching mode"},
+                "A": {"type": "integer", "description": "Show N lines of context after match"},
+                "B": {"type": "integer", "description": "Show N lines of context before match"},
+                "C": {"type": "integer", "description": "Show N lines of context before and after match"},
+                "head_limit": {"type": "integer", "description": "Limit output to first N matches, default 100. Must be a positive integer"},
+            },
+            "required": ["pattern"],
+        },
+    },
+}
+
 
 def execute(
     pattern: str,

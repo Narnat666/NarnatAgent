@@ -5,6 +5,8 @@ Agent类作为主编排者，委托具体实现给子模块：
 - ToolDispatcher: 工具调度+并行策略
 - MessageManager: 消息修复+追加+压缩
 - StatsTracker: token统计+费用追踪
+- NarnatSessionCallbacks: 会话命令回调
+- SafetyCallbacks / TodoCallbacks: 工具回调
 """
 
 import json
@@ -13,93 +15,20 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional
 
-from .llm import LLMClient
+from .llm import LLMClient, set_retry_count
 from .context import ContextManager
 from .compressor import Compressor
 from .tool_dispatcher import ToolDispatcher
 from .message_manager import MessageManager
 from .stats import StatsTracker
+from .session_callbacks import NarnatSessionCallbacks
+from .tool_callbacks import SafetyCallbacks, TodoCallbacks
 from ..config.loader import AppConfig, load_config
-from ..config.session_store import save_session, load_session, list_sessions, delete_session, format_session_list
-from ..config.skill_store import load_skill, list_skill_names
-from ..tools.terminal import kill_active_exec as _kill_terminal_exec, cleanup as _terminal_cleanup
+from ..tools.terminal import kill_active_exec as _kill_terminal_exec, cleanup as _terminal_cleanup, set_max_sessions
 from ..tools.tool_context import ToolContext
-from ..ui.ui_design import UIInterface, SessionCallbacks, _interrupt_ctrl, _stdout_write, apply_style, D, E, R, Y, G, B, C
+from ..ui.ui_design import UIInterface, _interrupt_ctrl, apply_style
+from ..output import write as _stdout_write, D, E, R, Y, G, B, C
 from ..logger import AgentLogger
-
-
-class NarnatSessionCallbacks(SessionCallbacks):
-    """会话命令回调实现"""
-
-    def __init__(self, narnat_dir: str, get_messages_func):
-        self._narnat_dir = narnat_dir
-        self._get_messages = get_messages_func
-        self._active_name: Optional[str] = None
-
-    def on_save(self, name: str) -> str:
-        if not name:
-            return "错误: 请指定会话名称"
-        msgs = self._get_messages()
-        err = save_session(self._narnat_dir, name, msgs)
-        if err:
-            return err
-        self._active_name = name
-        return ""
-
-    def on_show(self) -> str:
-        """列出所有已保存会话"""
-        from ..config.session_store import list_sessions as _list_sessions
-        sessions = _list_sessions(self._narnat_dir)
-        return format_session_list(sessions)
-
-    def on_enter(self, name: str) -> str:
-        """进入历史会话"""
-        if not name:
-            return "错误: 请指定会话名称"
-        msgs, err = load_session(self._narnat_dir, name)
-        if err:
-            return err
-        # 清空并填充原列表，保持MessageManager等模块的引用不断裂
-        current = self._get_messages()
-        current.clear()
-        current.extend(msgs)
-        self._active_name = name
-        return ""
-
-    def on_delete(self, name: str) -> str:
-        if not name:
-            return "错误: 请指定会话名称"
-        err = delete_session(self._narnat_dir, name)
-        if err:
-            return err
-        if self._active_name == name:
-            self._active_name = None
-        return ""
-
-    def on_list_names(self) -> list:
-        """返回所有已保存会话的名称列表，供Tab补全使用"""
-        from ..config.session_store import list_sessions as _list_sessions
-        return [s["name"] for s in _list_sessions(self._narnat_dir)]
-
-    def on_skill(self, name: str) -> str:
-        content, err = load_skill(self._narnat_dir, name)
-        if err:
-            return err
-        self._get_messages().append({"role": "system", "content": content})
-        return ""
-
-    def on_exit(self) -> str:
-        """退出时自动保存已命名的会话，返回保存的会话名或空串"""
-        if not self._active_name:
-            return ""
-        msgs = self._get_messages()
-        err = save_session(self._narnat_dir, self._active_name, msgs)
-        if err:
-            return ""
-        return self._active_name
-
-    def on_list_skill_names(self) -> list:
-        return list_skill_names(self._narnat_dir)
 
 
 class Agent:
@@ -109,8 +38,12 @@ class Agent:
         # 加载配置
         self._config = load_config(project_root)
 
-        # 加载自定义配色（从narnat.json读取，兼容旧版style.json）
+        # 加载自定义配色
         apply_style(self._config)
+
+        # 应用工具配置
+        set_max_sessions(self._config.ssh_max_sessions)
+        set_retry_count(self._config.llm_retry_count)
 
         # 初始化日志
         self._logger = AgentLogger(self._config.logs_dir)
@@ -138,12 +71,13 @@ class Agent:
             if self._logger:
                 self._logger.info("core.agent", "崩溃恢复: 已加载残留的压缩摘要")
 
-        # 初始化messages
+        # 初始化messages（通过MessageManager管理）
         self._messages: List[Dict[str, Any]] = [
             {"role": "system", "content": self._config.system_prompt}
         ]
+        self._msg_manager = MessageManager(self._messages, self._compressor, self._logger)
         if recovered_summary:
-            self._messages.append({"role": "system", "content": f"# 上一轮对话成果\n\n{recovered_summary}"})
+            self._msg_manager.append_system(f"# 上一轮对话成果\n\n{recovered_summary}")
 
         # 初始化UI
         callbacks = NarnatSessionCallbacks(
@@ -152,17 +86,16 @@ class Agent:
         )
         self._ui = UIInterface(self._config.ai.model, callbacks)
 
-        # 初始化工具上下文（替代模块级全局变量）
+        # 初始化工具上下文
         self._tool_context = ToolContext(
-            confirm_callback=self._confirm_delete,
-            ui_callback=self._on_todo_update,
+            confirm_callback=SafetyCallbacks.confirm_delete,
+            ui_callback=TodoCallbacks.on_todo_update,
             api_keys=self._config.api_keys,
             ignore_dirs=self._config.ignore_dirs,
         )
 
         # 初始化子模块
         self._dispatcher = ToolDispatcher(self._tool_context, ThreadPoolExecutor(max_workers=16), self._logger)
-        self._msg_manager = MessageManager(self._messages, self._compressor, self._logger)
         self._stats = StatsTracker(
             self._config.ai.model,
             self._config.pricing.user_pricing,
@@ -177,33 +110,6 @@ class Agent:
         saved_name = self._ui.auto_save()
         if saved_name:
             _stdout_write(f"  {D}会话已自动保存: {E}{saved_name}{R}\n")
-
-    def _confirm_delete(self, command: str) -> bool:
-        """删除命令确认回调"""
-        try:
-            response = input(f"  确认执行删除命令? [y/N]: ")
-            return response.strip().lower() in ("y", "yes")
-        except (EOFError, KeyboardInterrupt):
-            return False
-
-    def _on_todo_update(self, todos):
-        """TodoWrite UI更新回调"""
-        for t in todos:
-            status = t["status"]
-            content = t.get("content", "")
-            active_form = t.get("activeForm", content)
-
-            if status == "completed":
-                icon = f"{E}✓{R}"
-                line = f"  {icon} {D}{content}{R}"
-            elif status == "in_progress":
-                icon = f"{Y}●{R}"
-                line = f"  {icon} {B}{active_form}{R}"
-            else:
-                icon = f"{G}○{R}"
-                line = f"  {icon} {D}{content}{R}"
-
-            _stdout_write(line + "\n")
 
     def run(self):
         """主循环"""
@@ -271,10 +177,7 @@ class Agent:
                 except Exception as e:
                     self._logger.error("core.agent", f"异常: {e}")
                     if hasattr(self, '_last_content_parts') and self._last_content_parts:
-                        self._messages.append({
-                            "role": "assistant",
-                            "content": "".join(self._last_content_parts),
-                        })
+                        self._msg_manager.append_assistant("".join(self._last_content_parts))
                     stream.abort()
 
         finally:
@@ -294,14 +197,11 @@ class Agent:
             call_usage = None
             parsed_finish_reason = None
 
-            for chunk in self._llm.chat_stream(self._messages, cancel_check=lambda: stream.cancelled):
+            for chunk in self._llm.chat_stream(self._msg_manager.messages, cancel_check=lambda: stream.cancelled):
                 # b. 检查中断
                 if stream.cancelled:
                     if content_parts:
-                        self._messages.append({
-                            "role": "assistant",
-                            "content": "".join(content_parts),
-                        })
+                        self._msg_manager.append_assistant("".join(content_parts))
                     stream.abort()
                     self._ui.on_interrupted()
                     return
@@ -347,13 +247,7 @@ class Agent:
                 # 中断检查
                 if stream.cancelled:
                     completed_ids = {tc_id for tc_id, _ in tool_results}
-                    for tc in tool_calls_result:
-                        if tc["id"] not in completed_ids:
-                            self._messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc["id"],
-                                "content": "[用户中断]",
-                            })
+                    self._msg_manager.append_interrupted_tools(tool_calls_result, completed_ids)
                     stream.abort()
                     self._ui.on_interrupted()
                     return
@@ -414,7 +308,7 @@ class Agent:
         )
         debug_data = {
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "request": {"messages": self._messages},
+            "request": {"messages": self._msg_manager.messages},
             "response": {
                 "raw_sse_lines": self._llm.raw_sse or [],
                 "parsed_content": "".join(content_parts),

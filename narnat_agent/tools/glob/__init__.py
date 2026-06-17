@@ -8,6 +8,23 @@ from pathlib import PurePath
 # 默认忽略的目录（硬编码兜底）
 _DEFAULT_IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache"}
 
+DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "Glob",
+        "description": "Search files by name pattern recursively in all subdirectories, e.g. *.py. Results truncated to 500 by default, truncation notice returned when exceeded, increase max_results for full list",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Glob pattern, e.g. *.py. Avoid **/*.py unless you are certain there are very few files"},
+                "path": {"type": "string", "description": "Root directory to search. Omit for current working directory"},
+                "max_results": {"type": "integer", "description": "Max result count, default 500. Must be a positive integer"},
+            },
+            "required": ["pattern"],
+        },
+    },
+}
+
 
 def execute(pattern: str, path: str = "", max_results: int = 500, _tool_context=None) -> str:
     """

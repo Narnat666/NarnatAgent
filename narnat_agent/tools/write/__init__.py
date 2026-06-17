@@ -3,7 +3,25 @@
 import os
 import difflib
 
-from .diff_utils import colorize_diff
+from ..diff_utils import colorize_diff
+
+DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "Write",
+        "description": "Create new file or overwrite entirely. Prefer Edit for modifying existing files. When remote=True, write remote file via SFTP",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "File path"},
+                "content": {"type": "string", "description": "Full file content"},
+                "remote": {"type": "boolean", "description": "Write remote file via SFTP (requires prior Terminal connect)"},
+                "host": {"type": "string", "description": "Remote host IP (only used when remote=True)"},
+            },
+            "required": ["file_path", "content"],
+        },
+    },
+}
 
 
 def execute(file_path: str, content: str,
@@ -26,7 +44,7 @@ def execute(file_path: str, content: str,
     """
     remote = bool(remote)
     if remote:
-        from .remote import remote_write
+        from ..terminal.remote import remote_write
         return remote_write(file_path, content, host, _tool_context=_tool_context)
     abs_path = os.path.abspath(file_path)
 

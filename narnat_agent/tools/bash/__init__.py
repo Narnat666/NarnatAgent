@@ -36,6 +36,24 @@ _active_proc_lock = threading.Lock()
 # ESC打断标记，kill_active()设置，execute()检查后清除
 _interrupted = False
 
+DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "Shell",
+        "description": f"Execute shell commands. Syntax: {__import__('sys').platform}. Forbidden for file operations. Output truncated to 2000 chars by default, truncation notice returned when exceeded, increase max_output_chars for full output",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": f"Shell command (syntax: {__import__('sys').platform})"},
+                "timeout": {"type": "integer", "description": "Timeout in seconds, default 120, max 600"},
+                "run_in_background": {"type": "boolean", "description": "Run in background"},
+                "max_output_chars": {"type": "integer", "description": "Max output chars, default 2000. Must be a positive integer"},
+            },
+            "required": ["command"],
+        },
+    },
+}
+
 
 def kill_active():
     """杀掉当前正在运行的前台子进程（ESC打断时由agent调用）"""

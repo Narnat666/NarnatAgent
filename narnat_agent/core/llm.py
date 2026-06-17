@@ -2,10 +2,11 @@
 LLM调用层 —— 双协议支持（OpenAI兼容 + Anthropic兼容），流式输出，token计数
 
 通过 base_url 中是否包含 "anthropic" 自动选择协议：
-- 含 "anthropic" → AnthropicClient（/v1/messages 端点，x-api-key 认证）
-- 其他 → OpenAI SDK（/chat/completions 端点，Bearer 认证）
+- 含 "anthropic" → AnthropicBackend（/v1/messages 端点，x-api-key 认证）
+- 其他 → OpenAIBackend（/chat/completions 端点，Bearer 认证）
 
-上层统一使用 OpenAI 格式的 messages/tool_calls，AnthropicClient 内部做双向转换。
+上层统一使用 OpenAI 格式的 messages/tool_calls，AnthropicBackend 内部做双向转换。
+两个后端统一使用 httpx，无 requests 依赖。
 """
 
 import json
@@ -21,22 +22,28 @@ from ..config.loader import AIConfig
 from ..tools.registry import get_tool_definitions
 from .interrupt import register_abort
 
-# ESC中断：持有当前活跃的LLM HTTP连接，供ESC轮询线程关闭
+# ESC中断：持有当前活跃的LLM HTTP连接
 _active_llm_response = None
 
-# 队列哨兵值，标记流结束
+# 队列哨兵值
 _STREAM_END = object()
 
 # 重试参数
-_MAX_NETWORK_RETRIES = 3   # 网络/服务端错误
+_MAX_NETWORK_RETRIES = 3   # 网络/服务端错误（可通过set_retry_count修改）
 _MAX_RATE_RETRIES = 5      # 429 速率限制
-_RETRY_BACKOFF_BASE = [1, 2, 4, 8, 8]  # 1s起步，8s封顶
+_RETRY_BACKOFF_BASE = [1, 2, 4, 8, 8]
+
+
+def set_retry_count(n: int) -> None:
+    """设置LLM网络重试次数（由Agent初始化时从配置读取）"""
+    global _MAX_NETWORK_RETRIES
+    _MAX_NETWORK_RETRIES = max(1, min(n, 10))  # 限制1-10
 
 
 def _retry_sleep(attempt: int, cancel_check=None) -> bool:
     """指数退避休眠，带 jitter 和中断检查。返回 False 表示用户取消。"""
     base = _RETRY_BACKOFF_BASE[min(attempt, len(_RETRY_BACKOFF_BASE) - 1)]
-    jitter = base * 0.25 * (random.random() * 2 - 1)  # ±25%
+    jitter = base * 0.25 * (random.random() * 2 - 1)
     sleep_time = max(0, base + jitter)
     deadline = time.time() + sleep_time
     while time.time() < deadline:
@@ -47,7 +54,6 @@ def _retry_sleep(attempt: int, cancel_check=None) -> bool:
 
 
 def _is_retryable_http(status: int) -> bool:
-    """判断 HTTP 状态码是否可重试（不含 429，429 单独处理）"""
     return status in (408, 409) or status >= 500
 
 
@@ -62,7 +68,6 @@ def abort_active_llm_request():
             pass
 
 
-# 模块加载时注册中断回调，ui层通过interrupt模块触发，不再直接导入此函数
 register_abort(abort_active_llm_request)
 
 
@@ -72,17 +77,17 @@ def _iter_to_queue(iterator, q):
         for item in iterator:
             q.put(item)
     except Exception:
-        pass  # 连接关闭等异常，主线程通过取消检查来处理
+        pass
     finally:
         q.put(_STREAM_END)
 
 
-class LLMClient:
-    """
-    LLM客户端，自动选择 OpenAI 或 Anthropic 协议。
+# ═══════════════════════════════════════════════════════════════
+# LLM 客户端
+# ═══════════════════════════════════════════════════════════════
 
-    对外接口统一：chat_stream() yield OpenAI 格式的 chunk。
-    """
+class LLMClient:
+    """LLM客户端，自动选择 OpenAI 或 Anthropic 协议。"""
 
     def __init__(self, config: AIConfig, logger=None, max_output_tokens: int = 128000):
         self._config = config
@@ -96,17 +101,13 @@ class LLMClient:
             self._backend = _OpenAIBackend(config, self._tool_defs, logger)
 
     def chat_stream(self, messages: List[Dict[str, Any]], no_tools: bool = False, cancel_check=None) -> Iterator:
-        """流式调用LLM，yield OpenAI格式chunk。no_tools=True时不传工具定义（压缩请求用）。
-        cancel_check: 可选的 callable，返回 True 表示用户请求中断。"""
         return self._backend.chat_stream(messages, no_tools=no_tools, cancel_check=cancel_check)
 
     @property
     def raw_sse(self):
-        """空回复调试：返回上轮 Anthropic 原始 SSE 数据。若非 Anthropic 后端返回 None。"""
         if hasattr(self._backend, '_last_raw_sse'):
             return list(self._backend._last_raw_sse)
         return None
-
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -117,25 +118,22 @@ class _OpenAIBackend:
     """OpenAI SDK 后端"""
 
     def __init__(self, config, tool_defs, logger):
-        from openai import OpenAI, APIStatusError, APIConnectionError, APITimeoutError
-        self._APIStatusError = APIStatusError
-        self._APIConnectionError = APIConnectionError
-        self._APITimeoutError = APITimeoutError
+        from openai import OpenAI
         self._config = config
         self._tool_defs = tool_defs
         self._logger = logger
         self._client = OpenAI(
             api_key=config.api_key,
             base_url=config.base_url,
-            max_retries=0,  # 禁用SDK层重试（我们自己控制）
+            max_retries=0,
         )
 
     def chat_stream(self, messages, no_tools=False, cancel_check=None):
-        """OpenAI 流式调用。cancel_check 为 callable，返回 True 表示应中断。"""
         if self._logger:
             self._logger.info("core.llm", f"发送请求(OpenAI), messages={len(messages)}条")
 
         global _active_llm_response
+        from openai import APIStatusError, APIConnectionError, APITimeoutError
 
         network_retries = 0
         rate_retries = 0
@@ -159,21 +157,17 @@ class _OpenAIBackend:
                     kwargs["max_tokens"] = self._config.max_tokens
                 stream = self._client.chat.completions.create(**kwargs)
                 break
-            except self._APIStatusError as e:
+
+            except APIStatusError as e:
                 _active_llm_response = None
                 status = e.status_code
-
-                # 不重试
                 if status in (400, 401, 403, 404, 422):
                     if self._logger:
                         self._logger.error("core.llm", f"API调用失败(不可重试): {e}")
                     yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
                     return
-
                 if cancel_check and cancel_check():
                     return
-
-                # 429 速率限制
                 if status == 429 and rate_retries < _MAX_RATE_RETRIES:
                     rate_retries += 1
                     if self._logger:
@@ -181,8 +175,6 @@ class _OpenAIBackend:
                     if not _retry_sleep(rate_retries - 1, cancel_check):
                         return
                     continue
-
-                # 可重试服务端错误
                 if _is_retryable_http(status) and network_retries < _MAX_NETWORK_RETRIES:
                     network_retries += 1
                     if self._logger:
@@ -190,13 +182,12 @@ class _OpenAIBackend:
                     if not _retry_sleep(network_retries - 1, cancel_check):
                         return
                     continue
-
                 if self._logger:
                     self._logger.error("core.llm", f"API调用失败(重试耗尽): {e}")
                 yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
                 return
 
-            except (self._APIConnectionError, self._APITimeoutError) as e:
+            except (APIConnectionError, APITimeoutError) as e:
                 _active_llm_response = None
                 if cancel_check and cancel_check():
                     return
@@ -221,15 +212,14 @@ class _OpenAIBackend:
                 yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
                 return
 
-        _active_llm_response = stream  # 切换到stream对象
+        _active_llm_response = stream
 
         try:
-            tool_calls_buffer = {}      # tc_id → {id, name, arguments}
-            _index_to_id = {}           # index → tc_id（用于增量chunk匹配）
+            tool_calls_buffer = {}
+            _index_to_id = {}
             content_buffer = []
             _tc_idx = 0
 
-            # 后台线程读取stream，主线程通过Queue消费——主线程永不阻塞在C级别recv()
             chunk_queue = queue.Queue()
             reader = threading.Thread(
                 target=_iter_to_queue, args=(iter(stream), chunk_queue), daemon=True)
@@ -245,7 +235,6 @@ class _OpenAIBackend:
                 if chunk is _STREAM_END:
                     break
 
-                # 捕获usage（OpenAI stream_options={"include_usage": True} 的最后chunk）
                 usage = getattr(chunk, 'usage', None)
                 if usage:
                     cached = 0
@@ -310,7 +299,7 @@ class _OpenAIBackend:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Anthropic 兼容后端
+# Anthropic 兼容后端（httpx 实现，无 requests 依赖）
 # ═══════════════════════════════════════════════════════════════
 
 class _AnthropicBackend:
@@ -323,6 +312,7 @@ class _AnthropicBackend:
 
     内部做 OpenAI ↔ Anthropic 消息格式双向转换，
     对外统一 yield OpenAI 格式的 chunk。
+    使用 httpx 替代 requests，统一HTTP客户端依赖。
     """
 
     def __init__(self, config, tool_defs, logger, max_output_tokens=128000):
@@ -331,7 +321,7 @@ class _AnthropicBackend:
         self._logger = logger
         self._max_output_tokens = max_output_tokens
         self._url = f"{config.base_url.rstrip('/')}/v1/messages"
-        self._last_raw_sse = []  # 空回复调试：缓存本轮原始SSE数据
+        self._last_raw_sse = []
         self._headers = {
             "x-api-key": config.api_key,
             "anthropic-version": "2023-06-01",
@@ -343,7 +333,7 @@ class _AnthropicBackend:
         if self._logger:
             self._logger.info("core.llm", f"发送请求(Anthropic), messages={len(messages)}条")
 
-        # 转换消息格式：OpenAI → Anthropic
+        # 转换消息格式
         try:
             system, anthropic_msgs = self._convert_messages(messages)
             anthropic_tools = self._convert_tools(self._tool_defs)
@@ -366,70 +356,78 @@ class _AnthropicBackend:
         if self._config.max_tokens is not None:
             body["max_tokens"] = self._config.max_tokens
 
-        # 发送请求（带重试）
-        import requests
-        session = requests.Session()
+        # 发送请求（带重试，使用 httpx 流式）
         global _active_llm_response
-
         network_retries = 0
         rate_retries = 0
 
         while True:
-            _active_llm_response = session
+            client = httpx.Client(timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=30.0))
+            _active_llm_response = client
             try:
-                resp = session.post(
-                    self._url, headers=self._headers, json=body,
-                    stream=True, timeout=120.0,
-                )
+                # 使用 stream 模式发送请求，先拿到 status_code 再决定是否读取流
+                req = client.build_request("POST", self._url, headers=self._headers, json=body)
+                resp = client.send(req, stream=True)
                 status = resp.status_code
 
                 # 不重试
                 if status in (400, 401, 403, 404, 422):
-                    resp.raise_for_status()
+                    err_text = resp.text
+                    resp.close()
+                    client.close()
+                    _active_llm_response = None
+                    if self._logger:
+                        self._logger.error("core.llm", f"API调用失败(不可重试): {status} {err_text[:200]}")
+                    yield {"content": f"错误: API调用失败({status}): {err_text[:200]}", "finish_reason": "error"}
+                    return
 
                 # 429 速率限制
                 if status == 429:
+                    resp.close()
+                    client.close()
                     if rate_retries < _MAX_RATE_RETRIES:
-                        session.close()
                         rate_retries += 1
                         if self._logger:
                             self._logger.warning("core.llm", f"API返回429(第{rate_retries}次重试)...")
                         if not _retry_sleep(rate_retries - 1, cancel_check):
                             _active_llm_response = None
                             return
-                        session = requests.Session()
                         continue
                     _active_llm_response = None
-                    session.close()
                     yield {"content": f"错误: API返回429速率限制(已重试{_MAX_RATE_RETRIES}次)", "finish_reason": "error"}
                     return
 
                 # 可重试服务端错误
                 if _is_retryable_http(status):
+                    resp.close()
+                    client.close()
                     if network_retries < _MAX_NETWORK_RETRIES:
-                        session.close()
                         network_retries += 1
                         if self._logger:
                             self._logger.warning("core.llm", f"API返回{status}(第{network_retries}次重试)...")
                         if not _retry_sleep(network_retries - 1, cancel_check):
                             _active_llm_response = None
                             return
-                        session = requests.Session()
                         continue
                     _active_llm_response = None
-                    session.close()
                     yield {"content": f"错误: API返回{status}错误(已重试{_MAX_NETWORK_RETRIES}次)", "finish_reason": "error"}
                     return
 
-                # 成功或其他码
-                resp.raise_for_status()
+                # 成功
+                if status != 200:
+                    err_text = resp.text
+                    resp.close()
+                    client.close()
+                    _active_llm_response = None
+                    if self._logger:
+                        self._logger.error("core.llm", f"API调用失败: {status} {err_text[:200]}")
+                    yield {"content": f"错误: API调用失败({status}): {err_text[:200]}", "finish_reason": "error"}
+                    return
                 break
 
-            except (requests.exceptions.ConnectionError,
-                    requests.exceptions.Timeout,
-                    requests.exceptions.SSLError) as e:
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                client.close()
                 _active_llm_response = None
-                session.close()
                 if cancel_check and cancel_check():
                     return
                 if network_retries < _MAX_NETWORK_RETRIES:
@@ -438,36 +436,15 @@ class _AnthropicBackend:
                         self._logger.warning("core.llm", f"网络错误(第{network_retries}次重试): {e}")
                     if not _retry_sleep(network_retries - 1, cancel_check):
                         return
-                    session = requests.Session()
                     continue
                 if self._logger:
                     self._logger.error("core.llm", f"网络错误(重试耗尽): {e}")
                 yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
                 return
 
-            except requests.exceptions.HTTPError as e:
-                _active_llm_response = None
-                session.close()
-                status = e.response.status_code if e.response is not None else 0
-
-                # 不重试
-                if status in (400, 401, 403, 404, 422):
-                    if self._logger:
-                        self._logger.error("core.llm", f"API调用失败(不可重试): {e}")
-                    yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
-                    return
-
-                if cancel_check and cancel_check():
-                    return
-
-                if self._logger:
-                    self._logger.error("core.llm", f"API调用失败: {e}")
-                yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
-                return
-
             except Exception as e:
+                client.close()
                 _active_llm_response = None
-                session.close()
                 if cancel_check and cancel_check():
                     return
                 if self._logger:
@@ -475,39 +452,39 @@ class _AnthropicBackend:
                 yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
                 return
 
-        # 解析 Anthropic SSE 流（后台线程读，主线程Queue消费）
-        _active_llm_response = resp  # 切换到response对象
-
-        # 确定编码：优先 Content-Type 声明的 charset，未声明则 utf-8
-        ctype = resp.headers.get("Content-Type", "")
-        m = re.search(r"charset=([^\s;]+)", ctype)
-        encoding = m.group(1) if m else "utf-8"
+        # 解析 Anthropic SSE 流（resp 已是 stream=True 模式）
+        _active_llm_response = resp
 
         try:
             content_buffer = []
-            tool_use_blocks = {}  # index → {id, name, input_json}
+            tool_use_blocks = {}
 
             line_queue = queue.Queue()
-            reader = threading.Thread(
-                target=_iter_to_queue,
-                args=(resp.iter_lines(decode_unicode=False), line_queue),
-                daemon=True,
-            )
+
+            def _read_lines():
+                """后台线程：从 httpx 流式响应中逐行读取 SSE"""
+                try:
+                    for line in resp.iter_lines():
+                        line_queue.put(line)
+                except Exception:
+                    pass
+                finally:
+                    line_queue.put(_STREAM_END)
+
+            reader = threading.Thread(target=_read_lines, daemon=True)
             reader.start()
 
             while True:
                 try:
-                    raw_line = line_queue.get(timeout=0.1)
+                    line = line_queue.get(timeout=0.1)
                 except queue.Empty:
                     if cancel_check and cancel_check():
                         return
                     continue
-                if raw_line is _STREAM_END:
+                if line is _STREAM_END:
                     break
 
-                if isinstance(raw_line, bytes):
-                    raw_line = raw_line.decode(encoding)
-                line = (raw_line or "").strip()
+                line = (line or "").strip()
                 if not line.startswith("data:"):
                     continue
                 data_str = line[5:].strip()
@@ -586,7 +563,7 @@ class _AnthropicBackend:
                             total_out = len("".join(content_buffer))
                             self._logger.info("core.llm", f"响应完成, content_len={total_out}, stop_reason={stop_reason}")
 
-                    # 捕获usage（Anthropic message_delta 中的 usage）
+                    # 捕获usage
                     usage = data.get("usage", {})
                     if usage:
                         prompt = usage.get("input_tokens", 0)
@@ -599,15 +576,12 @@ class _AnthropicBackend:
                     return
         finally:
             _active_llm_response = None
-            session.close()
+            resp.close()
+            client.close()
 
     # ── 消息格式转换：OpenAI → Anthropic ──
 
     def _convert_messages(self, messages):
-        """
-        将 OpenAI 格式 messages 转换为 Anthropic 格式。
-        返回 (system_text, anthropic_messages)。
-        """
         system_parts = []
         anthropic_msgs = []
 
@@ -626,7 +600,6 @@ class _AnthropicBackend:
             elif role == "assistant":
                 tool_calls = msg.get("tool_calls")
                 if tool_calls:
-                    # assistant 带 tool_calls → 多个 content block
                     blocks = []
                     if content:
                         blocks.append({"type": "text", "text": content})
@@ -647,13 +620,11 @@ class _AnthropicBackend:
                     anthropic_msgs.append({"role": "assistant", "content": content or ""})
 
             elif role == "tool":
-                # tool 结果 → 转为 user 消息中的 tool_result block
                 tool_result = {
                     "type": "tool_result",
                     "tool_use_id": msg.get("tool_call_id", ""),
                     "content": content or "",
                 }
-                # 合并到相邻的 user 消息
                 if anthropic_msgs and anthropic_msgs[-1]["role"] == "user" \
                         and isinstance(anthropic_msgs[-1]["content"], list):
                     anthropic_msgs[-1]["content"].append(tool_result)
@@ -666,7 +637,6 @@ class _AnthropicBackend:
     # ── 工具定义转换：OpenAI → Anthropic ──
 
     def _convert_tools(self, tool_defs):
-        """将 OpenAI 格式工具定义转换为 Anthropic 格式"""
         if not tool_defs:
             return []
         anthropic_tools = []

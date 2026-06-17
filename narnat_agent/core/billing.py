@@ -1,49 +1,21 @@
-"""余额查询和费用计算
-
-定价支持从配置读取，代码中保留默认定价表作为fallback。
-余额查询URL支持从配置读取。
 """
-import requests
-import json
+余额查询和费用计算
+
+纯配置驱动：
+- 定价：只从用户配置读取，无代码内置默认值。未配置定价的模型不计算费用。
+- 余额查询URL：只从用户配置读取，未配置则不查询。
+- 统一使用 httpx，无 requests 依赖。
+"""
+
+import httpx
 from typing import Optional, Dict, Any
 
 
-# 默认定价（元/百万tokens）—— 代码内置fallback
-_DEFAULT_PRICING = {
-    "deepseek-v4-pro": {
-        "input": 3.0,
-        "cache_hit": 0.025,
-        "output": 6.0,
-    },
-    "deepseek-v4-flash": {
-        "input": 1.0,
-        "cache_hit": 0.02,
-        "output": 2.0,
-    },
-    "deepseek-chat": {
-        "input": 1.0,
-        "cache_hit": 0.02,
-        "output": 2.0,
-    },
-    "deepseek-reasoner": {
-        "input": 1.0,
-        "cache_hit": 0.02,
-        "output": 2.0,
-    },
-}
-
-# 默认余额查询地址
-_DEFAULT_BALANCE_URL = "https://api.deepseek.com/user/balance"
-
-
-def get_pricing(model: str, user_pricing: Optional[Dict[str, Dict[str, float]]] = None) -> Dict[str, float]:
-    """获取指定模型的定价
-
-    优先使用用户配置的定价，fallback到代码默认值。
-    """
+def get_pricing(model: str, user_pricing: Optional[Dict[str, Dict[str, float]]] = None) -> Optional[Dict[str, float]]:
+    """获取指定模型的定价。未配置则返回None（不计算费用）。"""
     if user_pricing and model in user_pricing:
         return user_pricing[model]
-    return _DEFAULT_PRICING.get(model, _DEFAULT_PRICING["deepseek-v4-pro"])
+    return None
 
 
 def calculate_cost(
@@ -53,7 +25,7 @@ def calculate_cost(
     cached_tokens: int,
     user_pricing: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> float:
-    """计算本轮费用（元）
+    """计算本轮费用（元）。未配置定价则返回0。
 
     prompt_tokens 包含缓存部分，实际计费:
       - (prompt_tokens - cached_tokens) * input_price
@@ -61,52 +33,45 @@ def calculate_cost(
       - completion_tokens * output_price
     """
     p = get_pricing(model, user_pricing)
+    if p is None:
+        return 0.0
     uncached = prompt_tokens - cached_tokens
-    cost = (
+    return (
         uncached * p["input"] +
         cached_tokens * p["cache_hit"] +
         completion_tokens * p["output"]
     ) / 1_000_000
-    return cost
 
 
 def fetch_balance(api_key: str, balance_url: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """查询账户余额
-
-    Args:
-        api_key: API密钥
-        balance_url: 余额查询地址，不传则用默认DeepSeek地址
+    """查询账户余额。未配置balance_url则返回None。
 
     返回:
-        {
-            "total": float,
-            "granted": float,
-            "topped_up": float,
-            "currency": str,
-        }
-        失败返回 None
+        {"total": float, "granted": float, "topped_up": float, "currency": str}
+        失败或未配置返回 None
     """
-    url = balance_url or _DEFAULT_BALANCE_URL
+    if not balance_url:
+        return None
     try:
-        r = requests.get(
-            url,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=(3, 5),
-        )
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        if not data.get("is_available"):
-            return None
-        infos = data.get("balance_infos", [])
-        if not infos:
-            return None
-        info = infos[0]
-        return {
-            "total": float(info["total_balance"]),
-            "granted": float(info["granted_balance"]),
-            "topped_up": float(info["topped_up_balance"]),
-            "currency": info["currency"],
-        }
-    except (requests.RequestException, json.JSONDecodeError, KeyError, IndexError, ValueError):
+        with httpx.Client(timeout=httpx.Timeout(connect=3.0, read=5.0)) as client:
+            r = client.get(
+                balance_url,
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            if not data.get("is_available"):
+                return None
+            infos = data.get("balance_infos", [])
+            if not infos:
+                return None
+            info = infos[0]
+            return {
+                "total": float(info["total_balance"]),
+                "granted": float(info["granted_balance"]),
+                "topped_up": float(info["topped_up_balance"]),
+                "currency": info["currency"],
+            }
+    except Exception:
         return None

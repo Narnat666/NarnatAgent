@@ -1,25 +1,9 @@
 """Diff着色工具 —— 对unified diff文本添加ANSI颜色
 
-从ui_design.py中提取，供tools层使用，避免tools→ui的跨层依赖。
-颜色常量在此模块内自包含，与ui/colors.py保持同步。
+颜色常量从output.py导入，保持全局一致性。
 """
 
-# ── ANSI颜色常量（与ui/colors.py保持一致） ──
-RST = "\x1b[0m"
-BLD = "\x1b[1m"
-DIM = "\x1b[38;2;100;116;139m"   # 灰蓝/次要文字
-CYN = "\x1b[38;2;94;234;212m"    # 流光青/标题色
-GRN = "\x1b[38;2;52;211;153m"    # 薄荷绿/成功色
-RED = "\x1b[38;2;248;113;113m"   # 珊瑚红/错误色
-
-# 简写别名
-R = RST
-B = BLD
-D = DIM
-G = DIM   # 上下文行用暗淡色
-C = CYN
-E = GRN
-X = RED
+from ..output import RST as R, BLD as B, DIM as D, GRY as G, CYN as C, GRN as E, RED as X
 
 
 def colorize_diff(diff_text: str) -> str:

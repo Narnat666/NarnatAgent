@@ -1,6 +1,7 @@
 """消息管理 —— 消息修复、追加、压缩触发
 
 从agent.py中提取，负责维护messages列表的完整性。
+所有对messages的修改都通过此模块进行，agent不再直接操作列表。
 """
 
 import os
@@ -12,13 +13,55 @@ from ..logger import AgentLogger
 
 
 class MessageManager:
-    """消息列表管理器"""
+    """消息列表管理器 —— messages的唯一修改入口"""
 
     def __init__(self, messages: List[Dict[str, Any]], compressor: Compressor,
                  logger: Optional[AgentLogger] = None):
         self._messages = messages
         self._compressor = compressor
         self._logger = logger
+
+    @property
+    def messages(self) -> List[Dict[str, Any]]:
+        """只读访问messages列表（供LLM调用等场景）"""
+        return self._messages
+
+    # ── 追加方法 ──
+
+    def append_system(self, content: str) -> None:
+        """追加系统消息"""
+        self._messages.append({"role": "system", "content": content})
+
+    def append_user(self, content: str) -> None:
+        """追加用户消息"""
+        self._messages.append({"role": "user", "content": content})
+
+    def append_assistant(self, content: str, tool_calls: Optional[list] = None) -> None:
+        """追加assistant消息"""
+        msg = {"role": "assistant", "content": content or None}
+        if tool_calls:
+            msg["tool_calls"] = tool_calls
+        self._messages.append(msg)
+
+    def append_tool_result(self, tool_call_id: str, result: str) -> None:
+        """追加工具结果消息"""
+        self._messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": result,
+        })
+
+    def append_interrupted_tools(self, tool_calls: list, completed_ids: set) -> None:
+        """为未完成的tool_call追加中断结果"""
+        for tc in tool_calls:
+            if tc["id"] not in completed_ids:
+                self._messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": "[用户中断]",
+                })
+
+    # ── 修复方法 ──
 
     def repair(self) -> None:
         """修复messages：打断后可能留下不完整的消息序列。
@@ -55,24 +98,7 @@ class MessageManager:
         if repaired:
             self._logger.info("core.message_manager", "repair: 修复了打断后的消息序列")
 
-    def append_user(self, content: str) -> None:
-        """追加用户消息"""
-        self._messages.append({"role": "user", "content": content})
-
-    def append_assistant(self, content: str, tool_calls: Optional[list] = None) -> None:
-        """追加assistant消息"""
-        msg = {"role": "assistant", "content": content or None}
-        if tool_calls:
-            msg["tool_calls"] = tool_calls
-        self._messages.append(msg)
-
-    def append_tool_result(self, tool_call_id: str, result: str) -> None:
-        """追加工具结果消息"""
-        self._messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "content": result,
-        })
+    # ── 压缩方法 ──
 
     def handle_compress(self, pending_input: str, system_prompt: str,
                         llm_client, cancel_check, on_interrupt, on_llm_error) -> bool:

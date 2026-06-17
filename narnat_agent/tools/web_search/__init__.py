@@ -28,6 +28,22 @@ _ANYSEARCH_API_KEY = ""
 _TIMEOUT = 10
 _ANYSEARCH_TIMEOUT = 15
 
+DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "WebSearch",
+        "description": "Web search (AnySearch main engine, searches GitHub code/technical docs/official docs; auto-fallback to Bing+Baidu on failure). Must include Sources links at end of response after searching",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "num": {"type": "integer", "description": "Number of results, default 5"},
+            },
+            "required": ["query"],
+        },
+    },
+}
+
 
 # ── 工具函数 ──
 

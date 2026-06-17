@@ -7,6 +7,25 @@ import os
 
 MAX_OUTPUT_CHARS = 128 * 1024  # 128KB 总输出上限
 
+DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "Read",
+        "description": "Read file content with line numbers. Default max 2000 lines and 128KB total output, truncated with notice if exceeded. limit must be > 0. Use offset+limit to read in chunks. When remote=True, read remote file via SFTP",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "Absolute file path"},
+                "offset": {"type": "integer", "description": "Starting line (1-based). Omit to read from beginning"},
+                "limit": {"type": "integer", "description": "Max lines, must be > 0, default 2000"},
+                "remote": {"type": "boolean", "description": "Read remote file via SFTP (requires prior Terminal connect)"},
+                "host": {"type": "string", "description": "Remote host IP (only used when remote=True)"},
+            },
+            "required": ["file_path"],
+        },
+    },
+}
+
 
 def execute(file_path: str, offset: int = 0, limit: int = 2000,
             remote: bool = False, host: str = "",
@@ -32,7 +51,7 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
         return "错误: limit必须>0"
     remote = bool(remote)
     if remote:
-        from .remote import remote_read
+        from ..terminal.remote import remote_read
         result = remote_read(file_path, offset, limit, host)
         if "错误" not in result and _tool_context:
             _tool_context.mark_remote_read(file_path, host)

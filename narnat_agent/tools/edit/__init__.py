@@ -17,7 +17,29 @@
 import os
 import difflib
 
-from .diff_utils import colorize_diff
+from ..diff_utils import colorize_diff
+
+DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "Edit",
+        "description": "Edit file. Line mode: Edit(file, line_start, line_end, new_string) replace line range. String mode: Edit(file, old_string, new_string) exact match replace. When remote=True, edit remote file via SFTP",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "File path"},
+                "old_string": {"type": "string", "description": "Text to replace (string mode, must match exactly)"},
+                "new_string": {"type": "string", "description": "Replacement text"},
+                "replace_all": {"type": "boolean", "description": "Replace all matches (string mode, default replaces first only)"},
+                "line_start": {"type": "integer", "description": "Start line (line mode, 1-based)"},
+                "line_end": {"type": "integer", "description": "End line (line mode, inclusive; 0 or omit equals line_start)"},
+                "remote": {"type": "boolean", "description": "Edit remote file via SFTP (requires prior Terminal connect)"},
+                "host": {"type": "string", "description": "Remote host IP (only used when remote=True)"},
+            },
+            "required": ["file_path"],
+        },
+    },
+}
 
 
 def execute(file_path: str, old_string: str = "", new_string: str = "",
@@ -51,7 +73,7 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
     replace_all = bool(replace_all)
     remote = bool(remote)
     if remote:
-        from .remote import remote_edit
+        from ..terminal.remote import remote_edit
         return remote_edit(file_path, old_string, new_string, replace_all,
                           line_start, line_end, host)
     if not os.path.isfile(file_path):

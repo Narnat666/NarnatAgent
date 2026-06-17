@@ -9,8 +9,8 @@ import os
 import difflib
 from typing import Optional
 
-from .terminal import get_session, SSHSession
-from .diff_utils import colorize_diff
+from . import get_session, SSHSession
+from ..diff_utils import colorize_diff
 
 
 def _get_sftp(session: SSHSession):

@@ -31,9 +31,9 @@ from .colors import (
     _Color, RST, BLD, DIM, GRY, CYN, GRN, YLW, RED, BLU, MAG, ORG, BG8, WHT, WHT7,
     R, B, D, G, C, E, Y, X, U, M, O, BG, W, W7,
     _STYLE_KEY_MAP,
-    _stdout_lock, _stdout_write, _stdout_try_write,
     apply_style,
 )
+from ..output import _stdout_lock, write as _stdout_write, try_write as _stdout_try_write
 from .interrupt import InterruptController, _interrupt_ctrl
 from .renderer import (
     colorize_diff, _sep, _terminal_width, _display_width,
@@ -117,11 +117,11 @@ def show_interrupted() -> None:
 def show_stats(input_tokens: int, output_tokens: int,
                cache: int = 0, cost: float = 0.0,
                balance: float = 0.0) -> None:
-    # 动态从 colors 模块读取，确保 apply_style 修改后生效
-    from . import colors as _colors
-    _show_cost = _colors.SHOW_COST
-    _show_balance = _colors.SHOW_BALANCE
-    _max_tokens = _colors.MAX_TOKENS
+    # 动态从 output 模块读取，确保 apply_style 修改后生效
+    from .. import output as _output
+    _show_cost = _output.SHOW_COST
+    _show_balance = _output.SHOW_BALANCE
+    _max_tokens = _output.MAX_TOKENS
 
     si = f"{input_tokens / 1000:.1f}k" if input_tokens >= 1000 else str(input_tokens)
     so = f"{output_tokens / 1000:.1f}k" if output_tokens >= 1000 else str(output_tokens)

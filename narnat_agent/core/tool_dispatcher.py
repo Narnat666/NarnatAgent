@@ -12,7 +12,7 @@ from ..tools.registry import execute as tool_execute
 from ..tools.bash import kill_active as _kill_bash
 from ..tools.terminal import kill_active_exec as _kill_terminal_exec
 from ..tools.tool_context import ToolContext
-from ..ui.ui_design import _stdout_write, D, E, R, Y, G, B, C
+from ..output import write as _stdout_write, D, E, R, Y, G, B, C
 
 
 # ── 工具分类 ──
