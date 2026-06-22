@@ -44,6 +44,88 @@ def _display_width(text: str) -> int:
     return w
 
 
+def _visual_chars(text: str) -> List[str]:
+    """将文本拆分为视觉字符列表，跳过ANSI转义序列。
+
+    返回列表中每个元素是一个"视觉字符"：
+    - 普通ASCII字符：单字符字符串
+    - CJK宽字符：单字符字符串（但占2列）
+    - ANSI转义序列：完整的转义序列字符串（占0列）
+    """
+    result: List[str] = []
+    i = 0
+    raw = text
+    while i < len(raw):
+        if raw[i] == '\x1b':
+            # ANSI转义序列：\x1b[ ... m
+            j = i + 1
+            if j < len(raw) and raw[j] == '[':
+                j += 1
+                while j < len(raw) and raw[j] not in 'mABCDEFGHJKSTfh':
+                    j += 1
+                if j < len(raw):
+                    j += 1
+                result.append(raw[i:j])
+                i = j
+                continue
+        result.append(raw[i])
+        i += 1
+    return result
+
+
+def _wrap_cell(ansi_text: str, max_width: int) -> List[str]:
+    """将含ANSI转义的文本按显示宽度折行。
+
+    Args:
+        ansi_text: 含ANSI颜色码的文本
+        max_width: 最大显示宽度（必须>0）
+
+    Returns:
+        折行后的文本列表，每个元素显示宽度<=max_width。
+        空文本返回 [""]。
+        每行自动继承之前的ANSI状态，确保颜色不断裂。
+    """
+    if max_width <= 0:
+        return [ansi_text]
+
+    chars = _visual_chars(ansi_text)
+    lines: List[str] = []
+    current = ""
+    current_width = 0
+    # 追踪当前活跃的ANSI序列，折行时在新行开头重放
+    active_ansi: List[str] = []
+
+    for ch in chars:
+        if ch.startswith('\x1b'):
+            # ANSI转义序列，不占宽度
+            current += ch
+            if ch == '\x1b[0m':
+                # 重置序列，清空活跃状态
+                active_ansi.clear()
+            else:
+                active_ansi.append(ch)
+            continue
+
+        # 计算该字符的显示宽度
+        cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+        if current_width + cw > max_width:
+            # 超出宽度，换行
+            # 当前行追加重置，避免颜色泄漏到后续内容
+            lines.append(current + "\x1b[0m")
+            # 新行开头重放活跃ANSI状态
+            current = "".join(active_ansi) + ch
+            current_width = cw
+        else:
+            current += ch
+            current_width += cw
+
+    if current or not lines:
+        lines.append(current)
+
+    return lines
+
+
 # ═══════════════════════════════════════════════════════════════
 # Diff 着色（与 tools/diff_utils.py 逻辑一致，此处供 UI 层使用）
 # ═══════════════════════════════════════════════════════════════
@@ -408,32 +490,202 @@ class StreamingRenderer:
             self._table_rows.clear()
             self._table_has_separator = False
             return
-        # 合并表头和数据行计算列宽
+
+        # ── 计算列宽（带终端宽度限制） ──
+        term_w = _terminal_width()
+        # 表格可用宽度 = 终端宽度 - 4(缩进) - 1(左边框) - 1(右边框)
+        table_avail = max(term_w - 6, 20)
+
         all_rows = header_rows + data_rows
         rows_cells = [[c.strip() for c in line.strip("|").split("|")] for line in all_rows]
         cols = max(len(row) for row in rows_cells)
-        widths = [0] * cols
+        # 补齐短行
+        for row in rows_cells:
+            while len(row) < cols:
+                row.append("")
+
         rendered = [[InlineRules.render(c) for c in row] for row in rows_cells]
+
+        # 自然列宽（内容决定）
+        natural_widths = [0] * cols
         for row in rendered:
             for i, c in enumerate(row):
                 w = _display_width(c)
-                if w > widths[i]:
-                    widths[i] = w
+                if w > natural_widths[i]:
+                    natural_widths[i] = w
 
+        # 每列的边框+内边距开销：1(|) + 1(左空格) + 1(右空格) = 3
+        col_overhead = 3 * cols + 1  # +1 是最右边的 |
+        total_natural = sum(natural_widths) + col_overhead
+
+        if total_natural <= table_avail:
+            # ── 正常宽度：原逻辑，不折行 ──
+            widths = natural_widths
+            self._render_table_block(rendered, widths, cols)
+        else:
+            # ── 超宽：需要限制列宽+折行 ──
+            # 策略：给每列设上限，均等分配可用宽度
+            # 优先保证每列至少6字符（3个中文字符），剩余按自然宽度比例分配
+            min_col = 6
+            avail_for_content = table_avail - col_overhead
+            # 如果连最小宽度都放不下，减少列数（分块）
+            if cols * min_col > avail_for_content:
+                # 分块：计算每块能放多少列
+                self._render_table_chunked(rendered, cols, table_avail, col_overhead, min_col)
+            else:
+                # 限制列宽：先保证每列min_col，剩余按自然宽度比例分配
+                widths = [min_col] * cols
+                remaining = avail_for_content - cols * min_col
+                if remaining > 0 and sum(natural_widths) > 0:
+                    for i in range(cols):
+                        ratio = natural_widths[i] / sum(natural_widths)
+                        widths[i] += int(remaining * ratio)
+                    # 修正舍入误差
+                    diff = avail_for_content - sum(widths)
+                    if diff > 0:
+                        for i in range(diff):
+                            widths[i % cols] += 1
+
+                # 折行渲染
+                self._render_table_block(rendered, widths, cols, wrap=True)
+
+        self._table_rows.clear()
+        self._table_has_separator = False
+
+    def _render_table_block(self, rendered: List[List[str]],
+                            widths: List[int], cols: int,
+                            wrap: bool = False) -> None:
+        """渲染一个表格块。
+
+        Args:
+            rendered: 已做InlineRules渲染的单元格文本
+            widths: 各列宽度
+            cols: 列数
+            wrap: 是否对超宽单元格折行
+        """
+        # 如果需要折行，先对每个单元格做折行处理
+        if wrap:
+            wrapped: List[List[List[str]]] = []
+            for row in rendered:
+                wrapped_row: List[List[str]] = []
+                for i, c in enumerate(row):
+                    w = widths[i] if i < len(widths) else widths[-1]
+                    lines = _wrap_cell(c, w)
+                    wrapped_row.append(lines)
+                wrapped.append(wrapped_row)
+            # 渲染折行表格
+            self._render_wrapped_table(wrapped, widths, cols)
+        else:
+            # 原逻辑：单行单元格
+            sep = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+            border = f"    {BLU}{sep}{R}"
+
+            def _row(cells):
+                parts = [" " + c + " " * (widths[i] - _display_width(c) + 1) for i, c in enumerate(cells)]
+                return f"    {BLU}|{R}{W7}" + f"{BLU}|{R}{W7}".join(parts) + f"{BLU}|{R}"
+
+            parts = [border]
+            for row in rendered:
+                parts.append(_row(row))
+                parts.append(border)
+            _stdout_write("\n".join(parts) + "\n")
+
+    def _render_wrapped_table(self, wrapped: List[List[List[str]]],
+                              widths: List[int], cols: int) -> None:
+        """渲染折行表格。
+
+        Args:
+            wrapped: wrapped[row][col] = [line1, line2, ...] 折行后的文本
+            widths: 各列宽度
+            cols: 列数
+        """
         sep = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
         border = f"    {BLU}{sep}{R}"
 
-        def _row(cells):
-            parts = [" " + c + " " * (widths[i] - _display_width(c) + 1) for i, c in enumerate(cells)]
-            return f"    {BLU}|{R}{W7}" + f"{BLU}|{R}{W7}".join(parts) + f"{BLU}|{R}"
+        def _pad_cell(text: str, width: int) -> str:
+            """右填充到指定显示宽度"""
+            dw = _display_width(text)
+            pad = max(0, width - dw)
+            return " " + text + " " * (pad + 1)
 
-        parts = [border]
-        for row in rendered:
-            parts.append(_row(row))
+        parts: List[str] = []
+        for row in wrapped:
             parts.append(border)
+            # 该行中单元格的最大折行数
+            max_lines = max(len(cell) for cell in row)
+            for line_idx in range(max_lines):
+                cell_parts: List[str] = []
+                for col_idx in range(cols):
+                    cell = row[col_idx] if col_idx < len(row) else [""]
+                    text = cell[line_idx] if line_idx < len(cell) else ""
+                    w = widths[col_idx] if col_idx < len(widths) else widths[-1]
+                    cell_parts.append(f"{BLU}|{R}{W7}" + _pad_cell(text, w))
+                parts.append(f"    " + "".join(cell_parts) + f"{BLU}|{R}")
+        parts.append(border)
         _stdout_write("\n".join(parts) + "\n")
-        self._table_rows.clear()
-        self._table_has_separator = False
+
+    def _render_table_chunked(self, rendered: List[List[str]],
+                              cols: int, table_avail: int,
+                              col_overhead: int, min_col: int) -> None:
+        """列数过多时按列分块输出，首列作为锚点重复。
+
+        Args:
+            rendered: 已渲染的单元格
+            cols: 总列数
+            table_avail: 表格可用宽度
+            col_overhead: 列的边框+内边距总开销
+            min_col: 每列最小宽度
+        """
+        # 每列开销：3 (| + 两边空格)
+        per_col_overhead = 3
+        # 锚点列(第0列)固定占用
+        anchor_width = min_col
+        # 每块可用宽度（减去锚点列）
+        chunk_avail = table_avail - anchor_width - per_col_overhead - 1  # -1 右边框
+        # 每块能放的附加列数
+        cols_per_chunk = max(1, chunk_avail // (min_col + per_col_overhead))
+
+        # 分块：第0列(锚点) + 每块cols_per_chunk个附加列
+        data_col_indices = list(range(1, cols))
+        chunks: List[List[int]] = []
+        i = 0
+        while i < len(data_col_indices):
+            chunk = [0] + data_col_indices[i:i + cols_per_chunk]
+            chunks.append(chunk)
+            i += cols_per_chunk
+
+        total_chunks = len(chunks)
+
+        for chunk_idx, col_indices in enumerate(chunks):
+            # 提取子表数据
+            sub_rendered = []
+            for row in rendered:
+                sub_row = [row[c] if c < len(row) else "" for c in col_indices]
+                sub_rendered.append(sub_row)
+
+            # 计算子表列宽
+            sub_cols = len(col_indices)
+            sub_widths = [0] * sub_cols
+            for row in sub_rendered:
+                for i, c in enumerate(row):
+                    w = _display_width(c)
+                    if w > sub_widths[i]:
+                        sub_widths[i] = w
+
+            # 检查子表是否超宽，超宽则限制列宽
+            sub_col_overhead = 3 * sub_cols + 1
+            sub_total = sum(sub_widths) + sub_col_overhead
+            if sub_total > table_avail:
+                avail_for_content = table_avail - sub_col_overhead
+                for i in range(sub_cols):
+                    sub_widths[i] = min(sub_widths[i], max(min_col, avail_for_content // sub_cols))
+                self._render_table_block(sub_rendered, sub_widths, sub_cols, wrap=True)
+            else:
+                self._render_table_block(sub_rendered, sub_widths, sub_cols, wrap=False)
+
+            # 分块标签
+            if total_chunks > 1:
+                _stdout_write(f"    {D}── 表格 ({chunk_idx + 1}/{total_chunks}) ──{R}\n")
 
     def _flush_code_block(self) -> None:
         if self._code_lines:
