@@ -236,7 +236,10 @@ def _connect(host: str, username: str, port: int = 22,
         return "\n".join(parts)
 
     except paramiko.AuthenticationException:
-        return f"错误: 认证失败({username}@{host})，请检查key_path或password"
+        hint = ""
+        if not password and not key_path:
+            hint = "。未提供password或key_path，大多数设备需要password认证，请提供password参数后重试"
+        return f"错误: 认证失败({username}@{host})，请检查key_path或password{hint}"
     except paramiko.SSHException as e:
         return f"错误: SSH连接失败({username}@{host}): {e}"
     except Exception as e:

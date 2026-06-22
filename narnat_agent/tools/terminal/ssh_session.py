@@ -68,9 +68,12 @@ class SSHSession:
         connect_kwargs = {"hostname": host, "port": port, "username": username}
         if key_path:
             connect_kwargs["key_filename"] = os.path.expanduser(key_path)
-        elif password:
+        if password:
             connect_kwargs["password"] = password
         else:
+            # 始终传password（空字符串），让paramiko在密钥认证失败后fallback到密码认证
+            # 不传password时paramiko不会尝试密码认证，导致空密码设备无法连接
+            connect_kwargs["password"] = ""
             connect_kwargs["look_for_keys"] = True
             connect_kwargs["allow_agent"] = True
 
