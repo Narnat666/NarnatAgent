@@ -196,7 +196,8 @@ class InlineRules:
     _RE_ITAL = re.compile(r"\*(.+?)\*")
     _RE_CODE = re.compile(r"`([^`]+)`")
     _RE_IMG = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
-    _RE_LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+    # 链接：[ 前面不能是 \x1b（避免匹配 ANSI 转义序列中的 [）
+    _RE_LINK = re.compile(r"(?<!\x1b)\[([^\]]+)\]\([^)]+\)")
 
     @classmethod
     def render(cls, text: str) -> str:

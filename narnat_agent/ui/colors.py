@@ -12,6 +12,7 @@ from ..output import (
     R, B, D, G, C, E, Y, X, U, M, O, BG, W, W7,
     STYLE_KEY_MAP as _STYLE_KEY_MAP,
     _stdout_lock, write as _stdout_write, try_write as _stdout_try_write,
+    _ansi_color,
 )
 
 
@@ -48,7 +49,7 @@ def apply_style(config) -> bool:
         h = hex_str.lstrip("#")
         r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
         code = "48" if bg else "38"
-        return f"\x1b[{code};2;{r};{g};{b}m"
+        return _ansi_color(code, r, g, b)
 
     for key, (var_name, is_bg) in _STYLE_KEY_MAP.items():
         if key in data:
