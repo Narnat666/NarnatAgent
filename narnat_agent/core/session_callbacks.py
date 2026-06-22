@@ -14,10 +14,12 @@ from ..ui.session_commands import SessionCallbacks
 class NarnatSessionCallbacks(SessionCallbacks):
     """会话命令回调实现"""
 
-    def __init__(self, narnat_dir: str, get_messages_func: Callable[[], List[Dict[str, Any]]]):
+    def __init__(self, narnat_dir: str, get_messages_func: Callable[[], List[Dict[str, Any]]],
+                 context_manager=None):
         self._narnat_dir = narnat_dir
         self._get_messages = get_messages_func
         self._active_name: Optional[str] = None
+        self._context = context_manager
 
     def on_save(self, name: str) -> str:
         if not name:
@@ -43,6 +45,9 @@ class NarnatSessionCallbacks(SessionCallbacks):
         current.clear()
         current.extend(msgs)
         self._active_name = name
+        # 同步轮次计数，避免压缩机制失效
+        if self._context is not None:
+            self._context.sync_from_messages(current)
         return ""
 
     def on_delete(self, name: str) -> str:

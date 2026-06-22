@@ -63,6 +63,18 @@ class ContextManager:
         self._warned_1 = False
         self._warned_2 = False
 
+    def sync_from_messages(self, messages):
+        """
+        根据messages同步轮次计数（恢复会话时调用）。
+
+        increment()在每次用户输入时+1，因此user消息数等于轮次数。
+        同时根据轮次设置警告标记，避免重复触发警告。
+        """
+        user_count = sum(1 for m in messages if m.get("role") == "user")
+        self._turn_count = user_count
+        self._warned_1 = user_count >= self._warn_turn_1
+        self._warned_2 = user_count >= self._warn_turn_2
+
     def set_retry_soon(self):
         """压缩失败后设置近期重试（10轮后再次触发压缩）"""
         self._turn_count = max(0, self._compress_turn - 10)

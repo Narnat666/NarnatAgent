@@ -83,6 +83,7 @@ class Agent:
         callbacks = NarnatSessionCallbacks(
             self._config.narnat_dir,
             lambda: self._messages,
+            context_manager=self._context,
         )
         self._ui = UIInterface(self._config.ai.model, callbacks)
 
