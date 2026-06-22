@@ -126,35 +126,6 @@ Rule: decide what you need to READ before running the command. Don't dump what y
    definitions with `codegraph query &lt;symbol&gt;`.
 5. **Sync after changes**: Run `codegraph sync > $null 2>&1` after file modifications (suppress progress bars, same as init).
 
-# WebSearch Fallback
-
-When AnySearch is unavailable, fall back to local Open WebSearch daemon. If the daemon is not running, start it in background.
-
-**This machine has PowerShell ExecutionPolicy Restricted — `npm`/`npx` cannot run via PowerShell. Always use `cmd /c` as the shell wrapper.**
-
-Startup time: ~20s cold (npx downloads 188MB), ~1.2s warm (cached).
-
-1. **Start the daemon via cmd /c**:
-   ```
-   cmd /c "npx open-websearch serve > nul 2>&1"
-   ```
-
-2. **Poll until healthy (max 30s)**:
-   ```
-   for ($i = 0; $i -lt 30; $i++) {
-       Start-Sleep -Seconds 1
-       try {
-           $r = curl.exe -s http://127.0.0.1:3210/health 2>$null | ConvertFrom-Json
-           if ($r.status -eq "ok") { break }
-       } catch {}
-   }
-   ```
-
-3. **Use `curl.exe` (not `curl`) for health checks** — `curl` is a PowerShell alias that triggers security prompts:
-   ```
-   curl.exe -s http://127.0.0.1:3210/health
-   ```
-
 # PDF CLI Tools (Mandatory)
 
 `rga` and `pdftotext` are installed. NEVER Read PDF files as binary.
@@ -162,3 +133,15 @@ Startup time: ~20s cold (npx downloads 188MB), ~1.2s warm (cached).
 - Search PDF → `rga "keyword" file.pdf`
 - Read PDF → `pdftotext -f N -l M file.pdf -`
 - Metadata → `pdfinfo file.pdf`
+
+# Cppcheck (Mandatory)
+
+`cppcheck` is installed. Use it to statically analyze C/C++ source for bugs before modifying code.
+
+- Daily dev → `cppcheck --enable=warning --quiet -j 4 --cppcheck-build-dir=.cppcheck_cache <dir>`
+- Bug fixing → `cppcheck --enable=warning --quiet -j 4 --cppcheck-build-dir=.cppcheck_cache <.c/.cpp file>`
+- Code review → `cppcheck --enable=warning,style --quiet -j 4 --cppcheck-build-dir=.cppcheck_cache --inline-suppr <dir>`
+
+`--cppcheck-build-dir` caches results; only changed files are re-analyzed, returning in under a second.
+If the project has `compile_commands.json`, replace `<dir>` with `--project=compile_commands.json`.
+Exclude third-party headers with `-i <third_party_dir>`.

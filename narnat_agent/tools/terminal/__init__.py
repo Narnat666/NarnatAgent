@@ -59,7 +59,7 @@ DEFINITION = {
                 "username": {"type": "string", "description": "SSH username"},
                 "port": {"type": "integer", "description": "SSH port, default 22"},
                 "key_path": {"type": "string", "description": "SSH private key path, e.g. ~/.ssh/id_rsa"},
-                "password": {"type": "string", "description": "SSH password (key_path takes priority if set)"},
+                "password": {"type": "string", "description": "SSH password. Auto-tries key-based auth from ~/.ssh/ if not provided"},
                 "sudo_password": {"type": "string", "description": "Sudo password (set at connect time, auto-injected when subsequent exec encounters sudo prompt)"},
                 "command": {"type": "string", "description": "Command to execute (required when action=exec)"},
                 "input": {"type": "string", "description": "Interactive input (required when action=input, e.g. sudo password, y/n confirmation)"},

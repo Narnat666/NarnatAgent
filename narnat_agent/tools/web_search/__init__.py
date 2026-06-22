@@ -1,13 +1,7 @@
-"""WebSearch工具 —— AnySearch 为主，Open WebSearch 为备
-
-搜索链:
-  1. AnySearch API → GitHub/技术文档/官方文档 (AI意图路由)
-  2. 失败则降级到 Open WebSearch (Bing + Baidu 并行)
+"""WebSearch工具 —— MCP搜索API
 
 依赖:
-  - AnySearch API: https://api.anysearch.com/mcp (免费，无需Key)
-  - open-websearch (npm包)，需先启动 daemon:
-    $env:MODE="http"; open-websearch serve
+  - MCP搜索API (默认AnySearch): 需配置api_keys
 
 纯标准库调用(urllib)，零Python依赖。
 """
@@ -15,24 +9,21 @@
 import json
 import re
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Optional
-from urllib.parse import urlparse
+from typing import List, Dict
 
 
 # ── 常量 ──
 
-_DAEMON_URL = "http://127.0.0.1:3210"
-_ANYSEARCH_URL = "https://api.anysearch.com/mcp"
+_DEFAULT_SEARCH_URL = "https://api.anysearch.com/mcp"
 _ANYSEARCH_API_KEY = ""
-_TIMEOUT = 10
+_ANYSEARCH_URL = ""
 _ANYSEARCH_TIMEOUT = 15
 
 DEFINITION = {
     "type": "function",
     "function": {
         "name": "WebSearch",
-        "description": "Web search (AnySearch main engine, searches GitHub code/technical docs/official docs; auto-fallback to Bing+Baidu on failure). Must include Sources links at end of response after searching",
+        "description": "Web search for API docs, solutions, tech articles. Must include Sources links at end of response after searching",
         "parameters": {
             "type": "object",
             "properties": {
@@ -46,17 +37,6 @@ DEFINITION = {
 
 
 # ── 工具函数 ──
-
-def _url_key(url: str) -> str:
-    """URL去重键：域名+路径，忽略查询参数和片段"""
-    if not url:
-        return ""
-    try:
-        p = urlparse(url)
-        return f"{p.netloc}{p.path}".rstrip("/")
-    except Exception:
-        return url.rstrip("/")
-
 
 def _extract_query_words(query: str) -> set:
     """提取查询词用于相关性排序"""
@@ -119,7 +99,8 @@ def _parse_anysearch_markdown(text: str) -> List[Dict]:
 
 
 def _search_anysearch(query: str, max_results: int) -> List[Dict]:
-    """调用 AnySearch API"""
+    """调用MCP搜索API"""
+    url = _ANYSEARCH_URL or _DEFAULT_SEARCH_URL
     data = json.dumps({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": "search", "arguments": {
@@ -129,7 +110,7 @@ def _search_anysearch(query: str, max_results: int) -> List[Dict]:
     headers = {"Content-Type": "application/json"}
     if _ANYSEARCH_API_KEY:
         headers["X-API-Key"] = _ANYSEARCH_API_KEY
-    req = urllib.request.Request(_ANYSEARCH_URL, data=data, headers=headers)
+    req = urllib.request.Request(url, data=data, headers=headers)
     resp = urllib.request.urlopen(req, timeout=_ANYSEARCH_TIMEOUT)
     raw = json.loads(resp.read())
     # 提取所有 text 内容块
@@ -141,42 +122,11 @@ def _search_anysearch(query: str, max_results: int) -> List[Dict]:
     return _parse_anysearch_markdown(combined)
 
 
-# ── Open WebSearch 调用（备用） ──
-
-def _search_ows(query: str, engine: str, max_results: int) -> List[Dict]:
-    """调用 Open WebSearch daemon 搜索单个引擎"""
-    data = json.dumps({
-        "query": query,
-        "maxResults": max_results,
-        "engine": engine,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        f"{_DAEMON_URL}/search", data=data,
-        headers={"Content-Type": "application/json"},
-    )
-    resp = urllib.request.urlopen(req, timeout=_TIMEOUT)
-    result = json.loads(resp.read())
-    raw = result.get("data", {}).get("results", [])
-    # 统一字段名：OWS用description
-    return [{"title": r.get("title", ""), "url": r.get("url", ""),
-             "description": r.get("description", "")} for r in raw]
-
-
-def _check_daemon() -> bool:
-    """检查 Open WebSearch daemon 是否可用"""
-    try:
-        req = urllib.request.Request(f"{_DAEMON_URL}/health")
-        resp = urllib.request.urlopen(req, timeout=3)
-        return json.loads(resp.read()).get("status") == "ok"
-    except Exception:
-        return False
-
-
 # ── 主入口 ──
 
 def execute(query: str, num: int = 5, _tool_context=None) -> str:
     """
-    联网搜索。主引擎 AnySearch，失败则降级到 Open WebSearch。
+    联网搜索。
 
     Args:
         query: 搜索关键词
@@ -186,51 +136,22 @@ def execute(query: str, num: int = 5, _tool_context=None) -> str:
     Returns:
         格式化的搜索结果，每条含标题、URL、描述
     """
-    # 从tool_context注入API Key
-    global _ANYSEARCH_API_KEY
+    # 从tool_context注入API Key和URL
+    global _ANYSEARCH_API_KEY, _ANYSEARCH_URL
     if _tool_context and _tool_context.api_keys:
-        _ANYSEARCH_API_KEY = _tool_context.api_keys.get("anysearch", _ANYSEARCH_API_KEY)
+        _ANYSEARCH_API_KEY = _tool_context.api_keys.get("websearch", _ANYSEARCH_API_KEY)
+        _ANYSEARCH_URL = _tool_context.api_keys.get("websearch_url", _ANYSEARCH_URL)
 
-    results: List[Dict] = []
+    if not _ANYSEARCH_API_KEY:
+        return "搜索失败: 未配置 WebSearch API Key"
 
-    # ── Tier 1: AnySearch ──
-    if _ANYSEARCH_API_KEY:
-        try:
-            results = _search_anysearch(query, num)
-            if results:
-                results.sort(key=lambda r: _relevance_score(r, query), reverse=True)
-                return _format_results(results[:num])
-        except Exception:
-            pass
+    try:
+        results = _search_anysearch(query, num)
+    except Exception as e:
+        return f"搜索失败: {e}"
 
-    # ── Tier 2: Open WebSearch (Bing + Baidu 并行) ──
-    if not _check_daemon():
-        return ("搜索失败: AnySearch 不可用，且 Open WebSearch daemon 未运行。\n"
-                "请先启动: $env:MODE='http'; open-websearch serve")
-
-    all_results: List[Dict] = []
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = {
-            pool.submit(_search_ows, query, "bing", num): "bing",
-            pool.submit(_search_ows, query, "baidu", num): "baidu",
-        }
-        for fut in as_completed(futures):
-            try:
-                all_results.extend(fut.result())
-            except Exception:
-                pass
-
-    if not all_results:
+    if not results:
         return "(无搜索结果)"
 
-    # 去重
-    seen: set = set()
-    unique: List[Dict] = []
-    for r in all_results:
-        key = _url_key(r.get("url", ""))
-        if key and key not in seen:
-            seen.add(key)
-            unique.append(r)
-
-    unique.sort(key=lambda r: _relevance_score(r, query), reverse=True)
-    return _format_results(unique[:num])
+    results.sort(key=lambda r: _relevance_score(r, query), reverse=True)
+    return _format_results(results[:num])
