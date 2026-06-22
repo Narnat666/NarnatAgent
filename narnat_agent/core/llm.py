@@ -457,6 +457,7 @@ class _AnthropicBackend:
 
         try:
             content_buffer = []
+            thinking_buffer = []  # 兜底：DeepSeek V4 有时只返回 thinking 不返回 text
             tool_use_blocks = {}
 
             line_queue = queue.Queue()
@@ -522,6 +523,12 @@ class _AnthropicBackend:
                             content_buffer.append(text)
                             yield {"content": text}
 
+                    elif d_type == "thinking_delta":
+                        # 收集 thinking 内容，用于 thinking-only 回复兜底
+                        thinking_text = delta.get("thinking", "")
+                        if thinking_text:
+                            thinking_buffer.append(thinking_text)
+
                     elif d_type == "input_json_delta":
                         pj = delta.get("partial_json", "")
                         if idx in tool_use_blocks:
@@ -557,6 +564,14 @@ class _AnthropicBackend:
                                 })
                             yield {"tool_calls": completed_calls, "finish_reason": finish_reason}
                         else:
+                            # 兜底：DeepSeek V4 有时只返回 thinking 不返回 text
+                            # 此时将 thinking 内容作为正式输出
+                            if not content_buffer and thinking_buffer:
+                                fallback_text = "".join(thinking_buffer)
+                                content_buffer.append(fallback_text)
+                                yield {"content": fallback_text}
+                                if self._logger:
+                                    self._logger.info("core.llm", f"thinking-only兜底: 将thinking内容({len(fallback_text)}字符)作为text输出")
                             yield {"finish_reason": finish_reason}
 
                         if self._logger:
