@@ -232,7 +232,8 @@ def _connect(host: str, username: str, port: int = 22,
         parts = [f"已连接终端{alloc_id}: {username}@{host}"]
         if session._initial_output:
             parts.append(session._initial_output)
-        parts.append(session.prompt)
+        else:
+            parts.append(session.prompt)
         return "\n".join(parts)
 
     except paramiko.AuthenticationException:
