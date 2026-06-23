@@ -127,5 +127,5 @@ LAST_SESSION_SUMMARY = "last_session_summary.md"
 
 # ── 默认AI配置 ──
 DEFAULT_API_KEY = ""
-DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_BASE_URL = "https://api.deepseek.com/anthropic"
+DEFAULT_MODEL = "deepseek-v4-flash"

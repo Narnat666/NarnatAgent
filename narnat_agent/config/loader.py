@@ -300,7 +300,7 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
                         "接口密钥": DEFAULT_API_KEY,
                         "接口地址": DEFAULT_BASE_URL,
                         "模型": DEFAULT_MODEL,
-                        "接口密钥组": {"anysearch": ""},
+                        "接口密钥组": {"websearch": "", "websearch_url": "https://api.anysearch.com/mcp"},
                     }, f, indent=2, ensure_ascii=False)
                 else:
                     f.write("")
