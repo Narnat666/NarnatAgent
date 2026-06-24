@@ -19,6 +19,7 @@ from typing import Optional
 from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
+from prompt_toolkit.formatted_text import ANSI
 
 if sys.platform == "win32":
     try:
@@ -332,7 +333,6 @@ def _make_keybindings() -> KeyBindings:
 
 _PROMPT_STYLE = Style.from_dict({
     "prompt": "bold #00ff00",       # # 提示符保持绿色
-    "confirm": "#ffff00",           # 删除确认提示：亮黄色，不粗体
     "": "#ffffff",                  # 用户输入文本：极致白色
 })
 
@@ -353,8 +353,9 @@ def read_input(session: PromptSession) -> Optional[str]:
 
 
 def read_input_with_prompt(session: PromptSession, prompt_text: str) -> Optional[str]:
-    """带自定义提示符的输入，用于删除确认等场景。"""
+    """带自定义提示符的输入，用于删除确认等场景。提示文本使用AI输出颜色。"""
+    from ..output import W7, R
     try:
-        return session.prompt([("class:confirm", prompt_text)])
+        return session.prompt(ANSI(f"{W7}{prompt_text}{R}"))
     except (KeyboardInterrupt, EOFError):
         return None
