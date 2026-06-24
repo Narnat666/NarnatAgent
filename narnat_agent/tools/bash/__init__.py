@@ -14,11 +14,23 @@ import time
 from typing import Optional, Callable
 
 
-# 删除命令正则（仅保留删除确认，其他全部放行）
+# 删除命令正则
 _RE_DELETE = re.compile(
     r"\b(rm\s|del\s|Remove-Item\s|rmdir\s|rd\s)",
     re.IGNORECASE,
 )
+
+# git 只读子命令白名单（不在白名单中的 git 命令需确认）
+# 只匹配第一个子命令词，如 git log --oneline 匹配 log
+_GIT_READONLY = frozenset({
+    "status", "log", "diff", "show", "branch", "tag", "remote",
+    "blame", "shortlog", "rev-parse", "ls-tree", "describe",
+    "reflog", "name-rev", "ls-remote", "show-ref", "merge-base",
+    "cherry", "var",
+})
+
+# 匹配 git 子命令的正则（只捕获第一个子命令词）
+_RE_GIT_CMD = re.compile(r"\bgit\s+(\S+)", re.IGNORECASE)
 
 # PowerShell CLIXML 噪音正则（模块加载进度记录，对AI无意义）
 _RE_CLIXML = re.compile(
@@ -148,12 +160,25 @@ def execute(
     Returns:
         stdout + stderr + 退出码
     """
-    # 安全检查：仅删除命令需确认
+    # 安全检查：删除命令和非只读git命令需确认
+    need_confirm = False
     if _RE_DELETE.search(command):
+        need_confirm = True
+    else:
+        m = _RE_GIT_CMD.search(command)
+        if m:
+            subcmd = m.group(1).lower()
+            if subcmd not in _GIT_READONLY:
+                need_confirm = True
+            # branch/tag 虽然是只读子命令，但 -d/-D 是删除操作
+            elif subcmd in ("branch", "tag") and re.search(r"\s-[dD]\b", command):
+                need_confirm = True
+
+    if need_confirm:
         if sys.platform == "win32":
             # Windows: prompt_toolkit和input()用不同的输入系统，直接用input()确认
             if _tool_context and _tool_context.confirm_callback and not _tool_context.confirm_callback(command):
-                return "操作已取消: 删除命令需用户确认"
+                return "操作已取消: 此命令需用户确认"
         else:
             # Linux/macOS: 终端被prompt_toolkit占用，无法在子线程中读取输入
             # 用户已确认过（_delete_confirmed=True），直接执行

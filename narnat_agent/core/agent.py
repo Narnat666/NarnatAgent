@@ -353,7 +353,7 @@ class Agent:
         )
 
         # 在#提示符下显示确认信息，等待用户输入
-        user_input = self._ui.read_input_with_prompt("  确认执行删除命令? [y/N]: ")
+        user_input = self._ui.read_input_with_prompt("  确认执行此命令? [y/N]: ")
         if user_input is None:
             user_input = ""
 
@@ -369,7 +369,7 @@ class Agent:
                 _stdout_write("\n".join(f"  {line}" for line in color_diff.split("\n")) + "\n\n")
         else:
             # 用户取消
-            self._msg_manager.append_tool_result(confirm_tc_id, "操作已取消: 删除命令需用户确认")
+            self._msg_manager.append_tool_result(confirm_tc_id, "操作已取消: 此命令需用户确认")
 
         # 创建新的流式输出会话，继续agent_loop
         return self._ui.create_stream()

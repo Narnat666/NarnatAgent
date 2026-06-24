@@ -17,7 +17,7 @@ class SafetyCallbacks:
         if sys.platform != "win32":
             return False
         try:
-            response = input(f"  确认执行删除命令? [y/N]: ")
+            response = input(f"  确认执行此命令? [y/N]: ")
             return response.strip().lower() in ("y", "yes")
         except (EOFError, KeyboardInterrupt):
             return False
