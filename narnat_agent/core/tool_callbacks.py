@@ -4,14 +4,18 @@
 从agent.py中提取，Agent只负责组装。
 """
 
+import sys
+
 from ..output import write as _stdout_write, B, D, E, G, R, Y
 
 
 class SafetyCallbacks:
-    """安全相关回调：删除命令确认"""
+    """安全相关回调：删除命令确认（仅Windows使用）"""
 
     @staticmethod
     def confirm_delete(command: str) -> bool:
+        if sys.platform != "win32":
+            return False
         try:
             response = input(f"  确认执行删除命令? [y/N]: ")
             return response.strip().lower() in ("y", "yes")

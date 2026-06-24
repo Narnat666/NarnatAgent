@@ -256,6 +256,18 @@ class UIInterface:
             self._session = _create_session(self._callbacks)
         return line
 
+    def read_input_with_prompt(self, prompt_text: str) -> Optional[str]:
+        """带自定义提示符的输入，用于删除确认等场景。"""
+        if self._session is None:
+            self.start()
+        assert self._session is not None
+        _interrupt_ctrl.clear()
+        _interrupt_ctrl.enter_input_mode()
+        line = read_input_with_prompt(self._session, prompt_text)
+        if line is None:
+            self._session = _create_session(self._callbacks)
+        return line
+
     def dispatch_command(self, cmd: str, args: str) -> bool:
         return _dispatch_command(cmd, args, self._callbacks)
 
@@ -320,6 +332,7 @@ def _make_keybindings() -> KeyBindings:
 
 _PROMPT_STYLE = Style.from_dict({
     "prompt": "bold #00ff00",       # # 提示符保持绿色
+    "confirm": "#ffff00",           # 删除确认提示：亮黄色，不粗体
     "": "#ffffff",                  # 用户输入文本：极致白色
 })
 
@@ -335,5 +348,13 @@ def _create_session(callbacks: SessionCallbacks) -> PromptSession:
 def read_input(session: PromptSession) -> Optional[str]:
     try:
         return session.prompt([("class:prompt", "# ")])
+    except (KeyboardInterrupt, EOFError):
+        return None
+
+
+def read_input_with_prompt(session: PromptSession, prompt_text: str) -> Optional[str]:
+    """带自定义提示符的输入，用于删除确认等场景。"""
+    try:
+        return session.prompt([("class:confirm", prompt_text)])
     except (KeyboardInterrupt, EOFError):
         return None

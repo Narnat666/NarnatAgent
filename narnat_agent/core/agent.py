@@ -11,6 +11,7 @@ Agent类作为主编排者，委托具体实现给子模块：
 
 import json
 import os
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional
@@ -23,6 +24,7 @@ from .message_manager import MessageManager
 from .stats import StatsTracker
 from .session_callbacks import NarnatSessionCallbacks
 from .tool_callbacks import SafetyCallbacks, TodoCallbacks
+from ..tools.tool_context import AWAIT_CONFIRM
 from ..config.loader import AppConfig, load_config
 from ..tools.terminal import kill_active_exec as _kill_terminal_exec, cleanup as _terminal_cleanup, set_max_sessions
 from ..tools.tool_context import ToolContext
@@ -88,8 +90,10 @@ class Agent:
         self._ui = UIInterface(self._config.ai.model, callbacks)
 
         # 初始化工具上下文
+        # Windows: confirm_callback用input()直接确认（两套输入系统互不干扰）
+        # Linux/macOS: 不注入confirm_callback，删除命令通过AWAIT_CONFIRM机制在#提示符下确认
         self._tool_context = ToolContext(
-            confirm_callback=SafetyCallbacks.confirm_delete,
+            confirm_callback=SafetyCallbacks.confirm_delete if sys.platform == "win32" else None,
             ui_callback=TodoCallbacks.on_todo_update,
             api_keys=self._config.api_keys,
             ignore_dirs=self._config.ignore_dirs,
@@ -253,6 +257,24 @@ class Agent:
                     self._ui.on_interrupted()
                     return
 
+                # Linux/macOS: 拦截删除确认标记，在#提示符下等待用户确认
+                if self._tool_context.pending_delete is not None:
+                    pending = self._tool_context.pending_delete
+                    self._tool_context.pending_delete = None
+                    # 找到返回AWAIT_CONFIRM的那个tool_call_id
+                    confirm_tc_id = None
+                    for tc_id, result in tool_results:
+                        if result == AWAIT_CONFIRM:
+                            confirm_tc_id = tc_id
+                            break
+                    if confirm_tc_id is not None:
+                        # 结束当前流式输出，回到#提示符等用户确认
+                        new_stream = self._handle_delete_confirm(stream, confirm_tc_id, pending, tool_results)
+                        if new_stream is not None:
+                            stream = new_stream
+                            continue
+                        return
+
                 # 回传工具结果
                 for tc_id, result in tool_results:
                     self._msg_manager.append_tool_result(tc_id, result)
@@ -300,6 +322,57 @@ class Agent:
                 balance=self._stats.balance,
             )
             break
+
+    def _handle_delete_confirm(self, stream, confirm_tc_id, pending_delete, tool_results):
+        """处理Linux/macOS下的删除确认：结束流式输出，在#提示符下等用户确认。
+
+        Args:
+            stream: 当前流式输出会话
+            confirm_tc_id: 返回AWAIT_CONFIRM的tool_call_id
+            pending_delete: (tool_name, arguments_dict) 暂存的删除命令
+            tool_results: 所有工具结果列表 [(tc_id, result), ...]
+
+        Returns:
+            新的UIStreamSession - 用户已确认/取消，结果已回传，继续agent_loop
+            None - 流已结束，调用方应return
+        """
+        tool_name, arguments = pending_delete
+
+        # 先回传非确认的工具结果
+        for tc_id, result in tool_results:
+            if tc_id != confirm_tc_id:
+                self._msg_manager.append_tool_result(tc_id, result)
+
+        # 结束当前流式输出
+        stream.finish(
+            self._stats.input_tokens,
+            self._stats.output_tokens,
+            cache=self._stats.cache_tokens,
+            cost=self._stats.cost,
+            balance=self._stats.balance,
+        )
+
+        # 在#提示符下显示确认信息，等待用户输入
+        user_input = self._ui.read_input_with_prompt("  确认执行删除命令? [y/N]: ")
+        if user_input is None:
+            user_input = ""
+
+        confirmed = user_input.strip().lower() in ("y", "yes")
+
+        if confirmed:
+            # 用户确认：设置标志跳过删除检测，重新执行命令
+            self._tool_context._delete_confirmed = True
+            from ..tools.registry import execute as tool_execute
+            llm_result, color_diff = tool_execute(tool_name, arguments, self._tool_context)
+            self._msg_manager.append_tool_result(confirm_tc_id, llm_result)
+            if color_diff:
+                _stdout_write("\n".join(f"  {line}" for line in color_diff.split("\n")) + "\n\n")
+        else:
+            # 用户取消
+            self._msg_manager.append_tool_result(confirm_tc_id, "操作已取消: 删除命令需用户确认")
+
+        # 创建新的流式输出会话，继续agent_loop
+        return self._ui.create_stream()
 
     def _dump_empty_debug(self, content_parts, tool_calls_result, finish_reason, call_usage):
         """空回复时写调试日志"""

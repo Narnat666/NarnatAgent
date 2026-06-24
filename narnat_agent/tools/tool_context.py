@@ -5,14 +5,18 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Any, Dict, List
+from typing import Optional, Callable, Any, Dict, List, Tuple
+
+
+# 删除确认标记：bash/terminal检测到删除命令时返回此值，由agent主循环拦截处理
+AWAIT_CONFIRM = "__AWAIT_CONFIRM__"
 
 
 @dataclass
 class ToolContext:
     """工具运行时上下文"""
 
-    # 删除确认回调（bash/terminal使用）
+    # 删除确认回调（仅Windows使用，Linux/macOS通过AWAIT_CONFIRM机制处理）
     confirm_callback: Optional[Callable[[str], bool]] = None
 
     # TodoWrite UI更新回调
@@ -30,8 +34,15 @@ class ToolContext:
     # 已Read过的远程文件集合（remote使用）
     read_remote_files: set = field(default_factory=set)
 
+    # 暂存的删除命令（Linux/macOS下，用户确认后由agent主循环重新执行）
+    # 格式: (tool_name, arguments_dict) 或 None
+    pending_delete: Optional[Tuple[str, dict]] = None
+
+    # 用户已确认删除，下次执行删除命令时跳过确认直接执行
+    _delete_confirmed: bool = field(default=False, repr=False)
+
     def confirm_delete(self, command: str) -> bool:
-        """调用删除确认回调"""
+        """调用删除确认回调（仅Windows使用）"""
         if self.confirm_callback:
             return self.confirm_callback(command)
         return False

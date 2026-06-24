@@ -9,6 +9,7 @@ Terminal工具 ── 多终端可持续SSH
 """
 
 import re
+import sys
 import threading
 from typing import Optional
 
@@ -256,8 +257,27 @@ def _exec(session_id: int, host: str, command: str, timeout: int = 120, max_outp
 
     # 安全检查：删除命令需用户确认
     if _RE_DELETE.search(command):
-        if _tool_context and _tool_context.confirm_callback and not _tool_context.confirm_callback(command):
-            return "操作已取消: 删除命令需用户确认"
+        if sys.platform == "win32":
+            # Windows: prompt_toolkit和input()用不同的输入系统，直接用input()确认
+            if _tool_context and _tool_context.confirm_callback and not _tool_context.confirm_callback(command):
+                return "操作已取消: 删除命令需用户确认"
+        else:
+            # Linux/macOS: 终端被prompt_toolkit占用，无法在子线程中读取输入
+            # 用户已确认过（_delete_confirmed=True），直接执行
+            if _tool_context and _tool_context._delete_confirmed:
+                _tool_context._delete_confirmed = False
+            else:
+                # 暂存命令，返回AWAIT_CONFIRM标记，由agent主循环在#提示符下等待用户确认
+                if _tool_context is not None:
+                    _tool_context.pending_delete = ("Terminal", {
+                        "action": "exec",
+                        "session_id": session_id,
+                        "host": host,
+                        "command": command,
+                        "timeout": timeout,
+                        "max_output_chars": max_output_chars,
+                    })
+                return "__AWAIT_CONFIRM__"
 
     try:
         sid, session = _resolve_session_id(session_id, host)
