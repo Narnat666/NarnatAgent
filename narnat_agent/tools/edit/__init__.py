@@ -27,7 +27,7 @@ DEFINITION = {
         "parameters": {
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "File path"},
+                "file_path": {"type": "string", "description": "File path (absolute or relative to working directory)"},
                 "old_string": {"type": "string", "description": "Text to replace (string mode, must match exactly)"},
                 "new_string": {"type": "string", "description": "Replacement text"},
                 "replace_all": {"type": "boolean", "description": "Replace all matches (string mode, default replaces first only)"},

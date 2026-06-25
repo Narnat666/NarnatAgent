@@ -13,7 +13,7 @@ DEFINITION = {
         "parameters": {
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "File path"},
+                "file_path": {"type": "string", "description": "File path (absolute or relative to working directory)"},
                 "content": {"type": "string", "description": "Full file content"},
                 "remote": {"type": "boolean", "description": "Write remote file via SFTP (requires prior Terminal connect)"},
                 "host": {"type": "string", "description": "Remote host IP (only used when remote=True)"},

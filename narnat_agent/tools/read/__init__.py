@@ -15,7 +15,7 @@ DEFINITION = {
         "parameters": {
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "Absolute file path"},
+                "file_path": {"type": "string", "description": "File path (absolute or relative to working directory)"},
                 "offset": {"type": "integer", "description": "Starting line (1-based). Omit to read from beginning"},
                 "limit": {"type": "integer", "description": "Max lines, must be > 0, default 2000"},
                 "remote": {"type": "boolean", "description": "Read remote file via SFTP (requires prior Terminal connect)"},

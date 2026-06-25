@@ -7,7 +7,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "TodoWrite",
-        "description": "Create and manage a structured task list to track progress in current coding session. Required for complex multi-step tasks. Exactly 1 task in_progress at any time",
+        "description": "Create and manage a structured task list to track progress in current coding session. Required for complex multi-step tasks. At most 1 task in_progress at any time",
         "parameters": {
             "type": "object",
             "properties": {
