@@ -142,14 +142,14 @@ def _search_single_file(file_path, regex, output_mode, show_n, A, B, head_limit)
         return f"{file_path}:{len(matches)}" if matches else "(无匹配)"
     else:  # content
         lines = content.split("\n")
-        results, count = _match_lines(file_path, lines, regex, A, B, head_limit)
+        results, count = _match_lines(file_path, lines, regex, A, B, head_limit, show_n)
         output = "\n".join(results) if results else "(无匹配)"
         if head_limit and count >= head_limit:
             output += f"\n...[已截断: 超出head_limit({head_limit})限制, 增大head_limit获取完整结果]"
         return output
 
 
-def _match_lines(path_label, lines, regex, A, B, head_limit):
+def _match_lines(path_label, lines, regex, A, B, head_limit, show_n=False):
     """逐行匹配并收集结果（content模式），供单文件和目录搜索共用。
 
     Returns:
@@ -167,11 +167,20 @@ def _match_lines(path_label, lines, regex, A, B, head_limit):
             context_lines = []
             for ci in range(start, end):
                 prefix = ">" if ci == line_idx else " "
-                context_lines.append(f"  {prefix} {ci+1}:{lines[ci]}")
-            results.append(f"{path_label}:{line_num}:{line}")
+                if show_n:
+                    context_lines.append(f"  {prefix} {ci+1}:{lines[ci]}")
+                else:
+                    context_lines.append(f"  {prefix} {lines[ci]}")
+            if show_n:
+                results.append(f"{path_label}:{line_num}:{line}")
+            else:
+                results.append(f"{path_label}:{line}")
             results.extend(context_lines)
         else:
-            results.append(f"{path_label}:{line_num}:{line}")
+            if show_n:
+                results.append(f"{path_label}:{line_num}:{line}")
+            else:
+                results.append(f"{path_label}:{line}")
         count += 1
         if head_limit and count >= head_limit:
             break
@@ -211,7 +220,7 @@ def _search_files(root, regex, glob_filter, output_mode, show_n, A, B, head_limi
             else:  # content
                 lines = content.split("\n")
                 remaining = head_limit - count if head_limit else 0
-                matched, match_count = _match_lines(rel, lines, regex, A, B, remaining)
+                matched, match_count = _match_lines(rel, lines, regex, A, B, remaining, show_n)
                 results.extend(matched)
                 count += match_count
 

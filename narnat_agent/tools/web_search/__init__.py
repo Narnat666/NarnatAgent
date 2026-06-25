@@ -23,7 +23,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "WebSearch",
-        "description": "Web search for API docs, solutions, tech articles. Must include Sources links at end of response after searching",
+        "description": "Web search for API docs, solutions, tech articles.",
         "parameters": {
             "type": "object",
             "properties": {
