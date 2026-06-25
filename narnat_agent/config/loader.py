@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 
 from .defaults import (
-    BASE_PROMPT_TEMPLATE, IRON_RULES, COMPRESS_PROMPT,
+    BASE_PROMPT_TEMPLATE, COMPRESS_PROMPT,
     NARNAT_DIR, NARNAT_JSON, NARNAT_MD, LAST_SESSION_SUMMARY,
     CONFIG_SUBDIR, DATA_SUBDIR, LOGS_SUBDIR,
     DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL,
@@ -257,13 +257,13 @@ def _load_user_md(config_dir: str) -> str:
 
 
 def _build_system_prompt(model: str, user_md: str, cwd: str = "", os_name: str = "", shell_name: str = "") -> str:
-    """拼接系统prompt：基础prompt + 铁律 + 用户自定义"""
+    """拼接系统prompt：基础prompt + 用户自定义"""
     parts = [BASE_PROMPT_TEMPLATE.format(
         model=model,
         cwd=cwd or os.getcwd(),
         platform=os_name or platform.system(),
         shell=shell_name or ("PowerShell" if sys.platform == "win32" else "bash"),
-    ), IRON_RULES]
+    )]
     if user_md:
         parts.append(user_md)
     return "\n".join(parts)
