@@ -13,9 +13,9 @@ COMPRESS_TURN = 100  # 强制压缩
 
 # ── 基础Prompt模板 ──
 BASE_PROMPT_TEMPLATE = """\
-| 身份 | {model} |
+| 身份 | 你是 {model} |
 | 环境 | narnat agent |
-| 任务 | 解难 |
+| 任务 | 为用户解难 |
 | 工作目录 | {cwd} |
 | 平台 | {platform} |
 """
