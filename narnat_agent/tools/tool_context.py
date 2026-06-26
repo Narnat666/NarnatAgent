@@ -28,6 +28,10 @@ class ToolContext:
     # 忽略目录（glob/grep使用）
     ignore_dirs: List[str] = field(default_factory=list)
 
+    # 安全确认开关（由配置驱动）
+    git_skip_confirm: bool = False   # True=git命令免确认直接执行
+    rm_skip_confirm: bool = False    # True=rm命令免确认直接执行
+
     # 已Read过的本地文件集合（write使用）
     read_files: set = field(default_factory=set)
 

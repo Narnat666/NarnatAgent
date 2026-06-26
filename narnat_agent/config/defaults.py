@@ -2,6 +2,10 @@
 默认配置常量 —— 压缩prompt模板、阈值等
 """
 
+# ── 安全确认默认值 ──
+DEFAULT_GIT_SKIP = False   # git 命令默认不免确认（即需要二次确认）
+DEFAULT_RM_SKIP = False     # rm 命令默认不免确认（即需要二次确认）
+
 # ── 上下文压缩阈值 ──
 WARN_TURN_1 = 50    # 提示对话已50轮
 WARN_TURN_2 = 80   # 提示已80轮，建议开新对话

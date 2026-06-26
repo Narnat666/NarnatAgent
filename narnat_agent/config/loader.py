@@ -18,6 +18,7 @@ from .defaults import (
     CONFIG_SUBDIR, DATA_SUBDIR, LOGS_SUBDIR,
     DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL,
     WARN_TURN_1, WARN_TURN_2, COMPRESS_TURN,
+    DEFAULT_GIT_SKIP, DEFAULT_RM_SKIP,
 )
 
 
@@ -87,6 +88,8 @@ class AppConfig:
     ignore_dirs: List[str] = field(default_factory=lambda: list(_DEFAULT_IGNORE_DIRS))
     ssh_max_sessions: int = 5
     llm_retry_count: int = 3
+    git_skip_confirm: bool = DEFAULT_GIT_SKIP
+    rm_skip_confirm: bool = DEFAULT_RM_SKIP
 
 
 def _is_nuitka_onefile() -> bool:
@@ -348,4 +351,6 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
         ignore_dirs=data.get("忽略目录", list(_DEFAULT_IGNORE_DIRS)),
         ssh_max_sessions=int(data.get("SSH最大会话数", 5)),
         llm_retry_count=int(data.get("LLM重试次数", 3)),
+        git_skip_confirm=bool(data.get("git免确认", DEFAULT_GIT_SKIP)),
+        rm_skip_confirm=bool(data.get("rm免确认", DEFAULT_RM_SKIP)),
     )

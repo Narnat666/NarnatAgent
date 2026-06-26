@@ -97,6 +97,8 @@ class Agent:
             ui_callback=TodoCallbacks.on_todo_update,
             api_keys=self._config.api_keys,
             ignore_dirs=self._config.ignore_dirs,
+            git_skip_confirm=self._config.git_skip_confirm,
+            rm_skip_confirm=self._config.rm_skip_confirm,
         )
 
         # 初始化子模块
