@@ -12,24 +12,23 @@ WARN_TURN_2 = 80   # 提示已80轮，建议开新对话
 COMPRESS_TURN = 100  # 强制压缩
 
 # ── 基础Prompt模板 ──
-BASE_PROMPT_TEMPLATE = """你是 {model}，一个协助软件工程任务的代码智能体。
-
-# 环境
-
-- 工作目录：{cwd} | 平台：{platform} | Shell：{shell}
-- 路径均相对工作目录，工具返回相对路径直接使用，禁止编造绝对路径。"""
+BASE_PROMPT_TEMPLATE = """\
+| 身份 | {model} |
+| 环境 | narnat agent |
+| 任务 | 解难 |
+| 工作目录 | {cwd} |
+| 平台 | {platform} |
+"""
 
 # ── 压缩Prompt模板 ──
-COMPRESS_PROMPT = """Please create a comprehensive summary of this conversation that captures all essential experience and outcomes. The summary MUST include:
+COMPRESS_PROMPT = """直接输出本轮对话核心经验总结，作为下一新会话的基础。必须包含：
 
-1. User's original request and ongoing goals
-2. All completed work and their outcomes (files modified, commands executed, results obtained)
-3. Unfinished tasks and next steps
-4. Key decisions made and their reasoning
-5. Important file paths, code snippets, and technical details referenced
-6. Any errors encountered and their resolutions
-
-This summary will serve as the foundation for the next session, enabling it to build upon all experience gained in this conversation."""
+1. 用户原始请求与当前目标
+2. 已完成工作及结果（涉及文件、执行命令、实际产出）
+3. 未完成任务及下一步计划
+4. 关键决策及原因
+5. 核心技术细节（文件路径、关键代码段）
+6. 遇到的错误及解决方案"""
 
 # ── .narnat 目录名 ──
 NARNAT_DIR = ".narnat"

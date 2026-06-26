@@ -23,23 +23,24 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Edit",
-        "description": "Edit file. Line mode: Edit(file, line_start, line_end, new_string) replace line range. String mode: Edit(file, old_string, new_string) exact match replace. When remote=True, edit remote file via SFTP",
+        "description": "编辑文件（字符串替换或行替换）",
         "parameters": {
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "File path (absolute or relative to working directory)"},
-                "old_string": {"type": "string", "description": "Text to replace (string mode, must match exactly)"},
-                "new_string": {"type": "string", "description": "Replacement text"},
-                "replace_all": {"type": "boolean", "description": "Replace all matches (string mode, default replaces first only)"},
-                "line_start": {"type": "integer", "description": "Start line (line mode, 1-based)"},
-                "line_end": {"type": "integer", "description": "End line (line mode, inclusive; 0 or omit equals line_start)"},
-                "remote": {"type": "boolean", "description": "Edit remote file via SFTP (requires prior Terminal connect)"},
-                "host": {"type": "string", "description": "Remote host IP (only used when remote=True)"},
+                "file_path": {"type": "string", "description": "文件路径（绝对或相对）"},
+                "old_string": {"type": "string", "description": "待替换文本"},
+                "new_string": {"type": "string", "description": "替换文本"},
+                "replace_all": {"type": "boolean", "description": "是否替换全部匹配（默认否）"},
+                "line_start": {"type": "integer", "description": "起始行（默认不启用，≥1启用，含本行）"},
+                "line_end": {"type": "integer", "description": "结束行（含本行）"},
+                "remote": {"type": "boolean", "description": "是否编辑远程（默认否，启用前需先Terminal连接）"},
+                "host": {"type": "string", "description": "远程主机IP（默认空，需启用remote）"},
             },
             "required": ["file_path"],
         },
     },
 }
+
 
 
 def execute(file_path: str, old_string: str = "", new_string: str = "",

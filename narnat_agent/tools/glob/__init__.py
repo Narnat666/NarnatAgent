@@ -12,18 +12,20 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Glob",
-        "description": "Search files by name pattern recursively in all subdirectories, e.g. *.py. Results truncated to 500 by default, truncation notice returned when exceeded, increase max_results for full list",
+        "description": '按模式匹配文件。例："*.h"、"src/**/*.cpp"。返回匹配的文件路径，按修改时间排序。',
         "parameters": {
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "Glob pattern, e.g. *.py. Avoid **/*.py unless you are certain there are very few files"},
-                "path": {"type": "string", "description": "Root directory to search. Omit for current working directory"},
-                "max_results": {"type": "integer", "description": "Max result count, default 500. Must be a positive integer"},
+                "pattern": {"type": "string", "description": "Glob模式"},
+                "path": {"type": "string", "description": "搜索目录（默认当前）"},
+                "max_results": {"type": "integer", "description": "最大结果数（默认500）"},
             },
             "required": ["pattern"],
         },
     },
 }
+
+
 
 
 def execute(pattern: str, path: str = "", max_results: int = 500, _tool_context=None) -> str:

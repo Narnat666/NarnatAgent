@@ -7,7 +7,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "TodoWrite",
-        "description": "Create and manage a structured task list to track progress in current coding session. Required for complex multi-step tasks. At most 1 task in_progress at any time",
+        "description": "创建并管理任务列表跟踪进度（同时刻最多1个in_progress）",
         "parameters": {
             "type": "object",
             "properties": {
@@ -16,29 +16,24 @@ DEFINITION = {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "content": {
-                                "type": "string",
-                                "description": "Task description in imperative mood, e.g. 'Run tests'",
-                            },
-                            "activeForm": {
-                                "type": "string",
-                                "description": "Progressive form displayed during execution, e.g. 'Running tests'",
-                            },
+                            "content": {"type": "string", "description": "任务描述（祈使句，如'运行测试'）"},
+                            "activeForm": {"type": "string", "description": "执行时的进行时描述（如'正在运行测试'）"},
                             "status": {
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "completed"],
-                                "description": "Task status",
+                                "description": "任务状态",
                             },
                         },
                         "required": ["content", "status", "activeForm"],
                     },
-                    "description": "Task list",
+                    "description": "任务列表",
                 },
             },
             "required": ["todos"],
         },
     },
 }
+
 
 
 def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:

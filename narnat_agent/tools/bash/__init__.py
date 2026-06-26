@@ -43,14 +43,14 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Shell",
-        "description": f"Execute shell commands. Syntax: {__import__('sys').platform}. Forbidden for file operations. Output truncated to 2000 chars by default, truncation notice returned when exceeded, increase max_output_chars for full output",
+        "description": f"在{__import__('sys').platform}执行命令",
         "parameters": {
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": f"Shell command (syntax: {__import__('sys').platform})"},
-                "timeout": {"type": "integer", "description": "Timeout in seconds, default 120, max 600"},
-                "run_in_background": {"type": "boolean", "description": "Run in background"},
-                "max_output_chars": {"type": "integer", "description": "Max output chars, default 2000. Must be a positive integer"},
+                "command": {"type": "string", "description": "命令"},
+                "timeout": {"type": "integer", "description": "超时秒数（默认120，上限600）"},
+                "run_in_background": {"type": "boolean", "description": "是否后台运行（默认否）"},
+                "max_output_chars": {"type": "integer", "description": "最大输出字符数（默认2000）"},
             },
             "required": ["command"],
         },

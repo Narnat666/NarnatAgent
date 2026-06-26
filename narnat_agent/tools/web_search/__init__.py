@@ -23,12 +23,12 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "WebSearch",
-        "description": "Web search for API docs, solutions, tech articles.",
+        "description": "网页搜索（用于查找API文档、解决方案、技术文章等）",
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query"},
-                "num": {"type": "integer", "description": "Number of results, default 5"},
+                "query": {"type": "string", "description": "搜索查询词"},
+                "num": {"type": "integer", "description": "返回结果数量（默认5）"},
             },
             "required": ["query"],
         },

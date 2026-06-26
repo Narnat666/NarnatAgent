@@ -9,19 +9,20 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Write",
-        "description": "Create new file or overwrite entirely. Prefer Edit for modifying existing files. When remote=True, write remote file via SFTP",
+        "description": "创建新文件或全量覆盖文件",
         "parameters": {
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "File path (absolute or relative to working directory)"},
-                "content": {"type": "string", "description": "Full file content"},
-                "remote": {"type": "boolean", "description": "Write remote file via SFTP (requires prior Terminal connect)"},
-                "host": {"type": "string", "description": "Remote host IP (only used when remote=True)"},
+                "file_path": {"type": "string", "description": "文件路径（绝对或相对）"},
+                "content": {"type": "string", "description": "完整文件内容"},
+                "remote": {"type": "boolean", "description": "是否写入远程文件（默认否，启用前需先Terminal连接）"},
+                "host": {"type": "string", "description": "远程主机IP（默认空，需启用remote）"},
             },
             "required": ["file_path", "content"],
         },
     },
 }
+
 
 
 def execute(file_path: str, content: str,

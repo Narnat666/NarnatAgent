@@ -11,20 +11,23 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Read",
-        "description": "Read file content with line numbers. Default max 2000 lines and 128KB total output, truncated with notice if exceeded. limit must be > 0. Use offset+limit to read in chunks. When remote=True, read remote file via SFTP",
+        "description": "读取文件内容，返还内容带行号（由1开始）",
         "parameters": {
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "File path (absolute or relative to working directory)"},
-                "offset": {"type": "integer", "description": "Starting line (1-based). Omit to read from beginning"},
-                "limit": {"type": "integer", "description": "Max lines, must be > 0, default 2000"},
-                "remote": {"type": "boolean", "description": "Read remote file via SFTP (requires prior Terminal connect)"},
-                "host": {"type": "string", "description": "Remote host IP (only used when remote=True)"},
+                "file_path": {"type": "string", "description": "文件路径（绝对或相对）"},
+                "offset": {"type": "integer", "description": "起始行（默认1，含本行）"},
+                "limit": {"type": "integer", "description": "读取行数（默认2000，上限受128KB输出限制）"},
+                "remote": {"type": "boolean", "description": "是否读取远程（默认否，启用前需先Terminal连接）"},
+                "host": {"type": "string", "description": "远程主机IP（默认空，需启用remote）"},
             },
             "required": ["file_path"],
         },
     },
 }
+
+
+
 
 
 def execute(file_path: str, offset: int = 0, limit: int = 2000,
