@@ -27,9 +27,6 @@ DEFINITION = {
 }
 
 
-
-
-
 def execute(file_path: str, offset: int = 0, limit: int = 2000,
             remote: bool = False, host: str = "",
             _tool_context=None) -> str:
@@ -47,11 +44,12 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
     Returns:
         带行号的文件内容字符串，格式 "  行号→内容"
     """
-    # AI可能传字符串类型的数值参数，确保类型正确
-    offset = int(offset) if offset else 0
-    limit = int(limit) if limit else 0
+    # AI可能传字符串类型的数值参数，确保类型正确并处理None
+    offset = int(offset) if offset is not None else 0
+    limit = int(limit) if limit is not None else 2000
     if limit <= 0:
         return "错误: limit必须>0"
+    
     remote = bool(remote)
     if remote:
         from ..terminal.remote import remote_read
@@ -59,44 +57,62 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
         if "错误" not in result and _tool_context:
             _tool_context.mark_remote_read(file_path, host)
         return result
+        
     if not os.path.isfile(file_path):
         return f"错误: 文件不存在: {file_path}"
 
+    # 统一转为绝对路径，供 _tool_context 标记和校验
+    abs_path = os.path.abspath(file_path)
+
     # 标记文件已被Read（供Write检查）
     if _tool_context:
-        _tool_context.mark_read(file_path)
+        _tool_context.mark_read(abs_path)
 
     try:
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
+            start = max(offset - 1, 0) if offset > 0 else 0
+            
+            # 流式跳过 offset 行，避免大文件内存溢出
+            for _ in range(start):
+                if not f.readline():
+                    break
+            
+            # 按需读取 limit 行
+            result = []
+            char_count = 0
+            truncated_by_size = False
+            truncated_by_limit = False
+            
+            for i in range(limit):
+                line = f.readline()
+                if not line:
+                    break  # 文件结束
+                
+                line_num = start + i + 1
+                content = line.rstrip("\n\r")
+                formatted = f"  {line_num}→{content}"
+                char_count += len(formatted) + 1  # +1 for \n
+                
+                if char_count > MAX_OUTPUT_CHARS:
+                    truncated_by_size = True
+                    break
+                
+                result.append(formatted)
+            else:
+                # for...else: 循环正常结束（没有 break），说明读完了 limit 行
+                # 此时再尝试读一行，如果非空，说明文件还有内容，被 limit 截断了
+                if f.readline():
+                    truncated_by_limit = True
+
     except PermissionError:
         return f"错误: 权限不足: {file_path}"
     except OSError as e:
         return f"错误: 读取失败: {e}"
 
-    # 应用offset/limit
-    total_lines = len(lines)
-    start = max(offset - 1, 0) if offset > 0 else 0
-    lines = lines[start:start + limit]
-
-    # 格式化输出，同时检查总字符数
-    result = []
-    char_count = 0
-    truncated_by_size = False
-    for i, line in enumerate(lines):
-        line_num = start + i + 1
-        content = line.rstrip("\n\r")
-        formatted = f"  {line_num}→{content}"
-        char_count += len(formatted) + 1  # +1 for \n
-        if char_count > MAX_OUTPUT_CHARS:
-            truncated_by_size = True
-            break
-        result.append(formatted)
-
-    # 截断提示（优先报字符数截断）
+    # 截断提示
     if truncated_by_size:
         result.append(f"  ... [输出截断: 已达 {MAX_OUTPUT_CHARS // 1024}KB 上限。使用 offset/limit 参数可读取其余部分]")
-    elif len(lines) > 0 and start + len(lines) < total_lines:
-        result.append(f"  ... [截断: 文件共 {total_lines} 行，已显示 {len(lines)} 行。使用 offset/limit 参数可读取其余部分]")
+    elif truncated_by_limit:
+        result.append(f"  ... [截断: 已显示 {limit} 行。使用 offset={start + limit + 1} 参数可读取其余部分]")
 
     return "\n".join(result)
