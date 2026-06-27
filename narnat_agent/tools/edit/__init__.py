@@ -1,6 +1,6 @@
 """Edit工具 —— 精确修改文件内容
 
-支持两种模式:
+支持两种模式（互斥）:
 1. 行号范围替换: Edit(file_path, line_start, line_end, new_string)
    - 替换 [line_start, line_end] 行（含两端）为 new_string
    - 省略 line_end 则只替换 line_start 一行
@@ -9,9 +9,9 @@
 2. 字符串精确替换: Edit(file_path, old_string, new_string)
    - old_string 必须精确匹配文件内容
    - replace_all=True 替换所有匹配
+   - 自动兼容 \r\n 和 \n 换行符
 
-行号模式更高效：Read → Edit(file, line_start, line_end, new_string)
-省掉中间的 old_string 拷贝步骤。
+注意: line_start 和 old_string 不能同时使用，需选择一种模式。
 """
 
 import os
@@ -23,16 +23,16 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Edit",
-        "description": "编辑文件（字符串替换或行替换）",
+        "description": "编辑文件（字符串替换或行替换，两种模式互斥）",
         "parameters": {
             "type": "object",
             "properties": {
                 "file_path": {"type": "string", "description": "文件路径（绝对或相对）"},
-                "old_string": {"type": "string", "description": "待替换文本"},
+                "old_string": {"type": "string", "description": "待替换文本（字符串模式）"},
                 "new_string": {"type": "string", "description": "替换文本"},
-                "replace_all": {"type": "boolean", "description": "是否替换全部匹配（默认否）"},
-                "line_start": {"type": "integer", "description": "起始行（默认不启用，≥1启用，含本行）"},
-                "line_end": {"type": "integer", "description": "结束行（含本行）"},
+                "replace_all": {"type": "boolean", "description": "是否替换全部匹配（字符串模式，默认否）"},
+                "line_start": {"type": "integer", "description": "起始行（行号模式，默认不启用，≥1启用，含本行）"},
+                "line_end": {"type": "integer", "description": "结束行（含本行，默认等于line_start）"},
                 "remote": {"type": "boolean", "description": "是否编辑远程（默认否，启用前需先Terminal连接）"},
                 "host": {"type": "string", "description": "远程主机IP（默认空，需启用remote）"},
             },
@@ -40,7 +40,6 @@ DEFINITION = {
         },
     },
 }
-
 
 
 def execute(file_path: str, old_string: str = "", new_string: str = "",
@@ -73,45 +72,73 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
     line_end = int(line_end) if line_end else 0
     replace_all = bool(replace_all)
     remote = bool(remote)
+
     if remote:
         from ..terminal.remote import remote_edit
         return remote_edit(file_path, old_string, new_string, replace_all,
                           line_start, line_end, host)
+
     if not os.path.isfile(file_path):
         return (f"错误: 文件不存在: {file_path}，如需创建请用Write工具", "")
 
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, "r", encoding="utf-8", newline='') as f:
             content = f.read()
     except PermissionError:
         return (f"错误: 权限不足: {file_path}", "")
     except OSError as e:
         return (f"错误: 读取失败: {e}", "")
 
+    # ── 参数互斥检查 ──
+    has_line_mode = line_start > 0
+    has_string_mode = bool(old_string)
+
+    if has_line_mode and has_string_mode:
+        return ("错误: line_start 和 old_string 不能同时使用，请选择一种模式:\n"
+                "  - 行号模式: line_start + new_string\n"
+                "  - 字符串模式: old_string + new_string", "")
+
+    if has_line_mode and replace_all:
+        return ("错误: replace_all 仅用于字符串模式，行号模式不支持", "")
+
     # ── 行号模式 ──
-    if line_start > 0:
+    if has_line_mode:
         return _edit_by_lines(content, file_path, line_start, line_end, new_string)
 
     # ── 字符串模式 ──
+    return _edit_by_string(content, old_string, new_string, replace_all, file_path)
+
+
+def _edit_by_string(content: str, old_string: str, new_string: str,
+                    replace_all: bool, file_path: str) -> tuple:
+    """字符串精确替换，自动兼容换行符"""
     if not old_string:
         return ("错误: old_string不能为空（或使用line_start行号模式）", "")
 
-    count = content.count(old_string)
+    # 检测文件换行符风格，转换 old_string 以匹配
+    has_crlf = '\r\n' in content
+    if has_crlf:
+        # 文件是 CRLF，确保 old_string 也用 CRLF
+        # 先把 \r\n 替换成占位符，再把 \n 替换成 \r\n，最后还原占位符
+        old_string_normalized = old_string.replace('\r\n', '\x00').replace('\n', '\r\n').replace('\x00', '\r\n')
+    else:
+        # 文件是 LF，确保 old_string 也用 LF
+        old_string_normalized = old_string.replace('\r\n', '\n').replace('\r', '\n')
+
+    count = content.count(old_string_normalized)
     if count == 0:
         hint = _find_similar(content, old_string)
         return (f"错误: 未找到匹配文本。请先Read确认文件内容。\n{hint}", "")
 
     if count > 1 and not replace_all:
-        return ((f"错误: 找到{count}处匹配，old_string不唯一。"
-                 f"请扩大上下文使其唯一，或设置replace_all=True"), "")
+        return (f"错误: 找到{count}处匹配，old_string不唯一。请扩大上下文使其唯一，或设置replace_all=True", "")
 
     if replace_all:
-        new_content = content.replace(old_string, new_string)
+        new_content = content.replace(old_string_normalized, new_string)
     else:
-        new_content = content.replace(old_string, new_string, 1)
+        new_content = content.replace(old_string_normalized, new_string, 1)
 
-    return _write_and_diff(content, new_content, file_path,
-                           count if replace_all else 1)
+    return _write_and_diff(content, new_content, file_path, count if replace_all else 1)
 
 
 def _edit_by_lines(content: str, file_path: str,
@@ -125,6 +152,8 @@ def _edit_by_lines(content: str, file_path: str,
         line_end = line_start
 
     # 边界检查
+    if total == 0:
+        return ("错误: 文件为空，无法按行号编辑", "")
     if line_start < 1 or line_start > total:
         return (f"错误: line_start={line_start} 超出范围（1-{total}）", "")
     if line_end < line_start:
@@ -134,8 +163,12 @@ def _edit_by_lines(content: str, file_path: str,
 
     # 构造新内容
     new_lines = new_string.splitlines(keepends=True)
+
+    # 如果 new_string 非空且不以换行符结尾，需要为最后一行添加换行符
+    # 使用原文件的换行符风格
     if new_string and not new_string.endswith("\n"):
-        new_lines[-1] = new_lines[-1] + _detect_line_ending(content)
+        line_ending = _detect_line_ending(content)
+        new_lines[-1] = new_lines[-1] + line_ending
 
     # 替换 [line_start-1, line_end) 范围的行
     new_content_lines = lines[:line_start - 1] + new_lines + lines[line_end:]
@@ -163,7 +196,7 @@ def _write_and_diff(old_content: str, new_content: str, file_path: str,
         - color_diff: 着色diff，传给终端展示；空串表示无差异
     """
     try:
-        with open(file_path, "w", encoding="utf-8") as f:
+        with open(file_path, "w", encoding="utf-8", newline='') as f:
             f.write(new_content)
     except OSError as e:
         return (f"错误: 写入失败: {e}", "")
