@@ -23,11 +23,8 @@ _RE_DELETE = re.compile(
 # 匹配 git 命令的简单正则（出现 git 即命中）
 _RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
 
-# PowerShell CLIXML 噪音正则（模块加载进度记录，对AI无意义）
-_RE_CLIXML = re.compile(
-    r'#<\s*CLIXML\s*\n.*?</Objs>',
-    re.DOTALL,
-)
+_EXITCODE_MARKER = "__EXIT_b3f7__"
+_RE_EXITCODE = re.compile(rf"(?:^|\n){_EXITCODE_MARKER}:(\d+)\s*$")
 
 # 后台进程注册表 {pid: (proc, start_time)}
 _background_procs: dict = {}
@@ -93,11 +90,14 @@ def _decode_output(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _strip_clixml(text: str) -> str:
-    """清洗PowerShell CLIXML噪音（模块加载进度记录，对AI无意义，仅输出优化）"""
-    text = _RE_CLIXML.sub("", text)
-    text = re.sub(r'\n{3,}', '\n\n', text)  # 压缩多余空行
-    return text.strip()
+def _extract_exitcode(text: str) -> tuple[str, int | None]:
+    """从输出末尾提取__EXIT_b3f7__:N，返回(清洗后文本, 退出码)"""
+    m = _RE_EXITCODE.search(text)
+    if m:
+        code = int(m.group(1))
+        cleaned = text[:m.start()].rstrip("\n")
+        return cleaned, code
+    return text, None
 
 
 def _kill_proc_tree(proc: subprocess.Popen):
@@ -187,7 +187,13 @@ def execute(
         ps = _find_executable("pwsh", "powershell")
         if ps is None:
             return "错误: 未找到PowerShell，请安装后重试"
-        full_cmd = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + command
+        full_cmd = (
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+            f"$__ec = 0; "
+            f"try {{ & {{ {command}\n}} 2>&1 | ForEach-Object {{ if($_ -is [System.Management.Automation.ErrorRecord]){{ $_.ToString() }}else{{ $_ }} }} }} "
+            f"catch {{ Write-Output $_.ToString(); $__ec = 1 }} "
+            f"finally {{ if($LASTEXITCODE){{ $__ec = $LASTEXITCODE }}elseif(!$?){{ $__ec = 1 }} ; Write-Output \"{_EXITCODE_MARKER}:$__ec\" }}"
+        )
         encoded = base64.b64encode(full_cmd.encode("utf-16-le")).decode("ascii")
         shell_cmd = [ps, "-NoProfile", "-EncodedCommand", encoded]
     else:
@@ -204,12 +210,13 @@ def execute(
 
     # 前台运行模式
     # Unix: 用新进程组，确保能killpg杀整棵树
+    is_win = sys.platform == "win32"
     popen_kwargs = {
         "stdout": subprocess.PIPE,
-        "stderr": subprocess.PIPE,
+        "stderr": subprocess.PIPE if not is_win else subprocess.DEVNULL,
         "cwd": os.getcwd(),
     }
-    if sys.platform != "win32":
+    if not is_win:
         popen_kwargs["start_new_session"] = True
 
     try:
@@ -240,9 +247,12 @@ def execute(
                 pass
 
         t_out = threading.Thread(target=_reader, args=(proc.stdout, stdout_chunks), daemon=True)
-        t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_chunks), daemon=True)
-        t_out.start()
-        t_err.start()
+        threads = [t_out]
+        if not is_win:
+            t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_chunks), daemon=True)
+            threads.append(t_err)
+        for t in threads:
+            t.start()
 
         deadline = time.time() + timeout_sec
         timed_out = False
@@ -254,46 +264,73 @@ def execute(
             time.sleep(0.05)
 
         # 等待读取线程结束
-        t_out.join(timeout=5.0)
-        t_err.join(timeout=5.0)
+        for t in threads:
+            t.join(timeout=5.0)
 
         stdout = b"".join(stdout_chunks)
-        stderr = b"".join(stderr_chunks)
+        stderr = b"".join(stderr_chunks) if not is_win else b""
 
         # ESC打断检查（优先级最高，kill_active已在外部调用）
         global _interrupted
         if _interrupted:
             _interrupted = False
-            out = _decode_output(stdout)
-            err = _strip_clixml(_decode_output(stderr))
-            parts = []
-            if out.strip():
-                parts.append(out.strip())
-            if err.strip():
-                parts.append(f"[stderr]\n{err.strip()}")
-            parts.append("[用户中断]")
+            if is_win:
+                out, exitcode = _extract_exitcode(_decode_output(stdout))
+                final_code = exitcode if exitcode else proc.returncode
+                parts = []
+                if out.strip():
+                    parts.append(out.strip())
+                parts.append("[用户中断]")
+                parts.append(f"[exit code: {final_code}]")
+            else:
+                out = _decode_output(stdout)
+                err = _decode_output(stderr)
+                parts = []
+                if out.strip():
+                    parts.append(out.strip())
+                if err.strip():
+                    parts.append(f"[stderr]\n{err.strip()}")
+                parts.append("[用户中断]")
             return _truncate_output("\n".join(parts), max_output_chars)
 
         if timed_out:
+            _kill_proc_tree(proc)
+            proc.wait(timeout=5)
+            if is_win:
+                out, exitcode = _extract_exitcode(_decode_output(stdout))
+                final_code = exitcode if exitcode else proc.returncode
+                parts = []
+                if out.strip():
+                    parts.append(out.strip())
+                parts.append(f"[超时: 命令执行超过{timeout_sec:.0f}秒，已终止]")
+                parts.append(f"[exit code: {final_code}]")
+            else:
+                out = _decode_output(stdout)
+                err = _decode_output(stderr)
+                parts = []
+                if out.strip():
+                    parts.append(out.strip())
+                if err.strip():
+                    parts.append(f"[stderr]\n{err.strip()}")
+                parts.append(f"[超时: 命令执行超过{timeout_sec:.0f}秒，已终止]")
+            return _truncate_output("\n".join(parts), max_output_chars)
+
+        if is_win:
+            out, exitcode = _extract_exitcode(_decode_output(stdout))
+            final_code = exitcode if exitcode else proc.returncode
+            parts = []
+            if out.strip():
+                parts.append(out.strip())
+            parts.append(f"[exit code: {final_code}]")
+        else:
             out = _decode_output(stdout)
-            err = _strip_clixml(_decode_output(stderr))
+            err = _decode_output(stderr)
             parts = []
             if out.strip():
                 parts.append(out.strip())
             if err.strip():
                 parts.append(f"[stderr]\n{err.strip()}")
-            parts.append(f"[超时: 命令执行超过{timeout_sec:.0f}秒，进程仍在运行]")
-            return _truncate_output("\n".join(parts), max_output_chars)
-
-        out = _decode_output(stdout)
-        err = _strip_clixml(_decode_output(stderr))
-
-        parts = []
-        if out.strip():
-            parts.append(out.strip())
-        if err.strip():
-            parts.append(f"[stderr]\n{err.strip()}")
-        parts.append(f"[exit code: {proc.returncode}]")
+            parts.append(f"[exit code: {proc.returncode}]")
 
         return _truncate_output("\n".join(parts), max_output_chars)
     finally:
