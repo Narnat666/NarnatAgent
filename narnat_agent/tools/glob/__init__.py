@@ -14,7 +14,7 @@ DEFINITION = {
         "parameters": {
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "Glob模式，如 **/*.py 或 src/*.cpp"},
+                "pattern": {"type": "string", "description": "Glob模式（支持 * ? [] ** 通配符）"},
                 "path": {"type": "string", "description": "搜索目录（默认当前目录）"},
                 "max_results": {"type": "integer", "description": "最大结果数（默认500）"},
             },
