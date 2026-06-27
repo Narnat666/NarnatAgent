@@ -60,6 +60,11 @@ class ToolDispatcher:
 
         三组之间串行执行：只读 → 写入 → 串行，保证写入看到最新文件状态。
         """
+        # 计划优先拦截
+        blocked = self._check_plan_required(tool_calls)
+        if blocked is not None:
+            return blocked
+
         # 解析所有tool_call
         parsed: List[Tuple[str, str, dict]] = []
         for tc in tool_calls:
@@ -241,6 +246,44 @@ class ToolDispatcher:
                 break
             result = self._run_single(tc_id, name, arguments, stream)
             results[idx] = (tc_id, result)
+
+    def _check_plan_required(self, tool_calls: List[Dict[str, Any]]) -> Optional[List[Tuple[str, str]]]:
+        """计划优先拦截：require_plan开启时，非TodoWrite工具需先有in_progress的todo"""
+        ctx = self._tool_context
+        if not ctx.require_plan:
+            return None
+
+        non_todo_names = []
+        non_todo_ids = []
+        for tc in tool_calls:
+            name = tc["function"]["name"]
+            if name != "TodoWrite":
+                non_todo_names.append(name)
+                non_todo_ids.append(tc["id"])
+
+        if not non_todo_names:
+            return None
+
+        if len(non_todo_names) < ctx.min_tools:
+            return None
+
+        has_active = any(
+            t.get("status") == "in_progress"
+            for t in ctx.current_todos
+        )
+        if has_active:
+            return None
+
+        if self._logger:
+            self._logger.info("dispatcher", f"计划优先拦截: {non_todo_names}")
+        hint = (
+            f"计划优先模式已开启：请先使用TodoWrite制定计划（至少1项in_progress），"
+            f"再执行其他工具。当前尝试调用的工具: {', '.join(non_todo_names)}"
+        )
+        results = []
+        for i, tc_id in enumerate(non_todo_ids):
+            results.append((tc_id, hint if i == 0 else "计划优先拦截，详见上方"))
+        return results
 
     def _show_tool_call(self, name: str, arguments: dict):
         """在终端显示工具调用摘要"""

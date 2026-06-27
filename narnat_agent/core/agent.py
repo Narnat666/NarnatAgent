@@ -99,6 +99,8 @@ class Agent:
             ignore_dirs=self._config.ignore_dirs,
             git_skip_confirm=self._config.git_skip_confirm,
             rm_skip_confirm=self._config.rm_skip_confirm,
+            require_plan=self._config.require_plan,
+            min_tools=self._config.min_tools,
         )
 
         # 初始化子模块

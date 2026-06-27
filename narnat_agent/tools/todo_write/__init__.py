@@ -7,7 +7,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "TodoWrite",
-        "description": "创建并管理任务列表跟踪进度（同时刻最多1个in_progress）",
+        "description": "创建并管理任务列表（同时刻最多1个in_progress）。做任务前，优先使用此工具与用户同步计划",
         "parameters": {
             "type": "object",
             "properties": {
@@ -69,5 +69,9 @@ def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
     # 通知UI更新
     if _tool_context and _tool_context.ui_callback:
         _tool_context.ui_callback(todos)
+
+    # 同步todo状态到上下文（供计划优先拦截使用）
+    if _tool_context is not None:
+        _tool_context.current_todos = list(todos)
 
     return f"任务列表已更新({len(todos)}项)"

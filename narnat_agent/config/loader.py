@@ -19,6 +19,7 @@ from .defaults import (
     DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL,
     WARN_TURN_1, WARN_TURN_2, COMPRESS_TURN,
     DEFAULT_GIT_SKIP, DEFAULT_RM_SKIP,
+    DEFAULT_REQUIRE_PLAN, DEFAULT_MIN_TOOLS,
 )
 
 
@@ -90,6 +91,8 @@ class AppConfig:
     llm_retry_count: int = 3
     git_skip_confirm: bool = DEFAULT_GIT_SKIP
     rm_skip_confirm: bool = DEFAULT_RM_SKIP
+    require_plan: bool = DEFAULT_REQUIRE_PLAN
+    min_tools: int = DEFAULT_MIN_TOOLS
 
 
 def _is_nuitka_onefile() -> bool:
@@ -353,4 +356,6 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
         llm_retry_count=int(data.get("LLM重试次数", 3)),
         git_skip_confirm=bool(data.get("git免确认", DEFAULT_GIT_SKIP)),
         rm_skip_confirm=bool(data.get("rm免确认", DEFAULT_RM_SKIP)),
+        require_plan=bool(data.get("计划优先", DEFAULT_REQUIRE_PLAN)),
+        min_tools=int(data.get("计划最低工具数", DEFAULT_MIN_TOOLS)),
     )
