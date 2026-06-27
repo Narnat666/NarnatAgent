@@ -45,7 +45,8 @@ DEFINITION = {
 def execute(file_path: str, old_string: str = "", new_string: str = "",
             replace_all: bool = False,
             line_start: int = 0, line_end: int = 0,
-            remote: bool = False, host: str = "") -> tuple:
+            remote: bool = False, host: str = "",
+            _tool_context=None) -> tuple:
     """
     修改文件内容。
 
@@ -81,6 +82,10 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
     if not os.path.isfile(file_path):
         return (f"错误: 文件不存在: {file_path}，如需创建请用Write工具", "")
 
+    abs_path = os.path.abspath(file_path)
+    if _tool_context and not _tool_context.is_read(abs_path):
+        return (f"错误: 编辑前必须先Read该文件: {file_path}", "")
+
     try:
         with open(file_path, "r", encoding="utf-8", newline='') as f:
             content = f.read()
@@ -103,14 +108,14 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
 
     # ── 行号模式 ──
     if has_line_mode:
-        return _edit_by_lines(content, file_path, line_start, line_end, new_string)
+        return _edit_by_lines(content, file_path, line_start, line_end, new_string, _tool_context)
 
-    # ── 字符串模式 ──
-    return _edit_by_string(content, old_string, new_string, replace_all, file_path)
+    return _edit_by_string(content, old_string, new_string, replace_all, file_path, _tool_context)
 
 
 def _edit_by_string(content: str, old_string: str, new_string: str,
-                    replace_all: bool, file_path: str) -> tuple:
+                    replace_all: bool, file_path: str,
+                    _tool_context=None) -> tuple:
     """字符串精确替换，自动兼容换行符"""
     if not old_string:
         return ("错误: old_string不能为空（或使用line_start行号模式）", "")
@@ -138,11 +143,13 @@ def _edit_by_string(content: str, old_string: str, new_string: str,
     else:
         new_content = content.replace(old_string_normalized, new_string, 1)
 
-    return _write_and_diff(content, new_content, file_path, count if replace_all else 1)
+    return _write_and_diff(content, new_content, file_path, count if replace_all else 1,
+                           _tool_context=_tool_context)
 
 
 def _edit_by_lines(content: str, file_path: str,
-                   line_start: int, line_end: int, new_string: str) -> tuple:
+                   line_start: int, line_end: int, new_string: str,
+                   _tool_context=None) -> tuple:
     """行号范围替换"""
     lines = content.splitlines(keepends=True)
     total = len(lines)
@@ -176,7 +183,7 @@ def _edit_by_lines(content: str, file_path: str,
 
     replaced_count = line_end - line_start + 1
     return _write_and_diff(content, new_content, file_path, replaced_count,
-                           f"行{line_start}-{line_end}")
+                           f"行{line_start}-{line_end}", _tool_context=_tool_context)
 
 
 def _detect_line_ending(content: str) -> str:
@@ -187,7 +194,8 @@ def _detect_line_ending(content: str) -> str:
 
 
 def _write_and_diff(old_content: str, new_content: str, file_path: str,
-                    count: int, range_desc: str = "") -> tuple:
+                    count: int, range_desc: str = "",
+                    _tool_context=None) -> tuple:
     """写回文件并生成diff。
 
     Returns:
@@ -200,6 +208,9 @@ def _write_and_diff(old_content: str, new_content: str, file_path: str,
             f.write(new_content)
     except OSError as e:
         return (f"错误: 写入失败: {e}", "")
+
+    if _tool_context:
+        _tool_context.mark_read(file_path)
 
     diff = _make_diff(old_content, new_content, file_path)
     if range_desc:
