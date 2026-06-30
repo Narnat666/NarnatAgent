@@ -133,7 +133,7 @@ def show_stats(input_tokens: int, output_tokens: int,
     cs = f"  缓存:{cache / 1000:.1f}k" if cache > 0 else ""
     co = f"  费用:¥{cost:.4f}" if _show_cost and cost > 0 else ""
     ba = f"  余额:¥{balance:.2f}" if _show_balance and balance > 0 else ""
-    _stdout_write(f"  {G}输入:{si} 输出:{so}{cs}{co}{th}  最大输出:{mt}{R}{Y}{ba}{R}\n")
+    _stdout_write(f"  {G}输入:{si} 输出:{so}{cs}{th}  最大输出:{mt}{R}{Y}{co}{ba}{R}\n")
 
 
 # ═══════════════════════════════════════════════════════════════
