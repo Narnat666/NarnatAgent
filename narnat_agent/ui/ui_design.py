@@ -117,7 +117,8 @@ def show_interrupted() -> None:
 
 def show_stats(input_tokens: int, output_tokens: int,
                cache: int = 0, cost: float = 0.0,
-               balance: float = 0.0) -> None:
+               balance: float = 0.0,
+               thinking_effort: str = "高") -> None:
     # 动态从 output 模块读取，确保 apply_style 修改后生效
     from .. import output as _output
     _show_cost = _output.SHOW_COST
@@ -127,11 +128,12 @@ def show_stats(input_tokens: int, output_tokens: int,
     si = f"{input_tokens / 1000:.1f}k" if input_tokens >= 1000 else str(input_tokens)
     so = f"{output_tokens / 1000:.1f}k" if output_tokens >= 1000 else str(output_tokens)
     mt = f"{_max_tokens / 1000:.0f}k" if _max_tokens >= 1000 else str(_max_tokens)
+    th = f"  思考:{thinking_effort}"
     _sep()
     cs = f"  缓存:{cache / 1000:.1f}k" if cache > 0 else ""
     co = f"  费用:¥{cost:.4f}" if _show_cost and cost > 0 else ""
     ba = f"  余额:¥{balance:.2f}" if _show_balance and balance > 0 else ""
-    _stdout_write(f"  {G}输入:{si} 输出:{so}{cs}  最大输出:{mt}{R}{Y}{co}{ba}{R}\n")
+    _stdout_write(f"  {G}输入:{si} 输出:{so}{cs}{co}{th}  最大输出:{mt}{R}{Y}{ba}{R}\n")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -213,11 +215,11 @@ class UIStreamSession:
 
     def finish(self, input_tokens: int = 0, output_tokens: int = 0,
                cache: int = 0, cost: float = 0.0,
-               balance: float = 0.0) -> None:
+               balance: float = 0.0, thinking_effort: str = "高") -> None:
         _interrupt_ctrl.enter_input_mode()  # 立即停止ESC轮询，防止误触发
         self._stop_spinner()
         self._renderer.flush()
-        show_stats(input_tokens, output_tokens, cache, cost, balance)
+        show_stats(input_tokens, output_tokens, cache, cost, balance, thinking_effort)
 
     def abort(self) -> None:
         self._aborted = True  # 标记已打断，防止后台线程resume_spinner重启

@@ -4,6 +4,8 @@
 从agent.py中提取，Agent只负责组装。
 """
 
+import json
+import os
 from typing import Optional, List, Dict, Any, Callable
 
 from ..config.session_store import save_session, load_session, list_sessions, delete_session, format_session_list
@@ -15,11 +17,17 @@ class NarnatSessionCallbacks(SessionCallbacks):
     """会话命令回调实现"""
 
     def __init__(self, narnat_dir: str, get_messages_func: Callable[[], List[Dict[str, Any]]],
-                 context_manager=None):
+                 context_manager=None, config_dir: str = "", thinking_effort_getter: Callable[[], str] = None,
+                 thinking_effort_setter: Callable[[str], None] = None,
+                 thinking_options: dict = None):
         self._narnat_dir = narnat_dir
         self._get_messages = get_messages_func
         self._active_name: Optional[str] = None
         self._context = context_manager
+        self._config_dir = config_dir
+        self._get_thinking_effort = thinking_effort_getter
+        self._set_thinking_effort = thinking_effort_setter
+        self._thinking_options = thinking_options or {"high": "高", "max": "全开"}
 
     def on_save(self, name: str) -> str:
         if not name:
@@ -69,6 +77,42 @@ class NarnatSessionCallbacks(SessionCallbacks):
             return err
         self._get_messages().append({"role": "system", "content": content})
         return ""
+
+    def on_thinking(self, effort: str) -> str:
+        """切换思考强度（配置驱动，effort 为空则查询）"""
+        options = self._thinking_options
+
+        if not effort:
+            current = (self._get_thinking_effort or (lambda: "high"))()
+            current_label = options.get(current, current)
+            return f"当前思考强度: {current_label}"
+
+        effort_lower = effort.strip().lower()
+        if effort_lower not in options:
+            available = " / ".join(options.keys())
+            return f"无效值: {effort_lower}（可用: {available}）"
+
+        # 更新内存中的配置
+        if self._set_thinking_effort:
+            self._set_thinking_effort(effort_lower)
+
+        # 回写 narnat.json
+        if self._config_dir:
+            config_path = os.path.join(self._config_dir, "narnat.json")
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                data["思考强度"] = effort_lower
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+            except Exception:
+                pass
+
+        return f"思考强度已切换为: {options[effort_lower]}"
+
+    def on_list_thinking_options(self) -> list:
+        """返回所有可用的思考强度选项，供Tab补全使用"""
+        return list(self._thinking_options.keys())
 
     def on_exit(self) -> str:
         if not self._active_name:

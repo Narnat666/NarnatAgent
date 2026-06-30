@@ -86,6 +86,10 @@ class Agent:
             self._config.narnat_dir,
             lambda: self._messages,
             context_manager=self._context,
+            config_dir=self._config.config_dir,
+            thinking_effort_getter=lambda: self._config.ai.thinking_effort,
+            thinking_effort_setter=lambda v: setattr(self._config.ai, 'thinking_effort', v),
+            thinking_options=self._config.ai.thinking_options,
         )
         self._ui = UIInterface(self._config.ai.model, callbacks)
 
@@ -113,6 +117,13 @@ class Agent:
 
         # 轮次计数
         self._round = 0
+
+    @property
+    def _thinking_label(self) -> str:
+        """思考强度中文标签（从配置读取）"""
+        return self._config.ai.thinking_options.get(
+            self._config.ai.thinking_effort, self._config.ai.thinking_effort
+        )
 
     def _auto_save_on_exit(self):
         """退出时自动保存已命名的会话"""
@@ -235,6 +246,7 @@ class Agent:
                         stream.finish(
                             self._stats.input_tokens,
                             self._stats.output_tokens,
+                            thinking_effort=self._thinking_label,
                         )
                         return
 
@@ -311,6 +323,7 @@ class Agent:
                     cache=self._stats.cache_tokens,
                     cost=self._stats.cost,
                     balance=self._stats.balance,
+                    thinking_effort=self._thinking_label,
                 )
                 return
 
@@ -324,6 +337,7 @@ class Agent:
                 cache=self._stats.cache_tokens,
                 cost=self._stats.cost,
                 balance=self._stats.balance,
+                thinking_effort=self._thinking_label,
             )
             break
 
@@ -354,6 +368,7 @@ class Agent:
             cache=self._stats.cache_tokens,
             cost=self._stats.cost,
             balance=self._stats.balance,
+            thinking_effort=self._thinking_label,
         )
 
         # 在#提示符下显示确认信息，等待用户输入

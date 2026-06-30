@@ -17,6 +17,7 @@ from .defaults import (
     NARNAT_DIR, NARNAT_JSON, NARNAT_MD, LAST_SESSION_SUMMARY,
     CONFIG_SUBDIR, DATA_SUBDIR, LOGS_SUBDIR,
     DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL,
+    DEFAULT_THINKING_EFFORT,
     WARN_TURN_1, WARN_TURN_2, COMPRESS_TURN,
     DEFAULT_GIT_SKIP, DEFAULT_RM_SKIP,
     DEFAULT_REQUIRE_PLAN, DEFAULT_MIN_TOOLS,
@@ -35,6 +36,8 @@ class AIConfig:
     model: str = DEFAULT_MODEL
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
+    thinking_effort: str = DEFAULT_THINKING_EFFORT      # "high" | "max"
+    thinking_options: dict = field(default_factory=lambda: {"high": "高", "max": "全开"})
 
 
 @dataclass
@@ -215,6 +218,8 @@ def _build_ai_config(data: dict) -> AIConfig:
         model=data.get("模型", data.get("model", DEFAULT_MODEL)),
         temperature=_coerce(data.get("温度", data.get("temperature")), float),
         max_tokens=_coerce(data.get("最大输出token数", data.get("max_tokens")), int),
+        thinking_effort=data.get("思考强度", data.get("thinking_effort", DEFAULT_THINKING_EFFORT)),
+        thinking_options=data.get("思考模式", data.get("thinking_options", {"high": "高", "max": "全开"})),
     )
 
 
@@ -306,6 +311,8 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
                         "接口密钥": DEFAULT_API_KEY,
                         "接口地址": DEFAULT_BASE_URL,
                         "模型": DEFAULT_MODEL,
+                        "思考强度": "high",
+                        "思考模式": {"high": "高", "max": "全开"},
                         "接口密钥组": {"websearch": "", "websearch_url": "https://api.anysearch.com/mcp"},
                     }, f, indent=2, ensure_ascii=False)
                 else:

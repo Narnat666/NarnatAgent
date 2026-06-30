@@ -53,3 +53,4 @@ LAST_SESSION_SUMMARY = "last_session_summary.md"
 DEFAULT_API_KEY = ""
 DEFAULT_BASE_URL = "https://api.deepseek.com/anthropic"
 DEFAULT_MODEL = "deepseek-v4-flash"
+DEFAULT_THINKING_EFFORT = "high"      # high / max

@@ -58,6 +58,14 @@ class SessionCallbacks:
         """返回所有可用技能的名称列表，供Tab补全使用"""
         return []
 
+    def on_thinking(self, effort: str) -> str:
+        """切换思考强度（high/max 或空查询），返回提示文本"""
+        return ""
+
+    def on_list_thinking_options(self) -> list:
+        """返回所有可用的思考强度选项，供Tab补全使用"""
+        return []
+
 
 # ═══════════════════════════════════════════════════════════════
 # Tab 补全
@@ -67,19 +75,21 @@ class _CommandCompleter(Completer):
     """命令补全：/enter /delete 动态补全会话名，/skill 动态补全技能名，其余命令静态补全"""
 
     _COMMANDS = {
-        "/clear":  "清理屏幕",
-        "/save":   "保存当前会话",
-        "/show":   "显示所有会话",
-        "/enter":  "进入历史会话",
-        "/delete": "删除会话",
-        "/skill":  "加载技能",
-        "/exit":   "退出程序",
+        "/clear":    "清理屏幕",
+        "/save":     "保存当前会话",
+        "/show":     "显示所有会话",
+        "/enter":    "进入历史会话",
+        "/delete":   "删除会话",
+        "/skill":    "加载技能",
+        "/thinking": "切换思考强度",
+        "/exit":     "退出程序",
     }
     # 命令→动态补全回调方法名
     _NAME_COMMANDS = {
-        "/enter":  "on_list_names",
-        "/delete": "on_list_names",
-        "/skill":  "on_list_skill_names",
+        "/enter":    "on_list_names",
+        "/delete":   "on_list_names",
+        "/skill":    "on_list_skill_names",
+        "/thinking": "on_list_thinking_options",
     }
 
     def __init__(self, callbacks: SessionCallbacks):
@@ -177,5 +187,9 @@ def _dispatch_command(cmd: str, args: str, cb: SessionCallbacks) -> bool:
             _stdout_write(f"  {X}{result}{R}\n")
         else:
             _stdout_write(f"  {E}已删除: {C}{args}{R}\n")
+        return True
+    if cmd == "thinking":
+        result = cb.on_thinking(args.strip() if args else "")
+        _stdout_write(f"  {C}{result}{R}\n")
         return True
     return False

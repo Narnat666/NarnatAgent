@@ -148,9 +148,12 @@ class _OpenAIBackend:
                     stream=True,
                     stream_options={"include_usage": True},
                     timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=30.0),
+                    extra_body={"thinking": {"type": "enabled"}},
+                    reasoning_effort=self._config.thinking_effort,
                 )
                 if not no_tools:
                     kwargs["tools"] = self._tool_defs
+                # thinking 模式下 temperature 不生效，传入会误导用户
                 if self._config.temperature is not None:
                     kwargs["temperature"] = self._config.temperature
                 if self._config.max_tokens is not None:
@@ -346,11 +349,14 @@ class _AnthropicBackend:
             "messages": anthropic_msgs,
             "max_tokens": self._max_output_tokens,
             "stream": True,
+            "thinking": {"type": "enabled"},
+            "output_config": {"effort": self._config.thinking_effort},
         }
         if system:
             body["system"] = system
         if anthropic_tools and not no_tools:
             body["tools"] = anthropic_tools
+        # thinking 模式下 temperature 不生效，传入会误导用户
         if self._config.temperature is not None:
             body["temperature"] = self._config.temperature
         if self._config.max_tokens is not None:
