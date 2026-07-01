@@ -82,7 +82,7 @@ class Agent:
             self._msg_manager.append_system(f"# 上一轮对话成果\n\n{recovered_summary}")
 
         # 初始化UI
-        callbacks = NarnatSessionCallbacks(
+        self._callbacks = NarnatSessionCallbacks(
             self._config.narnat_dir,
             lambda: self._messages,
             context_manager=self._context,
@@ -91,7 +91,7 @@ class Agent:
             thinking_effort_setter=lambda v: setattr(self._config.ai, 'thinking_effort', v),
             thinking_options=self._config.ai.thinking_options,
         )
-        self._ui = UIInterface(self._config.ai.model, callbacks)
+        self._ui = UIInterface(self._config.ai.model, self._callbacks)
 
         # 初始化工具上下文
         # Windows: confirm_callback用input()直接确认（两套输入系统互不干扰）
@@ -199,6 +199,9 @@ class Agent:
                     if hasattr(self, '_last_content_parts') and self._last_content_parts:
                         self._msg_manager.append_assistant("".join(self._last_content_parts))
                     stream.abort()
+                else:
+                    if not stream.aborted:
+                        self._callbacks.on_auto_save()
 
         finally:
             self._dispatcher._executor.shutdown(wait=False)

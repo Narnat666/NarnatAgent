@@ -39,6 +39,13 @@ class NarnatSessionCallbacks(SessionCallbacks):
         self._active_name = name
         return ""
 
+    def on_auto_save(self):
+        """每轮正常结束后自动保存（仅已命名会话）"""
+        if not self._active_name:
+            return
+        msgs = self._get_messages()
+        save_session(self._narnat_dir, self._active_name, msgs)
+
     def on_show(self) -> str:
         sessions = list_sessions(self._narnat_dir)
         return format_session_list(sessions)

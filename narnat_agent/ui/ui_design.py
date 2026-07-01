@@ -185,6 +185,10 @@ class UIStreamSession:
     def cancelled(self) -> bool:
         return _interrupt_ctrl.is_set
 
+    @property
+    def aborted(self) -> bool:
+        return self._aborted
+
     def begin(self) -> None:
         self._start_spinner()
 
