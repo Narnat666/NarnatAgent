@@ -18,6 +18,7 @@ from .edit import execute as edit_execute, DEFINITION as EDIT_DEF
 from .write import execute as write_execute, DEFINITION as WRITE_DEF
 from .bash import execute as bash_execute, DEFINITION as BASH_DEF
 from .terminal import execute as terminal_execute, DEFINITION as TERMINAL_DEF
+
 from .web_search import execute as web_search_execute, DEFINITION as WEBSEARCH_DEF
 from .todo_write import execute as todo_write_execute, DEFINITION as TODOWRITE_DEF
 
@@ -34,6 +35,7 @@ _TOOL_IMPLEMENTATIONS: Dict[str, Callable] = {
     "Write": write_execute,
     "Shell": bash_execute,
     "Terminal": terminal_execute,
+
     "WebSearch": web_search_execute,
     "TodoWrite": todo_write_execute,
 }

@@ -91,6 +91,7 @@ class AppConfig:
     warn_turn_2: int = WARN_TURN_2
     ignore_dirs: List[str] = field(default_factory=lambda: list(_DEFAULT_IGNORE_DIRS))
     ssh_max_sessions: int = 5
+    max_transfer_mb: int = 100
     llm_retry_count: int = 3
     git_skip_confirm: bool = DEFAULT_GIT_SKIP
     rm_skip_confirm: bool = DEFAULT_RM_SKIP
@@ -360,6 +361,7 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
         warn_turn_2=int(data.get("警告轮次2", WARN_TURN_2)),
         ignore_dirs=data.get("忽略目录", list(_DEFAULT_IGNORE_DIRS)),
         ssh_max_sessions=int(data.get("SSH最大会话数", 5)),
+        max_transfer_mb=int(data.get("最大传输文件MB", 100)),
         llm_retry_count=int(data.get("LLM重试次数", 3)),
         git_skip_confirm=bool(data.get("git免确认", DEFAULT_GIT_SKIP)),
         rm_skip_confirm=bool(data.get("rm免确认", DEFAULT_RM_SKIP)),

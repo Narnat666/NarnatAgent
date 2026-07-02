@@ -103,6 +103,7 @@ class Agent:
             ignore_dirs=self._config.ignore_dirs,
             git_skip_confirm=self._config.git_skip_confirm,
             rm_skip_confirm=self._config.rm_skip_confirm,
+            max_transfer_mb=self._config.max_transfer_mb,
             require_plan=self._config.require_plan,
             min_tools=self._config.min_tools,
         )

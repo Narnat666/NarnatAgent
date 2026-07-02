@@ -32,6 +32,8 @@ class ToolContext:
     git_skip_confirm: bool = False   # True=git命令免确认直接执行
     rm_skip_confirm: bool = False    # True=rm命令免确认直接执行
 
+    max_transfer_mb: int = 100       # 文件传输大小上限(MB)，0=不限制
+
     # 计划优先开关（由配置驱动）
     require_plan: bool = False       # True=强制AI先写TodoWrite再执行其他工具
     min_tools: int = 2               # 单轮工具调用数≥此值时才强制要求先写计划
