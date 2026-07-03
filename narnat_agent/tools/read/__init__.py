@@ -11,7 +11,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Read",
-        "description": "读取文件内容，返还内容带行号（由1开始）。本地或远程读取文件时使用",
+        "description": "读取文件内容，返还内容带行号（由1开始）。本地或远程读取文件时使用。",
         "parameters": {
             "type": "object",
             "properties": {

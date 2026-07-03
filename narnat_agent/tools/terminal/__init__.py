@@ -53,7 +53,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Terminal",
-        "description": "多终端持久SSH，最多5个并发。connect建立会话，exec执行命令，input发送交互输入，status查看会话，close关闭会话，transfer在所有已连接设备（含本机）之间自由传输文件（需先connect）",
+        "description": "多终端持久SSH，最多5个并发。connect建立会话，exec执行命令，input发送交互输入，status查看会话，close关闭会话，transfer在所有已连接设备（含本机）之间自由传输文件（需先connect）。",
         "parameters": {
             "type": "object",
             "properties": {

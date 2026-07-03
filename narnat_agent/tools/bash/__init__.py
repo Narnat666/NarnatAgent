@@ -40,7 +40,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Shell",
-        "description": f"在{__import__('sys').platform}执行命令",
+        "description": f"在{__import__('sys').platform}执行命令。",
         "parameters": {
             "type": "object",
             "properties": {

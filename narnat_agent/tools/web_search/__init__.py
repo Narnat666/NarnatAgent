@@ -23,7 +23,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "WebSearch",
-        "description": "网页搜索（用于查找API文档、解决方案、技术文章等）",
+        "description": "网页搜索（用于查找API文档、解决方案、技术文章等）。",
         "parameters": {
             "type": "object",
             "properties": {

@@ -9,7 +9,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Write",
-        "description": "创建新文件或全量覆盖文件。本地或远程写入文件时使用",
+        "description": "创建新文件或全量覆盖文件。本地或远程写入文件时使用。",
         "parameters": {
             "type": "object",
             "properties": {

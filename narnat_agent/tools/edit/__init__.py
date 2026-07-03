@@ -23,7 +23,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Edit",
-        "description": "编辑文件（字符串替换或行替换，两种模式互斥）。本地或远程编辑文件时使用",
+        "description": "编辑文件（字符串替换或行替换，两种模式互斥）。本地或远程编辑文件时使用。",
         "parameters": {
             "type": "object",
             "properties": {

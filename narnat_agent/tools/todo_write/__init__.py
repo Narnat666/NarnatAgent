@@ -7,7 +7,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "TodoWrite",
-        "description": "创建并管理任务列表（同时刻最多1个in_progress）。做任务前，优先使用此工具与用户同步计划",
+        "description": "创建并管理任务列表（同时刻最多1个in_progress）。做任务前，优先使用此工具与用户同步计划。",
         "parameters": {
             "type": "object",
             "properties": {

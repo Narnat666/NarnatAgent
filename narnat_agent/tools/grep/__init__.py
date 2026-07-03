@@ -10,7 +10,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Grep",
-        "description": "正则搜索文件内容",
+        "description": "正则搜索文件内容。",
         "parameters": {
             "type": "object",
             "properties": {
