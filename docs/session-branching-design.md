@@ -713,6 +713,148 @@ class UIInterface:
 | 2025-01 | UI 体验打磨：`/show` 标记当前位置 `◀ 当前`；`/done` 总结动画 + 自动切回父；`/exit` 瞬间保存；`/explore` 醒目边框提示 |
 | 2025-01 | 分界线机制：`/explore` 时插入 `system` 分界标记，AI 在子会话中能区分"背景"和"探索"；`/done` prompt 明确"只总结分界线之后" |
 | 2025-01 | 发现两个工具层问题（不阻塞本次实现，完成后修复） |
-
+| 2025-07 | **架构重构：三态会话模型**。将 if/else 标志位判断重构为 NoSession / RootSession / ChildSession 三个类，用类型安全替代运行时检查 |
 
 ---
+
+## 十二、架构重构：三态会话模型（v2）
+
+### 12.1 重构动机
+
+v1 实现中，`NarnatSessionCallbacks` 用 6+ 个散落的状态变量（`_active_name`、`_active_parent`、`_active_status`、`_active_summary`、`_active_msg_count`、`_pending_delete`）管理会话状态，每个操作方法各自手动维护这些变量。这导致：
+
+1. **状态遗漏**：切换会话时忘了重置某些字段（`/save` 不重置 `_pending_delete`）
+2. **语义模糊**：`/save` 同时承担"首次保存"和"另存为"，在子会话中语义冲突
+3. **逻辑分叉**：`on_exit` 子会话分支手动拼装状态，与 `_switch_to_session` 两套逻辑
+
+**根因**：用标志位（`_active_parent is not None`）区分行为，而不是用类型区分。
+
+### 12.2 核心设计：类型即行为
+
+**每个会话状态是一个类，类决定可用命令和命令行为。**
+
+```
+SessionState (基类)
+├── NoSession      ── 游离态，不在任何会话中
+├── RootSession    ── 根会话，可创建子会话
+└── ChildSession   ── 子会话，可合并结论
+```
+
+**命令可用性矩阵**：
+
+```
+              /save              /enter    /delete        /explore    /done    /exit
+NoSession    诞生新根会话         ✓        任意根(级联)      ✗          ✗      退出agent+清理
+RootSession  持久化当前会话       ✓        仅删儿子         ✓          ✗      →NoSession
+ChildSession ✗                  ✓          ✗             ✗          ✓      →RootSession
+```
+
+**同一命令，不同行为**：
+
+```
+/exit:
+  NoSession.exit()    → 返回 None（agent 退出）
+  RootSession.exit()  → 保存 → 返回 NoSession
+  ChildSession.exit() → 保存 → 返回 RootSession
+
+/save:
+  NoSession.save(name)    → 创建新根会话 → 变成 RootSession
+  RootSession.save(name)  → 持久化 → 仍是 RootSession
+  ChildSession            → 没有 save 方法，类型层面不可调用
+```
+
+### 12.3 家族责任模型
+
+```
+NoSession (爷爷)
+├── 创建权：/save 生出根会话
+├── 全局管辖：/delete 可删任意根会话（级联其子）
+├── 全局视野：/show 看到整棵树
+└── 最终清理：agent 退出时统一执行延迟删除
+
+RootSession (父亲)
+├── 管自己：保存、删除
+├── 管儿子：/explore 创建、/delete 仅删自己的儿子
+└── 责任：我死 → 儿子全死（级联标记）
+
+ChildSession (儿子)
+├── 只管自己：/done 合并、/exit 暂离
+└── 不管父、不管兄弟
+```
+
+**删除原则**：要删谁，就站到它的上级去删。自己不能删自己。
+
+### 12.4 全部延迟删除
+
+所有 `/delete` 操作只标记，不动磁盘。agent 退出时统一清理。
+
+```
+/delete xx    → 只标记 (name, parent) 到 pending_deletes 集合
+/show         → 显示 ✘ 标记
+agent 退出    → 遍历 pending_deletes，一次性清理磁盘
+崩溃/中断     → 标记丢失，会话存活（安全兜底）
+```
+
+好处：
+- 删除逻辑只有一条路径，不存在"删自己 vs 删别人"的分支
+- 不会出现"磁盘已删但内存还以为存在"的不一致
+- 用户有反悔机会（架构上预留 `/undelete`）
+
+### 12.5 SessionManager 架构
+
+```
+SessionManager (持有共享资源)
+├── narnat_dir: str              ← 所有状态共享
+├── get/set_messages: Callable   ← 所有状态共享
+├── context: ContextManager      ← 所有状态共享
+├── pending_deletes: Set         ← 跨状态持久
+├── summarize_func / anim 回调   ← /done 专用
+└── state: SessionState          ← 当前状态（No/Root/Child）
+     ├── exit() → 返回新状态
+     ├── save() → 返回新状态
+     └── 每个方法返回自己或新状态
+```
+
+**状态转换 = 替换整个状态对象**：
+
+```python
+# RootSession.exit()
+def exit(self) -> Tuple[str, Optional[SessionState]]:
+    self._persist()
+    return ("", NoSession(self._mgr))
+
+# _dispatch_command 中
+msg, new_state = mgr.on_exit()
+if new_state is not None:
+    mgr.switch_state(new_state)  # 整体替换，不可能遗漏字段
+```
+
+### 12.6 /save = 持久化 + /enter
+
+`/save` 内部复用 `/enter` 的跳转逻辑，不需要自己管理状态转换：
+
+```
+NoSession.save(name)    → save_session() + 创建 RootState + switch_state
+RootSession.save(name)  → _persist() 或 save_session() + 创建 RootState + switch_state
+```
+
+### 12.7 Tab 补全由状态决定
+
+```python
+class _CommandCompleter(Completer):
+    def get_completions(self, document, complete_event):
+        commands = self._mgr.available_commands()  # 从当前状态获取
+        ...
+```
+
+用户在 ChildSession 时，Tab 补全只显示 `/enter`、`/done`、`/show`、`/exit` 等，不显示 `/save`、`/explore`、`/delete`。
+
+### 12.8 与 v1 的对比
+
+| 维度 | v1（标志位） | v2（三态类） |
+|------|-------------|-------------|
+| 状态管理 | 6+ 个散落变量，手动维护 | 封装在状态对象内，切换 = 整体替换 |
+| 命令可用性 | `if is_child` 运行时检查 | 类型决定，编译期不可调用 |
+| 删除策略 | 混合（当前会话延迟，其他立即） | 全部延迟，退出时统一清理 |
+| 状态遗漏风险 | 高（每个方法都要记住重置所有字段） | 零（替换对象不可能遗漏） |
+| 代码复杂度 | `on_exit` 30+ 行手动拼装 | 每个类 `exit()` 5-8 行，各管各的 |

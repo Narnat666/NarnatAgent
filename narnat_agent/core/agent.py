@@ -22,7 +22,7 @@ from .compressor import Compressor
 from .tool_dispatcher import ToolDispatcher
 from .message_manager import MessageManager
 from .stats import StatsTracker
-from .session_callbacks import NarnatSessionCallbacks
+from .session_callbacks import SessionManager
 from .tool_callbacks import SafetyCallbacks, TodoCallbacks
 from ..tools.tool_context import AWAIT_CONFIRM
 from ..config.loader import AppConfig, load_config
@@ -82,16 +82,21 @@ class Agent:
             self._msg_manager.append_system(f"# 上一轮对话成果\n\n{recovered_summary}")
 
         # 初始化UI
-        self._callbacks = NarnatSessionCallbacks(
+        self._mgr = SessionManager(
             self._config.narnat_dir,
             lambda: self._messages,
+            lambda msgs: None,
             context_manager=self._context,
             config_dir=self._config.config_dir,
             thinking_effort_getter=lambda: self._config.ai.thinking_effort,
             thinking_effort_setter=lambda v: setattr(self._config.ai, 'thinking_effort', v),
             thinking_options=self._config.ai.thinking_options,
+            summarize_func=lambda msgs, cancel: self._do_summarize(msgs, cancel),
+            summary_anim_start=lambda: self._ui.begin_summarizing(),
+            summary_anim_stop=lambda: self._ui.end_summarizing(),
+            cancel_check=lambda: _interrupt_ctrl.is_set,
         )
-        self._ui = UIInterface(self._config.ai.model, self._callbacks)
+        self._ui = UIInterface(self._config.ai.model, self._mgr)
 
         # 初始化工具上下文
         # Windows: confirm_callback用input()直接确认（两套输入系统互不干扰）
@@ -127,10 +132,22 @@ class Agent:
         )
 
     def _auto_save_on_exit(self):
-        """退出时自动保存已命名的会话"""
-        saved_name = self._ui.auto_save()
-        if saved_name:
+        """退出时保存当前会话并清理延迟删除"""
+        if self._mgr.state.session_name():
+            self._mgr.on_auto_save()
+            saved_name = self._mgr.state.session_name()
             _stdout_write(f"  {D}会话已自动保存: {E}{saved_name}{R}\n")
+        self._mgr.cleanup_deletes()
+
+    def _do_summarize(self, messages, cancel_check):
+        summary_parts = []
+        for chunk in self._llm.chat_stream(messages, no_tools=True,
+                                            cancel_check=cancel_check):
+            if cancel_check():
+                return ""
+            if "content" in chunk and "tool_calls" not in chunk:
+                summary_parts.append(chunk["content"])
+        return "".join(summary_parts)
 
     def run(self):
         """主循环"""
@@ -148,19 +165,18 @@ class Agent:
                 if not stripped:
                     continue
 
-                # /exit 退出
-                if stripped == "/exit":
-                    self._auto_save_on_exit()
-                    self._logger.info("core.agent", "用户退出")
-                    self._logger.close()
-                    os._exit(0)
-
                 # 命令分发
                 if stripped.startswith("/"):
                     parts = stripped.split(None, 1)
                     cmd = parts[0]
                     args = parts[1] if len(parts) > 1 else ""
-                    if self._ui.dispatch_command(cmd, args):
+                    result = self._ui.dispatch_command(cmd, args)
+                    if result == 2:
+                        self._auto_save_on_exit()
+                        self._logger.info("core.agent", "用户退出")
+                        self._logger.close()
+                        os._exit(0)
+                    if result == 1:
                         continue
 
                 # 2. 轮次计数
@@ -202,7 +218,7 @@ class Agent:
                     stream.abort()
                 else:
                     if not stream.aborted:
-                        self._callbacks.on_auto_save()
+                        self._mgr.on_auto_save()
 
         finally:
             self._dispatcher._executor.shutdown(wait=False)

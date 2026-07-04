@@ -40,9 +40,7 @@ from .renderer import (
     colorize_diff, _sep, _terminal_width, _display_width,
     InlineRules, BlockRule, CodeBlockRenderer, StreamingRenderer, render_line,
 )
-from .session_commands import (
-    SessionCallbacks, _CommandCompleter, _dispatch_command,
-)
+from .session_commands import _CommandCompleter, _dispatch_command
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -107,6 +105,26 @@ def _compress_thread(stop: threading.Event) -> None:
         stop.wait(0.15)
 
     # 退出前自清：擦除动画行 + 恢复光标
+    _stdout_write("\r\x1b[K")
+    _stdout_write("\x1b[?25h")
+
+
+def _summary_thread(stop: threading.Event) -> None:
+    """总结动画，复用压缩动画模式。4帧循环"""
+    _stdout_write("\x1b[?25l")
+
+    frames = (
+        f"{B}{O}* {R}{O}正在合并   {R}",
+        f"{D}{O}* {R}{O}正在合并.  {R}",
+        f"{B}{O}* {R}{O}正在合并.. {R}",
+        f"{D}{O}* {R}{O}正在合并...{R}",
+    )
+    i = 0
+    while not stop.is_set():
+        _stdout_try_write(f"\r  {frames[i]}\x1b[K")
+        i = (i + 1) % 4
+        stop.wait(0.15)
+
     _stdout_write("\r\x1b[K")
     _stdout_write("\x1b[?25h")
 
@@ -240,9 +258,9 @@ class UIInterface:
     """UI 总接口，后端只和此类交互"""
 
     def __init__(self, model_name: str = "narnat",
-                 callbacks: Optional[SessionCallbacks] = None) -> None:
+                 session_manager=None) -> None:
         self._model = model_name
-        self._callbacks = callbacks or SessionCallbacks()
+        self._mgr = session_manager
         self._session: Optional[PromptSession] = None
         self._compress_stop: Optional[threading.Event] = None
         self._compress_thread: Optional[threading.Thread] = None
@@ -250,7 +268,7 @@ class UIInterface:
     def start(self) -> None:
         _interrupt_ctrl.enter_input_mode()
         show_header(self._model)
-        self._session = _create_session(self._callbacks)
+        self._session = _create_session(self._mgr)
 
     def read_input(self) -> Optional[str]:
         if self._session is None:
@@ -260,7 +278,7 @@ class UIInterface:
         _interrupt_ctrl.enter_input_mode()
         line = read_input(self._session)
         if line is None:
-            self._session = _create_session(self._callbacks)
+            self._session = _create_session(self._mgr)
         return line
 
     def read_input_with_prompt(self, prompt_text: str) -> Optional[str]:
@@ -272,11 +290,11 @@ class UIInterface:
         _interrupt_ctrl.enter_input_mode()
         line = read_input_with_prompt(self._session, prompt_text)
         if line is None:
-            self._session = _create_session(self._callbacks)
+            self._session = _create_session(self._mgr)
         return line
 
-    def dispatch_command(self, cmd: str, args: str) -> bool:
-        return _dispatch_command(cmd, args, self._callbacks)
+    def dispatch_command(self, cmd: str, args: str) -> int:
+        return _dispatch_command(cmd, args, self._mgr)
 
     def create_stream(self) -> UIStreamSession:
         _interrupt_ctrl.enter_run_mode()  # 内部已clear
@@ -286,7 +304,7 @@ class UIInterface:
 
     def on_interrupted(self) -> None:
         _interrupt_ctrl.enter_input_mode()
-        self._session = _create_session(self._callbacks)
+        self._session = _create_session(self._mgr)
 
     def begin_compressing(self) -> None:
         self._compress_stop = threading.Event()
@@ -304,9 +322,26 @@ class UIInterface:
         self._compress_stop = None
         self._compress_thread = None
 
+    def begin_summarizing(self) -> None:
+        self._summary_stop = threading.Event()
+        self._summary_thread_var = threading.Thread(
+            target=_summary_thread,
+            args=(self._summary_stop,), daemon=True)
+        self._summary_thread_var.start()
+
+    def end_summarizing(self) -> None:
+        if hasattr(self, '_summary_stop') and self._summary_stop is not None:
+            self._summary_stop.set()
+        if hasattr(self, '_summary_thread_var') and self._summary_thread_var is not None:
+            self._summary_thread_var.join(timeout=0.5)
+        self._summary_stop = None
+        self._summary_thread_var = None
+
     def auto_save(self) -> str:
         """退出时自动保存，返回保存的会话名或空串"""
-        return self._callbacks.on_exit()
+        if self._mgr.state.session_name():
+            self._mgr.on_auto_save()
+        return self._mgr.state.session_name() or ""
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -343,11 +378,11 @@ _PROMPT_STYLE = Style.from_dict({
 })
 
 
-def _create_session(callbacks: SessionCallbacks) -> PromptSession:
+def _create_session(session_manager) -> PromptSession:
     return PromptSession(
         style=_PROMPT_STYLE,
         multiline=True,
-        completer=_CommandCompleter(callbacks),
+        completer=_CommandCompleter(session_manager),
         key_bindings=_make_keybindings())
 
 
