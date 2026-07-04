@@ -87,7 +87,7 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
         return (f"错误: 编辑前必须先Read该文件: {file_path}", "")
 
     try:
-        with open(file_path, "r", encoding="utf-8", newline='') as f:
+        with open(file_path, "r", encoding="utf-8-sig", newline='') as f:
             content = f.read()
     except PermissionError:
         return (f"错误: 权限不足: {file_path}", "")
@@ -120,15 +120,15 @@ def _edit_by_string(content: str, old_string: str, new_string: str,
     if not old_string:
         return ("错误: old_string不能为空（或使用line_start行号模式）", "")
 
-    # 检测文件换行符风格，转换 old_string 以匹配
+    # 检测文件换行符风格，转换 old_string/new_string 以匹配
     has_crlf = '\r\n' in content
     if has_crlf:
-        # 文件是 CRLF，确保 old_string 也用 CRLF
-        # 先把 \r\n 替换成占位符，再把 \n 替换成 \r\n，最后还原占位符
-        old_string_normalized = old_string.replace('\r\n', '\x00').replace('\n', '\r\n').replace('\x00', '\r\n')
+        _normalize = lambda s: s.replace('\r\n', '\x00').replace('\n', '\r\n').replace('\x00', '\r\n')
     else:
-        # 文件是 LF，确保 old_string 也用 LF
-        old_string_normalized = old_string.replace('\r\n', '\n').replace('\r', '\n')
+        _normalize = lambda s: s.replace('\r\n', '\n').replace('\r', '\n')
+
+    old_string_normalized = _normalize(old_string)
+    new_string_normalized = _normalize(new_string)
 
     count = content.count(old_string_normalized)
     if count == 0:
@@ -139,9 +139,9 @@ def _edit_by_string(content: str, old_string: str, new_string: str,
         return (f"错误: 找到{count}处匹配，old_string不唯一。请扩大上下文使其唯一，或设置replace_all=True", "")
 
     if replace_all:
-        new_content = content.replace(old_string_normalized, new_string)
+        new_content = content.replace(old_string_normalized, new_string_normalized)
     else:
-        new_content = content.replace(old_string_normalized, new_string, 1)
+        new_content = content.replace(old_string_normalized, new_string_normalized, 1)
 
     return _write_and_diff(content, new_content, file_path, count if replace_all else 1,
                            _tool_context=_tool_context)
@@ -168,13 +168,16 @@ def _edit_by_lines(content: str, file_path: str,
     if line_end > total:
         return (f"错误: line_end={line_end} 超出范围（1-{total}）", "")
 
-    # 构造新内容
-    new_lines = new_string.splitlines(keepends=True)
+    # 构造新内容：按文件换行符风格归一化 new_string
+    line_ending = _detect_line_ending(content)
+    if line_ending == "\r\n":
+        new_string_normalized = new_string.replace('\r\n', '\x00').replace('\n', '\r\n').replace('\x00', '\r\n')
+    else:
+        new_string_normalized = new_string.replace('\r\n', '\n').replace('\r', '\n')
 
-    # 如果 new_string 非空且不以换行符结尾，需要为最后一行添加换行符
-    # 使用原文件的换行符风格
-    if new_string and not new_string.endswith("\n"):
-        line_ending = _detect_line_ending(content)
+    new_lines = new_string_normalized.splitlines(keepends=True)
+
+    if new_lines and not new_string_normalized.endswith("\n"):
         new_lines[-1] = new_lines[-1] + line_ending
 
     # 替换 [line_start-1, line_end) 范围的行

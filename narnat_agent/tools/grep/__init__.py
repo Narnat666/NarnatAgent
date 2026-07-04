@@ -111,7 +111,7 @@ def _format_results(file_matches, output_mode, head_limit):
 def _search_single_file(file_path, regex, output_mode, show_n, A, B, head_limit):
     """在单个文件内执行搜索，保持输入路径完整"""
     try:
-        with open(file_path, "r", encoding="utf-8", errors="strict") as f:
+        with open(file_path, "r", encoding="utf-8-sig", errors="strict") as f:
             content = f.read()
     except (UnicodeDecodeError, PermissionError, OSError):
         return "(无匹配)"
@@ -176,7 +176,7 @@ def _search_files(root, regex, glob_filter, output_mode, show_n, A, B, head_limi
             rel = os.path.relpath(full, root)
 
             try:
-                with open(full, "r", encoding="utf-8", errors="strict") as f:
+                with open(full, "r", encoding="utf-8-sig", errors="strict") as f:
                     content = f.read()
             except (UnicodeDecodeError, PermissionError, OSError):
                 continue

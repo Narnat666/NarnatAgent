@@ -62,25 +62,29 @@ def execute(file_path: str, content: str,
 
     # 覆写已有文件时生成diff
     color_diff = ""
+    old_content = ""
+    diff = ""
     if os.path.isfile(abs_path):
         try:
-            with open(abs_path, "r", encoding="utf-8") as f:
+            with open(abs_path, "r", encoding="utf-8-sig", newline='') as f:
                 old_content = f.read()
             diff = _make_diff(old_content, content, file_path)
             color_diff = colorize_diff(diff)
         except Exception:
-            pass  # 读取旧内容失败时不影响写入，只是不展示diff
+            pass
 
     try:
-        with open(abs_path, "w", encoding="utf-8") as f:
+        with open(abs_path, "w", encoding="utf-8", newline='') as f:
             f.write(content)
     except OSError as e:
         return (f"错误: 写入失败: {e}", "")
 
     byte_count = len(content.encode("utf-8"))
-    # 写入后标记为已读
     if _tool_context:
         _tool_context.mark_read(abs_path)
+
+    if diff:
+        return (f"已写入: {file_path} ({byte_count}字节)\n{diff}", color_diff)
     return (f"已写入: {file_path} ({byte_count}字节)", color_diff)
 
 

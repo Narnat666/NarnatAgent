@@ -69,7 +69,7 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
         _tool_context.mark_read(abs_path)
 
     try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        with open(file_path, "r", encoding="utf-8-sig", errors="replace") as f:
             start = max(offset - 1, 0) if offset > 0 else 0
             
             # 流式跳过 offset 行，避免大文件内存溢出
