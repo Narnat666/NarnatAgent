@@ -16,29 +16,42 @@ from typing import Optional, List, Dict, Any, Callable, Set, Tuple
 from ..config.session_store import (
     save_session, load_session, list_sessions, delete_session,
     format_session_list, list_sessions_tree, format_session_tree,
+    load_session_meta,
 )
 from ..config.skill_store import load_skill, list_skill_names
 
 BOUNDARY_MARKER_PREFIX = "━━━ 探索分支开始"
 
 
-def _make_boundary(round_num: int = 1) -> str:
-    label = f" 第{round_num}轮" if round_num > 1 else ""
-    header = f"━━━ 探索分支开始{label} ━━━"
-    return f"{header}\n以下为本分支的独立讨论内容。上方为之前的讨论背景，请勿重复已有结论。"
+def _format_messages_text(messages: list) -> str:
+    lines = []
+    for m in messages:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if role == "user":
+            lines.append(f"用户：{content}")
+        elif role == "assistant":
+            if content:
+                lines.append(f"AI：{content}")
+    return "\n".join(lines)
 
 
-DONE_PROMPT = """以下是你在一个"探索分支"中的完整对话。messages 中可能有多条 "━━━ 探索分支开始" 的分界线——
-请**只总结最后一条分界线之后的内容**，不要复述之前的结论。
+SUMMARY_TASK_TEMPLATE = """以下内容为历史已知背景，不需要重复总结，仅作参考：
+
+{memory}
+
+---
+
+结合上述背景，只总结下面新对话：
+
+{target}
 
 总结要求：
-1. 子会话目标
-2. 最终采用的方案及原因
-3. 关键代码变更（文件路径、核心改动）
-4. 已排除的无效方案及排除原因（一句话即可）
-5. 后续注意事项
+1. 新对话做了哪些方向讨论
+2. 新对话最终采用的方案及原因
+3. 关键文件变动
 
-要求：精炼，约500字左右，不含讨论过程的中间细节。"""
+要求：实事求是，简洁且抓住核心。"""
 
 
 class SessionState:
@@ -274,9 +287,10 @@ class RootSession(SessionState):
             return "错误: 请指定分支名称"
         self._persist()
         msgs = [dict(m) for m in self._mgr.get_messages()]
-        msgs.append({"role": "system", "content": _make_boundary(1)})
+        parent_msg_count = len(msgs)
         save_session(self._mgr.narnat_dir, name, msgs, parent=self._name,
-                     status="new")
+                     status="new", parent_msg_count=parent_msg_count,
+                     last_summarized_at=parent_msg_count)
         new_msgs, err = load_session(self._mgr.narnat_dir, name, parent=self._name)
         if err:
             return err
@@ -306,29 +320,16 @@ class ChildSession(SessionState):
         self._mgr = mgr
         self._name = name
         self._parent = parent
-        self._status: str = self._read_status()
-        self._summary: Optional[str] = self._read_summary()
+        self._status: str = self._read_meta_field("status", "active")
+        self._summary: Optional[str] = self._read_meta_field("summary")
+        self._parent_msg_count: int = self._read_meta_field("parent_msg_count") or 0
+        self._last_summarized_at: int = (self._read_meta_field("last_summarized_at")
+                                         or self._parent_msg_count)
         self._msg_count: int = len(mgr.get_messages())
 
-    def _read_status(self) -> str:
-        from ..config.session_store import _session_path
-        path = _session_path(self._mgr.narnat_dir, self._name, parent=self._parent)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data.get("status", "active")
-        except (OSError, json.JSONDecodeError):
-            return "active"
-
-    def _read_summary(self) -> Optional[str]:
-        from ..config.session_store import _session_path
-        path = _session_path(self._mgr.narnat_dir, self._name, parent=self._parent)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data.get("summary")
-        except (OSError, json.JSONDecodeError):
-            return None
+    def _read_meta_field(self, field: str, default=None):
+        meta = load_session_meta(self._mgr.narnat_dir, self._name, parent=self._parent)
+        return meta.get(field, default)
 
     def available_commands(self) -> Dict[str, str]:
         return {
@@ -348,7 +349,9 @@ class ChildSession(SessionState):
         save_session(self._mgr.narnat_dir, self._name, msgs,
                      parent=self._parent,
                      status=self._status or "active",
-                     summary=self._summary)
+                     summary=self._summary,
+                     parent_msg_count=self._parent_msg_count,
+                     last_summarized_at=self._last_summarized_at)
         self._msg_count = len(msgs)
 
     def show(self) -> str:
@@ -384,13 +387,36 @@ class ChildSession(SessionState):
         return ""
 
     def done(self) -> str:
+        if self._status == "completed":
+            return "该探索分支已完成，不可重复 /done"
+        msgs = list(self._mgr.get_messages())
+        parent_msg_count = self._parent_msg_count
+        if parent_msg_count == 0:
+            for i, m in enumerate(msgs):
+                if m.get("role") == "system" and BOUNDARY_MARKER_PREFIX in m.get("content", ""):
+                    parent_msg_count = i
+                    break
+
+        last_summarized_at = self._last_summarized_at
+        if last_summarized_at < parent_msg_count:
+            last_summarized_at = parent_msg_count
+
+        memory = msgs[:parent_msg_count]
+        target = msgs[last_summarized_at:]
+
+        if not target:
+            return "没有新的讨论内容需要总结"
+
+        memory_text = _format_messages_text(memory)
+        target_text = _format_messages_text(target)
+        task_content = SUMMARY_TASK_TEMPLATE.format(memory=memory_text, target=target_text)
+        summary_msgs = [{"role": "user", "content": task_content}]
+
         if self._mgr.summary_anim_start:
             self._mgr.summary_anim_start()
-        msgs = list(self._mgr.get_messages())
-        msgs.append({"role": "user", "content": DONE_PROMPT})
         summary = ""
         if self._mgr.summarize_func:
-            summary = self._mgr.summarize_func(msgs, self._mgr.cancel_check)
+            summary = self._mgr.summarize_func(summary_msgs, self._mgr.cancel_check)
         if self._mgr.summary_anim_stop:
             self._mgr.summary_anim_stop()
         if not summary:
@@ -405,12 +431,17 @@ class ChildSession(SessionState):
         parent_msgs.append({"role": "system",
             "content": f"# 子会话 [{self._name}]{round_label} 结论\n\n{summary}"})
         save_session(self._mgr.narnat_dir, self._parent, parent_msgs)
+
+        self._last_summarized_at = len(msgs)
+        self._status = "completed"
+        self._summary = summary
         child_msgs, _ = load_session(self._mgr.narnat_dir, self._name,
                                       parent=self._parent)
         save_session(self._mgr.narnat_dir, self._name, child_msgs,
-                     parent=self._parent, status="completed", summary=summary)
-        self._status = "completed"
-        self._summary = summary
+                     parent=self._parent, status="completed", summary=summary,
+                     parent_msg_count=self._parent_msg_count,
+                     last_summarized_at=self._last_summarized_at)
+
         new_msgs, err = load_session(self._mgr.narnat_dir, self._parent)
         if err:
             return err
@@ -492,37 +523,9 @@ class SessionManager:
         return ChildSession(self, name, parent)
 
     def load_child_with_boundary(self, name: str, parent: str) -> Tuple[List[Dict[str, Any]], str]:
-        """加载子会话消息，如果是 completed 且最后一条不是边界标记则插入分界标记"""
         new_msgs, err = load_session(self.narnat_dir, name, parent=parent)
-        if err:
-            return new_msgs, err
-        status = self._get_session_status(name, parent)
-        if status == "completed":
-            last_is_boundary = (new_msgs
-                                and new_msgs[-1].get("role") == "system"
-                                and BOUNDARY_MARKER_PREFIX in new_msgs[-1].get("content", ""))
-            if not last_is_boundary:
-                round_num = self._count_boundaries(new_msgs) + 1
-                new_msgs.append({"role": "system", "content": _make_boundary(round_num)})
-        return new_msgs, ""
+        return new_msgs, err
 
-    @staticmethod
-    def _count_boundaries(messages: list) -> int:
-        count = 0
-        for m in messages:
-            if m.get("role") == "system" and BOUNDARY_MARKER_PREFIX in m.get("content", ""):
-                count += 1
-        return count
-
-    def _get_session_status(self, name: str, parent: str) -> str:
-        from ..config.session_store import _session_path
-        path = _session_path(self.narnat_dir, name, parent=parent)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data.get("status", "active")
-        except (OSError, json.JSONDecodeError):
-            return "active"
 
     def apply_delete_marks(self, tree: List[Dict[str, Any]]):
         for root in tree:

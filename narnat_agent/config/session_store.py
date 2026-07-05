@@ -43,8 +43,17 @@ def save_session(narnat_dir: str, name: str,
                  messages: List[Dict[str, Any]],
                  parent: Optional[str] = None,
                  status: str = "active",
-                 summary: Optional[str] = None) -> str:
+                 summary: Optional[str] = None,
+                 parent_msg_count: Optional[int] = None,
+                 last_summarized_at: Optional[int] = None) -> str:
     path = _session_path(narnat_dir, name, parent=parent)
+    existing = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
     data = {
         "name": name,
         "timestamp": time.time(),
@@ -52,6 +61,8 @@ def save_session(narnat_dir: str, name: str,
         "parent": parent,
         "status": status,
         "summary": summary,
+        "parent_msg_count": parent_msg_count if parent_msg_count is not None else existing.get("parent_msg_count"),
+        "last_summarized_at": last_summarized_at if last_summarized_at is not None else existing.get("last_summarized_at"),
     }
     try:
         with open(path, "w", encoding="utf-8") as f:
@@ -225,6 +236,18 @@ def format_session_tree(tree: List[Dict[str, Any]],
     if active_name is None and active_parent is None:
         lines.append(f"   ◉  ◀ 当前")
     return "\n".join(lines)
+
+
+def load_session_meta(narnat_dir: str, name: str, parent: Optional[str] = None) -> dict:
+    path = _session_path(narnat_dir, name, parent=parent)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {k: v for k, v in data.items() if k != "messages"}
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
 def format_session_list(sessions: List[Dict[str, Any]]) -> str:
