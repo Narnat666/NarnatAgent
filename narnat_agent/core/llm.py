@@ -22,6 +22,16 @@ from ..config.loader import AIConfig
 from ..tools.registry import get_tool_definitions
 from .interrupt import register_abort
 
+
+def _strip_surrogates(obj):
+    if isinstance(obj, str):
+        return obj.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
+    if isinstance(obj, dict):
+        return {k: _strip_surrogates(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_strip_surrogates(v) for v in obj]
+    return obj
+
 # ESC中断：持有当前活跃的LLM HTTP连接
 _active_llm_response = None
 
@@ -101,7 +111,7 @@ class LLMClient:
             self._backend = _OpenAIBackend(config, self._tool_defs, logger)
 
     def chat_stream(self, messages: List[Dict[str, Any]], no_tools: bool = False, cancel_check=None) -> Iterator:
-        return self._backend.chat_stream(messages, no_tools=no_tools, cancel_check=cancel_check)
+        return self._backend.chat_stream(_strip_surrogates(messages), no_tools=no_tools, cancel_check=cancel_check)
 
     @property
     def raw_sse(self):

@@ -8,6 +8,16 @@ import shutil
 import time
 from typing import List, Dict, Any, Optional
 
+
+def _strip_surrogates(obj):
+    if isinstance(obj, str):
+        return obj.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
+    if isinstance(obj, dict):
+        return {k: _strip_surrogates(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_strip_surrogates(v) for v in obj]
+    return obj
+
 from .defaults import DATA_SUBDIR
 
 _SESSIONS_SUBDIR = "sessions"
@@ -66,9 +76,9 @@ def save_session(narnat_dir: str, name: str,
     }
     try:
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(_strip_surrogates(data), f, ensure_ascii=False, indent=2)
         return ""
-    except OSError as e:
+    except (OSError, UnicodeEncodeError) as e:
         return f"保存失败: {e}"
 
 
