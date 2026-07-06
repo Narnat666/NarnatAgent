@@ -85,7 +85,6 @@ class Agent:
         self._mgr = SessionManager(
             self._config.narnat_dir,
             lambda: self._messages,
-            lambda msgs: None,
             context_manager=self._context,
             config_dir=self._config.config_dir,
             thinking_effort_getter=lambda: self._config.ai.thinking_effort,

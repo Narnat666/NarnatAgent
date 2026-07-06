@@ -86,19 +86,41 @@ AI 会按需自主调用工具——读文件、改代码、执行命令、搜�
 
 ## 交互命令
 
-在 `#` 提示符下输入 `/` 开头的命令，支持 Tab 补全：
+在 `#` 提示符下输入 `/` 开头的命令，支持 Tab 补全。命令在不同状态下可用性不同：
 
-| 命令 | 说明 |
-|------|------|
-| `/exit` | 退出 |
-| `/save` | 保存当前会话 |
-| `/show` | 列出所有会话 |
-| `/enter <名称>` | 恢复历史会话 |
-| `/delete <名称>` | 删除会话 |
-| `/clear` | 清屏 |
-| `/skill <名称>` | 加载技能 |
-| `/thinking high\|max` | 切换思考强度 |
-| `Esc` | 中断当前输出 |
+| 命令 | 说明 | 可用状态 |
+|------|------|----------|
+| `/save <名称>` | 保存当前会话 | 全部 |
+| `/ls` | 列出所有已保存会话 | 全部 |
+| `/cd <名称>` | 进入历史会话 | 全部 |
+| `/rm <名称>` | 删除会话（退出时生效） | 全部 |
+| `/explore <名称>` | 从当前会话创建探索分支 | RootSession |
+| `/done` | 完成分支探索，AI 总结后合并回父会话 | ChildSession |
+| `/skill <名称>` | 加载技能文件 | 全部 |
+| `/thinking high\|max` | 切换思考强度 | 全部 |
+| `/clear` | 清屏 | 全部 |
+| `/exit` | 退出会话/退出程序 | 全部 |
+| `Esc` | 中断当前 AI 输出 | 全部 |
+
+### 会话管理
+
+Narnat 采用三态会话模型，支持**探索分支**——从任意会话分叉出子分支，在不影响主线的条件下验证想法，完成后由 AI 自动总结合并：
+
+```
+NoSession ──/save──▶ RootSession ──/explore──▶ ChildSession
+    ▲                    ▲                         │
+    │                    │◀────── /done ───────────┘
+    │◀─── /exit ─────────┘
+```
+
+- **RootSession**：常规工作会话，`/save` 持久化后可通过 `/cd` 随时恢复
+- **ChildSession**：探索分支，继承父会话全部上下文，`/done` 时 AI 将分支讨论总结为结构化结论，追加到父会话末尾；`/exit` 暂离可稍后 `/cd` 回来继续
+
+> 子分支通过 `父名/子名` 路径引用。`/ls` 以树形展示所有会话及其关系。
+
+### 技能系统
+
+`.narnat/config/skills/` 目录下的 Markdown 文件即为技能。用户输入 `/skill <名称>` 将技能内容作为系统指令注入到当前对话中，用于切换 AI 的工作模式或行为风格。
 
 ![交互命令](img/工具使用效果.png) ![命令补全](img/支持的工具.png)
 
@@ -152,8 +174,9 @@ narnat -d         调试模式（记录详细日志到 .narnat/logs/）
 
   // ── 高级 ──
   "SSH最大会话数": 5,
+  "最大传输文件MB": 100,
   "LLM重试次数": 3,
-  "忽略目录": [".git", "__pycache__", "node_modules", ".svn", ".hg", "venv"],
+  "忽略目录": [".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache"],
 
   // ── 界面配色（11 色可覆盖）──
   "用户输入色": "#FFFFFF",
@@ -170,19 +193,32 @@ narnat -d         调试模式（记录详细日志到 .narnat/logs/）
 }
 ```
 
-> 在 `.narnat/config/narnat.md` 中写入 Markdown，会作为自定义系统指令追加到 prompt 末尾。
+> 首次运行自动生成的配置仅包含 `接口密钥`、`接口地址`、`模型`、`思考强度`、`思考模式`、`接口密钥组` 七个字段。上方为**全部可配置项**的完整参考，按需手动添加即可。`narnat.md` 中的 Markdown 会作为自定义系统指令追加到 prompt 末尾。
 
 ## 项目结构
 
 ```
 NarnatAgent/
-├── main.py                 # 入口
+├── main.py                       # 入口 (v13.2.0)
 ├── narnat_agent/
-│   ├── core/               # Agent 主循环、LLM 双协议、上下文压缩
-│   ├── tools/              # 9 个工具（read/glob/grep/edit/write/bash/terminal/web_search/todo_write）
-│   ├── ui/                 # prompt-toolkit 终端界面、流式 Markdown 渲染
-│   ├── config/             # 配置加载
-│   ├── output.py           # 终端输出/颜色控制
-│   └── logger.py           # 日志
-└── output/                 # 编译产物
+│   ├── core/                     # Agent 主循环、LLM 双协议、上下文压缩、会话状态机
+│   ├── tools/
+│   │   ├── read/                 # Read   — 读取文件
+│   │   ├── glob/                 # Glob   — 按模式匹配文件
+│   │   ├── grep/                 # Grep   — 正则搜索文件内容
+│   │   ├── edit/                 # Edit   — 字符串/行号替换编辑
+│   │   ├── write/                # Write  — 创建/覆盖文件
+│   │   ├── bash/                 # Shell  — 本地命令行执行
+│   │   ├── terminal/             # Terminal — 多终端持久 SSH + 文件传输
+│   │   ├── web_search/           # WebSearch — 网页搜索
+│   │   ├── todo_write/           # TodoWrite — 任务列表管理
+│   │   ├── registry.py           # 工具注册表
+│   │   ├── diff_utils.py         # diff 生成
+│   │   └── tool_context.py       # 工具运行时上下文
+│   ├── ui/                       # prompt-toolkit 终端界面、流式 Markdown 渲染
+│   ├── config/                   # 配置加载、会话持久化、技能管理
+│   ├── output.py                 # 终端输出/颜色控制
+│   └── logger.py                 # 日志
+├── translator/                   # 旧版会话迁移工具
+└── output/                       # 编译产物
 ```

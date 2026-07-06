@@ -337,12 +337,6 @@ class UIInterface:
         self._summary_stop = None
         self._summary_thread_var = None
 
-    def auto_save(self) -> str:
-        """退出时自动保存，返回保存的会话名或空串"""
-        if self._mgr.state.session_name():
-            self._mgr.on_auto_save()
-        return self._mgr.state.session_name() or ""
-
 
 # ═══════════════════════════════════════════════════════════════
 # prompt_toolkit 配置

@@ -1,10 +1,10 @@
 """
-会话管理命令 ── /save /show /enter /delete /skill /clear
+会话管理命令 ── /save /ls /cd /rm /skill /clear
 
 命令可用性由当前会话状态决定：
-  NoSession:   /save /enter /delete /show /exit
-  RootSession: /save /enter /delete(仅儿子) /explore /show /exit
-  ChildSession: /enter /done /show /exit
+  NoSession:   /save /cd /rm /ls /exit
+  RootSession: /save /cd /rm(仅儿子) /explore /ls /exit
+  ChildSession: /cd /done /ls /exit
 
 Tab 补全只显示当前状态拥有的命令。
 """
@@ -23,11 +23,11 @@ from .colors import R, G, C, D, E, Y, X, _stdout_write
 # ═══════════════════════════════════════════════════════════════
 
 class _CommandCompleter(Completer):
-    """命令补全：从当前状态获取可用命令，/enter /delete 动态补全会话名"""
+    """命令补全：从当前状态获取可用命令，/cd /rm 动态补全会话名"""
 
     _NAME_COMMANDS = {
-        "/enter":    "on_list_names_tree",
-        "/delete":   "on_list_names_tree",
+        "/cd":       "on_list_names_tree",
+        "/rm":       "on_list_names_tree",
         "/skill":    "on_list_skill_names",
         "/thinking": "on_list_thinking_options",
     }
@@ -132,7 +132,7 @@ def _dispatch_command(cmd: str, args: str, mgr) -> int:
             _stdout_write(f"  {E}会话已保存: {C}{args}{R}\n")
         return 1
 
-    if cmd == "show":
+    if cmd == "ls":
         result = mgr.on_show()
         if result:
             _stdout_write(result + "\n")
@@ -140,9 +140,9 @@ def _dispatch_command(cmd: str, args: str, mgr) -> int:
             _stdout_write(f"  {G}(无已保存会话){R}\n")
         return 1
 
-    if cmd == "enter":
+    if cmd == "cd":
         if not args:
-            _stdout_write(f"  {Y}用法: /enter <名称>{R}\n")
+            _stdout_write(f"  {Y}用法: /cd <名称>{R}\n")
             return 1
         result = mgr.on_enter(args)
         if result:
@@ -162,9 +162,9 @@ def _dispatch_command(cmd: str, args: str, mgr) -> int:
             _stdout_write(f"  {E}已加载技能: {C}{args}{R}\n")
         return 1
 
-    if cmd == "delete":
+    if cmd == "rm":
         if not args:
-            _stdout_write(f"  {Y}用法: /delete <名称 | --all>{R}\n")
+            _stdout_write(f"  {Y}用法: /rm <名称 | --all>{R}\n")
             return 1
         result = mgr.on_delete(args)
         if result:
@@ -186,7 +186,7 @@ def _dispatch_command(cmd: str, args: str, mgr) -> int:
         if mgr.should_exit_agent():
             return 2
         if was_child:
-            _stdout_write(f"  {E}已暂离探索分支{R}  {D}(/enter 回来继续){R}\n")
+            _stdout_write(f"  {E}已暂离探索分支{R}  {D}(/cd 回来继续){R}\n")
         else:
             _stdout_write(f"  {D}已退出会话{R}\n")
         return 1

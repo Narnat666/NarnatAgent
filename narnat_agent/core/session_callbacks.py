@@ -2,9 +2,9 @@
 会话状态机 —— 三态模型：NoSession / RootSession / ChildSession
 
 每个状态类封装自己的行为，命令可用性由类型决定：
-  NoSession:   /save(诞生) /enter /delete(任意) /show /exit(退出agent)
-  RootSession: /save(持久化) /enter /delete(仅删儿子) /explore /show /exit(→NoSession)
-  ChildSession: /enter /done /show /exit(→RootSession)
+  NoSession:   /save(诞生) /cd /rm(任意) /ls /exit(退出agent)
+  RootSession: /save(持久化) /cd /rm(仅删儿子) /explore /ls /exit(→NoSession)
+  ChildSession: /cd /done /ls /exit(→RootSession)
 
 SessionManager 持有共享资源，状态对象通过 manager 引用访问。
 """
@@ -33,6 +33,12 @@ def _format_messages_text(messages: list) -> str:
         elif role == "assistant":
             if content:
                 lines.append(f"AI：{content}")
+        elif role == "tool":
+            tc_id = m.get("tool_call_id", "")
+            label = f"工具返回 [{tc_id}]" if tc_id else "工具返回"
+            lines.append(f"{label}：{content}")
+        elif role == "system":
+            lines.append(f"系统：{content}")
     return "\n".join(lines)
 
 
@@ -88,7 +94,7 @@ class SessionState:
         raise NotImplementedError
 
     def delete(self, name: str) -> str:
-        return "当前状态不可用 /delete"
+        return "当前状态不可用 /rm"
 
     def explore(self, name: str) -> str:
         return "当前状态不可用 /explore"
@@ -123,9 +129,9 @@ class NoSession(SessionState):
         return {
             "/clear":    "清理屏幕",
             "/save":     "保存当前会话",
-            "/show":     "显示所有会话",
-            "/enter":    "进入历史会话",
-            "/delete":   "删除会话",
+            "/ls":       "显示所有会话",
+            "/cd":       "进入历史会话",
+            "/rm":       "删除会话",
             "/skill":    "加载技能",
             "/thinking": "切换思考强度",
             "/exit":     "退出程序",
@@ -217,9 +223,9 @@ class RootSession(SessionState):
         return {
             "/clear":    "清理屏幕",
             "/save":     "保存当前会话",
-            "/show":     "显示所有会话",
-            "/enter":    "进入历史会话",
-            "/delete":   "删除子会话",
+            "/ls":       "显示所有会话",
+            "/cd":       "进入历史会话",
+            "/rm":       "删除子会话",
             "/skill":    "加载技能",
             "/thinking": "切换思考强度",
             "/explore":  "创建探索分支",
@@ -303,6 +309,8 @@ class RootSession(SessionState):
     def explore(self, name: str) -> str:
         if not name:
             return "错误: 请指定分支名称"
+        if name == self._name:
+            return f"错误: 分支名不可与父会话同名（'{name}'），请换一个名称"
         self._persist()
         msgs = [dict(m) for m in self._mgr.get_messages()]
         parent_msg_count = len(msgs)
@@ -338,22 +346,19 @@ class ChildSession(SessionState):
         self._mgr = mgr
         self._name = name
         self._parent = parent
-        self._status: str = self._read_meta_field("status", "active")
-        self._summary: Optional[str] = self._read_meta_field("summary")
-        self._parent_msg_count: int = self._read_meta_field("parent_msg_count") or 0
-        self._last_summarized_at: int = (self._read_meta_field("last_summarized_at")
+        meta = load_session_meta(self._mgr.narnat_dir, self._name, parent=self._parent)
+        self._status: str = meta.get("status", "active")
+        self._summary: Optional[str] = meta.get("summary")
+        self._parent_msg_count: int = meta.get("parent_msg_count") or 0
+        self._last_summarized_at: int = (meta.get("last_summarized_at")
                                          or self._parent_msg_count)
         self._msg_count: int = len(mgr.get_messages())
-
-    def _read_meta_field(self, field: str, default=None):
-        meta = load_session_meta(self._mgr.narnat_dir, self._name, parent=self._parent)
-        return meta.get(field, default)
 
     def available_commands(self) -> Dict[str, str]:
         return {
             "/clear":    "清理屏幕",
-            "/show":     "显示所有会话",
-            "/enter":    "进入历史会话",
+            "/ls":       "显示所有会话",
+            "/cd":       "进入历史会话",
             "/skill":    "加载技能",
             "/thinking": "切换思考强度",
             "/done":     "完成探索分支",
@@ -439,6 +444,7 @@ class ChildSession(SessionState):
             self._mgr.summary_anim_stop()
         if not summary:
             return "总结取消或失败"
+
         parent_msgs, err = load_session(self._mgr.narnat_dir, self._parent)
         if err:
             return f"无法加载父会话: {err}"
@@ -460,10 +466,7 @@ class ChildSession(SessionState):
                      parent_msg_count=self._parent_msg_count,
                      last_summarized_at=self._last_summarized_at)
 
-        new_msgs, err = load_session(self._mgr.narnat_dir, self._parent)
-        if err:
-            return err
-        self._mgr.replace_messages(new_msgs)
+        self._mgr.replace_messages(parent_msgs)
         new_state = self._mgr.create_root_state(self._parent)
         self._mgr.switch_state(new_state)
         return ""
@@ -496,7 +499,6 @@ class SessionManager:
 
     def __init__(self, narnat_dir: str,
                  get_messages_func: Callable[[], List[Dict[str, Any]]],
-                 set_messages_func: Callable[[List[Dict[str, Any]]], None],
                  context_manager=None,
                  config_dir: str = "",
                  thinking_effort_getter: Callable[[], str] = None,
@@ -508,7 +510,6 @@ class SessionManager:
                  cancel_check: Callable[[], bool] = None):
         self.narnat_dir = narnat_dir
         self._get_messages = get_messages_func
-        self._set_messages = set_messages_func
         self._context = context_manager
         self._config_dir = config_dir
         self._get_thinking_effort = thinking_effort_getter
@@ -575,6 +576,10 @@ class SessionManager:
             for child in root.get("children", []):
                 if child["name"] == name:
                     matches.append((child["name"], root["name"]))
+        # 裸名优先匹配根会话；仅当无根匹配时，唯一的子匹配才生效
+        root_matches = [m for m in matches if m[1] is None]
+        if root_matches:
+            return root_matches[0][0], None, ""
         if len(matches) == 1:
             return matches[0][0], matches[0][1], ""
         if len(matches) > 1:
