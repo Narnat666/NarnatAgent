@@ -108,6 +108,9 @@ class Agent:
             git_skip_confirm=self._config.git_skip_confirm,
             rm_skip_confirm=self._config.rm_skip_confirm,
             max_transfer_mb=self._config.max_transfer_mb,
+            max_tool_output_chars=(
+                self._config.max_tool_output_kb * 1024 if self._config.max_tool_output_kb > 0 else 0
+            ),
             require_plan=self._config.require_plan,
             min_tools=self._config.min_tools,
         )

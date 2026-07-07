@@ -21,6 +21,7 @@ from .defaults import (
     WARN_TURN_1, WARN_TURN_2, COMPRESS_TURN,
     DEFAULT_GIT_SKIP, DEFAULT_RM_SKIP,
     DEFAULT_REQUIRE_PLAN, DEFAULT_MIN_TOOLS,
+    DEFAULT_MAX_TOOL_OUTPUT_KB,
 )
 
 
@@ -97,6 +98,7 @@ class AppConfig:
     rm_skip_confirm: bool = DEFAULT_RM_SKIP
     require_plan: bool = DEFAULT_REQUIRE_PLAN
     min_tools: int = DEFAULT_MIN_TOOLS
+    max_tool_output_kb: int = DEFAULT_MAX_TOOL_OUTPUT_KB
 
 
 def _is_nuitka_onefile() -> bool:
@@ -314,6 +316,7 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
                         "模型": DEFAULT_MODEL,
                         "思考强度": "high",
                         "思考模式": {"high": "高", "max": "全开"},
+                        "工具输出上限KB": DEFAULT_MAX_TOOL_OUTPUT_KB,
                         "接口密钥组": {"websearch": "", "websearch_url": "https://api.anysearch.com/mcp"},
                     }, f, indent=2, ensure_ascii=False)
                 else:
@@ -367,4 +370,5 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
         rm_skip_confirm=bool(data.get("rm免确认", DEFAULT_RM_SKIP)),
         require_plan=bool(data.get("计划优先", DEFAULT_REQUIRE_PLAN)),
         min_tools=int(data.get("计划最低工具数", DEFAULT_MIN_TOOLS)),
+        max_tool_output_kb=int(data.get("工具输出上限KB", DEFAULT_MAX_TOOL_OUTPUT_KB)),
     )

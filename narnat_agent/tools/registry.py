@@ -83,9 +83,21 @@ def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolCon
             result = impl(**arguments)
         # Edit/Write 返回 (llm_result, color_diff) 元组
         if isinstance(result, tuple):
-            return result
-        # 其他工具返回纯字符串
-        return (result, "")
+            llm_result, color_diff = result
+        else:
+            llm_result, color_diff = result, ""
+
+        # ── 全局输出硬截断 ──
+        if tool_context and tool_context.max_tool_output_chars > 0:
+            if len(llm_result) > tool_context.max_tool_output_chars:
+                original_len = len(llm_result)
+                limit_kb = tool_context.max_tool_output_chars // 1024
+                llm_result = (
+                    llm_result[:tool_context.max_tool_output_chars]
+                    + f"\n...[已截断: 输出共{original_len}字符, 已达全局上限{limit_kb}KB]"
+                )
+
+        return (llm_result, color_diff)
     except TypeError as e:
         return (f"错误: 工具参数错误({name}): {e}", "")
     except Exception as e:
