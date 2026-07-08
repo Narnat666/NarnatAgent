@@ -6,7 +6,7 @@ import argparse
 import sys
 import os
 
-__version__ = "13.4.0"
+__version__ = "13.4.1"
 
 
 def main():
@@ -32,4 +32,14 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"\n程序异常退出: {e}")
+        try:
+            input("按回车键退出...")
+        except (KeyboardInterrupt, EOFError):
+            pass
+        sys.exit(1)
