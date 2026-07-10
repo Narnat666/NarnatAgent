@@ -310,6 +310,15 @@ class ToolDispatcher:
                 summary = "status"
             elif action == "close":
                 summary = f"close{sid_str} {arguments.get('host', '')}"
+            elif action == "transfer":
+                src_h = arguments.get("source_host", "") or "本机"
+                src_p = arguments.get("source_path", "")
+                tgt_h = arguments.get("target_host", "") or "本机"
+                tgt_p = arguments.get("target_path", "")
+                summary = f"transfer {src_h}:{src_p} → {tgt_h}:{tgt_p}"
+            elif action == "input":
+                text = arguments.get("input", "")
+                summary = f"input{sid_str} {text}"
             else:
                 summary = f"{action or '(未知)'}{sid_str}"
         elif name == "Grep":
@@ -318,6 +327,9 @@ class ToolDispatcher:
             summary = arguments.get("pattern", "")
         elif name == "WebSearch":
             summary = arguments.get("query", "")
+        elif name == "TodoWrite":
+            todos = arguments.get("todos", [])
+            summary = f"{len(todos)}项" if todos else "(空)"
 
         if summary:
             _stdout_write(f"  {D}[{label}] {summary}{R}\n")

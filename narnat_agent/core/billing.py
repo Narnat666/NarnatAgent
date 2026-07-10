@@ -53,7 +53,7 @@ def fetch_balance(api_key: str, balance_url: Optional[str] = None) -> Optional[D
     if not balance_url:
         return None
     try:
-        with httpx.Client(timeout=httpx.Timeout(connect=3.0, read=5.0)) as client:
+        with httpx.Client(timeout=8.0) as client:
             r = client.get(
                 balance_url,
                 headers={"Authorization": f"Bearer {api_key}"},

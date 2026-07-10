@@ -39,8 +39,7 @@ class StatsTracker:
         )
 
     def fetch_balance(self, api_key: str, round_num: int, interval: int = 10) -> None:
-        """每N轮查询一次余额"""
-        self._balance_to_show = 0.0
+        """每N轮查询一次余额，其余轮次保留上次查询结果"""
         if api_key and round_num % interval == 0:
             bal = fetch_balance(api_key, self._balance_url)
             if bal:
