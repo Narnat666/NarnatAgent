@@ -34,7 +34,7 @@ DEFINITION = {
                 "line_start": {"type": "integer", "description": "起始行（行号模式，默认不启用，≥1启用，含本行）"},
                 "line_end": {"type": "integer", "description": "结束行（含本行，默认等于line_start）"},
                 "remote": {"type": "boolean", "description": "是否编辑远程（默认否，启用前需先Terminal连接）"},
-                "host": {"type": "string", "description": "远程主机IP（默认空，需启用remote）"},
+                "host": {"type": "string", "description": "远程主机IP或域名（默认空，需启用remote）"},
             },
             "required": ["file_path"],
         },

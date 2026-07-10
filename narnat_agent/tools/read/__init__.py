@@ -17,9 +17,9 @@ DEFINITION = {
             "properties": {
                 "file_path": {"type": "string", "description": "文件路径（绝对或相对）"},
                 "offset": {"type": "integer", "description": "起始行（默认1，含本行）"},
-                "limit": {"type": "integer", "description": "读取行数（默认2000，上限受128KB输出限制）"},
+                "limit": {"type": "integer", "description": "读取行数（默认2000）"},
                 "remote": {"type": "boolean", "description": "是否读取远程（默认否，启用前需先Terminal连接）"},
-                "host": {"type": "string", "description": "远程主机IP（默认空，需启用remote）"},
+                "host": {"type": "string", "description": "远程主机IP或域名（默认空，需启用remote）"},
             },
             "required": ["file_path"],
         },
