@@ -424,14 +424,15 @@ class SSHSession:
             # Ctrl+C后哨兵出现了 → 走正常解析(远程进程已被终止)
             if found:
                 self._busy = False
-                cmd_output, cwd = self._parse_output(output, marker, pwd_marker)
+                cmd_output, cwd, exit_code = self._parse_output(output, marker, pwd_marker)
                 if cwd:
                     self._cwd = cwd
+                ec = f"[exit code: {exit_code}]\n" if exit_code is not None else ""
                 tag = "[ESC中断]" if interrupted else f"[超时中断: {timeout}秒]"
                 if cmd_output:
-                    return f"{cmd_output}\n{tag}\n{self.prompt}"
+                    return f"{ec}{cmd_output}\n{tag}\n{self.prompt}"
                 else:
-                    return f"{tag}\n{self.prompt}"
+                    return f"{ec}{tag}\n{self.prompt}"
 
             # 哨兵仍未出现（极少见：进程忽略信号或shell异常）
             # 不再启动busy_watcher，直接标记空闲
@@ -445,17 +446,18 @@ class SSHSession:
 
         # 正常解析
         self._busy = False
-        cmd_output, cwd = self._parse_output(output, marker, pwd_marker)
+        cmd_output, cwd, exit_code = self._parse_output(output, marker, pwd_marker)
         if cwd:
             self._cwd = cwd
 
+        ec = f"[exit code: {exit_code}]\n" if exit_code is not None else ""
         if cmd_output:
-            return f"{cmd_output}\n{self.prompt}"
+            return f"{ec}{cmd_output}\n{self.prompt}"
         else:
-            return self.prompt
+            return f"{ec}{self.prompt}"
 
-    def _parse_output(self, raw: str, marker: str, pwd_marker: str) -> tuple[str, Optional[str]]:
-        """解析正常完成的输出，返回 (命令输出, cwd)"""
+    def _parse_output(self, raw: str, marker: str, pwd_marker: str) -> tuple[str, Optional[str], Optional[int]]:
+        """解析正常完成的输出，返回 (命令输出, cwd, exit_code)"""
         exit_code = None
         cwd = None
 
@@ -498,7 +500,7 @@ class SSHSession:
 
         cmd_output = self._strip_echo(before_marker)
 
-        return self._clean_output(cmd_output), cwd
+        return self._clean_output(cmd_output), cwd, exit_code
 
     def _parse_partial_output(self, raw: str, marker: str) -> str:
         """解析超时时的部分输出（marker可能还没出现）"""

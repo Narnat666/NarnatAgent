@@ -1,10 +1,9 @@
 """Shell工具 —— 纯管道，AI写什么就执行什么
 
-Windows用PowerShell，Linux/macOS用bash。
+Windows用cmd，Linux/macOS用bash。
 AI自己负责写正确语法，我们只管送达和返回。
 """
 
-import base64
 import os
 import re
 import subprocess
@@ -22,9 +21,6 @@ _RE_DELETE = re.compile(
 
 # 匹配 git 命令的简单正则（出现 git 即命中）
 _RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
-
-_EXITCODE_MARKER = "__EXIT_b3f7__"
-_RE_EXITCODE = re.compile(rf"(?:^|\n){_EXITCODE_MARKER}:(\d+)\s*$")
 
 # 后台进程注册表 {pid: (proc, start_time)}
 _background_procs: dict = {}
@@ -90,14 +86,49 @@ def _decode_output(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _extract_exitcode(text: str) -> tuple[str, int | None]:
-    """从输出末尾提取__EXIT_b3f7__:N，返回(清洗后文本, 退出码)"""
-    m = _RE_EXITCODE.search(text)
-    if m:
-        code = int(m.group(1))
-        cleaned = text[:m.start()].rstrip("\n")
-        return cleaned, code
-    return text, None
+def _split_commands(command: str) -> list:
+    """在引号外按 && 和 || 分割，返回 [(op, cmd), ...]。
+    op: '' 表示首段，'&&' 或 '||' 表示后续段。"""
+    splits = []  # [(pos, '&&'|'||')]
+    in_quote = False
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if ch == '"':
+            in_quote = not in_quote
+        elif not in_quote and i + 1 < len(command):
+            two = command[i:i+2]
+            if two in ("&&", "||"):
+                splits.append((i, two))
+                i += 1
+        i += 1
+
+    if not splits:
+        return [("", command.strip())]
+
+    result = [("", command[:splits[0][0]].strip())]
+    for j, (pos, op) in enumerate(splits):
+        next_pos = splits[j+1][0] if j + 1 < len(splits) else len(command)
+        result.append((op, command[pos+2:next_pos].strip()))
+    return result
+
+
+def _is_cd_command(cmd: str) -> bool:
+    """判断是否为 cd/chdir 命令"""
+    lower = cmd.lower()
+    return lower.startswith("cd ") or lower == "cd" or lower.startswith("chdir ") or lower == "chdir"
+
+
+def _extract_cd_path(cmd: str) -> str:
+    """从 cd 命令中提取目标路径，处理 /d 等cmd标志"""
+    parts = cmd.split(None, 1)
+    if len(parts) < 2:
+        return os.path.expanduser("~")
+    args = parts[1]
+    # 去掉cmd的 /d 标志
+    if args.lower().startswith("/d "):
+        args = args[3:].strip()
+    return args.strip('"')
 
 
 def _kill_proc_tree(proc: subprocess.Popen):
@@ -180,22 +211,13 @@ def execute(
                     })
                 return "__AWAIT_CONFIRM__"
 
-    # Windows: 统一用PowerShell，AI输入什么就执行什么
-    # 优先pwsh(PowerShell 7+，原生支持&&/||)，回退powershell 5.x
-    # 用-EncodedCommand传Base64，避免-Command对$_等特殊字符的二次解析
+    # Windows: 用cmd /c，退出码天然透传，无CLIXML/编码污染
+    # 多段命令(&&/||)由Python端拆分后逐段执行
     if sys.platform == "win32":
-        ps = _find_executable("pwsh", "powershell")
-        if ps is None:
-            return "错误: 未找到PowerShell，请安装后重试"
-        full_cmd = (
-            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
-            f"$__ec = 0; "
-            f"try {{ & {{ {command}\n}} 2>&1 | ForEach-Object {{ if($_ -is [System.Management.Automation.ErrorRecord]){{ $_.ToString() }}else{{ $_ }} }} }} "
-            f"catch {{ Write-Output $_.ToString(); $__ec = 1 }} "
-            f"finally {{ if($LASTEXITCODE){{ $__ec = $LASTEXITCODE }}elseif(!$?){{ $__ec = 1 }} ; Write-Output \"{_EXITCODE_MARKER}:$__ec\" }}"
-        )
-        encoded = base64.b64encode(full_cmd.encode("utf-16-le")).decode("ascii")
-        shell_cmd = [ps, "-NoProfile", "-EncodedCommand", encoded]
+        segments = _split_commands(command)
+        if len(segments) > 1:
+            return _execute_segments(segments, timeout, run_in_background, max_output_chars, _tool_context)
+        shell_cmd = ["cmd", "/c", command]
     else:
         shell = _find_executable("bash", "sh")
         if shell is None:
@@ -213,7 +235,7 @@ def execute(
     is_win = sys.platform == "win32"
     popen_kwargs = {
         "stdout": subprocess.PIPE,
-        "stderr": subprocess.PIPE if not is_win else subprocess.DEVNULL,
+        "stderr": subprocess.PIPE,
         "cwd": os.getcwd(),
     }
     if not is_win:
@@ -247,10 +269,8 @@ def execute(
                 pass
 
         t_out = threading.Thread(target=_reader, args=(proc.stdout, stdout_chunks), daemon=True)
-        threads = [t_out]
-        if not is_win:
-            t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_chunks), daemon=True)
-            threads.append(t_err)
+        t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_chunks), daemon=True)
+        threads = [t_out, t_err]
         for t in threads:
             t.start()
 
@@ -268,61 +288,12 @@ def execute(
             t.join(timeout=5.0)
 
         stdout = b"".join(stdout_chunks)
-        stderr = b"".join(stderr_chunks) if not is_win else b""
+        stderr = b"".join(stderr_chunks)
 
         # ESC打断检查（优先级最高，kill_active已在外部调用）
         global _interrupted
         if _interrupted:
             _interrupted = False
-            if is_win:
-                out, exitcode = _extract_exitcode(_decode_output(stdout))
-                final_code = exitcode if exitcode else proc.returncode
-                parts = []
-                if out.strip():
-                    parts.append(out.strip())
-                parts.append("[用户中断]")
-                parts.append(f"[exit code: {final_code}]")
-            else:
-                out = _decode_output(stdout)
-                err = _decode_output(stderr)
-                parts = []
-                if out.strip():
-                    parts.append(out.strip())
-                if err.strip():
-                    parts.append(f"[stderr]\n{err.strip()}")
-                parts.append("[用户中断]")
-            return _truncate_output("\n".join(parts), max_output_chars)
-
-        if timed_out:
-            _kill_proc_tree(proc)
-            proc.wait(timeout=5)
-            if is_win:
-                out, exitcode = _extract_exitcode(_decode_output(stdout))
-                final_code = exitcode if exitcode else proc.returncode
-                parts = []
-                if out.strip():
-                    parts.append(out.strip())
-                parts.append(f"[超时: 命令执行超过{timeout_sec:.0f}秒，已终止]")
-                parts.append(f"[exit code: {final_code}]")
-            else:
-                out = _decode_output(stdout)
-                err = _decode_output(stderr)
-                parts = []
-                if out.strip():
-                    parts.append(out.strip())
-                if err.strip():
-                    parts.append(f"[stderr]\n{err.strip()}")
-                parts.append(f"[超时: 命令执行超过{timeout_sec:.0f}秒，已终止]")
-            return _truncate_output("\n".join(parts), max_output_chars)
-
-        if is_win:
-            out, exitcode = _extract_exitcode(_decode_output(stdout))
-            final_code = exitcode if exitcode else proc.returncode
-            parts = []
-            if out.strip():
-                parts.append(out.strip())
-            parts.append(f"[exit code: {final_code}]")
-        else:
             out = _decode_output(stdout)
             err = _decode_output(stderr)
             parts = []
@@ -330,7 +301,30 @@ def execute(
                 parts.append(out.strip())
             if err.strip():
                 parts.append(f"[stderr]\n{err.strip()}")
-            parts.append(f"[exit code: {proc.returncode}]")
+            parts.append("[用户中断]")
+            return _truncate_output("\n".join(parts), max_output_chars)
+
+        if timed_out:
+            _kill_proc_tree(proc)
+            proc.wait(timeout=5)
+            out = _decode_output(stdout)
+            err = _decode_output(stderr)
+            parts = []
+            if out.strip():
+                parts.append(out.strip())
+            if err.strip():
+                parts.append(f"[stderr]\n{err.strip()}")
+            parts.append(f"[超时: 命令执行超过{timeout_sec:.0f}秒，已终止]")
+            return _truncate_output("\n".join(parts), max_output_chars)
+
+        out = _decode_output(stdout)
+        err = _decode_output(stderr)
+        parts = []
+        parts.append(f"[exit code: {proc.returncode}]")
+        if out.strip():
+            parts.append(out.strip())
+        if err.strip():
+            parts.append(f"[stderr]\n{err.strip()}")
 
         return _truncate_output("\n".join(parts), max_output_chars)
     finally:
@@ -370,6 +364,85 @@ def _run_background(shell_cmd: list, original_command: str) -> str:
         f"命令: {original_command}\n"
         f"提示: 进程在后台运行，输出可通过重定向到文件后用Read查看"
     )
+
+
+def _execute_segments(segments: list, timeout: int, run_in_background: bool,
+                      max_output_chars: int, _tool_context) -> str:
+    """逐段执行 &&/|| 分割的命令，短路段跳过。
+
+    虽然 cmd /c 本身支持 &&，但 Python 端拆分为逐段执行以获得：
+    1. 每段独立的超时控制
+    2. ESC 可在段间打断
+    3. cd 命令作用到 os.chdir() 而非子进程
+    后台模式：重组为单行 cmd /c 调用，委托 _run_background。
+    """
+    timeout_sec = min(timeout, 600)
+    if run_in_background:
+        reassembled = " ".join(f"{op} {seg}" if op else seg for op, seg in segments)
+        return _run_background(["cmd", "/c", reassembled], reassembled)
+
+    all_parts = []
+    prev_rc = 0
+    remaining_timeout = timeout_sec
+
+    for i, (op, seg) in enumerate(segments):
+        # 短路求值
+        if op == "&&" and prev_rc != 0:
+            all_parts.append(f"[跳过: 前一命令失败(退出码{prev_rc})] {seg}")
+            continue
+        if op == "||" and prev_rc == 0:
+            all_parts.append(f"[跳过: 前一命令成功] {seg}")
+            continue
+
+        # cd 命令直接作用于 Python 进程
+        if _is_cd_command(seg):
+            path = _extract_cd_path(seg)
+            try:
+                os.chdir(path)
+                prev_rc = 0
+            except OSError as e:
+                all_parts.append(f"cd: {e}")
+                prev_rc = 1
+            continue
+
+        # 执行单段
+        seg_start = time.time()
+        try:
+            proc = subprocess.run(
+                ["cmd", "/c", seg],
+                capture_output=True,
+                timeout=remaining_timeout,
+                cwd=os.getcwd(),
+            )
+            seg_elapsed = time.time() - seg_start
+            remaining_timeout = max(0, remaining_timeout - seg_elapsed)
+
+            out = _decode_output(proc.stdout)
+            err = _decode_output(proc.stderr)
+            parts = [f"[exit code: {proc.returncode}]"]
+            if out.strip():
+                parts.append(out.strip())
+            if err.strip():
+                parts.append(f"[stderr]\n{err.strip()}")
+            all_parts.append("\n".join(parts))
+            prev_rc = proc.returncode
+        except subprocess.TimeoutExpired:
+            all_parts.append(f"[超时: 段{i}执行超过{remaining_timeout:.0f}秒]")
+            prev_rc = -1
+            break
+        except Exception as e:
+            all_parts.append(f"错误: 段{i}失败: {e}")
+            prev_rc = -1
+            break
+
+        # 检查ESC打断
+        global _interrupted
+        if _interrupted:
+            _interrupted = False
+            all_parts.append("[用户中断]")
+            break
+
+    return _truncate_output("\n".join(all_parts), max_output_chars)
 
 
 def get_background_status() -> str:
