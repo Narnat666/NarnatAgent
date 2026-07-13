@@ -44,6 +44,8 @@ class StatsTracker:
             bal = fetch_balance(api_key, self._balance_url)
             if bal:
                 self._balance_to_show = bal["total"]
+        else:
+            self._balance_to_show = 0.0
 
     @property
     def input_tokens(self) -> int:
