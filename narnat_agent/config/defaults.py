@@ -2,6 +2,9 @@
 默认配置常量 —— 压缩prompt模板、阈值等
 """
 
+# ── 自动保存默认值 ──
+DEFAULT_AUTO_SAVE = False   # 默认不自动保存，需用户手动 /save
+
 # ── 安全确认默认值 ──
 DEFAULT_GIT_SKIP = False   # git 命令默认不免确认（即需要二次确认）
 DEFAULT_RM_SKIP = False     # rm 命令默认不免确认（即需要二次确认）

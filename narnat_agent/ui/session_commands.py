@@ -122,14 +122,16 @@ def _dispatch_command(cmd: str, args: str, mgr) -> int:
         return 1
 
     if cmd == "save":
-        if not args:
-            _stdout_write(f"  {Y}用法: /save <名称>{R}\n")
-            return 1
         result = mgr.on_save(args)
         if result:
             _stdout_write(f"  {X}{result}{R}\n")
         else:
-            _stdout_write(f"  {E}会话已保存: {C}{args}{R}\n")
+            if args:
+                _stdout_write(f"  {E}会话已保存: {C}{args}{R}\n")
+            else:
+                saved_name = mgr.state.session_name()
+                label = saved_name if saved_name else ""
+                _stdout_write(f"  {E}会话已保存: {C}{label}{R}\n")
         return 1
 
     if cmd == "ls":

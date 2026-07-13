@@ -22,6 +22,7 @@ from .defaults import (
     DEFAULT_GIT_SKIP, DEFAULT_RM_SKIP,
     DEFAULT_REQUIRE_PLAN, DEFAULT_MIN_TOOLS,
     DEFAULT_MAX_TOOL_OUTPUT_KB,
+    DEFAULT_AUTO_SAVE,
 )
 
 
@@ -99,6 +100,7 @@ class AppConfig:
     require_plan: bool = DEFAULT_REQUIRE_PLAN
     min_tools: int = DEFAULT_MIN_TOOLS
     max_tool_output_kb: int = DEFAULT_MAX_TOOL_OUTPUT_KB
+    auto_save: bool = DEFAULT_AUTO_SAVE
 
 
 def _is_nuitka_onefile() -> bool:
@@ -371,4 +373,5 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
         require_plan=bool(data.get("计划优先", DEFAULT_REQUIRE_PLAN)),
         min_tools=int(data.get("计划最低工具数", DEFAULT_MIN_TOOLS)),
         max_tool_output_kb=int(data.get("工具输出上限KB", DEFAULT_MAX_TOOL_OUTPUT_KB)),
+        auto_save=bool(data.get("自动保存", DEFAULT_AUTO_SAVE)),
     )

@@ -12,6 +12,7 @@ Agent类作为主编排者，委托具体实现给子模块：
 import json
 import os
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional
@@ -94,6 +95,7 @@ class Agent:
             summary_anim_start=lambda: self._ui.begin_summarizing(),
             summary_anim_stop=lambda: self._ui.end_summarizing(),
             cancel_check=lambda: _interrupt_ctrl.is_set,
+            name_func=lambda msgs: self._do_name_session(msgs),
         )
         self._ui = UIInterface(self._config.ai.model, self._mgr)
 
@@ -125,6 +127,8 @@ class Agent:
 
         # 轮次计数
         self._round = 0
+        # 后台自动保存
+        self._auto_save_thread: Optional[threading.Thread] = None
 
     @property
     def _thinking_label(self) -> str:
@@ -135,6 +139,7 @@ class Agent:
 
     def _auto_save_on_exit(self):
         """退出时保存当前会话并清理延迟删除"""
+        self._wait_auto_save()
         if self._mgr.state.session_name():
             self._mgr.on_auto_save()
             saved_name = self._mgr.state.session_name()
@@ -151,6 +156,60 @@ class Agent:
                 summary_parts.append(chunk["content"])
         return "".join(summary_parts)
 
+    def _do_name_session(self, messages):
+        """用 LLM 生成会话名称。返回空串表示失败。"""
+        name_messages = list(messages)
+        name_messages.append({
+            "role": "user",
+            "content": "请为以上对话起一个简短标题（15字以内），直接输出标题，不要引号不要解释。"
+        })
+        parts = []
+        for chunk in self._llm.chat_stream(name_messages, no_tools=True,
+                                            cancel_check=lambda: False):
+            if "content" in chunk and "tool_calls" not in chunk:
+                parts.append(chunk["content"])
+        name = "".join(parts).strip()
+        if not name:
+            return ""
+        name = name.strip('"\'""''《》「」')
+        if len(name) > 30:
+            name = name[:30]
+        return name
+
+    def _try_auto_save(self):
+        """启动后台线程做 LLM 命名 + 写磁盘。主线程立即返回。"""
+        if not self._config.auto_save:
+            return
+        if self._mgr._auto_save_done:
+            return
+        from .session_callbacks import NoSession
+        if not isinstance(self._mgr.state, NoSession):
+            return
+        self._mgr._auto_save_done = True
+
+        self._auto_save_thread = threading.Thread(
+            target=self._do_auto_save, daemon=True)
+        self._auto_save_thread.start()
+
+    def _do_auto_save(self):
+        """后台线程：LLM 命名 → 写磁盘。不碰状态切换。"""
+        name = self._do_name_session(self._messages)
+        if not name:
+            return
+        from ..config.session_store import save_session
+        save_session(self._config.narnat_dir, name, list(self._messages))
+        self._mgr._pending_auto_save_name = name
+
+    def _wait_auto_save(self):
+        """等待后台自动保存完成，执行状态切换。幂等调用。"""
+        if self._auto_save_thread is not None:
+            self._auto_save_thread.join(timeout=5)
+            self._auto_save_thread = None
+        name = self._mgr._pending_auto_save_name
+        if name:
+            self._mgr._pending_auto_save_name = None
+            self._mgr.switch_state(self._mgr.create_root_state(name))
+
     def run(self):
         """主循环"""
         self._ui.start()
@@ -162,6 +221,9 @@ class Agent:
                 user_input = self._ui.read_input()
                 if user_input is None:
                     continue
+
+                # 同步点：等后台自动保存完成
+                self._wait_auto_save()
 
                 stripped = user_input.strip()
                 if not stripped:
@@ -221,6 +283,7 @@ class Agent:
                 else:
                     if not stream.aborted:
                         self._mgr.on_auto_save()
+                        self._try_auto_save()
 
         finally:
             self._dispatcher._executor.shutdown(wait=False)

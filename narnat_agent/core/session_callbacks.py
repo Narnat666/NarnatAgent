@@ -139,7 +139,10 @@ class NoSession(SessionState):
 
     def save(self, name: str) -> str:
         if not name:
-            return "错误: 请指定会话名称"
+            if self._mgr.name_func:
+                name = self._mgr.name_func(self._mgr.get_messages())
+            if not name:
+                return "自动命名失败，请手动指定: /save <名称>"
         msgs = self._mgr.get_messages()
         err = save_session(self._mgr.narnat_dir, name, msgs)
         if err:
@@ -243,7 +246,8 @@ class RootSession(SessionState):
 
     def save(self, name: str) -> str:
         if not name:
-            return "错误: 请指定会话名称"
+            self._persist()
+            return ""
         if name == self._name:
             self._persist()
         else:
@@ -507,7 +511,8 @@ class SessionManager:
                  summarize_func: Callable[[List[Dict[str, Any]], Callable[[], bool]], str] = None,
                  summary_anim_start: Callable[[], None] = None,
                  summary_anim_stop: Callable[[], None] = None,
-                 cancel_check: Callable[[], bool] = None):
+                 cancel_check: Callable[[], bool] = None,
+                 name_func: Callable[[List[Dict[str, Any]]], str] = None):
         self.narnat_dir = narnat_dir
         self._get_messages = get_messages_func
         self._context = context_manager
@@ -519,6 +524,9 @@ class SessionManager:
         self.summary_anim_start = summary_anim_start
         self.summary_anim_stop = summary_anim_stop
         self.cancel_check = cancel_check or (lambda: False)
+        self.name_func = name_func
+        self._auto_save_done: bool = False
+        self._pending_auto_save_name: Optional[str] = None
         self.pending_deletes: Set[Tuple[str, Optional[str]]] = set()
         self._state: SessionState = NoSession(self)
 
