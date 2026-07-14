@@ -1,6 +1,6 @@
 """Shell工具 —— 纯管道，AI写什么就执行什么
 
-Windows用cmd，Linux/macOS用bash。
+Windows用持久化cmd会话（命令直写stdin，零转义损耗），Linux/macOS用bash -c。
 AI自己负责写正确语法，我们只管送达和返回。
 """
 
@@ -11,6 +11,8 @@ import sys
 import threading
 import time
 from typing import Optional, Callable
+
+from .cmd_session import CmdSession
 
 
 # 删除命令正则
@@ -25,7 +27,28 @@ _RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
 # 后台进程注册表 {pid: (proc, start_time)}
 _background_procs: dict = {}
 
-# 当前运行的前台进程（agent层ESC打断后可调用kill_active杀掉）
+# ── 持久化 cmd 会话（Windows only）──
+_cmd_session: Optional[CmdSession] = None
+_cmd_session_lock = threading.Lock()
+
+
+def _get_cmd_session() -> CmdSession:
+    """获取或创建持久化 cmd 会话。进程已死或超时死亡则重建。"""
+    global _cmd_session
+    with _cmd_session_lock:
+        if (_cmd_session is None
+                or _cmd_session._proc.poll() is not None
+                or _cmd_session._dead):
+            if _cmd_session is not None:
+                try:
+                    _cmd_session.close()
+                except Exception:
+                    pass
+            _cmd_session = CmdSession()
+        return _cmd_session
+
+
+# 当前运行的前台进程（agent层ESC打断后可调用kill_active杀掉，Linux路径使用）
 _active_proc: Optional[subprocess.Popen] = None
 _active_proc_lock = threading.Lock()
 
@@ -54,6 +77,10 @@ DEFINITION = {
 def kill_active():
     """杀掉当前正在运行的前台子进程（ESC打断时由agent调用）"""
     global _interrupted
+    if sys.platform == "win32" and _cmd_session is not None:
+        _cmd_session.kill_active()
+        _interrupted = True
+        return
     with _active_proc_lock:
         proc = _active_proc
     if proc is not None and proc.poll() is None:
@@ -114,8 +141,11 @@ def _split_commands(command: str) -> list:
 
 
 def _is_cd_command(cmd: str) -> bool:
-    """判断是否为 cd/chdir 命令"""
+    """判断是否为 cd/chdir 命令（仅纯cd，不含 &/| 等复合操作符）"""
     lower = cmd.lower()
+    # 拒绝复合命令：含 & | && ||
+    if "&" in cmd or "|" in cmd:
+        return False
     return lower.startswith("cd ") or lower == "cd" or lower.startswith("chdir ") or lower == "chdir"
 
 
@@ -172,6 +202,9 @@ def execute(
     """
     执行shell命令。AI写什么就执行什么，不做翻译。
 
+    Windows: 持久化cmd会话，命令直写stdin，行为与真实cmd窗口一致。
+    Linux/macOS: bash -c 子进程。
+
     Args:
         command: shell命令
         timeout: 超时秒数
@@ -182,7 +215,7 @@ def execute(
     Returns:
         stdout + stderr + 退出码
     """
-    # 安全检查：删除命令和git命令根据配置决定是否需要确认
+    # ── 安全检查：删除命令和git命令根据配置决定是否需要确认 ──
     need_confirm = False
     tc = _tool_context
     if tc and not tc.rm_skip_confirm and _RE_DELETE.search(command):
@@ -192,16 +225,12 @@ def execute(
 
     if need_confirm:
         if sys.platform == "win32":
-            # Windows: prompt_toolkit和input()用不同的输入系统，直接用input()确认
             if tc and tc.confirm_callback and not tc.confirm_callback(command):
                 return "操作已取消: 此命令需用户确认"
         else:
-            # Linux/macOS: 终端被prompt_toolkit占用，无法在子线程中读取输入
-            # 用户已确认过（_delete_confirmed=True），直接执行
             if tc and tc._delete_confirmed:
                 tc._delete_confirmed = False
             else:
-                # 暂存命令，返回AWAIT_CONFIRM标记，由agent主循环在#提示符下等待用户确认
                 if tc is not None:
                     tc.pending_delete = ("Shell", {
                         "command": command,
@@ -211,50 +240,70 @@ def execute(
                     })
                 return "__AWAIT_CONFIRM__"
 
-    # Windows: 用cmd /c，退出码天然透传，无CLIXML/编码污染
-    # 多段命令(&&/||)由Python端拆分后逐段执行
-    if sys.platform == "win32":
-        segments = _split_commands(command)
-        if len(segments) > 1:
-            return _execute_segments(segments, timeout, run_in_background, max_output_chars, _tool_context)
-        shell_cmd = ["cmd", "/c", command]
-    else:
-        shell = _find_executable("bash", "sh")
-        if shell is None:
-            return "错误: 未找到shell，请安装bash或sh后重试"
-        shell_cmd = [shell, "-c", command]
+    timeout = min(timeout, 600)
 
-    timeout_sec = min(timeout, 600)
-
-    # 后台运行模式
+    # ── 后台运行：始终走独立子进程 ──
     if run_in_background:
-        return _run_background(shell_cmd, command)
+        if sys.platform == "win32":
+            return _run_background(["cmd", "/c", command], command)
+        else:
+            shell = _find_executable("bash", "sh")
+            if shell is None:
+                return "错误: 未找到shell，请安装bash或sh后重试"
+            return _run_background([shell, "-c", command], command)
 
-    # 前台运行模式
-    # Unix: 用新进程组，确保能killpg杀整棵树
-    is_win = sys.platform == "win32"
-    popen_kwargs = {
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.PIPE,
-        "cwd": os.getcwd(),
-    }
-    if not is_win:
-        popen_kwargs["start_new_session"] = True
+    # ═════════════════════════════════════════════════════════════
+    # Windows: 持久化 cmd 会话（命令直写 stdin，零转义损耗）
+    # ═════════════════════════════════════════════════════════════
+    if sys.platform == "win32":
+        # cd 命令：同步更新 Python 进程的 CWD（供 Read/Glob 等工具使用）
+        if _is_cd_command(command):
+            path = _extract_cd_path(command)
+            try:
+                os.chdir(path)
+            except OSError as e:
+                return f"cd: {e}"
 
+        session = _get_cmd_session()
+        return session.execute(
+            command, timeout=timeout, max_output_chars=max_output_chars
+        )
+
+    # ═════════════════════════════════════════════════════════════
+    # Linux/macOS: bash -c 子进程（原有逻辑）
+    # ═════════════════════════════════════════════════════════════
+    shell = _find_executable("bash", "sh")
+    if shell is None:
+        return "错误: 未找到shell，请安装bash或sh后重试"
+
+    # 多段命令(&&/||)由Python端拆分后逐段执行
+    segments = _split_commands(command)
+    if len(segments) > 1:
+        return _execute_segments(
+            segments, timeout, False, max_output_chars, _tool_context
+        )
+
+    shell_cmd = [shell, "-c", command]
+
+    # 用新进程组，确保能 killpg 杀整棵树
     try:
-        proc = subprocess.Popen(shell_cmd, **popen_kwargs)
+        proc = subprocess.Popen(
+            shell_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=os.getcwd(),
+            start_new_session=True,
+        )
     except FileNotFoundError as e:
         return f"错误: Shell未找到: {e}"
     except OSError as e:
         return f"错误: 启动失败: {e}"
 
-    # 注册到_active_proc，agent层ESC打断后可调用kill_active杀掉
     with _active_proc_lock:
         global _active_proc
         _active_proc = proc
 
     try:
-        # 非阻塞读取: 用线程读stdout/stderr，主线程轮询超时
         stdout_chunks = []
         stderr_chunks = []
 
@@ -268,13 +317,16 @@ def execute(
             except Exception:
                 pass
 
-        t_out = threading.Thread(target=_reader, args=(proc.stdout, stdout_chunks), daemon=True)
-        t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_chunks), daemon=True)
-        threads = [t_out, t_err]
-        for t in threads:
+        t_out = threading.Thread(
+            target=_reader, args=(proc.stdout, stdout_chunks), daemon=True
+        )
+        t_err = threading.Thread(
+            target=_reader, args=(proc.stderr, stderr_chunks), daemon=True
+        )
+        for t in (t_out, t_err):
             t.start()
 
-        deadline = time.time() + timeout_sec
+        deadline = time.time() + timeout
         timed_out = False
 
         while proc.poll() is None:
@@ -283,22 +335,20 @@ def execute(
                 break
             time.sleep(0.05)
 
-        # 等待读取线程结束
-        for t in threads:
+        for t in (t_out, t_err):
             t.join(timeout=5.0)
 
         stdout = b"".join(stdout_chunks)
         stderr = b"".join(stderr_chunks)
 
-        # ESC打断检查（优先级最高，kill_active已在外部调用）
         global _interrupted
         if _interrupted:
             _interrupted = False
-            out = _decode_output(stdout)
-            err = _decode_output(stderr)
             parts = []
+            out = _decode_output(stdout)
             if out.strip():
                 parts.append(out.strip())
+            err = _decode_output(stderr)
             if err.strip():
                 parts.append(f"[stderr]\n{err.strip()}")
             parts.append("[用户中断]")
@@ -307,25 +357,23 @@ def execute(
         if timed_out:
             _kill_proc_tree(proc)
             proc.wait(timeout=5)
-            out = _decode_output(stdout)
-            err = _decode_output(stderr)
             parts = []
+            out = _decode_output(stdout)
             if out.strip():
                 parts.append(out.strip())
+            err = _decode_output(stderr)
             if err.strip():
                 parts.append(f"[stderr]\n{err.strip()}")
-            parts.append(f"[超时: 命令执行超过{timeout_sec:.0f}秒，已终止]")
+            parts.append(f"[超时: 命令执行超过{timeout:.0f}秒，已终止]")
             return _truncate_output("\n".join(parts), max_output_chars)
 
+        parts = [f"[exit code: {proc.returncode}]"]
         out = _decode_output(stdout)
-        err = _decode_output(stderr)
-        parts = []
-        parts.append(f"[exit code: {proc.returncode}]")
         if out.strip():
             parts.append(out.strip())
+        err = _decode_output(stderr)
         if err.strip():
             parts.append(f"[stderr]\n{err.strip()}")
-
         return _truncate_output("\n".join(parts), max_output_chars)
     finally:
         with _active_proc_lock:
@@ -458,3 +506,15 @@ def get_background_status() -> str:
         lines.append(f"PID {pid}: {status}, 运行{elapsed:.0f}秒")
 
     return "\n".join(lines)
+
+
+def cleanup():
+    """程序退出时清理持久化 cmd 会话（由 agent 调用）"""
+    global _cmd_session
+    with _cmd_session_lock:
+        if _cmd_session is not None:
+            try:
+                _cmd_session.close()
+            except Exception:
+                pass
+            _cmd_session = None

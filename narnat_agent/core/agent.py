@@ -28,6 +28,7 @@ from .tool_callbacks import SafetyCallbacks, TodoCallbacks
 from ..tools.tool_context import AWAIT_CONFIRM
 from ..config.loader import AppConfig, load_config
 from ..tools.terminal import kill_active_exec as _kill_terminal_exec, cleanup as _terminal_cleanup, set_max_sessions
+from ..tools.bash import cleanup as _bash_cleanup
 from ..tools.tool_context import ToolContext
 from ..ui.ui_design import UIInterface, _interrupt_ctrl, apply_style
 from ..output import write as _stdout_write, D, E, R, Y, G, B, C
@@ -288,6 +289,7 @@ class Agent:
         finally:
             self._dispatcher._executor.shutdown(wait=False)
             _terminal_cleanup()
+            _bash_cleanup()
 
     def _agent_loop(self, stream):
         """工具调度内循环"""
