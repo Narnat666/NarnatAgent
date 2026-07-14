@@ -77,15 +77,11 @@ DEFINITION = {
 def kill_active():
     """杀掉当前正在运行的前台子进程（ESC打断时由agent调用）"""
     global _interrupted
-    if sys.platform == "win32" and _cmd_session is not None:
-        _cmd_session.kill_active()
-        _interrupted = True
-        return
+    _interrupted = True
     with _active_proc_lock:
         proc = _active_proc
     if proc is not None and proc.poll() is None:
         _kill_proc_tree(proc)
-        _interrupted = True
 
 
 def _find_executable(*names: str) -> Optional[str]:
@@ -245,7 +241,7 @@ def execute(
     # ── 后台运行：始终走独立子进程 ──
     if run_in_background:
         if sys.platform == "win32":
-            return _run_background(["cmd", "/c", command], command)
+            return _run_background(command, command)
         else:
             shell = _find_executable("bash", "sh")
             if shell is None:
@@ -253,7 +249,7 @@ def execute(
             return _run_background([shell, "-c", command], command)
 
     # ═════════════════════════════════════════════════════════════
-    # Windows: 持久化 cmd 会话（命令直写 stdin，零转义损耗）
+    # Windows: cmd /c 子进程（stdin 继承 TTY，避免外部工具因管道 stdin 阻塞）
     # ═════════════════════════════════════════════════════════════
     if sys.platform == "win32":
         # cd 命令：同步更新 Python 进程的 CWD（供 Read/Glob 等工具使用）
@@ -263,11 +259,16 @@ def execute(
                 os.chdir(path)
             except OSError as e:
                 return f"cd: {e}"
+            return f"[exit code: 0]\n"
 
-        session = _get_cmd_session()
-        return session.execute(
-            command, timeout=timeout, max_output_chars=max_output_chars
-        )
+        # 多段命令(&&/||)由Python端拆分后逐段执行
+        segments = _split_commands(command)
+        if len(segments) > 1:
+            return _execute_segments(
+                segments, timeout, False, max_output_chars, _tool_context
+            )
+
+        return _execute_win32(command, timeout, max_output_chars)
 
     # ═════════════════════════════════════════════════════════════
     # Linux/macOS: bash -c 子进程（原有逻辑）
@@ -380,15 +381,127 @@ def execute(
             _active_proc = None
 
 
-def _run_background(shell_cmd: list, original_command: str) -> str:
-    """后台运行命令，立即返回进程信息"""
+def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
+    """Windows: shell=True 起子进程。cmd 交互式解析（引号按用户预期处理），
+    stdin 继承控制台（避免 eza 等工具因管道 stdin 阻塞）。"""
+    global _interrupted
+    timeout = min(timeout, 600)
     try:
         proc = subprocess.Popen(
-            shell_cmd,
+            command,
+            shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=os.getcwd(),
         )
+    except FileNotFoundError as e:
+        return f"错误: cmd.exe未找到: {e}"
+    except OSError as e:
+        return f"错误: 启动失败: {e}"
+
+    with _active_proc_lock:
+        global _active_proc
+        _active_proc = proc
+
+    try:
+        stdout_chunks = []
+        stderr_chunks = []
+
+        def _reader(stream, chunks):
+            try:
+                while True:
+                    data = stream.read(4096)
+                    if not data:
+                        break
+                    chunks.append(data)
+            except Exception:
+                pass
+
+        t_out = threading.Thread(
+            target=_reader, args=(proc.stdout, stdout_chunks), daemon=True
+        )
+        t_err = threading.Thread(
+            target=_reader, args=(proc.stderr, stderr_chunks), daemon=True
+        )
+        for t in (t_out, t_err):
+            t.start()
+
+        deadline = time.time() + timeout
+        timed_out = False
+
+        while proc.poll() is None:
+            if time.time() >= deadline:
+                timed_out = True
+                break
+            if _interrupted:
+                break
+            time.sleep(0.05)
+
+        for t in (t_out, t_err):
+            t.join(timeout=5.0)
+
+        stdout = b"".join(stdout_chunks)
+        stderr = b"".join(stderr_chunks)
+
+        if _interrupted:
+            _interrupted = False
+            _kill_proc_tree(proc)
+            proc.wait(timeout=5)
+            parts = []
+            out = _decode_output(stdout)
+            if out.strip():
+                parts.append(out.strip())
+            err = _decode_output(stderr)
+            if err.strip():
+                parts.append(f"[stderr]\n{err.strip()}")
+            parts.append("[用户中断]")
+            return _truncate_output("\n".join(parts), max_output_chars)
+
+        if timed_out:
+            _kill_proc_tree(proc)
+            proc.wait(timeout=5)
+            parts = []
+            out = _decode_output(stdout)
+            if out.strip():
+                parts.append(out.strip())
+            err = _decode_output(stderr)
+            if err.strip():
+                parts.append(f"[stderr]\n{err.strip()}")
+            parts.append(f"[超时: 命令执行超过{timeout:.0f}秒，已终止]")
+            return _truncate_output("\n".join(parts), max_output_chars)
+
+        parts = [f"[exit code: {proc.returncode}]"]
+        out = _decode_output(stdout)
+        if out.strip():
+            parts.append(out.strip())
+        err = _decode_output(stderr)
+        if err.strip():
+            parts.append(f"[stderr]\n{err.strip()}")
+        return _truncate_output("\n".join(parts), max_output_chars)
+    finally:
+        with _active_proc_lock:
+            _active_proc = None
+
+
+def _run_background(shell_cmd, original_command: str) -> str:
+    """后台运行命令，立即返回进程信息。
+    shell_cmd: str → shell=True（Windows）；list → 直接 Popen（Linux bash -c）。"""
+    try:
+        if isinstance(shell_cmd, str):
+            proc = subprocess.Popen(
+                shell_cmd,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=os.getcwd(),
+            )
+        else:
+            proc = subprocess.Popen(
+                shell_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=os.getcwd(),
+            )
     except FileNotFoundError as e:
         return f"错误: Shell未找到: {e}"
     except OSError as e:
@@ -427,7 +540,7 @@ def _execute_segments(segments: list, timeout: int, run_in_background: bool,
     timeout_sec = min(timeout, 600)
     if run_in_background:
         reassembled = " ".join(f"{op} {seg}" if op else seg for op, seg in segments)
-        return _run_background(["cmd", "/c", reassembled], reassembled)
+        return _run_background(reassembled, reassembled)
 
     all_parts = []
     prev_rc = 0
@@ -457,7 +570,8 @@ def _execute_segments(segments: list, timeout: int, run_in_background: bool,
         seg_start = time.time()
         try:
             proc = subprocess.run(
-                ["cmd", "/c", seg],
+                seg,
+                shell=True,
                 capture_output=True,
                 timeout=remaining_timeout,
                 cwd=os.getcwd(),

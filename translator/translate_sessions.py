@@ -172,7 +172,7 @@ def translate_one(session_path: Path, output_dir: Path, root_dir: Path) -> str:
     out_subdir.mkdir(parents=True, exist_ok=True)
     output_path = out_subdir / f"{name}.md"
 
-    with open(output_path, "w", encoding="utf-8") as f:
+    with open(output_path, "w", encoding="utf-8-sig") as f:
         f.write("\n".join(lines))
 
     return str(output_path)
