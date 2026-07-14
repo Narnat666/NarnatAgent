@@ -1,8 +1,5 @@
 """
 配置加载器 —— 读取 narnat.json + narnat.md，拼接系统prompt
-
-narnat.json 支持中文key，同时兼容旧版英文key。
-style.json 已合并进 narnat.json，不再单独读取。
 """
 
 import json
@@ -184,9 +181,9 @@ def _parse_pricing(data: dict) -> Dict[str, Dict[str, float]]:
         if not isinstance(prices, dict):
             continue
         result[model] = {
-            "input": prices.get("输入", prices.get("input", 0)),
-            "cache_hit": prices.get("缓存命中", prices.get("cache_hit", 0)),
-            "output": prices.get("输出", prices.get("output", 0)),
+            "input": prices.get("输入", 0),
+            "cache_hit": prices.get("缓存命中", 0),
+            "output": prices.get("输出", 0),
         }
     return result
 
@@ -203,35 +200,24 @@ def _load_json(config_dir: str) -> dict:
         return {}
 
 
-def _load_style_json(config_dir: str) -> dict:
-    """读取旧版 style.json（兼容迁移）。不存在返回空字典"""
-    path = os.path.join(config_dir, "style.json")
-    if not os.path.isfile(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
-
 
 def _build_ai_config(data: dict) -> AIConfig:
-    """从narnat.json数据构建AIConfig，支持中文key和旧版英文key"""
+    """从narnat.json的"智能体"分组构建AIConfig"""
+    ai = data.get("智能体", {})
     return AIConfig(
-        api_key=data.get("接口密钥", data.get("api_key", DEFAULT_API_KEY)),
-        base_url=data.get("接口地址", data.get("base_url", DEFAULT_BASE_URL)),
-        model=data.get("模型", data.get("model", DEFAULT_MODEL)),
-        temperature=_coerce(data.get("温度", data.get("temperature")), float),
-        max_tokens=_coerce(data.get("最大输出token数", data.get("max_tokens")), int),
-        thinking_effort=data.get("思考强度", data.get("thinking_effort", DEFAULT_THINKING_EFFORT)),
-        thinking_options=data.get("思考模式", data.get("thinking_options", {"high": "高", "max": "全开"})),
+        api_key=ai.get("接口密钥", DEFAULT_API_KEY),
+        base_url=ai.get("接口地址", DEFAULT_BASE_URL),
+        model=ai.get("模型", DEFAULT_MODEL),
+        temperature=_coerce(ai.get("温度"), float),
+        max_tokens=_coerce(ai.get("最大输出token数"), int),
+        thinking_effort=ai.get("思考强度", DEFAULT_THINKING_EFFORT),
+        thinking_options=ai.get("思考模式", {"high": "高", "max": "全开"}),
     )
 
 
-def _build_ui_config(data: dict, style_data: dict) -> UIConfig:
-    """从narnat.json数据构建UIConfig，合并旧版style.json"""
-    # style.json 的值优先级低于 narnat.json
-    merged = {**style_data, **data}
+def _build_ui_config(data: dict, max_output_tokens: int = 128000) -> UIConfig:
+    """从narnat.json的"界面"分组构建UIConfig"""
+    ui = data.get("界面", {})
 
     colors = {}
     color_keys = [
@@ -239,24 +225,28 @@ def _build_ui_config(data: dict, style_data: dict) -> UIConfig:
         "错误色", "链接色", "装饰色", "加载动画色", "次要文字色", "代码块背景色",
     ]
     for key in color_keys:
-        if key in merged:
-            colors[key] = merged[key]
+        if key in ui:
+            colors[key] = ui[key]
 
     return UIConfig(
-        max_output_tokens=int(merged.get("最大输出token数", 128000)),
-        show_cost=bool(merged.get("显示费用", False)),
-        show_balance=bool(merged.get("显示余额", False)),
+        max_output_tokens=max_output_tokens,
+        show_cost=bool(ui.get("显示费用", False)),
+        show_balance=bool(ui.get("显示余额", False)),
         colors=colors,
     )
 
 
 def _build_pricing_config(data: dict) -> PricingConfig:
-    """从narnat.json数据构建PricingConfig"""
-    raw_pricing = data.get("定价", {})
+    """从narnat.json的"定价"分组构建PricingConfig"""
+    pricing_group = data.get("定价", {})
+    if not pricing_group:
+        return PricingConfig()
+    raw_pricing = pricing_group.get("模型", {})
+    balance_url = pricing_group.get("余额查询地址", "")
     user_pricing = _parse_pricing(raw_pricing) if raw_pricing else {}
     return PricingConfig(
         user_pricing=user_pricing,
-        balance_url=data.get("余额查询地址", ""),
+        balance_url=balance_url,
     )
 
 
@@ -313,13 +303,21 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
             with open(fpath, "w", encoding="utf-8") as f:
                 if fname == NARNAT_JSON:
                     json.dump({
-                        "接口密钥": DEFAULT_API_KEY,
-                        "接口地址": DEFAULT_BASE_URL,
-                        "模型": DEFAULT_MODEL,
-                        "思考强度": "high",
-                        "思考模式": {"high": "高", "max": "全开"},
-                        "工具输出上限KB": DEFAULT_MAX_TOOL_OUTPUT_KB,
+                        "智能体": {
+                            "接口密钥": DEFAULT_API_KEY,
+                            "接口地址": DEFAULT_BASE_URL,
+                            "模型": DEFAULT_MODEL,
+                            "思考强度": "high",
+                            "思考模式": {"high": "高", "max": "全开"},
+                        },
                         "接口密钥组": {"websearch": "", "websearch_url": "https://api.anysearch.com/mcp"},
+                        "定价": {"模型": {}, "余额查询地址": ""},
+                        "界面": {},
+                        "工具": {"输出上限KB": DEFAULT_MAX_TOOL_OUTPUT_KB},
+                        "会话": {},
+                        "压缩": {},
+                        "计划": {},
+                        "忽略目录": _DEFAULT_IGNORE_DIRS,
                     }, f, indent=2, ensure_ascii=False)
                 else:
                     f.write("")
@@ -332,13 +330,12 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
 
     # 读取配置
     data = _load_json(config_dir)
-    style_data = _load_style_json(config_dir)
 
     # 构建各子配置
     ai_config = _build_ai_config(data)
-    api_keys = data.get("接口密钥组", data.get("api_keys", {}))
+    api_keys = data.get("接口密钥组", {})
     pricing_config = _build_pricing_config(data)
-    ui_config = _build_ui_config(data, style_data)
+    ui_config = _build_ui_config(data, ai_config.max_tokens or 128000)
 
     # 读取用户自定义指令
     user_md = _load_user_md(config_dir)
@@ -361,17 +358,17 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
         logs_dir=logs_dir,
         pricing=pricing_config,
         ui=ui_config,
-        compress_turn=int(data.get("压缩轮次", COMPRESS_TURN)),
-        warn_turn_1=int(data.get("警告轮次1", WARN_TURN_1)),
-        warn_turn_2=int(data.get("警告轮次2", WARN_TURN_2)),
+        compress_turn=int(data.get("压缩", {}).get("压缩轮次", COMPRESS_TURN)),
+        warn_turn_1=int(data.get("压缩", {}).get("警告轮次1", WARN_TURN_1)),
+        warn_turn_2=int(data.get("压缩", {}).get("警告轮次2", WARN_TURN_2)),
         ignore_dirs=data.get("忽略目录", list(_DEFAULT_IGNORE_DIRS)),
-        ssh_max_sessions=int(data.get("SSH最大会话数", 5)),
-        max_transfer_mb=int(data.get("最大传输文件MB", 100)),
-        llm_retry_count=int(data.get("LLM重试次数", 3)),
-        git_skip_confirm=bool(data.get("git免确认", DEFAULT_GIT_SKIP)),
-        rm_skip_confirm=bool(data.get("rm免确认", DEFAULT_RM_SKIP)),
-        require_plan=bool(data.get("计划优先", DEFAULT_REQUIRE_PLAN)),
-        min_tools=int(data.get("计划最低工具数", DEFAULT_MIN_TOOLS)),
-        max_tool_output_kb=int(data.get("工具输出上限KB", DEFAULT_MAX_TOOL_OUTPUT_KB)),
-        auto_save=bool(data.get("自动保存", DEFAULT_AUTO_SAVE)),
+        ssh_max_sessions=int(data.get("工具", {}).get("SSH最大会话数", 5)),
+        max_transfer_mb=int(data.get("工具", {}).get("最大传输文件MB", 100)),
+        llm_retry_count=int(data.get("智能体", {}).get("LLM重试次数", 3)),
+        git_skip_confirm=bool(data.get("工具", {}).get("git免确认", DEFAULT_GIT_SKIP)),
+        rm_skip_confirm=bool(data.get("工具", {}).get("rm免确认", DEFAULT_RM_SKIP)),
+        require_plan=bool(data.get("计划", {}).get("计划优先", DEFAULT_REQUIRE_PLAN)),
+        min_tools=int(data.get("计划", {}).get("计划最低工具数", DEFAULT_MIN_TOOLS)),
+        max_tool_output_kb=int(data.get("工具", {}).get("输出上限KB", DEFAULT_MAX_TOOL_OUTPUT_KB)),
+        auto_save=bool(data.get("会话", {}).get("自动保存", DEFAULT_AUTO_SAVE)),
     )

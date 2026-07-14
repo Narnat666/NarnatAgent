@@ -157,8 +157,9 @@ class NoSession(SessionState):
         result = format_session_tree(tree, None, None)
         if not result:
             return ""
+        from ..ui.colors import C, R, X
+        result = result.replace("◀ 当前", f"{C}◀ 当前{R}")
         if self._mgr.pending_deletes:
-            from ..ui.colors import X, R
             result = result.replace("✘ 退出后删除", f"{X}✘ 退出后删除{R}")
         return result
 
@@ -261,8 +262,9 @@ class RootSession(SessionState):
         tree = list_sessions_tree(self._mgr.narnat_dir)
         self._mgr.apply_delete_marks(tree)
         result = format_session_tree(tree, self._name, None)
+        from ..ui.colors import C, R, X
+        result = result.replace("◀ 当前", f"{C}◀ 当前{R}")
         if self._mgr.pending_deletes:
-            from ..ui.colors import X, R
             result = result.replace("✘ 退出后删除", f"{X}✘ 退出后删除{R}")
         return result
 
@@ -385,8 +387,9 @@ class ChildSession(SessionState):
         tree = list_sessions_tree(self._mgr.narnat_dir)
         self._mgr.apply_delete_marks(tree)
         result = format_session_tree(tree, self._name, self._parent)
+        from ..ui.colors import C, R, X
+        result = result.replace("◀ 当前", f"{C}◀ 当前{R}")
         if self._mgr.pending_deletes:
-            from ..ui.colors import X, R
             result = result.replace("✘ 退出后删除", f"{X}✘ 退出后删除{R}")
         return result
 
@@ -654,7 +657,7 @@ class SessionManager:
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                data["思考强度"] = effort_lower
+                data.setdefault("智能体", {})["思考强度"] = effort_lower
                 with open(config_path, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
             except Exception:
