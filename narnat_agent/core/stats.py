@@ -3,19 +3,17 @@
 从agent.py中提取，负责token计数、费用计算、余额查询。
 """
 
-from typing import Optional, Dict, Any
-
 from .billing import calculate_cost, fetch_balance
 
 
 class StatsTracker:
     """Token统计和费用追踪器"""
 
-    def __init__(self, model: str, user_pricing: Optional[Dict[str, Dict[str, float]]] = None,
-                 balance_url: Optional[str] = None):
+    def __init__(self, model: str, user_pricing=None,
+                 balance_cfg=None):
         self._model = model
         self._user_pricing = user_pricing
-        self._balance_url = balance_url
+        self._balance_cfg = balance_cfg
         self._total_input_tokens = 0
         self._total_output_tokens = 0
         self._total_cache_tokens = 0
@@ -41,7 +39,7 @@ class StatsTracker:
     def fetch_balance(self, api_key: str, round_num: int, interval: int = 10) -> None:
         """每N轮查询一次余额，其余轮次保留上次查询结果"""
         if api_key and round_num % interval == 0:
-            bal = fetch_balance(api_key, self._balance_url)
+            bal = fetch_balance(api_key, self._balance_cfg)
             if bal:
                 self._balance_to_show = bal["total"]
         else:

@@ -1,11 +1,12 @@
 """
 LLM调用层 —— 双协议支持（OpenAI兼容 + Anthropic兼容），流式输出，token计数
 
-通过 base_url 中是否包含 "anthropic" 自动选择协议：
-- 含 "anthropic" → AnthropicBackend（/v1/messages 端点，x-api-key 认证）
-- 其他 → OpenAIBackend（/chat/completions 端点，Bearer 认证）
+通过 AIConfig.protocol 显式选择协议：
+- "anthropic" → AnthropicBackend（/v1/messages 端点，x-api-key 认证）
+- "openai"    → OpenAIBackend（/chat/completions 端点，Bearer 认证）
 
 上层统一使用 OpenAI 格式的 messages/tool_calls，AnthropicBackend 内部做双向转换。
+Thinking 参数通过 THINKING_PARAM_MAP 映射表动态构造，不再硬编码。
 两个后端统一使用 httpx，无 requests 依赖。
 """
 
@@ -19,6 +20,7 @@ import httpx
 from typing import List, Dict, Any, Iterator, Optional
 
 from ..config.loader import AIConfig
+from ..config.defaults import resolve_thinking_params
 from ..tools.registry import get_tool_definitions
 from .interrupt import register_abort
 
@@ -97,7 +99,7 @@ def _iter_to_queue(iterator, q):
 # ═══════════════════════════════════════════════════════════════
 
 class LLMClient:
-    """LLM客户端，自动选择 OpenAI 或 Anthropic 协议。"""
+    """LLM客户端，通过 config.protocol 选择 OpenAI 或 Anthropic 协议。"""
 
     def __init__(self, config: AIConfig, logger=None, max_output_tokens: int = 128000):
         self._config = config
@@ -105,7 +107,11 @@ class LLMClient:
         self._tool_defs = get_tool_definitions()
         self._max_output_tokens = max_output_tokens
 
-        if "anthropic" in config.base_url.lower():
+        # 协议由 config.protocol 显式指定
+        protocol = config.protocol
+        self._protocol = protocol
+
+        if protocol == "anthropic":
             self._backend = _AnthropicBackend(config, self._tool_defs, logger, max_output_tokens)
         else:
             self._backend = _OpenAIBackend(config, self._tool_defs, logger)
@@ -152,15 +158,21 @@ class _OpenAIBackend:
         while True:
             _active_llm_response = self._client
             try:
+                # 动态构造 thinking 参数（不再硬编码）
+                think_body_top, think_extra = resolve_thinking_params(
+                    "openai", self._config.model,
+                    self._config.thinking_enabled, self._config.thinking_effort,
+                )
                 kwargs = dict(
                     model=self._config.model,
                     messages=messages,
                     stream=True,
                     stream_options={"include_usage": True},
                     timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=30.0),
-                    extra_body={"thinking": {"type": "enabled"}},
-                    reasoning_effort=self._config.thinking_effort,
                 )
+                kwargs.update(think_body_top)
+                if think_extra:
+                    kwargs["extra_body"] = think_extra
                 if not no_tools:
                     kwargs["tools"] = self._tool_defs
                 # thinking 模式下 temperature 不生效，传入会误导用户
@@ -354,14 +366,20 @@ class _AnthropicBackend:
             yield {"content": f"错误: 消息格式转换失败: {e}", "finish_reason": "error"}
             return
 
+        # 动态构造 thinking 参数
+        think_body_top, think_extra = resolve_thinking_params(
+            "anthropic", self._config.model,
+            self._config.thinking_enabled, self._config.thinking_effort,
+        )
         body = {
             "model": self._config.model,
             "messages": anthropic_msgs,
             "max_tokens": self._max_output_tokens,
             "stream": True,
-            "thinking": {"type": "enabled"},
-            "output_config": {"effort": self._config.thinking_effort},
         }
+        # Anthropic 协议下 body_top 和 extra_body 都合并到 body 顶层
+        body.update(think_body_top)
+        body.update(think_extra)
         if system:
             body["system"] = system
         if anthropic_tools and not no_tools:

@@ -657,7 +657,7 @@ class SessionManager:
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                data.setdefault("智能体", {})["思考强度"] = effort_lower
+                data.setdefault("智能体", {}).setdefault("思考", {})["强度"] = effort_lower
                 with open(config_path, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
             except Exception:

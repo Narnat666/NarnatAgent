@@ -60,15 +60,18 @@ make -j$(nproc) && sudo make install
 
 首次运行会在当前目录生成 `.narnat/config/narnat.json`，编辑填入 API 密钥：
 
-```json
+```jsonc
 {
-  "接口密钥": "sk-xxxxxxxx",
-  "接口地址": "https://api.deepseek.com/anthropic",
-  "模型": "deepseek-v4-flash"
+  "智能体": {
+    "接口密钥": "sk-xxxxxxxx",
+    "接口地址": "https://api.deepseek.com/anthropic",
+    "模型": "deepseek-v4-pro",
+    "协议": "anthropic"
+  }
 }
 ```
 
-> **接口地址** 自动识别协议——含 `anthropic` 走 Anthropic 端点，否则走 OpenAI 兼容端点。支持 DeepSeek、OpenAI、Claude 及任意兼容 API。
+> **`"协议"`** 显式指定通信协议：`"anthropic"` 或 `"openai"`。支持 DeepSeek、GLM-5.2、Kimi K2.6、Qwen 3.7、GPT-5.5、Claude Opus 4.7 及任意兼容 API。换模型只需改 6-7 个字段，thinking 参数自动适配。
 
 ### 3. 开始对话
 
@@ -97,7 +100,7 @@ AI 会按需自主调用工具——读文件、改代码、执行命令、搜�
 | `/explore <名称>` | 从当前会话创建探索分支 | RootSession |
 | `/done` | 完成分支探索，AI 总结后合并回父会话 | ChildSession |
 | `/skill <名称>` | 加载技能文件 | 全部 |
-| `/thinking high\|max` | 切换思考强度 | 全部 |
+| `/thinking <强度>` | 切换思考强度（由 `"思考.强度选项"` 定义） | 全部 |
 | `/clear` | 清屏 | 全部 |
 | `/exit` | 退出会话/退出程序 | 全部 |
 | `Esc` | 中断当前 AI 输出 | 全部 |
@@ -134,18 +137,47 @@ narnat -d         调试模式（记录详细日志到 .narnat/logs/）
 
 ## 全部配置项
 
-`.narnat/config/narnat.json`，首次运行自动生成：
+`.narnat/config/narnat.json`，首次运行自动生成。完整参考如下（`narnat.md` 中的 Markdown 会作为自定义系统指令追加到 prompt 末尾）：
 
-```json
+```jsonc
 {
-  // ── AI 连接 ──
-  "接口密钥": "sk-xxxxxxxx",
-  "接口地址": "https://api.deepseek.com/anthropic",
-  "模型": "deepseek-v4-flash",
-  "思考强度": "high",
-  "思考模式": { "high": "高", "max": "全开" },
-  "温度": null,
-  "最大输出token数": null,
+  // ── 模型连接 ──
+  "智能体": {
+    "接口密钥": "sk-xxxxxxxx",
+    "接口地址": "https://api.deepseek.com/anthropic",
+    "模型": "deepseek-v4-pro",
+    "协议": "anthropic",               // "openai" | "anthropic"
+    "温度": null,
+    "最大输出token数": 128000,
+    "LLM重试次数": 3,
+
+    // 思考模式
+    "思考": {
+      "启用": true,                    // 关闭则不传 thinking 参数
+      "强度": "high",                  // 当前生效值
+      "强度选项": {                    // 可选值 → 中文显示名
+        "high": "高",
+        "max": "全开"
+      }
+    }
+  },
+
+  // ── 余额查询（独立分组，支持 DeepSeek / Kimi / GLM 等）──
+  "余额查询": {
+    "启用": true,
+    "查询地址": "https://api.deepseek.com/user/balance",
+    "认证方式": "bearer",              // "bearer" | "x-api-key"
+    "响应路径": "balance_infos.0.total_balance",
+    "货币路径": "balance_infos.0.currency"
+  },
+
+  // ── 定价 ──
+  "定价": {
+    "模型": {
+      "deepseek-v4-pro": { "输入": 3.0, "缓存命中": 0.025, "输出": 6.0 },
+      "deepseek-v4-flash": { "输入": 1.0, "缓存命中": 0.02, "输出": 2.0 }
+    }
+  },
 
   // ── 独立 API 密钥（WebSearch 等）──
   "接口密钥组": {
@@ -153,53 +185,79 @@ narnat -d         调试模式（记录详细日志到 .narnat/logs/）
     "websearch_url": "https://api.anysearch.com/mcp"
   },
 
-  // ── 费用与余额显示 ──
-  "显示费用": false,
-  "显示余额": false,
-  "余额查询地址": "",
-  "定价": {
-    "deepseek-v4-flash": { "输入": 1.0, "缓存命中": 0.25, "输出": 4.0 }
+  // ── 界面 ──
+  "界面": {
+    "显示费用": false,
+    "显示余额": false,
+    "用户输入色": "#FFFFFF",
+    "AI输出色": "#D8DEE9",
+    "标题色": "#5EEAD4",
+    "成功色": "#A3BE8C",
+    "行内代码色": "#EBCB8B",
+    "错误色": "#BF616A",
+    "链接色": "#81A1C1",
+    "装饰色": "#B48EAD",
+    "加载动画色": "#D08770",
+    "次要文字色": "#4C566A",
+    "代码块背景色": "#161821"
   },
 
-  // ── 安全 ──
-  "git免确认": false,
-  "rm免确认": false,
-  "计划优先": false,
-  "计划最低工具数": 2,
+  // ── 工具 ──
+  "工具": {
+    "输出上限KB": 20,
+    "SSH最大会话数": 5,
+    "最大传输文件MB": 100,
+    "git免确认": false,
+    "rm免确认": false
+  },
+
+  // ── 会话 ──
+  "会话": {
+    "自动保存": false
+  },
 
   // ── 上下文压缩 ──
-  "压缩轮次": 100,
-  "警告轮次1": 50,
-  "警告轮次2": 80,
+  "压缩": {
+    "压缩轮次": 100,
+    "警告轮次1": 50,
+    "警告轮次2": 80
+  },
 
-  // ── 高级 ──
-  "SSH最大会话数": 5,
-  "最大传输文件MB": 100,
-  "LLM重试次数": 3,
-  "忽略目录": [".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache"],
+  // ── 计划优先 ──
+  "计划": {
+    "计划优先": false,
+    "计划最低工具数": 2
+  },
 
-  // ── 界面配色（11 色可覆盖）──
-  "用户输入色": "#FFFFFF",
-  "AI输出色": "#D8DEE9",
-  "标题色": "#5EEAD4",
-  "成功色": "#A3BE8C",
-  "行内代码色": "#EBCB8B",
-  "错误色": "#BF616A",
-  "链接色": "#81A1C1",
-  "装饰色": "#B48EAD",
-  "加载动画色": "#D08770",
-  "次要文字色": "#4C566A",
-  "代码块背景色": "#161821"
+  // ── 文件操作 ──
+  "忽略目录": [
+    ".git", "__pycache__", "node_modules", ".svn", ".hg",
+    "venv", ".venv", ".pytest_cache"
+  ]
 }
 ```
 
-> 首次运行自动生成的配置仅包含 `接口密钥`、`接口地址`、`模型`、`思考强度`、`思考模式`、`接口密钥组` 七个字段。上方为**全部可配置项**的完整参考，按需手动添加即可。`narnat.md` 中的 Markdown 会作为自定义系统指令追加到 prompt 末尾。
+### 多模型适配
+
+换模型只需修改 `"智能体"` + `"余额查询"` + `"定价"` 三个分组中的少量字段，**thinking 参数由内部映射表自动翻译**为对应厂商的 API 格式，无需手动写 `extra_body` 或 `reasoning_effort`。
+
+**已内置适配的模型：**
+
+| 模型 | `"协议"` | `"思考"` 映射 |
+|------|----------|--------------|
+| DeepSeek V4 (Anthropic) | `"anthropic"` | `thinking: {type:"enabled"}` + `output_config.effort` |
+| DeepSeek V4 (OpenAI) | `"openai"` | `extra_body.thinking` + `reasoning_effort` |
+| GLM-5.2 | `"openai"` | `thinking` (顶层) + `reasoning_effort` |
+| Kimi K2.6/K2.7-code | `"openai"` | `extra_body.thinking` |
+| Qwen 3.7 | `"openai"` | `extra_body.enable_thinking` + `thinking_budget` |
+| GPT-5.5 | `"openai"` | `reasoning_effort` |
+| Claude Opus 4.7/Sonnet 5 | `"anthropic"` | `thinking: {type:"adaptive"}` + `effort` |
 
 ## 项目结构
 
 ```
 NarnatAgent/
-├── main.py                       # 入口 (v13.2.0)
+├── main.py                       # 入口
 ├── narnat_agent/
 │   ├── core/                     # Agent 主循环、LLM 双协议、上下文压缩、会话状态机
 │   ├── tools/

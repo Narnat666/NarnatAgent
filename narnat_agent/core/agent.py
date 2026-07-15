@@ -123,7 +123,7 @@ class Agent:
         self._stats = StatsTracker(
             self._config.ai.model,
             self._config.pricing.user_pricing,
-            self._config.pricing.balance_url,
+            self._config.balance,
         )
 
         # 轮次计数

@@ -14,7 +14,7 @@ from .defaults import (
     NARNAT_DIR, NARNAT_JSON, NARNAT_MD, LAST_SESSION_SUMMARY,
     CONFIG_SUBDIR, DATA_SUBDIR, LOGS_SUBDIR,
     DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL,
-    DEFAULT_THINKING_EFFORT,
+    DEFAULT_PROTOCOL, DEFAULT_THINKING_ENABLED, DEFAULT_THINKING_EFFORT,
     WARN_TURN_1, WARN_TURN_2, COMPRESS_TURN,
     DEFAULT_GIT_SKIP, DEFAULT_RM_SKIP,
     DEFAULT_REQUIRE_PLAN, DEFAULT_MIN_TOOLS,
@@ -33,9 +33,11 @@ class AIConfig:
     api_key: str = DEFAULT_API_KEY
     base_url: str = DEFAULT_BASE_URL
     model: str = DEFAULT_MODEL
+    protocol: str = DEFAULT_PROTOCOL              # "openai" | "anthropic"
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
-    thinking_effort: str = DEFAULT_THINKING_EFFORT      # "high" | "max"
+    thinking_enabled: bool = DEFAULT_THINKING_ENABLED
+    thinking_effort: str = DEFAULT_THINKING_EFFORT
     thinking_options: dict = field(default_factory=lambda: {"high": "高", "max": "全开"})
 
 
@@ -45,7 +47,16 @@ class PricingConfig:
     # 用户自定义定价（中文key映射到英文key）
     # 格式: {"模型名": {"输入": x, "缓存命中": y, "输出": z}}
     user_pricing: Dict[str, Dict[str, float]] = field(default_factory=dict)
-    balance_url: str = ""  # 空串=不查询余额
+
+
+@dataclass
+class BalanceConfig:
+    """余额查询配置"""
+    enabled: bool = False
+    url: str = ""                    # 查询地址
+    auth_method: str = "bearer"      # "bearer" | "x-api-key"
+    value_path: str = ""             # 余额数值 JSONPath
+    currency_path: str = ""          # 货币单位 JSONPath
 
 
 @dataclass
@@ -84,6 +95,7 @@ class AppConfig:
     logs_dir: str = ""      # .narnat/logs/
     # 新增配置项
     pricing: PricingConfig = field(default_factory=PricingConfig)
+    balance: BalanceConfig = field(default_factory=BalanceConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     compress_turn: int = COMPRESS_TURN
     warn_turn_1: int = WARN_TURN_1
@@ -204,14 +216,24 @@ def _load_json(config_dir: str) -> dict:
 def _build_ai_config(data: dict) -> AIConfig:
     """从narnat.json的"智能体"分组构建AIConfig"""
     ai = data.get("智能体", {})
+
+    protocol = ai.get("协议", DEFAULT_PROTOCOL)
+
+    thinking_cfg = ai.get("思考", {})
+    thinking_enabled = bool(thinking_cfg.get("启用", DEFAULT_THINKING_ENABLED))
+    thinking_effort = thinking_cfg.get("强度", DEFAULT_THINKING_EFFORT)
+    thinking_options = thinking_cfg.get("强度选项", {"high": "高", "max": "全开"})
+
     return AIConfig(
         api_key=ai.get("接口密钥", DEFAULT_API_KEY),
         base_url=ai.get("接口地址", DEFAULT_BASE_URL),
         model=ai.get("模型", DEFAULT_MODEL),
+        protocol=protocol,
         temperature=_coerce(ai.get("温度"), float),
         max_tokens=_coerce(ai.get("最大输出token数"), int),
-        thinking_effort=ai.get("思考强度", DEFAULT_THINKING_EFFORT),
-        thinking_options=ai.get("思考模式", {"high": "高", "max": "全开"}),
+        thinking_enabled=thinking_enabled,
+        thinking_effort=thinking_effort,
+        thinking_options=thinking_options,
     )
 
 
@@ -242,11 +264,19 @@ def _build_pricing_config(data: dict) -> PricingConfig:
     if not pricing_group:
         return PricingConfig()
     raw_pricing = pricing_group.get("模型", {})
-    balance_url = pricing_group.get("余额查询地址", "")
     user_pricing = _parse_pricing(raw_pricing) if raw_pricing else {}
-    return PricingConfig(
-        user_pricing=user_pricing,
-        balance_url=balance_url,
+    return PricingConfig(user_pricing=user_pricing)
+
+
+def _build_balance_config(data: dict) -> BalanceConfig:
+    """从narnat.json的"余额查询"分组构建BalanceConfig"""
+    bal = data.get("余额查询", {})
+    return BalanceConfig(
+        enabled=bool(bal.get("启用", False)),
+        url=bal.get("查询地址", ""),
+        auth_method=bal.get("认证方式", "bearer"),
+        value_path=bal.get("响应路径", ""),
+        currency_path=bal.get("货币路径", ""),
     )
 
 
@@ -307,11 +337,25 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
                             "接口密钥": DEFAULT_API_KEY,
                             "接口地址": DEFAULT_BASE_URL,
                             "模型": DEFAULT_MODEL,
-                            "思考强度": "high",
-                            "思考模式": {"high": "高", "max": "全开"},
+                            "协议": "anthropic",
+                            "温度": None,
+                            "最大输出token数": 128000,
+                            "思考": {
+                                "启用": True,
+                                "强度": "high",
+                                "强度选项": {"high": "高", "max": "全开"},
+                            },
+                            "LLM重试次数": 3,
+                        },
+                        "余额查询": {
+                            "启用": True,
+                            "查询地址": "https://api.deepseek.com/user/balance",
+                            "认证方式": "bearer",
+                            "响应路径": "balance_infos.0.total_balance",
+                            "货币路径": "balance_infos.0.currency",
                         },
                         "接口密钥组": {"websearch": "", "websearch_url": "https://api.anysearch.com/mcp"},
-                        "定价": {"模型": {}, "余额查询地址": ""},
+                        "定价": {"模型": {}},
                         "界面": {},
                         "工具": {"输出上限KB": DEFAULT_MAX_TOOL_OUTPUT_KB},
                         "会话": {},
@@ -335,6 +379,7 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
     ai_config = _build_ai_config(data)
     api_keys = data.get("接口密钥组", {})
     pricing_config = _build_pricing_config(data)
+    balance_config = _build_balance_config(data)
     ui_config = _build_ui_config(data, ai_config.max_tokens or 128000)
 
     # 读取用户自定义指令
@@ -357,6 +402,7 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
         data_dir=data_dir,
         logs_dir=logs_dir,
         pricing=pricing_config,
+        balance=balance_config,
         ui=ui_config,
         compress_turn=int(data.get("压缩", {}).get("压缩轮次", COMPRESS_TURN)),
         warn_turn_1=int(data.get("压缩", {}).get("警告轮次1", WARN_TURN_1)),
