@@ -188,6 +188,21 @@ def _truncate_output(text: str, max_chars: int) -> str:
     return text[:max_chars] + f"\n...[已截断: 输出共{len(text)}字符, 当前显示前{max_chars}字符。增大max_output_chars可获取完整输出]"
 
 
+def _format_prompt() -> str:
+    """返回当前路径提示符，仿终端显示。"""
+    cwd = os.getcwd()
+    if sys.platform == "win32":
+        return f"{cwd}>"
+    else:
+        home = os.path.expanduser("~")
+        if cwd == home:
+            return "~$ "
+        elif cwd.startswith(home + os.sep):
+            return "~" + cwd[len(home):] + "$ "
+        else:
+            return f"{cwd}$ "
+
+
 def execute(
     command: str,
     timeout: int = 120,
@@ -258,8 +273,8 @@ def execute(
             try:
                 os.chdir(path)
             except OSError as e:
-                return f"cd: {e}"
-            return f"[exit code: 0]\n"
+                return f"cd: {e}\n{_format_prompt()}"
+            return f"[exit code: 0]\n{_format_prompt()}"
 
         # 多段命令(&&/||)由Python端拆分后逐段执行
         segments = _split_commands(command)
@@ -353,7 +368,7 @@ def execute(
             if err.strip():
                 parts.append(f"[stderr]\n{err.strip()}")
             parts.append("[用户中断]")
-            return _truncate_output("\n".join(parts), max_output_chars)
+            return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
 
         if timed_out:
             _kill_proc_tree(proc)
@@ -366,7 +381,7 @@ def execute(
             if err.strip():
                 parts.append(f"[stderr]\n{err.strip()}")
             parts.append(f"[超时: 命令执行超过{timeout:.0f}秒，已终止]")
-            return _truncate_output("\n".join(parts), max_output_chars)
+            return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
 
         parts = [f"[exit code: {proc.returncode}]"]
         out = _decode_output(stdout)
@@ -375,7 +390,7 @@ def execute(
         err = _decode_output(stderr)
         if err.strip():
             parts.append(f"[stderr]\n{err.strip()}")
-        return _truncate_output("\n".join(parts), max_output_chars)
+        return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
     finally:
         with _active_proc_lock:
             _active_proc = None
@@ -455,7 +470,7 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
             if err.strip():
                 parts.append(f"[stderr]\n{err.strip()}")
             parts.append("[用户中断]")
-            return _truncate_output("\n".join(parts), max_output_chars)
+            return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
 
         if timed_out:
             _kill_proc_tree(proc)
@@ -468,7 +483,7 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
             if err.strip():
                 parts.append(f"[stderr]\n{err.strip()}")
             parts.append(f"[超时: 命令执行超过{timeout:.0f}秒，已终止]")
-            return _truncate_output("\n".join(parts), max_output_chars)
+            return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
 
         parts = [f"[exit code: {proc.returncode}]"]
         out = _decode_output(stdout)
@@ -477,7 +492,7 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
         err = _decode_output(stderr)
         if err.strip():
             parts.append(f"[stderr]\n{err.strip()}")
-        return _truncate_output("\n".join(parts), max_output_chars)
+        return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
     finally:
         with _active_proc_lock:
             _active_proc = None
@@ -604,7 +619,7 @@ def _execute_segments(segments: list, timeout: int, run_in_background: bool,
             all_parts.append("[用户中断]")
             break
 
-    return _truncate_output("\n".join(all_parts), max_output_chars)
+    return _truncate_output("\n".join(all_parts) + "\n" + _format_prompt(), max_output_chars)
 
 
 def get_background_status() -> str:
