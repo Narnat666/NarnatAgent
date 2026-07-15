@@ -59,7 +59,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Shell",
-        "description": f"在{__import__('sys').platform}执行命令。",
+        "description": f"持久化本地Shell — 在{__import__('sys').platform}执行命令。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -145,11 +145,12 @@ def _is_cd_command(cmd: str) -> bool:
     return lower.startswith("cd ") or lower == "cd" or lower.startswith("chdir ") or lower == "chdir"
 
 
-def _extract_cd_path(cmd: str) -> str:
-    """从 cd 命令中提取目标路径，处理 /d 等cmd标志"""
+def _extract_cd_path(cmd: str) -> Optional[str]:
+    """从 cd 命令中提取目标路径，处理 /d 等cmd标志。
+    返回 None 表示无参数cd（仅显示当前目录，不切换）。"""
     parts = cmd.split(None, 1)
     if len(parts) < 2:
-        return os.path.expanduser("~")
+        return None  # 无参数cd：仅显示当前目录，不切换
     args = parts[1]
     # 去掉cmd的 /d 标志
     if args.lower().startswith("/d "):
@@ -251,6 +252,9 @@ def execute(
                     })
                 return "__AWAIT_CONFIRM__"
 
+    if timeout <= 0:
+        return "错误: timeout必须为正整数（秒）。"
+
     timeout = min(timeout, 600)
 
     # ── 后台运行：始终走独立子进程 ──
@@ -270,6 +274,9 @@ def execute(
         # cd 命令：同步更新 Python 进程的 CWD（供 Read/Glob 等工具使用）
         if _is_cd_command(command):
             path = _extract_cd_path(command)
+            if path is None:
+                # 无参数cd：仅显示当前目录（与cmd.exe行为一致）
+                return f"[exit code: 0]\n{_format_prompt()}"
             try:
                 os.chdir(path)
             except OSError as e:
@@ -573,12 +580,15 @@ def _execute_segments(segments: list, timeout: int, run_in_background: bool,
         # cd 命令直接作用于 Python 进程
         if _is_cd_command(seg):
             path = _extract_cd_path(seg)
-            try:
-                os.chdir(path)
-                prev_rc = 0
-            except OSError as e:
-                all_parts.append(f"cd: {e}")
-                prev_rc = 1
+            if path is None:
+                prev_rc = 0  # 无参数cd仅显示，不切换
+            else:
+                try:
+                    os.chdir(path)
+                    prev_rc = 0
+                except OSError as e:
+                    all_parts.append(f"cd: {e}")
+                    prev_rc = 1
             continue
 
         # 执行单段
