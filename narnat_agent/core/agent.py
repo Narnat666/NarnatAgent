@@ -65,23 +65,13 @@ class Agent:
         self._context = ContextManager(self._logger, self._config.warn_turn_1, self._config.warn_turn_2, self._config.compress_turn)
 
         # 初始化压缩器
-        self._compressor = Compressor(self._config.narnat_dir, self._logger)
-
-        # 崩溃恢复：检查是否有残留的压缩摘要
-        recovered_summary = ""
-        if self._compressor.verify_summary():
-            recovered_summary = self._compressor.read_summary()
-            self._compressor.reset_summary()
-            if self._logger:
-                self._logger.info("core.agent", "崩溃恢复: 已加载残留的压缩摘要")
+        self._compressor = Compressor()
 
         # 初始化messages（通过MessageManager管理）
         self._messages: List[Dict[str, Any]] = [
             {"role": "system", "content": self._config.system_prompt}
         ]
         self._msg_manager = MessageManager(self._messages, self._compressor, self._logger)
-        if recovered_summary:
-            self._msg_manager.append_system(f"# 上一轮对话成果\n\n{recovered_summary}")
 
         # 初始化UI
         self._mgr = SessionManager(

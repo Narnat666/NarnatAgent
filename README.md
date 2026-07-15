@@ -239,9 +239,48 @@ narnat -d         调试模式（记录详细日志到 .narnat/logs/）
 
 ### 多模型适配
 
-换模型只需修改 `"智能体"` + `"余额查询"` + `"定价"` 三个分组中的少量字段，**thinking 参数由内部映射表自动翻译**为对应厂商的 API 格式，无需手动写 `extra_body` 或 `reasoning_effort`。
+thinking 参数由内部映射表自动翻译为对应厂商的 API 格式，无需手动写 `extra_body`。
 
-**已内置适配的模型：**
+**切换到其他模型：修改 `narnat.json` 的 `"智能体"` 分组中 4 个字段即可。** 以下为各厂商的完整配置模板，直接照填：
+
+| 厂商 | `"接口密钥"` | `"接口地址"` | `"模型"` | `"协议"` |
+|------|-------------|-------------|---------|---------|
+| DeepSeek（推荐） | `sk-xxx` | `https://api.deepseek.com/anthropic` | `deepseek-v4-pro` | `anthropic` |
+| DeepSeek (OpenAI) | `sk-xxx` | `https://api.deepseek.com/v1` | `deepseek-v4-pro` | `openai` |
+| 智谱 GLM | 你的 GLM 密钥 | `https://open.bigmodel.cn/api/paas/v4` | `GLM-4.7` | `openai` |
+| Kimi | 你的 Kimi 密钥 | `https://api.moonshot.cn/v1` | `kimi-k2.6` | `openai` |
+| 阿里 Qwen | 你的 DashScope 密钥 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3-235b-a22b` | `openai` |
+| OpenAI GPT | `sk-xxx` | `https://api.openai.com/v1` | `gpt-5.1` | `openai` |
+| Anthropic Claude | `sk-ant-xxx` | `https://api.anthropic.com` | `claude-sonnet-4-20250514` | `anthropic` |
+
+> **`"协议"`** 选择了 `anthropic` 还是 `openai` 取决于厂商的 API 端点格式，不是随便填的。表中已标出，跟着写即可。
+
+切换模型时 **`"余额查询"` 和 `"定价"` 也需要同步修改**，否则费用显示不准：
+
+```jsonc
+// 智谱 GLM 示例
+"余额查询": {
+  "启用": true,
+  "查询地址": "https://open.bigmodel.cn/api/paas/v4/account/info",
+  "认证方式": "bearer",
+  "响应路径": "data.balance",
+  "货币路径": "data.currency"
+},
+"定价": {
+  "模型": { "GLM-4.7": { "输入": 50.0, "输出": 50.0 } }
+}
+
+// DeepSeek 示例
+"余额查询": {
+  "启用": true,
+  "查询地址": "https://api.deepseek.com/user/balance",
+  "认证方式": "bearer",
+  "响应路径": "balance_infos.0.total_balance",
+  "货币路径": "balance_infos.0.currency"
+}
+```
+
+**thinking 参数映射表（仅供参考，无需手动配置）：**
 
 | 模型 | `"协议"` | `"思考"` 映射 |
 |------|----------|--------------|

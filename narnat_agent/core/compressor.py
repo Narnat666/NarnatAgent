@@ -1,33 +1,19 @@
 """
-压缩执行 —— 发送压缩prompt→校验md→切换会话
+压缩执行 —— 构建压缩prompt、构建新会话messages
 """
 
-import os
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
-from ..config.defaults import COMPRESS_PROMPT, DATA_SUBDIR, LAST_SESSION_SUMMARY
+from ..config.defaults import COMPRESS_PROMPT
 
 
 class Compressor:
     """
     上下文压缩器。
 
-    9步流程：
-    1. 拦截用户输入（由agent.py处理）
-    2. 发送压缩prompt
-    3. 写入磁盘
-    4. 校验总结结果
-    5. 销毁旧会话
-    6. 创建新会话
-    7. 重置标记
-    8. 恢复用户问题（由agent.py处理）
-    9. 停止压缩动画（由agent.py处理）
+    纯函数：不在磁盘留下任何中间文件，
+    build_compress_messages → LLM总结 → build_new_session_messages 全部在内存中完成。
     """
-
-    def __init__(self, narnat_dir: str, logger=None):
-        self._narnat_dir = narnat_dir
-        self._logger = logger
-        self._summary_path = os.path.join(narnat_dir, DATA_SUBDIR, LAST_SESSION_SUMMARY)
 
     def build_compress_messages(
         self, messages: List[Dict[str, Any]]
@@ -43,53 +29,6 @@ class Compressor:
             "content": COMPRESS_PROMPT,
         })
         return compress_messages
-
-    def write_summary(self, content: str) -> bool:
-        """
-        将AI总结写入磁盘。
-
-        Returns:
-            True=写入成功
-        """
-        try:
-            with open(self._summary_path, "w", encoding="utf-8") as f:
-                f.write(content)
-            if self._logger:
-                self._logger.info("compressor", f"总结写入: {self._summary_path}")
-            return True
-        except OSError as e:
-            if self._logger:
-                self._logger.error("compressor", f"写入失败: {e}")
-            return False
-
-    def verify_summary(self) -> bool:
-        """
-        校验总结结果。
-
-        读取md文件，非空=压缩成功，空=压缩失败。
-        """
-        try:
-            with open(self._summary_path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-            return len(content) > 0
-        except OSError:
-            return False
-
-    def read_summary(self) -> str:
-        """读取总结内容"""
-        try:
-            with open(self._summary_path, "r", encoding="utf-8") as f:
-                return f.read().strip()
-        except OSError:
-            return ""
-
-    def reset_summary(self):
-        """重置总结文件为空（继承完毕后调用）"""
-        try:
-            with open(self._summary_path, "w", encoding="utf-8") as f:
-                f.write("")
-        except OSError:
-            pass
 
     def build_new_session_messages(
         self, system_prompt: str, summary: str

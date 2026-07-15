@@ -133,28 +133,18 @@ class MessageManager:
 
         summary = "".join(summary_content)
 
-        # 写入磁盘
-        if not self._compressor.write_summary(summary):
-            on_llm_error("压缩失败: 写入失败")
-            return False
-
-        # 校验总结结果
-        if not self._compressor.verify_summary():
+        # 校验总结结果（内存中直接校验）
+        if not summary.strip():
             on_llm_error("压缩失败: 总结为空")
             return False
 
-        # 销毁旧会话，创建新会话
+        # 先完整构建新会话（含用户问题），再原子替换旧会话
+        new_messages = self._compressor.build_new_session_messages(system_prompt, summary)
+        new_messages.append({"role": "user", "content": pending_input})
         self._messages.clear()
-        summary_text = self._compressor.read_summary()
-        self._messages.extend(
-            self._compressor.build_new_session_messages(system_prompt, summary_text)
-        )
-        self._compressor.reset_summary()
+        self._messages.extend(new_messages)
 
         self._logger.info("message_manager", "压缩成功，新会话已创建")
-
-        # 恢复用户问题
-        self._messages.append({"role": "user", "content": pending_input})
         return True
 
     def clear_and_rebuild(self, system_prompt: str, summary_text: str) -> None:

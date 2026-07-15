@@ -52,9 +52,6 @@ LOGS_SUBDIR = "logs"           # 日志层：可清理
 NARNAT_JSON = "narnat.json"
 NARNAT_MD = "narnat.md"
 
-# ── 数据文件名（相对于 data/ 子目录） ──
-LAST_SESSION_SUMMARY = "last_session_summary.md"
-
 # ── 默认AI配置 ──
 DEFAULT_API_KEY = ""
 DEFAULT_BASE_URL = "https://api.deepseek.com/anthropic"

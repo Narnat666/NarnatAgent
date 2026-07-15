@@ -11,7 +11,7 @@ from typing import Optional, Dict, List
 
 from .defaults import (
     BASE_PROMPT_TEMPLATE, COMPRESS_PROMPT,
-    NARNAT_DIR, NARNAT_JSON, NARNAT_MD, LAST_SESSION_SUMMARY,
+    NARNAT_DIR, NARNAT_JSON, NARNAT_MD,
     CONFIG_SUBDIR, DATA_SUBDIR, LOGS_SUBDIR,
     DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL,
     DEFAULT_PROTOCOL, DEFAULT_THINKING_ENABLED, DEFAULT_THINKING_EFFORT,
@@ -321,10 +321,9 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
     data_dir = os.path.join(narnat_dir, DATA_SUBDIR)
     logs_dir = os.path.join(narnat_dir, LOGS_SUBDIR)
 
-    # 确保 .narnat 及子目录存在
+    # 确保 .narnat 及子目录存在（logs 目录由 logger.start() 在 debug 模式下按需创建）
     os.makedirs(config_dir, exist_ok=True)
     os.makedirs(data_dir, exist_ok=True)
-    os.makedirs(logs_dir, exist_ok=True)
 
     # 确保关键配置文件存在
     for fname in (NARNAT_JSON, NARNAT_MD):
@@ -365,12 +364,6 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
                     }, f, indent=2, ensure_ascii=False)
                 else:
                     f.write("")
-
-    # 确保压缩摘要文件存在
-    summary_path = os.path.join(data_dir, LAST_SESSION_SUMMARY)
-    if not os.path.isfile(summary_path):
-        with open(summary_path, "w", encoding="utf-8") as f:
-            f.write("")
 
     # 读取配置
     data = _load_json(config_dir)
