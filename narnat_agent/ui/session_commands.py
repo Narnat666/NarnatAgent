@@ -27,7 +27,7 @@ class _CommandCompleter(Completer):
 
     _NAME_COMMANDS = {
         "/cd":       "on_list_names_tree",
-        "/rm":       "on_list_names_tree",
+        "/rm":       "on_list_rm_names",
         "/skill":    "on_list_skill_names",
         "/thinking": "on_list_thinking_options",
     }

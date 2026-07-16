@@ -138,12 +138,14 @@ class NoSession(SessionState):
         }
 
     def save(self, name: str) -> str:
+        msgs = self._mgr.get_messages()
+        if not any(m.get("role") == "user" for m in msgs):
+            return "没有对话内容，无需保存"
         if not name:
             if self._mgr.name_func:
-                name = self._mgr.name_func(self._mgr.get_messages())
+                name = self._mgr.name_func(msgs)
             if not name:
                 return "自动命名失败，请手动指定: /save <名称>"
-        msgs = self._mgr.get_messages()
         err = save_session(self._mgr.narnat_dir, name, msgs)
         if err:
             return err
@@ -302,6 +304,13 @@ class RootSession(SessionState):
                         self._mgr.pending_deletes.add((child["name"], self._name))
                     return ""
             return "会话不存在"
+        # 处理 parent/child 路径格式（tab 补全可能产生此格式）
+        if "/" in name:
+            parts = name.split("/", 1)
+            parent_name, child_name = parts[0], parts[1]
+            if parent_name != self._name:
+                return f"'{name}' 不是当前会话的子会话"
+            name = child_name
         tree = list_sessions_tree(self._mgr.narnat_dir)
         for root in tree:
             if root["name"] == self._name:
@@ -678,6 +687,18 @@ class SessionManager:
 
     def on_list_names_tree(self) -> list:
         return self.on_list_names()
+
+    def on_list_rm_names(self) -> list:
+        """返回当前状态下可删除的会话名列表（供 /rm tab 补全使用）"""
+        if isinstance(self._state, NoSession):
+            return self.on_list_names()
+        if isinstance(self._state, RootSession):
+            tree = list_sessions_tree(self.narnat_dir)
+            current_name = self._state.session_name()
+            for root in tree:
+                if root["name"] == current_name:
+                    return [f"{root['name']}/{child['name']}" for child in root.get("children", [])]
+        return []
 
     def on_list_skill_names(self) -> list:
         return list_skill_names(self.narnat_dir)
