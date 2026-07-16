@@ -74,4 +74,17 @@ def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
     if _tool_context is not None:
         _tool_context.current_todos = list(todos)
 
-    return f"任务列表已更新({len(todos)}项)"
+    # ── 构建返回给 LLM 的状态提示 ──
+    unfinished = [t for t in todos if t["status"] != "completed"]
+
+    if not unfinished:
+        return "任务全部完成。"
+
+    lines = ["你有未完成的任务，请继续：", ""]
+    for i, t in enumerate(unfinished, 1):
+        status_label = "进行中" if t["status"] == "in_progress" else "待处理"
+        lines.append(f"{i}. [{status_label}] {t['content']}")
+    lines.append("")
+    lines.append("完成后请使用 TodoWrite 更新任务状态。")
+
+    return "\n".join(lines)
