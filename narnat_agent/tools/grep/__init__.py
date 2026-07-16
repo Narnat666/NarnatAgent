@@ -32,16 +32,13 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Grep",
-        "description": (
-            "正则搜索文件内容。"
-            "head_limit 在各模式下含义：files_with_matches/count 限制文件数，content 限制匹配行数。"
-        ),
+        "description": "正则搜索文件内容。",
         "parameters": {
             "type": "object",
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "正则表达式（最大4096字符）",
+                    "description": "正则表达式",
                 },
                 "path": {
                     "type": "string",
@@ -49,7 +46,7 @@ DEFINITION = {
                 },
                 "glob": {
                     "type": "string",
-                    "description": "文件类型过滤，如*.py（仅匹配文件名，不含路径；默认空）",
+                    "description": "文件类型过滤，如*.py（默认空）",
                 },
                 "output_mode": {
                     "type": "string",
@@ -63,10 +60,6 @@ DEFINITION = {
                 "n": {
                     "type": "boolean",
                     "description": "是否显示行号（content模式专用，默认否）",
-                },
-                "multiline": {
-                    "type": "boolean",
-                    "description": "已废弃：当前逐行匹配，跨行不可用。保留仅为兼容旧调用方",
                 },
                 "A": {
                     "type": "integer",
@@ -82,11 +75,7 @@ DEFINITION = {
                 },
                 "head_limit": {
                     "type": "integer",
-                    "description": (
-                        "最大返回结果数（默认100）；"
-                        "0 表示不返回任何结果；"
-                        "files_with_matches/count 按文件数，content 按匹配行数"
-                    ),
+                    "description": "最大返回结果数（默认100）；files_with_matches/count按文件计数，content按行计数",
                 },
             },
             "required": ["pattern"],
@@ -102,7 +91,6 @@ def execute(
     output_mode: str = "files_with_matches",
     i: bool = False,
     n: bool = False,
-    multiline: bool = False,
     A: int = 0,
     B: int = 0,
     C: int = 0,
@@ -120,8 +108,6 @@ def execute(
     flags = 0
     if i:
         flags |= re.IGNORECASE
-    # multiline 已废弃 — 逐行搜索下 re.MULTILINE 无意义（\n 已被 split 吃掉）
-    # 保留参数仅为兼容旧调用方，不再设置 re.MULTILINE
 
     try:
         regex = re.compile(pattern, flags)
