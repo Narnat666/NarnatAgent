@@ -349,12 +349,19 @@ def execute(
         for t in (t_out, t_err):
             t.start()
 
+        global _interrupted
+        _interrupted = False  # 入口清零：上轮残留的中断标志不污染本轮
         deadline = time.time() + timeout
         timed_out = False
+        was_interrupted = False
 
         while proc.poll() is None:
             if time.time() >= deadline:
                 timed_out = True
+                break
+            if _interrupted:
+                was_interrupted = True
+                _interrupted = False
                 break
             time.sleep(0.05)
 
@@ -364,9 +371,9 @@ def execute(
         stdout = b"".join(stdout_chunks)
         stderr = b"".join(stderr_chunks)
 
-        global _interrupted
-        if _interrupted:
-            _interrupted = False
+        if was_interrupted:
+            _kill_proc_tree(proc)
+            proc.wait(timeout=5)
             parts = []
             out = _decode_output(stdout)
             if out.strip():
@@ -448,14 +455,18 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
         for t in (t_out, t_err):
             t.start()
 
+        _interrupted = False  # 入口清零：上轮残留的中断标志不污染本轮
         deadline = time.time() + timeout
         timed_out = False
+        was_interrupted = False
 
         while proc.poll() is None:
             if time.time() >= deadline:
                 timed_out = True
                 break
             if _interrupted:
+                was_interrupted = True
+                _interrupted = False
                 break
             time.sleep(0.05)
 
@@ -465,8 +476,7 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
         stdout = b"".join(stdout_chunks)
         stderr = b"".join(stderr_chunks)
 
-        if _interrupted:
-            _interrupted = False
+        if was_interrupted:
             _kill_proc_tree(proc)
             proc.wait(timeout=5)
             parts = []
@@ -564,9 +574,12 @@ def _execute_segments(segments: list, timeout: int, run_in_background: bool,
         reassembled = " ".join(f"{op} {seg}" if op else seg for op, seg in segments)
         return _run_background(reassembled, reassembled)
 
+    global _interrupted
+    _interrupted = False  # 入口清零：上轮残留的中断标志不污染本轮
     all_parts = []
     prev_rc = 0
     remaining_timeout = timeout_sec
+    was_interrupted = False
 
     for i, (op, seg) in enumerate(segments):
         # 短路求值
@@ -623,11 +636,13 @@ def _execute_segments(segments: list, timeout: int, run_in_background: bool,
             break
 
         # 检查ESC打断
-        global _interrupted
         if _interrupted:
             _interrupted = False
-            all_parts.append("[用户中断]")
+            was_interrupted = True
             break
+
+    if was_interrupted:
+        all_parts.append("[用户中断]")
 
     return _truncate_output("\n".join(all_parts) + "\n" + _format_prompt(), max_output_chars)
 
