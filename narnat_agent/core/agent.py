@@ -149,10 +149,16 @@ class Agent:
 
     def _do_name_session(self, messages):
         """用 LLM 生成会话名称。返回空串表示失败。"""
+        from ..config.session_store import list_sessions
+        existing = list_sessions(self._config.narnat_dir)
+        taken_names = [s["name"] for s in existing]
+        hint = ""
+        if taken_names:
+            hint = f"\n注意：以下名称已被占用，请勿使用：{', '.join(taken_names)}"
         name_messages = list(messages)
         name_messages.append({
             "role": "user",
-            "content": "请为以上对话起一个简短标题（15字以内），直接输出标题，不要引号不要解释。"
+            "content": f"请为以上对话起一个简短标题（15字以内），直接输出标题，不要引号不要解释。{hint}"
         })
         parts = []
         for chunk in self._llm.chat_stream(name_messages, no_tools=True,
