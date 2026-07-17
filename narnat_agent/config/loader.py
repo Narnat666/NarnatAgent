@@ -29,7 +29,11 @@ _DEFAULT_IGNORE_DIRS = [".git", "__pycache__", "node_modules", ".svn", ".hg", "v
 
 @dataclass
 class AIConfig:
-    """AI连接配置"""
+    """AI连接配置。
+
+    注意: thinking_effort 在当前阶段仍为可变状态（由 /thinking 命令修改）。
+    后续 Phase 拆分 LLMClient 后将移出此字段，届时本类将改为 frozen。
+    """
     api_key: str = DEFAULT_API_KEY
     base_url: str = DEFAULT_BASE_URL
     model: str = DEFAULT_MODEL
@@ -39,19 +43,62 @@ class AIConfig:
     thinking_enabled: bool = DEFAULT_THINKING_ENABLED
     thinking_effort: str = DEFAULT_THINKING_EFFORT
     thinking_options: dict = field(default_factory=lambda: {"high": "高", "max": "全开"})
+    retry_count: int = 3
 
 
-@dataclass
+@dataclass(frozen=True)
+class PathConfig:
+    """路径配置（只读）"""
+    project_root: str = ""
+    narnat_dir: str = ""
+    config_dir: str = ""    # .narnat/config/
+    data_dir: str = ""      # .narnat/data/
+    logs_dir: str = ""      # .narnat/logs/
+
+
+@dataclass(frozen=True)
+class ToolConfig:
+    """工具配置（只读）。单位转换在load时完成，外部直接用最终单位。"""
+    max_sessions: int = 5                              # SSH最大会话数
+    max_transfer_mb: int = 100                          # 文件传输上限(MB)
+    max_output_chars: int = DEFAULT_MAX_TOOL_OUTPUT_KB * 1024  # 工具输出上限(字符数)
+    ignore_dirs: tuple = ()                             # 忽略目录（tuple保证不可变）
+
+
+@dataclass(frozen=True)
+class SafetyConfig:
+    """安全确认配置（只读）"""
+    git_skip_confirm: bool = DEFAULT_GIT_SKIP
+    rm_skip_confirm: bool = DEFAULT_RM_SKIP
+
+
+@dataclass(frozen=True)
+class PlanConfig:
+    """计划优先配置（只读）"""
+    require_plan: bool = DEFAULT_REQUIRE_PLAN
+    min_tools: int = DEFAULT_MIN_TOOLS
+
+
+@dataclass(frozen=True)
+class SessionConfig:
+    """会话与上下文配置（只读）"""
+    auto_save: bool = DEFAULT_AUTO_SAVE
+    compress_turn: int = COMPRESS_TURN
+    warn_turn_1: int = WARN_TURN_1
+    warn_turn_2: int = WARN_TURN_2
+
+
+@dataclass(frozen=True)
 class PricingConfig:
-    """定价配置"""
+    """定价配置（只读）"""
     # 用户自定义定价（中文key映射到英文key）
     # 格式: {"模型名": {"输入": x, "缓存命中": y, "输出": z}}
     user_pricing: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(frozen=True)
 class BalanceConfig:
-    """余额查询配置"""
+    """余额查询配置（只读）"""
     enabled: bool = False
     url: str = ""                    # 查询地址
     auth_method: str = "bearer"      # "bearer" | "x-api-key"
@@ -59,9 +106,9 @@ class BalanceConfig:
     currency_path: str = ""          # 货币单位 JSONPath
 
 
-@dataclass
+@dataclass(frozen=True)
 class UIConfig:
-    """UI配置（原style.json内容）"""
+    """UI配置（只读，原style.json内容）"""
     max_output_tokens: int = 128000
     show_cost: bool = False
     show_balance: bool = False
@@ -82,34 +129,23 @@ class UIConfig:
 
 
 @dataclass
-class AppConfig:
-    """应用总配置"""
+class Config:
+    """应用总配置。
+
+    注意: 本类当前非 frozen，因 AIConfig.thinking_effort 仍需运行时修改。
+    后续 Phase 拆分 LLMClient 后将改为 frozen。
+    """
     ai: AIConfig = field(default_factory=AIConfig)
-    api_keys: dict = field(default_factory=dict)
-    system_prompt: str = ""
-    narnat_dir: str = ""
-    project_root: str = ""
-    # 子目录路径（由 load_config 计算）
-    config_dir: str = ""    # .narnat/config/
-    data_dir: str = ""      # .narnat/data/
-    logs_dir: str = ""      # .narnat/logs/
-    # 新增配置项
+    paths: PathConfig = field(default_factory=PathConfig)
+    tools: ToolConfig = field(default_factory=ToolConfig)
+    safety: SafetyConfig = field(default_factory=SafetyConfig)
+    plan: PlanConfig = field(default_factory=PlanConfig)
+    session: SessionConfig = field(default_factory=SessionConfig)
     pricing: PricingConfig = field(default_factory=PricingConfig)
     balance: BalanceConfig = field(default_factory=BalanceConfig)
     ui: UIConfig = field(default_factory=UIConfig)
-    compress_turn: int = COMPRESS_TURN
-    warn_turn_1: int = WARN_TURN_1
-    warn_turn_2: int = WARN_TURN_2
-    ignore_dirs: List[str] = field(default_factory=lambda: list(_DEFAULT_IGNORE_DIRS))
-    ssh_max_sessions: int = 5
-    max_transfer_mb: int = 100
-    llm_retry_count: int = 3
-    git_skip_confirm: bool = DEFAULT_GIT_SKIP
-    rm_skip_confirm: bool = DEFAULT_RM_SKIP
-    require_plan: bool = DEFAULT_REQUIRE_PLAN
-    min_tools: int = DEFAULT_MIN_TOOLS
-    max_tool_output_kb: int = DEFAULT_MAX_TOOL_OUTPUT_KB
-    auto_save: bool = DEFAULT_AUTO_SAVE
+    api_keys: dict = field(default_factory=dict)
+    system_prompt: str = ""
 
 
 def _is_nuitka_onefile() -> bool:
@@ -305,15 +341,16 @@ def _build_system_prompt(model: str, user_md: str, cwd: str = "", os_name: str =
     return "\n".join(parts)
 
 
-def load_config(project_root: Optional[str] = None) -> AppConfig:
+def load_config(project_root: Optional[str] = None) -> Config:
     """
-    加载全部配置。
+    加载全部配置，返回不可变的 Config 对象。
 
     1. 定位项目根目录（含 .narnat 的目录）
     2. 创建 .narnat 子目录结构（config/ data/ logs/）
     3. 读取 narnat.json → 全部配置
     4. 读取 narnat.md → 用户自定义指令
     5. 拼接系统prompt
+    6. 单位转换在此完成，外部直接用最终单位
     """
     root = os.path.abspath(project_root or _find_project_root())
     narnat_dir = os.path.join(root, NARNAT_DIR)
@@ -385,29 +422,56 @@ def load_config(project_root: Optional[str] = None) -> AppConfig:
         shell_name="PowerShell" if sys.platform == "win32" else "bash",
     )
 
-    return AppConfig(
+    # ── 单位转换在此完成 ──
+    max_output_kb = int(data.get("工具", {}).get("输出上限KB", DEFAULT_MAX_TOOL_OUTPUT_KB))
+    max_output_chars = max_output_kb * 1024 if max_output_kb > 0 else 0
+
+    # 补充 AIConfig 的 retry_count（从JSON读取，不在 _build_ai_config 中处理）
+    ai_config = AIConfig(
+        api_key=ai_config.api_key,
+        base_url=ai_config.base_url,
+        model=ai_config.model,
+        protocol=ai_config.protocol,
+        temperature=ai_config.temperature,
+        max_tokens=ai_config.max_tokens,
+        thinking_enabled=ai_config.thinking_enabled,
+        thinking_effort=ai_config.thinking_effort,
+        thinking_options=ai_config.thinking_options,
+        retry_count=int(data.get("智能体", {}).get("LLM重试次数", 3)),
+    )
+
+    return Config(
         ai=ai_config,
-        api_keys=api_keys,
-        system_prompt=system_prompt,
-        narnat_dir=narnat_dir,
-        project_root=root,
-        config_dir=config_dir,
-        data_dir=data_dir,
-        logs_dir=logs_dir,
+        paths=PathConfig(
+            project_root=root,
+            narnat_dir=narnat_dir,
+            config_dir=config_dir,
+            data_dir=data_dir,
+            logs_dir=logs_dir,
+        ),
+        tools=ToolConfig(
+            max_sessions=int(data.get("工具", {}).get("SSH最大会话数", 5)),
+            max_transfer_mb=int(data.get("工具", {}).get("最大传输文件MB", 100)),
+            max_output_chars=max_output_chars,
+            ignore_dirs=tuple(data.get("忽略目录", list(_DEFAULT_IGNORE_DIRS))),
+        ),
+        safety=SafetyConfig(
+            git_skip_confirm=bool(data.get("工具", {}).get("git免确认", DEFAULT_GIT_SKIP)),
+            rm_skip_confirm=bool(data.get("工具", {}).get("rm免确认", DEFAULT_RM_SKIP)),
+        ),
+        plan=PlanConfig(
+            require_plan=bool(data.get("计划", {}).get("计划优先", DEFAULT_REQUIRE_PLAN)),
+            min_tools=int(data.get("计划", {}).get("计划最低工具数", DEFAULT_MIN_TOOLS)),
+        ),
+        session=SessionConfig(
+            auto_save=bool(data.get("会话", {}).get("自动保存", DEFAULT_AUTO_SAVE)),
+            compress_turn=int(data.get("压缩", {}).get("压缩轮次", COMPRESS_TURN)),
+            warn_turn_1=int(data.get("压缩", {}).get("警告轮次1", WARN_TURN_1)),
+            warn_turn_2=int(data.get("压缩", {}).get("警告轮次2", WARN_TURN_2)),
+        ),
         pricing=pricing_config,
         balance=balance_config,
         ui=ui_config,
-        compress_turn=int(data.get("压缩", {}).get("压缩轮次", COMPRESS_TURN)),
-        warn_turn_1=int(data.get("压缩", {}).get("警告轮次1", WARN_TURN_1)),
-        warn_turn_2=int(data.get("压缩", {}).get("警告轮次2", WARN_TURN_2)),
-        ignore_dirs=data.get("忽略目录", list(_DEFAULT_IGNORE_DIRS)),
-        ssh_max_sessions=int(data.get("工具", {}).get("SSH最大会话数", 5)),
-        max_transfer_mb=int(data.get("工具", {}).get("最大传输文件MB", 100)),
-        llm_retry_count=int(data.get("智能体", {}).get("LLM重试次数", 3)),
-        git_skip_confirm=bool(data.get("工具", {}).get("git免确认", DEFAULT_GIT_SKIP)),
-        rm_skip_confirm=bool(data.get("工具", {}).get("rm免确认", DEFAULT_RM_SKIP)),
-        require_plan=bool(data.get("计划", {}).get("计划优先", DEFAULT_REQUIRE_PLAN)),
-        min_tools=int(data.get("计划", {}).get("计划最低工具数", DEFAULT_MIN_TOOLS)),
-        max_tool_output_kb=int(data.get("工具", {}).get("输出上限KB", DEFAULT_MAX_TOOL_OUTPUT_KB)),
-        auto_save=bool(data.get("会话", {}).get("自动保存", DEFAULT_AUTO_SAVE)),
+        api_keys=api_keys,
+        system_prompt=system_prompt,
     )

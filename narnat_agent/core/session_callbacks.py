@@ -19,6 +19,7 @@ from ..config.session_store import (
     load_session_meta,
 )
 from ..config.skill_store import load_skill, list_skill_names
+from .message_list import MessageList
 
 BOUNDARY_MARKER_PREFIX = "━━━ 探索分支开始"
 
@@ -514,7 +515,7 @@ class SessionManager:
     """会话管理器 —— 持有共享资源，管理状态切换和延迟删除"""
 
     def __init__(self, narnat_dir: str,
-                 get_messages_func: Callable[[], List[Dict[str, Any]]],
+                 messages: 'MessageList',
                  context_manager=None,
                  config_dir: str = "",
                  thinking_effort_getter: Callable[[], str] = None,
@@ -526,7 +527,7 @@ class SessionManager:
                  cancel_check: Callable[[], bool] = None,
                  name_func: Callable[[List[Dict[str, Any]]], str] = None):
         self.narnat_dir = narnat_dir
-        self._get_messages = get_messages_func
+        self._messages = messages
         self._context = context_manager
         self._config_dir = config_dir
         self._get_thinking_effort = thinking_effort_getter
@@ -543,14 +544,17 @@ class SessionManager:
         self._state: SessionState = NoSession(self)
 
     def get_messages(self) -> List[Dict[str, Any]]:
-        return self._get_messages()
+        """返回 messages 的浅拷贝列表（供状态类读取/保存使用）"""
+        return self._messages.view().to_list()
+
+    def get_message_list(self):
+        """返回 MessageList 引用（供 Agent 直接调用 LLM 等场景）"""
+        return self._messages
 
     def replace_messages(self, new_msgs: List[Dict[str, Any]]):
-        current = self._get_messages()
-        current.clear()
-        current.extend(new_msgs)
+        self._messages.replace_all(new_msgs)
         if self._context is not None:
-            self._context.sync_from_messages(current)
+            self._context.sync_from_messages(self._messages.view().to_list())
 
     def switch_state(self, new_state: SessionState):
         self._state = new_state
@@ -646,7 +650,7 @@ class SessionManager:
         content, err = load_skill(self.narnat_dir, name)
         if err:
             return err
-        self._get_messages().append({"role": "system", "content": content})
+        self._messages.append_system(content)
         return ""
 
     def on_thinking(self, effort: str) -> str:

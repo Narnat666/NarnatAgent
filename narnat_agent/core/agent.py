@@ -1,211 +1,38 @@
 """
 主循环 —— 读输入→调度AI→输出→循环
 
-Agent类作为主编排者，委托具体实现给子模块：
-- ToolDispatcher: 工具调度+并行策略
-- MessageManager: 消息修复+追加+压缩
-- StatsTracker: token统计+费用追踪
-- NarnatSessionCallbacks: 会话命令回调
-- SafetyCallbacks / TodoCallbacks: 工具回调
+Agent 类作为纯编排者，只做发令和委托：
+- 命令分发 → UIInterface / SessionManager
+- 对话轮次 → AgentLoop
+- 压缩检查 → CompressionService
+- 自动保存 → AutoSaveManager
+
+所有子模块的构造在 Assembly 中完成，Agent 不关心构造细节。
 """
 
-import json
 import os
-import sys
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
-from typing import List, Dict, Any, Optional
+from typing import Optional
 
-from .llm import LLMClient, set_retry_count
-from .context import ContextManager
-from .compressor import Compressor
-from .tool_dispatcher import ToolDispatcher
-from .message_manager import MessageManager
-from .stats import StatsTracker
-from .session_callbacks import SessionManager
-from .tool_callbacks import SafetyCallbacks, TodoCallbacks
-from ..tools.tool_context import AWAIT_CONFIRM
-from ..config.loader import AppConfig, load_config
-from ..tools.terminal import kill_active_exec as _kill_terminal_exec, cleanup as _terminal_cleanup, set_max_sessions
-from ..tools.bash import cleanup as _bash_cleanup
-from ..tools.tool_context import ToolContext
-from ..ui.ui_design import UIInterface, _interrupt_ctrl, apply_style
-from ..output import write as _stdout_write, D, E, R, Y, G, B, C
-from ..logger import AgentLogger
+from ..assembly import Assembly, AssemblyResult
+from ..output import write as _stdout_write
 
 
 class Agent:
-    """Narnat Agent 主控"""
+    """Narnat Agent 主控 — 纯编排者"""
 
     def __init__(self, project_root: Optional[str] = None, debug: bool = False):
-        # 加载配置
-        self._config = load_config(project_root)
-
-        # 加载自定义配色
-        apply_style(self._config)
-
-        # 应用工具配置
-        set_max_sessions(self._config.ssh_max_sessions)
-        set_retry_count(self._config.llm_retry_count)
-
-        # 初始化日志
-        self._logger = AgentLogger(self._config.logs_dir)
-        if debug:
-            self._logger.start(self._config.logs_dir)
-
-        # 初始化LLM
-        self._llm = LLMClient(
-            self._config.ai,
-            self._logger,
-            max_output_tokens=self._config.ui.max_output_tokens,
-        )
-
-        # 初始化上下文管理
-        self._context = ContextManager(self._logger, self._config.warn_turn_1, self._config.warn_turn_2, self._config.compress_turn)
-
-        # 初始化压缩器
-        self._compressor = Compressor()
-
-        # 初始化messages（通过MessageManager管理）
-        self._messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": self._config.system_prompt}
-        ]
-        self._msg_manager = MessageManager(self._messages, self._compressor, self._logger)
-
-        # 初始化UI
-        self._mgr = SessionManager(
-            self._config.narnat_dir,
-            lambda: self._messages,
-            context_manager=self._context,
-            config_dir=self._config.config_dir,
-            thinking_effort_getter=lambda: self._config.ai.thinking_effort,
-            thinking_effort_setter=lambda v: setattr(self._config.ai, 'thinking_effort', v),
-            thinking_options=self._config.ai.thinking_options,
-            summarize_func=lambda msgs, cancel: self._do_summarize(msgs, cancel),
-            summary_anim_start=lambda: self._ui.begin_summarizing(),
-            summary_anim_stop=lambda: self._ui.end_summarizing(),
-            cancel_check=lambda: _interrupt_ctrl.is_set,
-            name_func=lambda msgs: self._do_name_session(msgs),
-        )
-        self._ui = UIInterface(self._config.ai.model, self._mgr)
-
-        # 初始化工具上下文
-        # Windows: confirm_callback用input()直接确认（两套输入系统互不干扰）
-        # Linux/macOS: 不注入confirm_callback，删除命令通过AWAIT_CONFIRM机制在#提示符下确认
-        self._tool_context = ToolContext(
-            confirm_callback=SafetyCallbacks.confirm_delete if sys.platform == "win32" else None,
-            ui_callback=TodoCallbacks.on_todo_update,
-            api_keys=self._config.api_keys,
-            ignore_dirs=self._config.ignore_dirs,
-            git_skip_confirm=self._config.git_skip_confirm,
-            rm_skip_confirm=self._config.rm_skip_confirm,
-            max_transfer_mb=self._config.max_transfer_mb,
-            max_tool_output_chars=(
-                self._config.max_tool_output_kb * 1024 if self._config.max_tool_output_kb > 0 else 0
-            ),
-            require_plan=self._config.require_plan,
-            min_tools=self._config.min_tools,
-        )
-
-        # 初始化子模块
-        self._dispatcher = ToolDispatcher(self._tool_context, ThreadPoolExecutor(max_workers=16), self._logger)
-        self._stats = StatsTracker(
-            self._config.ai.model,
-            self._config.pricing.user_pricing,
-            self._config.balance,
-        )
-
-        # 轮次计数
+        self._parts: AssemblyResult = Assembly.build(project_root, debug)
+        self._config = self._parts.config
+        self._logger = self._parts.logger
+        self._ui = self._parts.ui
+        self._context = self._parts.context
+        self._mgr = self._parts.session_mgr
+        self._msg_manager = self._parts.msg_manager
+        self._stats = self._parts.stats
+        self._agent_loop = self._parts.agent_loop
+        self._auto_save = self._parts.auto_save_mgr
+        self._compression = self._parts.compression_service
         self._round = 0
-        # 后台自动保存
-        self._auto_save_thread: Optional[threading.Thread] = None
-
-    @property
-    def _thinking_label(self) -> str:
-        """思考强度中文标签（从配置读取）"""
-        return self._config.ai.thinking_options.get(
-            self._config.ai.thinking_effort, self._config.ai.thinking_effort
-        )
-
-    def _auto_save_on_exit(self):
-        """退出时保存当前会话并清理延迟删除"""
-        self._wait_auto_save()
-        if self._mgr.state.session_name():
-            self._mgr.on_auto_save()
-            saved_name = self._mgr.state.session_name()
-            _stdout_write(f"  {D}会话已自动保存: {E}{saved_name}{R}\n")
-        self._mgr.cleanup_deletes()
-
-    def _do_summarize(self, messages, cancel_check):
-        summary_parts = []
-        for chunk in self._llm.chat_stream(messages, no_tools=True,
-                                            cancel_check=cancel_check):
-            if cancel_check():
-                return ""
-            if "content" in chunk and "tool_calls" not in chunk:
-                summary_parts.append(chunk["content"])
-        return "".join(summary_parts)
-
-    def _do_name_session(self, messages):
-        """用 LLM 生成会话名称。返回空串表示失败。"""
-        from ..config.session_store import list_sessions
-        existing = list_sessions(self._config.narnat_dir)
-        taken_names = [s["name"] for s in existing]
-        hint = ""
-        if taken_names:
-            hint = f"\n注意：以下名称已被占用，请勿使用：{', '.join(taken_names)}"
-        name_messages = list(messages)
-        name_messages.append({
-            "role": "user",
-            "content": f"请为以上对话起一个简短标题（15字以内），直接输出标题，不要引号不要解释。{hint}"
-        })
-        parts = []
-        for chunk in self._llm.chat_stream(name_messages, no_tools=True,
-                                            cancel_check=lambda: False):
-            if "content" in chunk and "tool_calls" not in chunk:
-                parts.append(chunk["content"])
-        name = "".join(parts).strip()
-        if not name:
-            return ""
-        name = name.strip('"\'""''《》「」')
-        if len(name) > 30:
-            name = name[:30]
-        return name
-
-    def _try_auto_save(self):
-        """启动后台线程做 LLM 命名 + 写磁盘。主线程立即返回。"""
-        if not self._config.auto_save:
-            return
-        if self._mgr._auto_save_done:
-            return
-        from .session_callbacks import NoSession
-        if not isinstance(self._mgr.state, NoSession):
-            return
-        self._mgr._auto_save_done = True
-
-        self._auto_save_thread = threading.Thread(
-            target=self._do_auto_save, daemon=True)
-        self._auto_save_thread.start()
-
-    def _do_auto_save(self):
-        """后台线程：LLM 命名 → 写磁盘。不碰状态切换。"""
-        name = self._do_name_session(self._messages)
-        if not name:
-            return
-        from ..config.session_store import save_session
-        save_session(self._config.narnat_dir, name, list(self._messages))
-        self._mgr._pending_auto_save_name = name
-
-    def _wait_auto_save(self):
-        """等待后台自动保存完成，执行状态切换。幂等调用。"""
-        if self._auto_save_thread is not None:
-            self._auto_save_thread.join(timeout=5)
-            self._auto_save_thread = None
-        name = self._mgr._pending_auto_save_name
-        if name:
-            self._mgr._pending_auto_save_name = None
-            self._mgr.switch_state(self._mgr.create_root_state(name))
 
     def run(self):
         """主循环"""
@@ -220,7 +47,7 @@ class Agent:
                     continue
 
                 # 同步点：等后台自动保存完成
-                self._wait_auto_save()
+                self._auto_save.wait()
 
                 stripped = user_input.strip()
                 if not stripped:
@@ -233,7 +60,7 @@ class Agent:
                     args = parts[1] if len(parts) > 1 else ""
                     result = self._ui.dispatch_command(cmd, args)
                     if result == 2:
-                        self._auto_save_on_exit()
+                        self._auto_save.on_exit()
                         self._logger.info("core.agent", "用户退出")
                         self._logger.close()
                         os._exit(0)
@@ -253,7 +80,7 @@ class Agent:
                 # 4. 压缩检查
                 compress_ok = False
                 if self._context.need_compress():
-                    compress_ok = self._handle_compress(stripped)
+                    compress_ok = self._compression.compress(stripped)
                     if not compress_ok:
                         continue
 
@@ -268,262 +95,23 @@ class Agent:
 
                 try:
                     # 7. 工具调度内循环
-                    self._agent_loop(stream)
+                    self._agent_loop.run(stream)
                 except KeyboardInterrupt:
                     self._ui.on_interrupted()
                     stream.abort()
                 except Exception as e:
                     self._logger.error("core.agent", f"异常: {e}")
-                    if hasattr(self, '_last_content_parts') and self._last_content_parts:
-                        self._msg_manager.append_assistant("".join(self._last_content_parts))
+                    if hasattr(self._agent_loop, '_last_content_parts') and self._agent_loop._last_content_parts:
+                        self._msg_manager.append_assistant("".join(self._agent_loop._last_content_parts))
                     stream.abort()
                 else:
                     if not stream.aborted:
                         self._mgr.on_auto_save()
-                        self._try_auto_save()
+                        self._auto_save.try_save()
 
         finally:
-            self._dispatcher._executor.shutdown(wait=False)
+            self._parts.dispatcher._executor.shutdown(wait=False)
+            from ..tools.terminal import cleanup as _terminal_cleanup
+            from ..tools.bash import cleanup as _bash_cleanup
             _terminal_cleanup()
             _bash_cleanup()
-
-    def _agent_loop(self, stream):
-        """工具调度内循环"""
-        while True:
-            # a. 修复messages
-            self._msg_manager.repair()
-
-            # b. 调用LLM
-            content_parts = []
-            self._last_content_parts = content_parts
-            tool_calls_result = []
-            call_usage = None
-            parsed_finish_reason = None
-
-            for chunk in self._llm.chat_stream(self._msg_manager.messages, cancel_check=lambda: stream.cancelled):
-                # b. 检查中断
-                if stream.cancelled:
-                    if content_parts:
-                        self._msg_manager.append_assistant("".join(content_parts))
-                    stream.abort()
-                    self._ui.on_interrupted()
-                    return
-
-                # c. 处理tool_call
-                if "tool_calls" in chunk:
-                    tool_calls_result = chunk["tool_calls"]
-
-                # d. 处理纯文本
-                if "content" in chunk and "tool_calls" not in chunk:
-                    stream.feed(chunk["content"])
-                    content_parts.append(chunk["content"])
-
-                # e. 捕获usage
-                if "usage" in chunk:
-                    call_usage = chunk["usage"]
-
-                # f. 处理结束
-                if "finish_reason" in chunk:
-                    parsed_finish_reason = chunk["finish_reason"]
-                    if parsed_finish_reason == "error":
-                        stream.finish(
-                            self._stats.input_tokens,
-                            self._stats.output_tokens,
-                            thinking_effort=self._thinking_label,
-                        )
-                        return
-
-            # 中断检查
-            if stream.cancelled:
-                stream.abort()
-                self._ui.on_interrupted()
-                return
-
-            # 有tool_call → 执行工具 → 继续内循环
-            if tool_calls_result:
-                self._msg_manager.append_assistant(
-                    "".join(content_parts) or None,
-                    tool_calls=tool_calls_result,
-                )
-
-                tool_results = self._dispatcher.execute_tool_calls(tool_calls_result, stream)
-
-                # 中断检查
-                if stream.cancelled:
-                    completed_ids = {tc_id for tc_id, _ in tool_results}
-                    self._msg_manager.append_interrupted_tools(tool_calls_result, completed_ids)
-                    stream.abort()
-                    self._ui.on_interrupted()
-                    return
-
-                # Linux/macOS: 拦截删除确认标记，在#提示符下等待用户确认
-                if self._tool_context.pending_delete is not None:
-                    pending = self._tool_context.pending_delete
-                    self._tool_context.pending_delete = None
-                    # 找到返回AWAIT_CONFIRM的那个tool_call_id
-                    confirm_tc_id = None
-                    for tc_id, result in tool_results:
-                        if result == AWAIT_CONFIRM:
-                            confirm_tc_id = tc_id
-                            break
-                    if confirm_tc_id is not None:
-                        # 结束当前流式输出，回到#提示符等用户确认
-                        new_stream = self._handle_delete_confirm(stream, confirm_tc_id, pending, tool_results)
-                        if new_stream is not None:
-                            stream = new_stream
-                            continue
-                        return
-
-                # 回传工具结果
-                for tc_id, result in tool_results:
-                    self._msg_manager.append_tool_result(tc_id, result)
-
-                # 更新统计
-                if call_usage:
-                    self._stats.update(call_usage)
-
-                continue
-
-            # 无tool_call → 纯文本输出完成
-            if content_parts:
-                self._msg_manager.append_assistant("".join(content_parts))
-            else:
-                # 空回复
-                self._dump_empty_debug(content_parts, tool_calls_result, parsed_finish_reason, call_usage)
-                _empty_msgs = {
-                    "stop": "⚠ AI 返回了空回复，请尝试缩短对话或稍后重试。",
-                    "max_tokens": "⚠ AI 思考超过了最大输出限制，请增大限制或缩短对话。",
-                    "content_filter": "⚠ AI 返回被安全策略拦截，请调整提问内容。",
-                    "server_busy": "⚠ 服务器繁忙，请稍后重试。",
-                    "error": "⚠ AI 调用出错，请查看上方错误信息。",
-                }
-                reason = parsed_finish_reason or "stop"
-                msg = _empty_msgs.get(reason, f"⚠ AI 返回异常（{reason}），请稍后重试。")
-                stream.feed(f"\n\n{msg}\n")
-                stream.finish(
-                    self._stats.input_tokens,
-                    self._stats.output_tokens,
-                    cache=self._stats.cache_tokens,
-                    cost=self._stats.cost,
-                    balance=self._stats.balance,
-                    thinking_effort=self._thinking_label,
-                )
-                return
-
-            # 更新统计
-            if call_usage:
-                self._stats.update(call_usage)
-
-            stream.finish(
-                self._stats.input_tokens,
-                self._stats.output_tokens,
-                cache=self._stats.cache_tokens,
-                cost=self._stats.cost,
-                balance=self._stats.balance,
-                thinking_effort=self._thinking_label,
-            )
-            break
-
-    def _handle_delete_confirm(self, stream, confirm_tc_id, pending_delete, tool_results):
-        """处理Linux/macOS下的删除确认：结束流式输出，在#提示符下等用户确认。
-
-        Args:
-            stream: 当前流式输出会话
-            confirm_tc_id: 返回AWAIT_CONFIRM的tool_call_id
-            pending_delete: (tool_name, arguments_dict) 暂存的删除命令
-            tool_results: 所有工具结果列表 [(tc_id, result), ...]
-
-        Returns:
-            新的UIStreamSession - 用户已确认/取消，结果已回传，继续agent_loop
-            None - 流已结束，调用方应return
-        """
-        tool_name, arguments = pending_delete
-
-        # 先回传非确认的工具结果
-        for tc_id, result in tool_results:
-            if tc_id != confirm_tc_id:
-                self._msg_manager.append_tool_result(tc_id, result)
-
-        # 结束当前流式输出
-        stream.finish(
-            self._stats.input_tokens,
-            self._stats.output_tokens,
-            cache=self._stats.cache_tokens,
-            cost=self._stats.cost,
-            balance=self._stats.balance,
-            thinking_effort=self._thinking_label,
-        )
-
-        # 在#提示符下显示确认信息，等待用户输入
-        user_input = self._ui.read_input_with_prompt("  确认执行此命令? [y/N]: ")
-        if user_input is None:
-            user_input = ""
-
-        confirmed = user_input.strip().lower() in ("y", "yes")
-
-        if confirmed:
-            # 用户确认：设置标志跳过删除检测，重新执行命令
-            self._tool_context._delete_confirmed = True
-            from ..tools.registry import execute as tool_execute
-            llm_result, color_diff = tool_execute(tool_name, arguments, self._tool_context)
-            self._msg_manager.append_tool_result(confirm_tc_id, llm_result)
-            if color_diff:
-                _stdout_write("\n".join(f"  {line}" for line in color_diff.split("\n")) + "\n\n")
-        else:
-            # 用户取消
-            self._msg_manager.append_tool_result(confirm_tc_id, "操作已取消: 此命令需用户确认")
-
-        # 创建新的流式输出会话，继续agent_loop
-        return self._ui.create_stream()
-
-    def _dump_empty_debug(self, content_parts, tool_calls_result, finish_reason, call_usage):
-        """空回复时写调试日志"""
-        debug_path = os.path.join(
-            self._config.data_dir,
-            f"debug_empty_{time.strftime('%Y%m%d_%H%M%S')}.json"
-        )
-        debug_data = {
-            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "request": {"messages": self._msg_manager.messages},
-            "response": {
-                "raw_sse_lines": self._llm.raw_sse or [],
-                "parsed_content": "".join(content_parts),
-                "parsed_tool_calls": tool_calls_result,
-                "parsed_finish_reason": finish_reason,
-                "call_usage": call_usage,
-            },
-        }
-        try:
-            with open(debug_path, "w", encoding="utf-8") as f:
-                json.dump(debug_data, f, ensure_ascii=False, indent=2)
-            _stdout_write(f"  ⚠ 调试日志已写入: {debug_path}\n")
-        except OSError:
-            pass
-
-    def _handle_compress(self, pending_input: str) -> bool:
-        """处理上下文压缩"""
-        def on_interrupt():
-            self._ui.end_compressing()
-            self._context.reset()
-            self._msg_manager.append_user(pending_input)
-
-        def on_llm_error(msg):
-            self._ui.end_compressing()
-            self._logger.error("compressor", msg)
-            self._context.set_retry_soon()
-            self._msg_manager.append_user(pending_input)
-
-        self._ui.begin_compressing()
-        result = self._msg_manager.handle_compress(
-            pending_input,
-            self._config.system_prompt,
-            self._llm,
-            cancel_check=lambda: _interrupt_ctrl.is_set,
-            on_interrupt=on_interrupt,
-            on_llm_error=on_llm_error,
-        )
-        if result:
-            self._ui.end_compressing()
-            self._context.reset()
-            self._tool_context.clear_read_files()
-        return result

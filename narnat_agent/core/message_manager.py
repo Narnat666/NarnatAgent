@@ -1,67 +1,49 @@
-"""消息管理 —— 消息修复、追加、压缩触发
+"""消息管理 —— 消息修复、压缩触发
 
-从agent.py中提取，负责维护messages列表的完整性。
-所有对messages的修改都通过此模块进行，agent不再直接操作列表。
+MessageManager 负责消息的修复逻辑和压缩流程编排，
+实际的列表持有和修改委托给 MessageList（唯一所有者）。
 """
 
 import os
 from typing import List, Dict, Any, Optional
 
 from .compressor import Compressor
-from ..config.loader import AppConfig
+from .message_list import MessageList, MessageView
 from ..logger import AgentLogger
 
 
 class MessageManager:
-    """消息列表管理器 —— messages的唯一修改入口"""
+    """消息管理器 —— 委托 MessageList 执行修改，自身负责 repair 逻辑和压缩编排"""
 
-    def __init__(self, messages: List[Dict[str, Any]], compressor: Compressor,
+    def __init__(self, messages: MessageList, compressor: Compressor,
                  logger: Optional[AgentLogger] = None):
         self._messages = messages
         self._compressor = compressor
         self._logger = logger
 
     @property
-    def messages(self) -> List[Dict[str, Any]]:
-        """只读访问messages列表（供LLM调用等场景）"""
-        return self._messages
+    def view(self) -> MessageView:
+        """只读视图（供LLM调用等场景）"""
+        return self._messages.view()
 
-    # ── 追加方法 ──
+    # ── 追加方法（委托 MessageList）──
 
     def append_system(self, content: str) -> None:
-        """追加系统消息"""
-        self._messages.append({"role": "system", "content": content})
+        self._messages.append_system(content)
 
     def append_user(self, content: str) -> None:
-        """追加用户消息"""
-        self._messages.append({"role": "user", "content": content})
+        self._messages.append_user(content)
 
     def append_assistant(self, content: str, tool_calls: Optional[list] = None) -> None:
-        """追加assistant消息"""
-        msg = {"role": "assistant", "content": content or None}
-        if tool_calls:
-            msg["tool_calls"] = tool_calls
-        self._messages.append(msg)
+        self._messages.append_assistant(content, tool_calls)
 
     def append_tool_result(self, tool_call_id: str, result: str) -> None:
-        """追加工具结果消息"""
-        self._messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "content": result,
-        })
+        self._messages.append_tool_result(tool_call_id, result)
 
     def append_interrupted_tools(self, tool_calls: list, completed_ids: set) -> None:
-        """为未完成的tool_call追加中断结果"""
-        for tc in tool_calls:
-            if tc["id"] not in completed_ids:
-                self._messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": "[用户中断]",
-                })
+        self._messages.append_interrupted_tools(tool_calls, completed_ids)
 
-    # ── 修复方法 ──
+    # ── 修复方法（repair 逻辑原样保留，通过 view 读取）──
 
     def repair(self) -> None:
         """修复messages：打断后可能留下不完整的消息序列。
@@ -69,36 +51,34 @@ class MessageManager:
         1. assistant含tool_calls但没有对应的tool消息 → 补上tool("[用户中断]")
         2. 如果第1步修复了，且末尾是tool消息 → 补上assistant（API要求tool后不能直接跟user）
         """
+        msgs = self._messages
+
         # 1. 为未回复的tool_call补上空结果
         replied_ids = set()
-        for msg in self._messages:
+        for msg in msgs.view():
             if msg.get("role") == "tool":
                 tc_id = msg.get("tool_call_id")
                 if tc_id:
                     replied_ids.add(tc_id)
 
         repaired = False
-        for msg in self._messages:
+        for msg in msgs.view():
             if msg.get("role") == "assistant" and "tool_calls" in msg:
                 for tc in msg["tool_calls"]:
                     tc_id = tc.get("id")
                     if tc_id and tc_id not in replied_ids:
-                        self._messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc_id,
-                            "content": "[用户中断]",
-                        })
+                        msgs.append_tool_result(tc_id, "[用户中断]")
                         replied_ids.add(tc_id)
                         repaired = True
 
         # 2. 只有在第1步确实修复了未回复的tool_call时，才补assistant
-        if repaired and self._messages and self._messages[-1].get("role") == "tool":
-            self._messages.append({"role": "assistant", "content": "（用户中断了工具执行）"})
+        if repaired and len(msgs) > 0 and msgs.view()[-1].get("role") == "tool":
+            msgs.append_assistant("（用户中断了工具执行）")
 
         if repaired:
             self._logger.info("core.message_manager", "repair: 修复了打断后的消息序列")
 
-    # ── 压缩方法 ──
+    # ── 压缩方法（逻辑原样保留，通过 view/to_list 读取）──
 
     def handle_compress(self, pending_input: str, system_prompt: str,
                         llm_client, cancel_check, on_interrupt, on_llm_error) -> bool:
@@ -112,7 +92,7 @@ class MessageManager:
         self._logger.info("message_manager", f"压缩触发, messages={len(self._messages)}条")
 
         # 构建压缩请求
-        compress_messages = self._compressor.build_compress_messages(self._messages)
+        compress_messages = self._compressor.build_compress_messages(self._messages.view().to_list())
 
         # 发送压缩请求，收集AI输出
         summary_content = []
@@ -141,15 +121,12 @@ class MessageManager:
         # 先完整构建新会话（含用户问题），再原子替换旧会话
         new_messages = self._compressor.build_new_session_messages(system_prompt, summary)
         new_messages.append({"role": "user", "content": pending_input})
-        self._messages.clear()
-        self._messages.extend(new_messages)
+        self._messages.replace_all(new_messages)
 
         self._logger.info("message_manager", "压缩成功，新会话已创建")
         return True
 
     def clear_and_rebuild(self, system_prompt: str, summary_text: str) -> None:
         """清空并重建消息列表（压缩后使用）"""
-        self._messages.clear()
-        self._messages.extend(
-            self._compressor.build_new_session_messages(system_prompt, summary_text)
-        )
+        new_messages = self._compressor.build_new_session_messages(system_prompt, summary_text)
+        self._messages.replace_all(new_messages)

@@ -21,7 +21,6 @@ from typing import List, Dict, Any, Iterator, Optional
 
 from ..config.loader import AIConfig
 from ..config.defaults import resolve_thinking_params
-from ..tools.registry import get_tool_definitions
 from .interrupt import register_abort
 
 
@@ -101,10 +100,11 @@ def _iter_to_queue(iterator, q):
 class LLMClient:
     """LLM客户端，通过 config.protocol 选择 OpenAI 或 Anthropic 协议。"""
 
-    def __init__(self, config: AIConfig, logger=None, max_output_tokens: int = 128000):
+    def __init__(self, config: AIConfig, logger=None, max_output_tokens: int = 128000,
+                 tool_definitions: list = None):
         self._config = config
         self._logger = logger
-        self._tool_defs = get_tool_definitions()
+        self._tool_defs = tool_definitions or []
         self._max_output_tokens = max_output_tokens
 
         # 协议由 config.protocol 显式指定

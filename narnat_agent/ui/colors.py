@@ -17,10 +17,10 @@ from ..output import (
 
 
 def apply_style(config) -> bool:
-    """从 AppConfig 加载自定义颜色和UI配置。
+    """从 Config 加载自定义颜色和UI配置。
 
     Args:
-        config: AppConfig 对象（新接口）或 narnat_dir 字符串（兼容旧接口）
+        config: Config 对象（新接口）或 narnat_dir 字符串（兼容旧接口）
     """
     import json
     from .. import output as _output
@@ -37,7 +37,7 @@ def apply_style(config) -> bool:
         except (json.JSONDecodeError, OSError):
             return False
     else:
-        # 新接口：从 AppConfig.ui 读取
+        # 新接口：从 Config.ui 读取
         data = config.ui.colors if hasattr(config, 'ui') else {}
         # 设置显示开关
         if hasattr(config, 'ui'):
