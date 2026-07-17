@@ -4,7 +4,7 @@
 Agent 类作为纯编排者，只做发令和委托：
 - 命令分发 → UIInterface / SessionManager
 - 对话轮次 → AgentLoop
-- 压缩检查 → CompressionService
+- 压缩检查 → CompressionCoordinator
 - 自动保存 → AutoSaveManager
 
 所有子模块的构造在 Assembly 中完成，Agent 不关心构造细节。
@@ -31,7 +31,7 @@ class Agent:
         self._stats = self._parts.stats
         self._agent_loop = self._parts.agent_loop
         self._auto_save = self._parts.auto_save_mgr
-        self._compression = self._parts.compression_service
+        self._compression = self._parts.compression_coordinator
         self._round = 0
 
     def run(self):

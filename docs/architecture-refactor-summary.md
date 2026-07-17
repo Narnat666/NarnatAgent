@@ -27,7 +27,7 @@ narnat_agent/
 │   ├── agent_loop.py            ← LLM↔工具内循环（NEW）
 │   ├── auto_save_manager.py     ← 后台自动保存（NEW）
 │   ├── billing.py
-│   ├── compression_service.py   ← 上下文压缩（NEW）
+│   ├── compression_coordinator.py ← 上下文压缩（NEW）
 │   ├── compressor.py
 │   ├── context.py
 │   ├── interrupt.py
@@ -36,7 +36,7 @@ narnat_agent/
 │   ├── message_manager.py       ← 委托 MessageList（重构）
 │   ├── session_callbacks.py     ← 直接持有对象引用（重构）
 │   ├── stats.py
-│   ├── summary_service.py       ← LLM摘要命名（NEW）
+│   ├── summarizer.py            ← LLM摘要命名（NEW）
 │   ├── tool_callbacks.py
 │   └── tool_dispatcher.py
 ├── logger.py
@@ -123,9 +123,9 @@ Agent 526行 → 98行纯编排者
 提取的对象:
   Assembly              ← 唯一组装点，依赖顺序就是代码顺序
   AgentLoop             ← LLM↔工具调度内循环
-  SummaryService        ← LLM 命名会话 + 总结探索分支
+  Summarizer            ← LLM 命名会话 + 总结探索分支
   AutoSaveManager       ← 后台自动保存
-  CompressionService    ← 上下文压缩流程
+  CompressionCoordinator ← 上下文压缩流程
 ```
 
 ### Phase 4 — 消除跨层依赖
@@ -524,7 +524,7 @@ ContextTracker.need_compress() == True
     │
     ▼
 ┌─────────────────────────────────────┐
-│ CompressionService.compress(input)  │
+│ CompressionCoordinator.compress(input)│
 └──────────────────┬──────────────────┘
                    ▼
         ┌────────────────────┐
@@ -701,7 +701,7 @@ Assembly.build()
   ├─ 8. Compressor            ← 压缩器
   ├─ 9. MessageList           ← 消息唯一所有者
   ├─ 10. MessageManager       ← 消息管理
-  ├─ 11. SummaryService       ← LLM摘要命名
+  ├─ 11. Summarizer           ← LLM摘要命名
   ├─ 12. SessionManager       ← 会话状态机
   ├─ 13. UIInterface          ← 输入/输出/渲染
   │     └─ 补充 session_mgr 的 UI 回调
@@ -709,7 +709,7 @@ Assembly.build()
   ├─ 15. ToolDispatcher       ← 工具调度器
   ├─ 16. StatsTracker         ← 费用追踪
   ├─ 17. AutoSaveManager      ← 自动保存
-  ├─ 18. CompressionService   ← 压缩服务
+  ├─ 18. CompressionCoordinator ← 压缩协调器
   ├─ 19. AgentLoop            ← 对话内循环
   └─ 20. Agent                ← 编排者
          └─ Agent.run()       ← 启动主循环
@@ -748,7 +748,7 @@ Assembly.build()
 
 ```
 新增文件: 6 个（assembly, agent_loop, auto_save_manager,
-                  compression_service, summary_service, message_list）
+                  compression_coordinator, summarizer, message_list）
 重构文件: 6 个（loader, agent, message_manager, session_callbacks, llm, colors）
 算法改动: 0 行
 Agent 代码: 526行 → 98行（-81%）

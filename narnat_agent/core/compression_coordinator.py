@@ -1,4 +1,4 @@
-"""压缩服务 —— 上下文压缩流程编排
+"""压缩协调器 —— 上下文压缩流程编排
 
 从 Agent._handle_compress() 提取。算法逻辑原样保留。
 """
@@ -13,8 +13,8 @@ from ..ui.interrupt import _interrupt_ctrl
 from ..logger import AgentLogger
 
 
-class CompressionService:
-    """上下文压缩服务"""
+class CompressionCoordinator:
+    """上下文压缩协调器"""
 
     def __init__(self, config: Config, msg_manager: MessageManager,
                  llm: LLMClient, context: ContextManager,

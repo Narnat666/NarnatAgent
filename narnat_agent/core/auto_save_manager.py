@@ -10,7 +10,7 @@ from typing import Optional
 from ..config.loader import Config
 from .message_list import MessageList
 from .session_callbacks import SessionManager
-from .summary_service import SummaryService
+from .summarizer import Summarizer
 from ..logger import AgentLogger
 from ..output import write as _stdout_write, D, E, R
 
@@ -19,12 +19,12 @@ class AutoSaveManager:
     """自动保存管理器"""
 
     def __init__(self, config: Config, message_list: MessageList,
-                 session_mgr: SessionManager, summary_service: SummaryService,
+                 session_mgr: SessionManager, summarizer: Summarizer,
                  logger: AgentLogger):
         self._config = config
         self._message_list = message_list
         self._mgr = session_mgr
-        self._summary = summary_service
+        self._summary = summarizer
         self._logger = logger
         self._auto_save_thread: Optional[threading.Thread] = None
 

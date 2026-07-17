@@ -1,4 +1,4 @@
-"""摘要服务 —— LLM 命名会话 + LLM 总结探索分支
+"""摘要器 —— LLM 命名会话 + LLM 总结探索分支
 
 从 Agent._do_summarize() 和 Agent._do_name_session() 提取。
 算法逻辑原样保留。
@@ -11,8 +11,8 @@ from ..config.loader import Config
 from ..logger import AgentLogger
 
 
-class SummaryService:
-    """LLM 摘要服务"""
+class Summarizer:
+    """LLM 摘要器"""
 
     def __init__(self, llm: LLMClient, config: Config, logger: AgentLogger):
         self._llm = llm

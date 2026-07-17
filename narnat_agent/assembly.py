@@ -19,9 +19,9 @@ from .core.stats import StatsTracker
 from .core.session_callbacks import SessionManager
 from .core.tool_callbacks import SafetyCallbacks, TodoCallbacks
 from .core.agent_loop import AgentLoop
-from .core.summary_service import SummaryService
+from .core.summarizer import Summarizer
 from .core.auto_save_manager import AutoSaveManager
-from .core.compression_service import CompressionService
+from .core.compression_coordinator import CompressionCoordinator
 from .tools.tool_context import ToolContext
 from .tools.terminal import set_max_sessions, cleanup as _terminal_cleanup
 from .tools.bash import cleanup as _bash_cleanup
@@ -78,8 +78,8 @@ class Assembly:
         message_list = MessageList(config.system_prompt)
         msg_manager = MessageManager(message_list, compressor, logger)
 
-        # 9. 摘要服务
-        summary_service = SummaryService(llm, config, logger)
+        # 9. 摘要器
+        summarizer = Summarizer(llm, config, logger)
 
         # 10. 会话管理器
         session_mgr = SessionManager(
@@ -90,11 +90,11 @@ class Assembly:
             thinking_effort_getter=lambda: config.ai.thinking_effort,
             thinking_effort_setter=lambda v: setattr(config.ai, 'thinking_effort', v),
             thinking_options=config.ai.thinking_options,
-            summarize_func=lambda msgs, cancel: summary_service.summarize(msgs, cancel),
+            summarize_func=lambda msgs, cancel: summarizer.summarize(msgs, cancel),
             summary_anim_start=None,  # 由 Agent 在 run() 中设置
             summary_anim_stop=None,
             cancel_check=lambda: _interrupt_ctrl.is_set,
-            name_func=lambda msgs: summary_service.name_session(msgs),
+            name_func=lambda msgs: summarizer.name_session(msgs),
         )
 
         # 11. UI
@@ -134,11 +134,11 @@ class Assembly:
 
         # 15. 自动保存管理器
         auto_save_mgr = AutoSaveManager(
-            config, message_list, session_mgr, summary_service, logger,
+            config, message_list, session_mgr, summarizer, logger,
         )
 
-        # 16. 压缩服务
-        compression_service = CompressionService(
+        # 16. 压缩协调器
+        compression_coordinator = CompressionCoordinator(
             config, msg_manager, llm, context, tool_context, ui, logger,
         )
 
@@ -161,7 +161,7 @@ class Assembly:
             dispatcher=dispatcher,
             stats=stats,
             auto_save_mgr=auto_save_mgr,
-            compression_service=compression_service,
+            compression_coordinator=compression_coordinator,
             agent_loop=agent_loop,
         )
 
@@ -171,7 +171,7 @@ class AssemblyResult:
 
     def __init__(self, config, logger, llm, context, message_list,
                  msg_manager, session_mgr, ui, tool_context, dispatcher,
-                 stats, auto_save_mgr, compression_service, agent_loop):
+                 stats, auto_save_mgr, compression_coordinator, agent_loop):
         self.config = config
         self.logger = logger
         self.llm = llm
@@ -184,5 +184,5 @@ class AssemblyResult:
         self.dispatcher = dispatcher
         self.stats = stats
         self.auto_save_mgr = auto_save_mgr
-        self.compression_service = compression_service
+        self.compression_coordinator = compression_coordinator
         self.agent_loop = agent_loop
