@@ -691,13 +691,26 @@ class SessionManager:
     def on_list_rm_names(self) -> list:
         """返回当前状态下可删除的会话名列表（供 /rm tab 补全使用）"""
         if isinstance(self._state, NoSession):
-            return self.on_list_names()
+            all_names = self.on_list_names()
+            result = []
+            for name in all_names:
+                if "/" in name:
+                    parent, child = name.split("/", 1)
+                    if (child, parent) in self.pending_deletes:
+                        continue
+                else:
+                    if (name, None) in self.pending_deletes:
+                        continue
+                result.append(name)
+            return result
         if isinstance(self._state, RootSession):
             tree = list_sessions_tree(self.narnat_dir)
             current_name = self._state.session_name()
             for root in tree:
                 if root["name"] == current_name:
-                    return [f"{root['name']}/{child['name']}" for child in root.get("children", [])]
+                    return [f"{root['name']}/{child['name']}"
+                            for child in root.get("children", [])
+                            if (child["name"], current_name) not in self.pending_deletes]
         return []
 
     def on_list_skill_names(self) -> list:
