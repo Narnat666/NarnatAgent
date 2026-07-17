@@ -93,12 +93,14 @@ THINKING_PARAM_MAP = {
     },
 
     # ── GLM (OpenAI 协议) ──
+    # thinking 必须走 extra_body，OpenAI SDK 不接受 thinking 作为顶层 kwargs
+    # reasoning_effort 走 body_top（OpenAI SDK 原生支持）
     ("openai", "glm"): {
         "enable": {
-            "body_top": {"thinking": {"type": "enabled"}},
+            "extra_body": {"thinking": {"type": "enabled"}},
         },
         "disable": {
-            "body_top": {"thinking": {"type": "disabled"}},
+            "extra_body": {"thinking": {"type": "disabled"}},
         },
         "effort_path": ("body_top", "reasoning_effort"),
     },
