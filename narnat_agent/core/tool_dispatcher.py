@@ -293,6 +293,18 @@ class ToolDispatcher:
             results.append((tc_id, hint if i == 0 else "计划优先拦截，详见上方"))
         return results
 
+    @staticmethod
+    def _fmt_cmd(raw: str, empty_label: str = "(空命令)") -> str:
+        """格式化命令摘要：有内容返回内容，仅换行→(换行)，仅空格→(空格)，空→默认标签"""
+        stripped = raw.strip()
+        if stripped:
+            return stripped
+        if "\n" in raw:
+            return "(换行)"
+        if raw:  # 非空但 strip 后为空 → 纯空格
+            return "(空格)"
+        return empty_label
+
     def _show_tool_call(self, name: str, arguments: dict):
         """在终端显示工具调用摘要"""
         label = _TOOL_LABELS.get(name, name)
@@ -300,8 +312,7 @@ class ToolDispatcher:
         if name in _FILE_PATH_TOOLS:
             summary = arguments.get("file_path", "")
         elif name == "Shell":
-            cmd = arguments.get("command", "").strip()
-            summary = cmd if cmd else "(空命令)"
+            summary = self._fmt_cmd(arguments.get("command", ""))
         elif name == "Terminal":
             action = arguments.get("action", "")
             if not action and arguments.get("command", ""):
@@ -313,8 +324,7 @@ class ToolDispatcher:
                 username = arguments.get("username", "")
                 summary = f"connect{sid_str} {username}@{host}"
             elif action == "exec":
-                cmd = arguments.get("command", "").strip()
-                summary = f"exec{sid_str} {cmd}" if cmd else f"exec{sid_str} (空命令)"
+                summary = f"exec{sid_str} {self._fmt_cmd(arguments.get('command', ''))}"
             elif action == "status":
                 summary = "status"
             elif action == "close":
@@ -326,8 +336,7 @@ class ToolDispatcher:
                 tgt_p = arguments.get("target_path", "")
                 summary = f"transfer {src_h}:{src_p} → {tgt_h}:{tgt_p}"
             elif action == "input":
-                text = arguments.get("input", "").strip()
-                summary = f"input{sid_str} {text}" if text else f"input{sid_str} (空)"
+                summary = f"input{sid_str} {self._fmt_cmd(arguments.get('input', ''), '(空)')}"
             else:
                 summary = f"{action or '(未知)'}{sid_str}"
         elif name == "Grep":
@@ -350,14 +359,11 @@ class ToolDispatcher:
                 baud = arguments.get("baudrate", 115200)
                 summary = f"connect{sid_str} {port} @{baud}"
             elif action == "exec":
-                cmd = arguments.get("command", "").strip()
-                summary = f"exec{sid_str} {cmd}" if cmd else f"exec{sid_str} (空命令)"
+                summary = f"exec{sid_str} {self._fmt_cmd(arguments.get('command', ''))}"
             elif action == "raw_exec":
-                cmd = arguments.get("command", "").strip()
-                summary = f"raw_exec{sid_str} {cmd}" if cmd else f"raw_exec{sid_str} (空命令)"
+                summary = f"raw_exec{sid_str} {self._fmt_cmd(arguments.get('command', ''))}"
             elif action == "input":
-                text = arguments.get("input", "").strip()
-                summary = f"input{sid_str} {text}" if text else f"input{sid_str} (空)"
+                summary = f"input{sid_str} {self._fmt_cmd(arguments.get('input', ''), '(空)')}"
             elif action == "status":
                 summary = "status"
             elif action == "close":
