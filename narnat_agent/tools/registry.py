@@ -21,6 +21,7 @@ from .terminal import execute as terminal_execute, DEFINITION as TERMINAL_DEF
 
 from .web_search import execute as web_search_execute, DEFINITION as WEBSEARCH_DEF
 from .todo_write import execute as todo_write_execute, DEFINITION as TODOWRITE_DEF
+from .serial import execute as serial_execute, DEFINITION as SERIAL_DEF
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -38,6 +39,7 @@ _TOOL_IMPLEMENTATIONS: Dict[str, Callable] = {
 
     "WebSearch": web_search_execute,
     "TodoWrite": todo_write_execute,
+    "Serial": serial_execute,
 }
 
 
@@ -48,6 +50,7 @@ _TOOL_IMPLEMENTATIONS: Dict[str, Callable] = {
 TOOL_DEFINITIONS: List[Dict] = [
     READ_DEF, GLOB_DEF, GREP_DEF, EDIT_DEF, WRITE_DEF,
     BASH_DEF, TERMINAL_DEF, WEBSEARCH_DEF, TODOWRITE_DEF,
+    SERIAL_DEF,
 ]
 
 
@@ -74,7 +77,7 @@ def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolCon
         return (f"错误: 未知工具: {name}", "")
 
     # 需要tool_context的工具：注入上下文参数
-    _CONTEXT_TOOLS = {"Shell", "Terminal", "TodoWrite", "WebSearch", "Write", "Read", "Glob", "Grep", "Edit"}
+    _CONTEXT_TOOLS = {"Shell", "Terminal", "TodoWrite", "WebSearch", "Write", "Read", "Glob", "Grep", "Edit", "Serial"}
 
     try:
         if tool_context and name in _CONTEXT_TOOLS:

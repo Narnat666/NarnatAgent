@@ -113,5 +113,7 @@ class Agent:
             self._parts.dispatcher._executor.shutdown(wait=False)
             from ..tools.terminal import cleanup as _terminal_cleanup
             from ..tools.bash import cleanup as _bash_cleanup
+            from ..tools.serial import cleanup as _serial_cleanup
             _terminal_cleanup()
             _bash_cleanup()
+            _serial_cleanup()

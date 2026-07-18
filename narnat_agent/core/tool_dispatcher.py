@@ -11,6 +11,7 @@ from typing import List, Dict, Any, Tuple, Optional
 from ..tools.registry import execute as tool_execute
 from ..tools.bash import kill_active as _kill_bash
 from ..tools.terminal import kill_active_exec as _kill_terminal_exec
+from ..tools.serial import kill_active_exec as _kill_serial_exec
 from ..tools.tool_context import ToolContext
 from ..output import write as _stdout_write, D, E, R, Y, G, B, C
 
@@ -18,7 +19,7 @@ from ..output import write as _stdout_write, D, E, R, Y, G, B, C
 # ── 工具分类 ──
 _READONLY_TOOLS = {"Read", "Glob", "Grep", "WebSearch"}
 _WRITE_TOOLS = {"Edit", "Write"}
-_SERIAL_TOOLS = {"Shell", "Terminal", "TodoWrite"}
+_SERIAL_TOOLS = {"Shell", "Terminal", "TodoWrite", "Serial"}
 
 # 工具名→简短描述映射
 _TOOL_LABELS = {
@@ -31,6 +32,7 @@ _TOOL_LABELS = {
     "Terminal": "终端",
     "WebSearch": "联网搜索",
     "TodoWrite": "更新计划",
+    "Serial": "串口",
 }
 
 # 工具摘要提取：文件类工具取file_path
@@ -100,6 +102,7 @@ class ToolDispatcher:
         if stream.cancelled:
             _kill_bash()
             _kill_terminal_exec()
+            _kill_serial_exec()
             return [results[i] for i in range(len(parsed)) if i in results]
 
         # ── 阶段2：写入工具按文件分组 ──
@@ -115,6 +118,7 @@ class ToolDispatcher:
                         if stream.cancelled:
                             _kill_bash()
                             _kill_terminal_exec()
+                            _kill_serial_exec()
                             break
                         time.sleep(0.2)
                     if stream.cancelled:
@@ -136,6 +140,7 @@ class ToolDispatcher:
                     if stream.cancelled:
                         _kill_bash()
                         _kill_terminal_exec()
+                        _kill_serial_exec()
                         break
                     done, remaining = wait(remaining, timeout=0.2, return_when=FIRST_COMPLETED)
                     for fut in done:
@@ -158,6 +163,7 @@ class ToolDispatcher:
                     if stream.cancelled:
                         _kill_bash()
                         _kill_terminal_exec()
+                        _kill_serial_exec()
                         break
                     time.sleep(0.2)
                 if stream.cancelled:
@@ -207,6 +213,7 @@ class ToolDispatcher:
                     if stream.cancelled:
                         _kill_bash()
                         _kill_terminal_exec()
+                        _kill_serial_exec()
                         break
                     time.sleep(0.2)
                 if stream.cancelled:
@@ -229,6 +236,7 @@ class ToolDispatcher:
             if stream.cancelled:
                 _kill_bash()
                 _kill_terminal_exec()
+                _kill_serial_exec()
                 break
             done, remaining = wait(remaining, timeout=0.2, return_when=FIRST_COMPLETED)
             for fut in done:
@@ -330,6 +338,35 @@ class ToolDispatcher:
         elif name == "TodoWrite":
             todos = arguments.get("todos", [])
             summary = f"{len(todos)}项" if todos else "(空)"
+        elif name == "Serial":
+            action = arguments.get("action", "exec")
+            sid = arguments.get("session_id", -1)
+            sid_str = f"[{sid}]" if sid >= 0 else ""
+            if action == "scan":
+                summary = "扫描可用串口"
+            elif action == "connect":
+                port = arguments.get("port", "")
+                baud = arguments.get("baudrate", 115200)
+                summary = f"connect{sid_str} {port} @{baud}"
+            elif action == "exec":
+                cmd = arguments.get("command", "")
+                summary = f"exec{sid_str} {cmd}" if cmd else f"exec{sid_str} (空命令)"
+            elif action == "raw_exec":
+                cmd = arguments.get("command", "")
+                summary = f"raw_exec{sid_str} {cmd}" if cmd else f"raw_exec{sid_str} (空命令)"
+            elif action == "input":
+                text = arguments.get("input", "")
+                summary = f"input{sid_str} {text}" if text else f"input{sid_str} (空)"
+            elif action == "status":
+                summary = "查看会话"
+            elif action == "close":
+                summary = f"close{sid_str}"
+            elif action == "transfer":
+                direction = arguments.get("direction", "send")
+                local = arguments.get("local_path", "")
+                summary = f"transfer {direction} {local}" if local else f"transfer {direction}"
+            else:
+                summary = f"{action}{sid_str}"
 
         if summary:
             _stdout_write(f"  {D}[{label}] {summary}{R}\n")
