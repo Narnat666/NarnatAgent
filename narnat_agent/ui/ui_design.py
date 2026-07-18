@@ -190,10 +190,12 @@ class UIStreamSession:
 
     def _stop_spinner(self) -> None:
         """停止spinner线程并等待其退出，主动清理避免竞态残留"""
-        if self._spinner_thread is None:
+        t = self._spinner_thread
+        if t is None:
             return
         self._spinner_stop.set()
-        self._spinner_thread.join(timeout=0.5)
+        if t.is_alive():
+            t.join(timeout=0.5)
         self._spinner_thread = None
         # 清理：擦除动画行 + 恢复光标
         _stdout_write("\r\x1b[K")

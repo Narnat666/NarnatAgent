@@ -300,7 +300,8 @@ class ToolDispatcher:
         if name in _FILE_PATH_TOOLS:
             summary = arguments.get("file_path", "")
         elif name == "Shell":
-            summary = arguments.get("command", "")
+            cmd = arguments.get("command", "").strip()
+            summary = cmd if cmd else "(空命令)"
         elif name == "Terminal":
             action = arguments.get("action", "")
             if not action and arguments.get("command", ""):
@@ -312,7 +313,7 @@ class ToolDispatcher:
                 username = arguments.get("username", "")
                 summary = f"connect{sid_str} {username}@{host}"
             elif action == "exec":
-                cmd = arguments.get("command", "")
+                cmd = arguments.get("command", "").strip()
                 summary = f"exec{sid_str} {cmd}" if cmd else f"exec{sid_str} (空命令)"
             elif action == "status":
                 summary = "status"
@@ -325,8 +326,8 @@ class ToolDispatcher:
                 tgt_p = arguments.get("target_path", "")
                 summary = f"transfer {src_h}:{src_p} → {tgt_h}:{tgt_p}"
             elif action == "input":
-                text = arguments.get("input", "")
-                summary = f"input{sid_str} {text}"
+                text = arguments.get("input", "").strip()
+                summary = f"input{sid_str} {text}" if text else f"input{sid_str} (空)"
             else:
                 summary = f"{action or '(未知)'}{sid_str}"
         elif name == "Grep":
@@ -343,28 +344,24 @@ class ToolDispatcher:
             sid = arguments.get("session_id", -1)
             sid_str = f"[{sid}]" if sid >= 0 else ""
             if action == "scan":
-                summary = "扫描可用串口"
+                summary = "scan"
             elif action == "connect":
                 port = arguments.get("port", "")
                 baud = arguments.get("baudrate", 115200)
                 summary = f"connect{sid_str} {port} @{baud}"
             elif action == "exec":
-                cmd = arguments.get("command", "")
+                cmd = arguments.get("command", "").strip()
                 summary = f"exec{sid_str} {cmd}" if cmd else f"exec{sid_str} (空命令)"
             elif action == "raw_exec":
-                cmd = arguments.get("command", "")
+                cmd = arguments.get("command", "").strip()
                 summary = f"raw_exec{sid_str} {cmd}" if cmd else f"raw_exec{sid_str} (空命令)"
             elif action == "input":
-                text = arguments.get("input", "")
+                text = arguments.get("input", "").strip()
                 summary = f"input{sid_str} {text}" if text else f"input{sid_str} (空)"
             elif action == "status":
-                summary = "查看会话"
+                summary = "status"
             elif action == "close":
                 summary = f"close{sid_str}"
-            elif action == "transfer":
-                direction = arguments.get("direction", "send")
-                local = arguments.get("local_path", "")
-                summary = f"transfer {direction} {local}" if local else f"transfer {direction}"
             else:
                 summary = f"{action}{sid_str}"
 

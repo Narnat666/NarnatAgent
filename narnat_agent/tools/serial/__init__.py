@@ -46,13 +46,13 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Serial",
-        "description": "多终端持久串口，最多可连5个不同串口设备。scan扫描串口，connect连接设备，exec执行命令等待提示符，raw_exec纯超时返回（不检测提示符），input发送交互输入，status查看会话，close关闭会话，transfer传输文件。",
+        "description": "多终端持久串口，最多可连5个不同串口设备。scan扫描串口，connect连接设备，exec执行命令等待提示符，raw_exec纯超时返回（不检测提示符），input发送交互输入，status查看会话，close关闭会话。",
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["scan", "connect", "exec", "raw_exec", "input", "status", "close", "transfer"],
+                    "enum": ["scan", "connect", "exec", "raw_exec", "input", "status", "close"],
                     "description": "操作类型（默认status）",
                 },
                 "port": {
@@ -107,27 +107,6 @@ DEFINITION = {
                     "type": "integer",
                     "description": "最大输出字符数，默认2000",
                 },
-                "direction": {
-                    "type": "string",
-                    "enum": ["send", "receive"],
-                    "description": "传输方向，send=本机→设备，receive=设备→本机",
-                },
-                "local_path": {
-                    "type": "string",
-                    "description": "本机文件路径（action=transfer时使用）",
-                },
-                "remote_path": {
-                    "type": "string",
-                    "description": "设备端文件路径（action=transfer时使用）",
-                },
-                "remote_recv_cmd": {
-                    "type": "string",
-                    "description": "设备端接收命令，默认rx",
-                },
-                "remote_send_cmd": {
-                    "type": "string",
-                    "description": "设备端发送命令，默认sx",
-                },
             },
             "required": [],
         },
@@ -163,11 +142,6 @@ def execute(
     timeout: int = 60,
     session_id: int = -1,
     max_output_chars: int = 2000,
-    direction: str = "send",
-    local_path: str = "",
-    remote_path: str = "",
-    remote_recv_cmd: str = "rx",
-    remote_send_cmd: str = "sx",
     _tool_context=None,
 ) -> str:
     """
@@ -181,7 +155,6 @@ def execute(
       input    - 向串口发送交互输入（如密码、确认等）
       status   - 查看当前所有串口会话状态（默认 action）
       close    - 关闭指定会话
-      transfer - 通过 XMODEM-1K 协议传输文件（需设备端有 rx/sx 命令）
     """
     if action == "scan":
         return _scan()
@@ -197,11 +170,8 @@ def execute(
         return _status()
     elif action == "close":
         return _close(session_id)
-    elif action == "transfer":
-        return _transfer(session_id, direction, local_path, remote_path, timeout,
-                         remote_recv_cmd, remote_send_cmd)
     else:
-        return f"错误: 未知action '{action}'，可选: scan/connect/exec/raw_exec/input/status/close/transfer"
+        return f"错误: 未知action '{action}'，可选: scan/connect/exec/raw_exec/input/status/close"
 
 
 # ── 内部实现 ──
@@ -492,43 +462,6 @@ def _close(session_id: int) -> str:
         with _active_exec_lock:
             _active_exec_sids.discard(session_id)
         return f"已关闭终端{session_id}"
-
-
-def _transfer(session_id: int, direction: str, local_path: str,
-              remote_path: str, timeout: int = 120,
-              remote_recv_cmd: str = "rx", remote_send_cmd: str = "sx") -> str:
-    """通过 XMODEM-1K 协议传输文件"""
-    if direction not in ("send", "receive"):
-        return "错误: direction 必须是 send 或 receive"
-    if not local_path:
-        return "错误: transfer 需要提供 local_path（本机文件路径）"
-
-    try:
-        sid, session = _resolve_session_id(session_id)
-    except ValueError as e:
-        return f"错误: {e}"
-
-    if not session.is_alive:
-        with _sessions_lock:
-            _sessions.pop(sid, None)
-        return f"错误: 终端{sid}串口已断开，请重新 connect"
-
-    try:
-        with _active_exec_lock:
-            _active_exec_sids.add(sid)
-        try:
-            if direction == "send":
-                result = session.transfer_send(local_path, remote_path, timeout,
-                                              remote_recv_cmd)
-            else:
-                result = session.transfer_recv(local_path, remote_path, timeout,
-                                              remote_send_cmd)
-        finally:
-            with _active_exec_lock:
-                _active_exec_sids.discard(sid)
-        return f"[终端{sid}] {result}"
-    except Exception as e:
-        return f"错误: 终端{sid}传输失败: {e}"
 
 
 def cleanup():
