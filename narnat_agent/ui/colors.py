@@ -1,65 +1,43 @@
 """
-ANSI 颜色常量与配色管理
+ANSI 颜色常量与配色管理 —— 从 output.py 重导出
 
-颜色常量和写入函数统一在 output.py 中定义，此模块从 output 导入并保留 apply_style。
+所有定义统一在 output.py，此模块仅做兼容重导出，
+保持 ui 层历史 import 路径不变。
 """
 
-import os
-
-# ── 从 output.py 导入颜色常量和写入函数 ──
+# 基础常量
 from ..output import (
-    _Color, RST, BLD, DIM, GRY, CYN, GRN, YLW, RED, BLU, MAG, ORG, BG8, WHT, WHT7,
-    R, B, D, G, C, E, Y, X, U, M, O, BG, W, W7,
-    STYLE_KEY_MAP as _STYLE_KEY_MAP,
-    _stdout_lock, write as _stdout_write, try_write as _stdout_try_write,
-    _ansi_color,
+    _Color, _stdout_lock, _ansi_color,
+    write as _stdout_write, try_write as _stdout_try_write,
+    RST, BLD, DIM, R, B, D,
 )
 
+# 基础色
+from ..output import (
+    C_PRIMARY, C_SECONDARY, C_USER,
+    C_ACCENT, C_SUCCESS, C_WARNING,
+    C_ERROR, C_LINK, C_DECORATION, C_EMPHASIS, C_CODE_BG,
+)
 
-def apply_style(config) -> bool:
-    """从 Config 加载自定义颜色和UI配置。
+# 旧别名
+from ..output import (
+    G, C, E, Y, X, U, M, O, BG, W, W7,
+    GRY, CYN, GRN, YLW, RED, BLU, MAG, ORG, BG8, WHT, WHT7,
+)
 
-    Args:
-        config: Config 对象（新接口）或 narnat_dir 字符串（兼容旧接口）
-    """
-    import json
-    from .. import output as _output
-
-    # 兼容旧接口：传入字符串路径时从 style.json 读取
-    if isinstance(config, str):
-        narnat_dir = config
-        path = os.path.join(narnat_dir, "style.json")
-        if not os.path.isfile(path):
-            return False
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return False
-    else:
-        # 新接口：从 Config.ui 读取
-        data = config.ui.colors if hasattr(config, 'ui') else {}
-        # 设置显示开关
-        if hasattr(config, 'ui'):
-            _output.SHOW_COST = config.ui.show_cost
-            _output.SHOW_BALANCE = config.ui.show_balance
-            _output.MAX_TOKENS = config.ui.max_output_tokens
-
-    def _hex_to_ansi(hex_str: str, bg: bool = False) -> str:
-        h = hex_str.lstrip("#")
-        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-        code = "48" if bg else "38"
-        return _ansi_color(code, r, g, b)
-
-    for key, (var_name, is_bg) in _STYLE_KEY_MAP.items():
-        if key in data:
-            getattr(_output, var_name)._value = _hex_to_ansi(data[key], bg=is_bg)
-    if isinstance(config, str):
-        # 旧接口兼容
-        if "显示费用" in data:
-            _output.SHOW_COST = bool(data["显示费用"])
-        if "显示余额" in data:
-            _output.SHOW_BALANCE = bool(data["显示余额"])
-        if "最大输出token数" in data:
-            _output.MAX_TOKENS = int(data["最大输出token数"])
-    return True
+# 派生 token
+from ..output import (
+    MD_H1, MD_H3, MD_H4, MD_BOLD, MD_ITALIC, MD_STRIKE,
+    MD_CODE, MD_LINK, MD_IMAGE, MD_BLOCKQUOTE, MD_HR,
+    MD_UL, MD_OL, MD_TASK_DONE, MD_TASK_UNDONE,
+    MD_TABLE_BORDER, MD_TABLE_CONTENT,
+    CB_LINE_NO, CB_LANG_LABEL,
+    CB_LANG_CYAN, CB_LANG_YELLOW, CB_LANG_GREEN,
+    CB_LANG_MAGENTA, CB_LANG_RED, CB_LANG_BLUE, CB_LANG_GRAY,
+    DIFF_HEADER, DIFF_RANGE, DIFF_ADDED, DIFF_REMOVED, DIFF_CONTEXT,
+    UI_HEADER, UI_SPINNER, UI_INTERRUPTED, UI_INTERRUPTED_HINT,
+    UI_STATS_LABEL, UI_STATS_VALUE, UI_SEPARATOR,
+    CMD_SUCCESS, CMD_ERROR, CMD_HINT, CMD_HIGHLIGHT, CMD_MUTED,
+    PTK_PROMPT_SYMBOL, PTK_PROMPT_TEXT, PTK_PROMPT_CUSTOM,
+    apply_style, SHOW_COST, SHOW_BALANCE, MAX_TOKENS,
+)

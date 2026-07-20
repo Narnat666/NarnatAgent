@@ -7,15 +7,26 @@
   ChildSession: /cd /done /ls /exit
 
 Tab 补全只显示当前状态拥有的命令。
+
+命令注册：用 @_register("name") 装饰器替代 if/elif 链，
+新增命令只需添加一个装饰函数，无需修改 _dispatch_command。
 """
 
-import os
-import sys
-from typing import Dict, Optional
+from enum import IntEnum
+from typing import Callable, Dict, Optional
 
 from prompt_toolkit.completion import Completer, Completion
 
-from .colors import R, G, C, D, E, Y, X, _stdout_write
+from .colors import (R,
+    CMD_SUCCESS, CMD_ERROR, CMD_HINT, CMD_HIGHLIGHT, CMD_MUTED,
+    _stdout_write)
+
+
+class CommandResult(IntEnum):
+    """命令分发返回值。继承 int，与旧代码完全兼容。"""
+    UNKNOWN = 0  # 未知命令
+    HANDLED = 1  # 已处理，继续主循环
+    EXIT = 2     # 退出 agent 进程
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -86,111 +97,164 @@ class _CommandCompleter(Completer):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 命令分发
+# 命令注册表 — @_register("name") 装饰器替代 if/elif 链
 # ═══════════════════════════════════════════════════════════════
 
-def _dispatch_command(cmd: str, args: str, mgr) -> int:
-    """分发命令。返回值：0=未知命令 1=已处理 2=退出agent"""
+_commands: Dict[str, Callable] = {}
+
+
+def _register(name: str):
+    """装饰器：将函数注册为命令处理器。"""
+    def decorator(fn: Callable) -> Callable:
+        _commands[name] = fn
+        return fn
+    return decorator
+
+
+def _require_args(args: str, hint: str) -> Optional[str]:
+    """通用参数检查：无参数时打印用法提示并返回错误消息。"""
+    if not args:
+        _stdout_write(f"  {CMD_HINT}{hint}{R}\n")
+        return "missing_args"
+    return None
+
+
+@_register("clear")
+def _cmd_clear(args: str, mgr) -> CommandResult:
+    _stdout_write("\033[2J\033[H")
+    return CommandResult.HANDLED
+
+
+@_register("explore")
+def _cmd_explore(args: str, mgr) -> CommandResult:
+    if _require_args(args, "用法: /explore <名称>"):
+        return CommandResult.HANDLED
+    result = mgr.on_explore(args)
+    if result:
+        _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
+    else:
+        _stdout_write(f"  {CMD_SUCCESS}已进入探索分支: {CMD_HIGHLIGHT}{args}{R}  "
+                      f"{CMD_MUTED}(/done 合并结论, /exit 暂离){R}\n")
+    return CommandResult.HANDLED
+
+
+@_register("done")
+def _cmd_done(args: str, mgr) -> CommandResult:
+    result = mgr.on_done()
+    if result:
+        _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
+    else:
+        _stdout_write(f"  {CMD_SUCCESS}探索分支已完成，结论已合并{R}\n")
+    return CommandResult.HANDLED
+
+
+@_register("save")
+def _cmd_save(args: str, mgr) -> CommandResult:
+    result = mgr.on_save(args)
+    if result:
+        _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
+    else:
+        if args:
+            _stdout_write(f"  {CMD_SUCCESS}会话已保存: {CMD_HIGHLIGHT}{args}{R}\n")
+        else:
+            saved_name = mgr.state.session_name()
+            label = saved_name if saved_name else ""
+            _stdout_write(f"  {CMD_SUCCESS}会话已保存: {CMD_HIGHLIGHT}{label}{R}\n")
+    return CommandResult.HANDLED
+
+
+@_register("ls")
+def _cmd_ls(args: str, mgr) -> CommandResult:
+    result = mgr.on_show()
+    if result:
+        _stdout_write(result + "\n")
+    else:
+        _stdout_write(f"  {CMD_MUTED}(无已保存会话){R}\n")
+    return CommandResult.HANDLED
+
+
+@_register("cd")
+def _cmd_cd(args: str, mgr) -> CommandResult:
+    if _require_args(args, "用法: /cd <名称>"):
+        return CommandResult.HANDLED
+    result = mgr.on_enter(args)
+    if result:
+        _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
+    else:
+        _stdout_write(f"  {CMD_SUCCESS}已进入会话: {CMD_HIGHLIGHT}{args}{R}\n")
+    return CommandResult.HANDLED
+
+
+@_register("skill")
+def _cmd_skill(args: str, mgr) -> CommandResult:
+    if _require_args(args, "用法: /skill <名称>"):
+        return CommandResult.HANDLED
+    result = mgr.on_skill(args)
+    if result:
+        _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
+    else:
+        _stdout_write(f"  {CMD_SUCCESS}已加载技能: {CMD_HIGHLIGHT}{args}{R}\n")
+    return CommandResult.HANDLED
+
+
+@_register("rm")
+def _cmd_rm(args: str, mgr) -> CommandResult:
+    if _require_args(args, "用法: /rm <名称 | --all>"):
+        return CommandResult.HANDLED
+    result = mgr.on_delete(args)
+    if result:
+        _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
+    else:
+        _stdout_write(f"  {CMD_SUCCESS}已标记删除: {CMD_HIGHLIGHT}{args}{R}  "
+                      f"{CMD_MUTED}(退出agent时生效){R}\n")
+    return CommandResult.HANDLED
+
+
+@_register("thinking")
+def _cmd_thinking(args: str, mgr) -> CommandResult:
+    result = mgr.on_thinking(args.strip() if args else "")
+    _stdout_write(f"  {CMD_HIGHLIGHT}{result}{R}\n")
+    return CommandResult.HANDLED
+
+
+@_register("exit")
+def _cmd_exit(args: str, mgr) -> CommandResult:
+    was_child = mgr.is_child_session()
+    result = mgr.on_exit()
+    if result:
+        _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
+    if mgr.should_exit_agent():
+        return CommandResult.EXIT
+    if was_child:
+        _stdout_write(f"  {CMD_SUCCESS}已暂离探索分支{R}  "
+                      f"{CMD_MUTED}(/cd 回来继续){R}\n")
+    else:
+        _stdout_write(f"  {CMD_MUTED}已退出会话{R}\n")
+    return CommandResult.HANDLED
+
+
+# ═══════════════════════════════════════════════════════════════
+# _dispatch_command — 统一入口
+# ═══════════════════════════════════════════════════════════════
+
+def _dispatch_command(cmd: str, args: str, mgr) -> CommandResult:
+    """分发命令。查注册表 → 可用性校验 → 调用处理器。
+
+    /clear 始终可用（不依赖会话状态），其余命令校验 available_commands()。
+    """
     cmd = cmd.lower().lstrip("/")
-    available = mgr.available_commands()
-    cmd_slash = f"/{cmd}"
-
     if cmd == "clear":
-        os.system("cls" if sys.platform == "win32" else "clear")
-        return 1
+        return _cmd_clear(args, mgr)
+    if mgr is None:
+        return CommandResult.UNKNOWN
+    available = mgr.available_commands()
 
+
+    cmd_slash = f"/{cmd}"
     if cmd_slash not in available:
-        return 0
+        return CommandResult.UNKNOWN
 
-    if cmd == "explore":
-        if not args:
-            _stdout_write(f"  {Y}用法: /explore <名称>{R}\n")
-            return 1
-        result = mgr.on_explore(args)
-        if result:
-            _stdout_write(f"  {X}{result}{R}\n")
-        else:
-            _stdout_write(f"  {E}已进入探索分支: {C}{args}{R}  {D}(/done 合并结论, /exit 暂离){R}\n")
-        return 1
-
-    if cmd == "done":
-        result = mgr.on_done()
-        if result:
-            _stdout_write(f"  {X}{result}{R}\n")
-        else:
-            _stdout_write(f"  {E}探索分支已完成，结论已合并{R}\n")
-        return 1
-
-    if cmd == "save":
-        result = mgr.on_save(args)
-        if result:
-            _stdout_write(f"  {X}{result}{R}\n")
-        else:
-            if args:
-                _stdout_write(f"  {E}会话已保存: {C}{args}{R}\n")
-            else:
-                saved_name = mgr.state.session_name()
-                label = saved_name if saved_name else ""
-                _stdout_write(f"  {E}会话已保存: {C}{label}{R}\n")
-        return 1
-
-    if cmd == "ls":
-        result = mgr.on_show()
-        if result:
-            _stdout_write(result + "\n")
-        else:
-            _stdout_write(f"  {G}(无已保存会话){R}\n")
-        return 1
-
-    if cmd == "cd":
-        if not args:
-            _stdout_write(f"  {Y}用法: /cd <名称>{R}\n")
-            return 1
-        result = mgr.on_enter(args)
-        if result:
-            _stdout_write(f"  {X}{result}{R}\n")
-        else:
-            _stdout_write(f"  {E}已进入会话: {C}{args}{R}\n")
-        return 1
-
-    if cmd == "skill":
-        if not args:
-            _stdout_write(f"  {Y}用法: /skill <名称>{R}\n")
-            return 1
-        result = mgr.on_skill(args)
-        if result:
-            _stdout_write(f"  {X}{result}{R}\n")
-        else:
-            _stdout_write(f"  {E}已加载技能: {C}{args}{R}\n")
-        return 1
-
-    if cmd == "rm":
-        if not args:
-            _stdout_write(f"  {Y}用法: /rm <名称 | --all>{R}\n")
-            return 1
-        result = mgr.on_delete(args)
-        if result:
-            _stdout_write(f"  {X}{result}{R}\n")
-        else:
-            _stdout_write(f"  {E}已标记删除: {C}{args}{R}  {D}(退出agent时生效){R}\n")
-        return 1
-
-    if cmd == "thinking":
-        result = mgr.on_thinking(args.strip() if args else "")
-        _stdout_write(f"  {C}{result}{R}\n")
-        return 1
-
-    if cmd == "exit":
-        was_child = mgr.is_child_session()
-        result = mgr.on_exit()
-        if result:
-            _stdout_write(f"  {X}{result}{R}\n")
-        if mgr.should_exit_agent():
-            return 2
-        if was_child:
-            _stdout_write(f"  {E}已暂离探索分支{R}  {D}(/cd 回来继续){R}\n")
-        else:
-            _stdout_write(f"  {D}已退出会话{R}\n")
-        return 1
-
-    return 0
+    handler = _commands.get(cmd)
+    if handler is None:
+        return CommandResult.UNKNOWN
+    return handler(args, mgr)

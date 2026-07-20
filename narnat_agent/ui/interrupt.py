@@ -4,12 +4,22 @@
 状态机: INPUT_MODE ↔ RUN_MODE
 """
 
+import atexit
 import os
 import sys
 import signal
 import threading
 import time
 from typing import Optional
+
+
+def _try_restore_term(fd: int, settings) -> None:
+    """atexit 回调：尝试恢复终端原始设置。忽略所有异常（进程退出中）。"""
+    try:
+        import termios
+        termios.tcsetattr(fd, termios.TCSADRAIN, settings)
+    except Exception:
+        pass
 
 
 class InterruptController:
@@ -23,6 +33,7 @@ class InterruptController:
         self._stop_poll = threading.Event()
         self._poll_thread: Optional[threading.Thread] = None
         self._saved_sigint = None
+        self._atexit_registered = False  # atexit 去重：仅注册一次
 
     @property
     def is_set(self) -> bool:
@@ -51,6 +62,10 @@ class InterruptController:
 
     def enter_run_mode(self) -> None:
         self._interrupt.clear()
+        # 先停旧轮询线程，防止多个并行轮询线程竞争同一 _interrupt Event
+        self._stop_poll.set()
+        if self._poll_thread is not None and self._poll_thread.is_alive():
+            self._poll_thread.join(timeout=1.0)
         # 每个轮询线程用自己独立的stop event，避免旧线程被新线程的clear唤醒
         self._stop_poll = threading.Event()
         self._poll_thread = threading.Thread(target=self._poll_esc,
@@ -184,6 +199,11 @@ class InterruptController:
         try:
             old_settings = termios.tcgetattr(fd)
             tty.setcbreak(fd)  # 设置为cbreak模式，允许单字符读取
+            # atexit 兜底: daemon 线程被强制终止时 finally 可能不执行，注册退出回调确保终端恢复
+            # 使用 _atexit_registered 去重，避免多次启停累积回调
+            if not self._atexit_registered:
+                atexit.register(lambda _fd=fd, _old=old_settings: _try_restore_term(_fd, _old))
+                self._atexit_registered = True
         except (termios.error, OSError):
             return  # 无法设置终端模式（如管道输入）
 

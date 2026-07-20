@@ -29,9 +29,13 @@ if sys.platform == "win32":
 
 # ── 从子模块 re-export，保持外部导入兼容 ──
 from .colors import (
-    _Color, RST, BLD, DIM, GRY, CYN, GRN, YLW, RED, BLU, MAG, ORG, BG8, WHT, WHT7,
-    R, B, D, G, C, E, Y, X, U, M, O, BG, W, W7,
-    _STYLE_KEY_MAP,
+    _Color, RST, BLD, DIM, R, B, D,
+    C_PRIMARY, C_SECONDARY, C_USER, C_ACCENT, C_SUCCESS, C_WARNING, C_ERROR, C_LINK, C_EMPHASIS,
+    G, C, E, Y, X, U, M, O, W7,
+    UI_HEADER, UI_SPINNER,
+    UI_INTERRUPTED, UI_INTERRUPTED_HINT,
+    UI_STATS_LABEL, UI_STATS_VALUE,
+    PTK_PROMPT_SYMBOL, PTK_PROMPT_TEXT, PTK_PROMPT_CUSTOM,
     apply_style,
 )
 from ..output import _stdout_lock, write as _stdout_write, try_write as _stdout_try_write
@@ -40,97 +44,80 @@ from .renderer import (
     colorize_diff, _sep, _terminal_width, _display_width,
     InlineRules, BlockRule, CodeBlockRenderer, StreamingRenderer, render_line,
 )
-from .session_commands import _CommandCompleter, _dispatch_command
+from .session_commands import _CommandCompleter, _dispatch_command, CommandResult
 
 
 # ═══════════════════════════════════════════════════════════════
 # 界面辅助函数
 # ═══════════════════════════════════════════════════════════════
 
+_ANIMATION_FRAME_INTERVAL = 0.15  # 动画帧间隔（秒）
+
 def show_header(msg: str) -> None:
-    _stdout_write(f"  {C}{msg}{R}\n")
+    _stdout_write(f"  {UI_HEADER}{msg}{R}\n")
     _sep()
 
 
-def _spinner_thread(stop: threading.Event) -> None:
-    """显示思考中动画。先等待666ms，避免串行工具间的短暂空白闪烁。
-    666ms后屏幕仍空白才启动动画，4帧循环：* 思考中 → * 思考中. → * 思考中.. → * 思考中...
-    左侧 * 粗细交替，右侧 ... 从0到3循环，"思考中"三字位置锁定。
-    退出前自清屏幕残留，与 _stop_spinner 形成双道防护。"""
-    # 延迟666ms，期间每50ms检查一次stop
-    delay = 0.666
-    elapsed = 0.0
-    tick = 0.05
-    while elapsed < delay:
-        if stop.is_set():
-            return
-        time.sleep(tick)
-        elapsed += tick
+def _join_thread(t: threading.Thread, max_wait: float = 1.0) -> None:
+    """等待线程退出，最长等待 max_wait 秒。比裸 join(timeout=N) 更可靠地处理短超时残留。"""
+    deadline = time.time() + max_wait
+    while t.is_alive() and time.time() < deadline:
+        t.join(0.1)
 
-    # 隐藏光标（阻塞锁，必须执行）
+
+def _animation_thread(stop: threading.Event, label: str,
+                      delay: float = 0.0) -> None:
+    """通用动画线程：4帧循环 * label → * label. → * label.. → * label...
+
+    Args:
+        stop: 停止信号
+        label: 动画标签文本（如 "思考中"、"正在压缩"）
+        delay: 可选延迟启动秒数，期间每50ms检查stop。0表示立即启动。
+    """
+    if delay > 0:
+        elapsed = 0.0
+        tick = 0.05
+        while elapsed < delay:
+            if stop.is_set():
+                return
+            time.sleep(tick)
+            elapsed += tick
+
     _stdout_write("\x1b[?25l")
 
     frames = (
-        f"{B}{O}* {R}{O}思考中   {R}",
-        f"{D}{O}* {R}{O}思考中.  {R}",
-        f"{B}{O}* {R}{O}思考中.. {R}",
-        f"{D}{O}* {R}{O}思考中...{R}",
+        f"{B}{UI_SPINNER}* {R}{UI_SPINNER}{label}   {R}",
+        f"{D}{UI_SPINNER}* {R}{UI_SPINNER}{label}.  {R}",
+        f"{B}{UI_SPINNER}* {R}{UI_SPINNER}{label}.. {R}",
+        f"{D}{UI_SPINNER}* {R}{UI_SPINNER}{label}...{R}",
     )
     i = 0
     while not stop.is_set():
         _stdout_try_write(f"\r  {frames[i]}\x1b[K")
         i = (i + 1) % 4
-        stop.wait(0.15)
+        stop.wait(_ANIMATION_FRAME_INTERVAL)
 
-    # 退出前自清：擦除动画行 + 恢复光标（阻塞锁，必须执行）
     _stdout_write("\r\x1b[K")
     _stdout_write("\x1b[?25h")
+
+
+def _spinner_thread(stop: threading.Event) -> None:
+    """思考中动画。延迟666ms启动，避免串行工具间短暂空白闪烁。"""
+    _animation_thread(stop, "思考中", 0.666)
 
 
 def _compress_thread(stop: threading.Event) -> None:
-    """压缩动画，与思考中动画风格一致。4帧循环：* 正在压缩 → * 正在压缩. → * 正在压缩.. → * 正在压缩..."""
-    # 隐藏光标
-    _stdout_write("\x1b[?25l")
-
-    frames = (
-        f"{B}{O}* {R}{O}正在压缩   {R}",
-        f"{D}{O}* {R}{O}正在压缩.  {R}",
-        f"{B}{O}* {R}{O}正在压缩.. {R}",
-        f"{D}{O}* {R}{O}正在压缩...{R}",
-    )
-    i = 0
-    while not stop.is_set():
-        _stdout_try_write(f"\r  {frames[i]}\x1b[K")
-        i = (i + 1) % 4
-        stop.wait(0.15)
-
-    # 退出前自清：擦除动画行 + 恢复光标
-    _stdout_write("\r\x1b[K")
-    _stdout_write("\x1b[?25h")
+    """压缩动画。"""
+    _animation_thread(stop, "正在压缩")
 
 
 def _summary_thread(stop: threading.Event) -> None:
-    """总结动画，复用压缩动画模式。4帧循环"""
-    _stdout_write("\x1b[?25l")
-
-    frames = (
-        f"{B}{O}* {R}{O}正在合并   {R}",
-        f"{D}{O}* {R}{O}正在合并.  {R}",
-        f"{B}{O}* {R}{O}正在合并.. {R}",
-        f"{D}{O}* {R}{O}正在合并...{R}",
-    )
-    i = 0
-    while not stop.is_set():
-        _stdout_try_write(f"\r  {frames[i]}\x1b[K")
-        i = (i + 1) % 4
-        stop.wait(0.15)
-
-    _stdout_write("\r\x1b[K")
-    _stdout_write("\x1b[?25h")
+    """总结动画。"""
+    _animation_thread(stop, "正在合并")
 
 
 def show_interrupted() -> None:
-    _stdout_write(f"\n  {Y}已打断{R}\n  {G}继续...{R}\n")
+    _stdout_write(f"\n  {UI_INTERRUPTED}已打断{R}\n  {UI_INTERRUPTED_HINT}继续...{R}\n")
 
 
 def show_stats(input_tokens: int, output_tokens: int,
@@ -149,9 +136,9 @@ def show_stats(input_tokens: int, output_tokens: int,
     th = f"  思考:{thinking_effort}"
     _sep()
     cs = f"  缓存:{cache / 1000:.1f}k" if cache > 0 else ""
-    co = f"  费用:¥{cost:.4f}" if _show_cost and cost > 0 else ""
+    co = f"  费用:¥{cost:.4f}" if _show_cost else ""
     ba = f"  余额:¥{balance:.2f}" if _show_balance and balance > 0 else ""
-    _stdout_write(f"  {G}输入:{si} 输出:{so}{cs}{th}  最大输出:{mt}{R}{Y}{co}{ba}{R}\n")
+    _stdout_write(f"  {UI_STATS_LABEL}输入:{si} 输出:{so}{cs}{th}  最大输出:{mt}{R}{UI_STATS_VALUE}{co}{ba}{R}\n")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -195,7 +182,7 @@ class UIStreamSession:
             return
         self._spinner_stop.set()
         if t.is_alive():
-            t.join(timeout=0.5)
+            _join_thread(t)
         self._spinner_thread = None
         # 清理：擦除动画行 + 恢复光标
         _stdout_write("\r\x1b[K")
@@ -266,6 +253,8 @@ class UIInterface:
         self._session: Optional[PromptSession] = None
         self._compress_stop: Optional[threading.Event] = None
         self._compress_thread: Optional[threading.Thread] = None
+        self._summary_stop: Optional[threading.Event] = None
+        self._summary_thread_var: Optional[threading.Thread] = None
 
     def start(self) -> None:
         _interrupt_ctrl.enter_input_mode()
@@ -295,7 +284,7 @@ class UIInterface:
             self._session = _create_session(self._mgr)
         return line
 
-    def dispatch_command(self, cmd: str, args: str) -> int:
+    def dispatch_command(self, cmd: str, args: str) -> CommandResult:
         return _dispatch_command(cmd, args, self._mgr)
 
     def create_stream(self) -> UIStreamSession:
@@ -320,7 +309,7 @@ class UIInterface:
             return
         self._compress_stop.set()
         if self._compress_thread is not None:
-            self._compress_thread.join(timeout=0.5)
+            _join_thread(self._compress_thread)
         self._compress_stop = None
         self._compress_thread = None
 
@@ -332,10 +321,10 @@ class UIInterface:
         self._summary_thread_var.start()
 
     def end_summarizing(self) -> None:
-        if hasattr(self, '_summary_stop') and self._summary_stop is not None:
+        if self._summary_stop is not None:
             self._summary_stop.set()
-        if hasattr(self, '_summary_thread_var') and self._summary_thread_var is not None:
-            self._summary_thread_var.join(timeout=0.5)
+        if self._summary_thread_var is not None:
+            _join_thread(self._summary_thread_var)
         self._summary_stop = None
         self._summary_thread_var = None
 
@@ -368,15 +357,17 @@ def _make_keybindings() -> KeyBindings:
     return kb
 
 
-_PROMPT_STYLE = Style.from_dict({
-    "prompt": "bold #00ff00",       # # 提示符保持绿色
-    "": "#ffffff",                  # 用户输入文本：极致白色
-})
+def _get_prompt_style() -> Style:
+    from ..output import PTK_PROMPT_SYMBOL, PTK_PROMPT_TEXT
+    return Style.from_dict({
+        "prompt": PTK_PROMPT_SYMBOL,
+        "": PTK_PROMPT_TEXT,
+    })
 
 
 def _create_session(session_manager) -> PromptSession:
     return PromptSession(
-        style=_PROMPT_STYLE,
+        style=_get_prompt_style(),
         multiline=True,
         completer=_CommandCompleter(session_manager),
         key_bindings=_make_keybindings())
@@ -391,8 +382,8 @@ def read_input(session: PromptSession) -> Optional[str]:
 
 def read_input_with_prompt(session: PromptSession, prompt_text: str) -> Optional[str]:
     """带自定义提示符的输入，用于删除确认等场景。提示文本使用AI输出颜色。"""
-    from ..output import W7, R
+    from ..output import R
     try:
-        return session.prompt(ANSI(f"{W7}{prompt_text}{R}"))
+        return session.prompt(ANSI(f"{C_PRIMARY}{prompt_text}{R}"))
     except (KeyboardInterrupt, EOFError):
         return None

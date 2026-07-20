@@ -9,14 +9,25 @@
 - StreamingRenderer: 流式状态机
 """
 
+import io
 import re
 import shutil
 import unicodedata
 from typing import Optional, Callable, List, Match
 
 from .colors import (
-    R, B, D, G, C, E, Y, X, U, M, O, BG,
-    W7, BLU, CYN, GRN, GRY, YLW, RED,
+    R, B, D,
+    C_PRIMARY, C_SECONDARY, C_CODE_BG,
+    MD_H1, MD_H3, MD_H4,
+    MD_BOLD, MD_ITALIC, MD_STRIKE, MD_CODE, MD_LINK, MD_IMAGE,
+    MD_BLOCKQUOTE, MD_HR, MD_UL, MD_OL,
+    MD_TASK_DONE, MD_TASK_UNDONE,
+    MD_TABLE_BORDER, MD_TABLE_CONTENT,
+    CB_LINE_NO, CB_LANG_LABEL,
+    CB_LANG_CYAN, CB_LANG_YELLOW, CB_LANG_GREEN,
+    CB_LANG_MAGENTA, CB_LANG_RED, CB_LANG_BLUE, CB_LANG_GRAY,
+    DIFF_HEADER, DIFF_RANGE, DIFF_ADDED, DIFF_REMOVED, DIFF_CONTEXT,
+    UI_SEPARATOR,
     _stdout_write,
 )
 
@@ -25,9 +36,12 @@ from .colors import (
 # 终端宽度与显示宽度
 # ═══════════════════════════════════════════════════════════════
 
+_MAX_TERMINAL_WIDTH = 160
+
+
 def _terminal_width() -> int:
     try:
-        return min(shutil.get_terminal_size().columns, 160)
+        return min(shutil.get_terminal_size().columns, _MAX_TERMINAL_WIDTH)
     except Exception:
         return 120
 
@@ -133,19 +147,19 @@ def _wrap_cell(ansi_text: str, max_width: int) -> List[str]:
 def colorize_diff(diff_text: str) -> str:
     """对 unified diff 文本添加 ANSI 颜色"""
     if not diff_text or diff_text == "(无差异)":
-        return f"{G}(无差异){R}"
+        return f"{C_SECONDARY}(无差异){R}"
     out = []
     for line in diff_text.split("\n"):
         if line.startswith("---") or line.startswith("+++"):
-            out.append(f"{B}{C}{line}{R}")
+            out.append(f"{DIFF_HEADER}{line}{R}")
         elif line.startswith("@@"):
-            out.append(f"{D}{C}{line}{R}")
+            out.append(f"{DIFF_RANGE}{line}{R}")
         elif line.startswith("-"):
-            out.append(f"{X}{line}{R}")
+            out.append(f"{DIFF_REMOVED}{line}{R}")
         elif line.startswith("+"):
-            out.append(f"{E}{line}{R}")
+            out.append(f"{DIFF_ADDED}{line}{R}")
         else:
-            out.append(f"{G}{line}{R}")
+            out.append(f"{DIFF_CONTEXT}{line}{R}")
     return "\n".join(out)
 
 
@@ -154,7 +168,7 @@ def colorize_diff(diff_text: str) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 def _sep() -> None:
-    _stdout_write(f"  {G}{'─' * (_terminal_width() - 2)}{R}\n")
+    _stdout_write(f"  {UI_SEPARATOR}{'─' * (_terminal_width() - 2)}{R}\n")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -174,8 +188,8 @@ _LANG_GROUPS = [
     ("blue",    ["css", "scss", "sass", "less"]),
     ("gray",    ["markdown", "md", "text", "txt", "log"]),
 ]
-_COLOR_MAP = {"cyan": C, "yellow": Y, "green": E, "blue": U,
-              "magenta": M, "red": X, "gray": G}
+_COLOR_MAP = {"cyan": CB_LANG_CYAN, "yellow": CB_LANG_YELLOW, "green": CB_LANG_GREEN,
+              "blue": CB_LANG_BLUE, "magenta": CB_LANG_MAGENTA, "red": CB_LANG_RED, "gray": CB_LANG_GRAY}
 for _grp_color, _grp_langs in _LANG_GROUPS:
     for _lang in _grp_langs:
         _LANG_COLOR_MAP[_lang] = _grp_color
@@ -201,12 +215,12 @@ class InlineRules:
 
     @classmethod
     def render(cls, text: str) -> str:
-        text = cls._RE_STRIKE.sub(f"{X}\\1{R}", text)
-        text = cls._RE_BOLD.sub(f"{B}{W7}\\1{R}", text)
-        text = cls._RE_ITAL.sub(f"{D}{W7}\\1{R}", text)
-        text = cls._RE_CODE.sub(f"{Y}\\1{R}", text)
-        text = cls._RE_IMG.sub(f"{D}[img:\\1]{R}", text)
-        text = cls._RE_LINK.sub(f"{U}\\1{R}", text)
+        text = cls._RE_STRIKE.sub(f"{MD_STRIKE}\\1{R}", text)
+        text = cls._RE_BOLD.sub(f"{MD_BOLD}\\1{R}", text)
+        text = cls._RE_ITAL.sub(f"{MD_ITALIC}\\1{R}", text)
+        text = cls._RE_CODE.sub(f"{MD_CODE}\\1{R}", text)
+        text = cls._RE_IMG.sub(f"{MD_IMAGE}\\1{R}", text)
+        text = cls._RE_LINK.sub(f"{MD_LINK}\\1{R}", text)
         return text
 
 
@@ -234,30 +248,30 @@ def _render_heading(_line: str, m: Match) -> str:
     level = len(m.group(1))
     body = InlineRules.render(m.group(2))
     if level <= 2:
-        return f"  {B}{CYN}{body}{R}"
+        return f"  {MD_H1}{body}{R}"
     if level == 3:
-        return f"  {B}{GRN}{body}{R}"
-    return f"  {B}{W7}{body}{R}"
+        return f"  {MD_H3}{body}{R}"
+    return f"  {MD_H4}{body}{R}"
 
 
 def _render_hr(_line: str, _m: Match) -> str:
-    return f"  {G}{_line.strip()}{R}"
+    return f"  {MD_HR}{_line.strip()}{R}"
 
 
 def _render_task(_line: str, m: Match) -> str:
     done = m.group(1).lower() == "x"
-    marker = f"{E}v{R}" if done else f"{G}o{R}"
-    return f"   {marker} {W7}{InlineRules.render(m.group(2))}{R}"
+    marker = f"{MD_TASK_DONE}v{R}" if done else f"{MD_TASK_UNDONE}o{R}"
+    return f"   {marker} {C_PRIMARY}{InlineRules.render(m.group(2))}{R}"
 
 
 def _render_ul(_line: str, _m: Match) -> str:
-    return f"   {E}*{R} {W7}{InlineRules.render(_line[2:])}{R}"
+    return f"   {MD_UL}*{R} {C_PRIMARY}{InlineRules.render(_line[2:])}{R}"
 
 
 def _render_ol(_line: str, m: Match) -> str:
     num = m.group(1)
     body_start = len(num) + 2
-    return f"   {G}{num}.{R} {W7}{InlineRules.render(_line[body_start:])}{R}"
+    return f"   {MD_OL}{num}.{R} {C_PRIMARY}{InlineRules.render(_line[body_start:])}{R}"
 
 
 def _render_blockquote(_line: str, _m: Match) -> str:
@@ -267,18 +281,18 @@ def _render_blockquote(_line: str, _m: Match) -> str:
         rest = rest[1:]
         depth += 1
     body = rest.strip()
-    return f"  {D}{G}{'| ' * depth}{R}{W7}{InlineRules.render(body)}{R}"
+    return f"  {MD_BLOCKQUOTE}{'| ' * depth}{R}{C_PRIMARY}{InlineRules.render(body)}{R}"
 
 
 def _render_table_row(_line: str, _m: Match) -> str:
     cells = [c.strip() for c in _line.strip("|").split("|")]
     if _is_table_separator(cells):
         return ""
-    return f"    {W7}" + " | ".join(InlineRules.render(c) for c in cells) + f"{R}"
+    return f"    {MD_TABLE_CONTENT}" + " | ".join(InlineRules.render(c) for c in cells) + f"{R}"
 
 
 def _render_paragraph(_line: str, _m: Match) -> str:
-    return f"  {W7}{InlineRules.render(_line)}{R}"
+    return f"  {C_PRIMARY}{InlineRules.render(_line)}{R}"
 
 
 _RE_TABLE_SEP = re.compile(r"^[-:]+$")
@@ -329,13 +343,13 @@ class CodeBlockRenderer:
     @staticmethod
     def render(lang: str, body: str, width: int) -> str:
         color = _COLOR_MAP.get(
-            _LANG_COLOR_MAP.get(lang.strip().lower(), "gray"), G)
+            _LANG_COLOR_MAP.get(lang.strip().lower(), "gray"), CB_LANG_GRAY)
         lines = []
         for i, raw in enumerate(body.split("\n"), 1):
             stripped = raw.rstrip()
-            lines.append(f" {BG} {G}{i:>3} {R}{color}{stripped}{R}")
+            lines.append(f" {C_CODE_BG} {CB_LINE_NO}{i:>3} {R}{color}{stripped}{R}")
         label = lang.strip().lower() or "code"
-        header = f"{G}{BG}  -- {label} --{R}"
+        header = f"{CB_LANG_LABEL}  -- {label} --{R}"
         return header + "\n" + "\n".join(lines)
 
 
@@ -347,12 +361,11 @@ class StreamingRenderer:
     """
     字符级流式渲染器。
     状态机: NORMAL ↔ CODE_BLOCK
-    _process_lines: 通用行消费者，消除 _feed_code/_feed_normal 的重复循环骨架。
     """
 
     def __init__(self) -> None:
         self.width = _terminal_width()
-        self._buf_parts: List[str] = []
+        self._buf = io.StringIO()
         self._in_code = False
         self._code_lang = ""
         self._code_lines: List[str] = []
@@ -361,54 +374,39 @@ class StreamingRenderer:
         self._table_has_separator = False      # 是否见过分隔行
 
     def _buf_append(self, text: str) -> None:
-        self._buf_parts.append(text)
+        self._buf.write(text)
 
     def _buf_get_and_clear(self) -> str:
-        result = "".join(self._buf_parts)
-        self._buf_parts.clear()
+        result = self._buf.getvalue()
+        self._buf.seek(0)
+        self._buf.truncate(0)
         return result
 
-    def _process_lines(self, chunk: str,
-                       handler: Callable[[str, str], bool]) -> None:
+    def _process_lines(self, raw: str,
+                       handler: Callable[[str, str], bool]) -> bool:
+        """逐完整行消费 raw。
+        返回 True: handler 触发状态切换，未消费部分已放回 _buf_parts。
+        返回 False: 全部完整行已消费，未完成行已放回 _buf_parts。
         """
-        通用行消费者：
-        - 累积 chunk 到缓冲区，逐完整行调用 handler(line, rest)。
-        - handler 返回 True: 终止消费（handler 已自行处理 rest）。
-        - handler 返回 False: 继续消费下一行。
-        """
-        self._buf_append(chunk)
-        raw = self._buf_get_and_clear()
         while "\n" in raw:
             line, rest = raw.split("\n", 1)
             if handler(line, rest):
-                return
-            raw = rest + self._buf_get_and_clear()
+                self._buf_append(rest)
+                return True
+            raw = rest
         self._buf_append(raw)
+        return False
 
     def feed(self, chunk: str) -> None:
-        # 循环处理：handler可能切换状态（_in_code），
-        # 切换后需要用新handler继续处理剩余内容
+        """流式输入入口。状态切换时自动换 handler 继续消费剩余行。"""
         self._buf_append(chunk)
         raw = self._buf_get_and_clear()
         while raw:
             handler = self._on_code_line if self._in_code else self._on_normal_line
-            # 逐行处理
-            while "\n" in raw:
-                line, rest = raw.split("\n", 1)
-                if handler(line, rest):
-                    # handler返回True：状态已切换，用新handler继续处理rest
-                    raw = rest
-                    break
-                raw = rest
-            else:
-                # while正常结束（无更多完整行），剩余放回缓冲区
-                self._buf_append(raw)
-                return
-            # handler返回True后，raw=rest，继续外层while用新handler处理
-            # 但先合并缓冲区中可能新追加的内容
-            extra = self._buf_get_and_clear()
-            if extra:
-                raw = raw + extra
+            if not self._process_lines(raw, handler):
+                break
+            # 状态已切换，取出 handler 放回的剩余行继续处理
+            raw = self._buf_get_and_clear()
 
     def _on_code_line(self, line: str, rest: str) -> bool:
         stripped = line.strip()
@@ -449,17 +447,22 @@ class StreamingRenderer:
         self._normal_line_count += 1
         return False
 
+    def _demote_to_paragraphs(self) -> None:
+        """将缓冲的表格候选行降级为段落逐行输出，并清空表格状态。"""
+        for line in self._table_rows:
+            rendered = _render_paragraph(line, None)
+            if rendered:
+                _stdout_write(rendered + "\n")
+        self._table_rows.clear()
+        self._table_has_separator = False
+
     def _flush_table(self) -> None:
         if not self._table_rows:
             self._table_has_separator = False
             return
         if not self._table_has_separator:
-            # 无分隔行 → 不是表格，逐行按段落输出
-            for line in self._table_rows:
-                rendered = _render_paragraph(line, None)
-                if rendered:
-                    _stdout_write(rendered + "\n")
-            self._table_rows.clear()
+            # 无分隔行 → 不是表格，降级为段落输出
+            self._demote_to_paragraphs()
             return
         # 有分隔行 → 拆分表头和数据
         # 找出分隔行位置（第一个全由---组成的分隔行）
@@ -472,24 +475,30 @@ class StreamingRenderer:
         # 表头行=分隔行之前的行，数据行=分隔行之后的行
         header_rows = self._table_rows[:sep_idx] if sep_idx >= 0 else self._table_rows
         data_rows = self._table_rows[sep_idx + 1:] if sep_idx >= 0 else []
+
+        # 从分隔行解析列对齐：:--- → left, :---: → center, ---: → right
+        alignments: List[str] = []
+        if sep_idx >= 0:
+            sep_cells = [c.strip() for c in self._table_rows[sep_idx].strip("|").split("|")]
+            for cell in sep_cells:
+                l = cell.startswith(":")
+                r = cell.endswith(":")
+                if l and r:
+                    alignments.append("center")
+                elif r:
+                    alignments.append("right")
+                else:
+                    alignments.append("left")
         # 无数据行 → 不是真正的表格（只有表头+分隔行或孤立分隔行）
         if not data_rows:
-            for line in self._table_rows:
-                rendered = _render_paragraph(line, None)
-                if rendered:
-                    _stdout_write(rendered + "\n")
-            self._table_rows.clear()
-            self._table_has_separator = False
+            # 无数据行 → 不是表格
+            self._demote_to_paragraphs()
             return
         # 数据行全部为空 → 不算表格
         data_cells = [[c.strip() for c in line.strip("|").split("|")] for line in data_rows]
         if not any(any(c for c in row) for row in data_cells):
-            for line in self._table_rows:
-                rendered = _render_paragraph(line, None)
-                if rendered:
-                    _stdout_write(rendered + "\n")
-            self._table_rows.clear()
-            self._table_has_separator = False
+            # 数据行全空 → 不是表格
+            self._demote_to_paragraphs()
             return
 
         # ── 计算列宽（带终端宽度限制） ──
@@ -522,7 +531,7 @@ class StreamingRenderer:
         if total_natural <= table_avail:
             # ── 正常宽度：原逻辑，不折行 ──
             widths = natural_widths
-            self._render_table_block(rendered, widths, cols)
+            self._render_table_block(rendered, widths, cols, alignments=alignments)
         else:
             # ── 超宽：需要限制列宽+折行 ──
             # 策略：给每列设上限，均等分配可用宽度
@@ -532,7 +541,7 @@ class StreamingRenderer:
             # 如果连最小宽度都放不下，减少列数（分块）
             if cols * min_col > avail_for_content:
                 # 分块：计算每块能放多少列
-                self._render_table_chunked(rendered, cols, table_avail, col_overhead, min_col)
+                self._render_table_chunked(rendered, cols, table_avail, col_overhead, min_col, alignments=alignments)
             else:
                 # 限制列宽：先保证每列min_col，剩余按自然宽度比例分配
                 widths = [min_col] * cols
@@ -548,14 +557,15 @@ class StreamingRenderer:
                             widths[i % cols] += 1
 
                 # 折行渲染
-                self._render_table_block(rendered, widths, cols, wrap=True)
+                self._render_table_block(rendered, widths, cols, wrap=True, alignments=alignments)
 
         self._table_rows.clear()
         self._table_has_separator = False
 
     def _render_table_block(self, rendered: List[List[str]],
                             widths: List[int], cols: int,
-                            wrap: bool = False) -> None:
+                            wrap: bool = False,
+                            alignments: Optional[List[str]] = None) -> None:
         """渲染一个表格块。
 
         Args:
@@ -563,7 +573,11 @@ class StreamingRenderer:
             widths: 各列宽度
             cols: 列数
             wrap: 是否对超宽单元格折行
+            alignments: 各列对齐方式 ("left"/"center"/"right")，默认全左对齐
         """
+        if alignments is None:
+            alignments = ["left"] * cols
+
         # 如果需要折行，先对每个单元格做折行处理
         if wrap:
             wrapped: List[List[List[str]]] = []
@@ -575,15 +589,27 @@ class StreamingRenderer:
                     wrapped_row.append(lines)
                 wrapped.append(wrapped_row)
             # 渲染折行表格
-            self._render_wrapped_table(wrapped, widths, cols)
+            self._render_wrapped_table(wrapped, widths, cols, alignments)
         else:
-            # 原逻辑：单行单元格
+            # 原逻辑：单行单元格（带对齐）
             sep = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
-            border = f"    {BLU}{sep}{R}"
+            border = f"    {MD_TABLE_BORDER}{sep}{R}"
 
             def _row(cells):
-                parts = [" " + c + " " * (widths[i] - _display_width(c) + 1) for i, c in enumerate(cells)]
-                return f"    {BLU}|{R}{W7}" + f"{BLU}|{R}{W7}".join(parts) + f"{BLU}|{R}"
+                parts = []
+                for i, c in enumerate(cells):
+                    dw = _display_width(c)
+                    pad = widths[i] - dw
+                    al = alignments[i] if i < len(alignments) else "left"
+                    if al == "right":
+                        parts.append(" " * (pad + 1) + c + " ")
+                    elif al == "center":
+                        lp = pad // 2
+                        rp = pad - lp
+                        parts.append(" " * (lp + 1) + c + " " * (rp + 1))
+                    else:
+                        parts.append(" " + c + " " * (pad + 1))
+                return f"    {MD_TABLE_BORDER}|{R}{MD_TABLE_CONTENT}" + f"{MD_TABLE_BORDER}|{R}{MD_TABLE_CONTENT}".join(parts) + f"{MD_TABLE_BORDER}|{R}"
 
             parts = [border]
             for row in rendered:
@@ -592,22 +618,34 @@ class StreamingRenderer:
             _stdout_write("\n".join(parts) + "\n")
 
     def _render_wrapped_table(self, wrapped: List[List[List[str]]],
-                              widths: List[int], cols: int) -> None:
+                              widths: List[int], cols: int,
+                              alignments: Optional[List[str]] = None) -> None:
         """渲染折行表格。
 
         Args:
             wrapped: wrapped[row][col] = [line1, line2, ...] 折行后的文本
             widths: 各列宽度
             cols: 列数
+            alignments: 各列对齐方式
         """
-        sep = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
-        border = f"    {BLU}{sep}{R}"
+        if alignments is None:
+            alignments = ["left"] * cols
 
-        def _pad_cell(text: str, width: int) -> str:
-            """右填充到指定显示宽度"""
+        sep = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+        border = f"    {MD_TABLE_BORDER}{sep}{R}"
+
+        def _pad_cell(text: str, width: int, al: str = "left") -> str:
+            """按对齐方式填充到指定显示宽度"""
             dw = _display_width(text)
             pad = max(0, width - dw)
-            return " " + text + " " * (pad + 1)
+            if al == "right":
+                return " " * (pad + 1) + text + " "
+            elif al == "center":
+                lp = pad // 2
+                rp = pad - lp
+                return " " * (lp + 1) + text + " " * (rp + 1)
+            else:
+                return " " + text + " " * (pad + 1)
 
         parts: List[str] = []
         for row in wrapped:
@@ -620,14 +658,16 @@ class StreamingRenderer:
                     cell = row[col_idx] if col_idx < len(row) else [""]
                     text = cell[line_idx] if line_idx < len(cell) else ""
                     w = widths[col_idx] if col_idx < len(widths) else widths[-1]
-                    cell_parts.append(f"{BLU}|{R}{W7}" + _pad_cell(text, w))
-                parts.append(f"    " + "".join(cell_parts) + f"{BLU}|{R}")
+                    al = alignments[col_idx] if col_idx < len(alignments) else "left"
+                    cell_parts.append(f"{MD_TABLE_BORDER}|{R}{MD_TABLE_CONTENT}" + _pad_cell(text, w, al))
+                parts.append(f"    " + "".join(cell_parts) + f"{MD_TABLE_BORDER}|{R}")
         parts.append(border)
         _stdout_write("\n".join(parts) + "\n")
 
     def _render_table_chunked(self, rendered: List[List[str]],
                               cols: int, table_avail: int,
-                              col_overhead: int, min_col: int) -> None:
+                              col_overhead: int, min_col: int,
+                              alignments: Optional[List[str]] = None) -> None:
         """列数过多时按列分块输出，首列作为锚点重复。
 
         Args:
@@ -636,7 +676,10 @@ class StreamingRenderer:
             table_avail: 表格可用宽度
             col_overhead: 列的边框+内边距总开销
             min_col: 每列最小宽度
+            alignments: 各列对齐方式
         """
+        if alignments is None:
+            alignments = ["left"] * cols
         # 每列开销：3 (| + 两边空格)
         per_col_overhead = 3
         # 锚点列(第0列)固定占用
@@ -664,6 +707,9 @@ class StreamingRenderer:
                 sub_row = [row[c] if c < len(row) else "" for c in col_indices]
                 sub_rendered.append(sub_row)
 
+            # 子集对齐
+            sub_alignments = [alignments[c] if c < len(alignments) else "left" for c in col_indices]
+
             # 计算子表列宽
             sub_cols = len(col_indices)
             sub_widths = [0] * sub_cols
@@ -680,9 +726,9 @@ class StreamingRenderer:
                 avail_for_content = table_avail - sub_col_overhead
                 for i in range(sub_cols):
                     sub_widths[i] = min(sub_widths[i], max(min_col, avail_for_content // sub_cols))
-                self._render_table_block(sub_rendered, sub_widths, sub_cols, wrap=True)
+                self._render_table_block(sub_rendered, sub_widths, sub_cols, wrap=True, alignments=sub_alignments)
             else:
-                self._render_table_block(sub_rendered, sub_widths, sub_cols, wrap=False)
+                self._render_table_block(sub_rendered, sub_widths, sub_cols, wrap=False, alignments=sub_alignments)
 
             # 分块标签
             if total_chunks > 1:

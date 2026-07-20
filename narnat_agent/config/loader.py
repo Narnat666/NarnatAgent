@@ -108,24 +108,27 @@ class BalanceConfig:
 
 @dataclass(frozen=True)
 class UIConfig:
-    """UI配置（只读，原style.json内容）"""
-    max_output_tokens: int = 128000
+    """UI配置（只读）
+
+    raw: narnat.json 中 "界面" 分组的完整 dict，直接传给 apply_style()。
+    结构:
+      {
+        "colors":    {"accent": "#88C0D0", ...},
+        "markdown":  {"heading_h1": "bold accent", ...},
+        "codeblock": {"lang_cyan": "#00FFFF", ...},
+        "diff":      {"added": "success", ...},
+        "ui":        {"header": "accent", ...},
+        "cmd":       {"error": "error", ...},
+        "prompt":    {"symbol": "bold #00ff00", ...},
+        "show_cost": False,
+        "show_balance": False,
+        "max_output_tokens": 128000,
+      }
+    """
+    raw: Dict = field(default_factory=dict)
     show_cost: bool = False
     show_balance: bool = False
-    # 颜色配置（hex字符串）
-    colors: Dict[str, str] = field(default_factory=lambda: {
-        "用户输入色": "#FFFFFF",
-        "AI输出色": "#D8DEE9",
-        "标题色": "#5EEAD4",
-        "成功色": "#A3BE8C",
-        "行内代码色": "#EBCB8B",
-        "错误色": "#BF616A",
-        "链接色": "#81A1C1",
-        "装饰色": "#B48EAD",
-        "加载动画色": "#D08770",
-        "次要文字色": "#4C566A",
-        "代码块背景色": "#161821",
-    })
+    max_output_tokens: int = 128000
 
 
 @dataclass
@@ -274,24 +277,137 @@ def _build_ai_config(data: dict) -> AIConfig:
 
 
 def _build_ui_config(data: dict, max_output_tokens: int = 128000) -> UIConfig:
-    """从narnat.json的"界面"分组构建UIConfig"""
+    """从 narnat.json 的 "界面" 分组构建 UIConfig。
+
+    支持全中文 key（如 "颜色"."强调色"），内部自动转英文。
+    """
+
+    # ── 中英映射表（section 级别 + 每 section 内部 key 级别） ──
+    _SECTION_MAP = {
+        "颜色": "colors", "基础色": "base_colors",
+        "标注": "markdown", "标记": "markdown",
+        "代码块": "codeblock", "差异": "diff", "对比": "diff",
+        "框架": "ui", "命令": "cmd", "提示符": "prompt",
+    }
+    _KEY_MAPS = {
+        "colors": {
+            # 仅保留旧格式兼容项（如 "成功色""警告色" 在配方值中可能出现）
+            "成功色": "success", "警告色": "warning",
+            "错误色": "error", "链接色": "link",
+            "装饰色": "decoration", "强调": "emphasis",
+        },
+        "base_colors": {
+            "用户": "user", "主色": "primary", "次色": "secondary",
+            "强调色": "accent", "链接": "link", "链接色": "link",
+            "装饰": "decoration", "装饰色": "decoration",
+        },
+        "markdown": {
+            "标题1": "heading_h1", "标题3": "heading_h3", "标题4": "heading_h4",
+            "粗体": "bold", "斜体": "italic", "删除线": "strikethrough",
+            "行内代码": "code_inline", "链接": "link", "图片": "image",
+            "引用": "blockquote", "分隔线": "hr",
+            "无序列表": "list_unordered", "有序列表": "list_ordered",
+            "任务完成": "task_done", "任务未完成": "task_undone",
+            "表格边框": "table_border", "表格内容": "table_content",
+        },
+        "codeblock": {
+            "背景": "background",
+            "行号": "line_number", "语言标签": "lang_label",
+            "语言青": "lang_cyan", "语言黄": "lang_yellow", "语言绿": "lang_green",
+            "语言紫": "lang_magenta", "语言红": "lang_red",
+            "语言蓝": "lang_blue", "语言灰": "lang_gray",
+        },
+        "diff": {
+            "头部": "header", "范围": "range", "添加": "added",
+            "删除": "removed", "上下文": "context",
+        },
+        "ui": {
+            "标题": "header", "加载动画": "spinner",
+            "中断": "interrupted", "中断提示": "interrupted_hint",
+            "统计标签": "stats_label", "统计数值": "stats_value", "分隔": "separator",
+        },
+        "cmd": {
+            "成功": "success", "错误": "error", "提示": "hint",
+            "高亮": "highlight", "弱化": "muted",
+        },
+        "prompt": {
+            "符号": "symbol", "文字": "text", "自定义": "custom",
+        },
+    }
+
     ui = data.get("界面", {})
+    raw = dict(ui)
 
-    colors = {}
-    color_keys = [
-        "用户输入色", "AI输出色", "标题色", "成功色", "行内代码色",
-        "错误色", "链接色", "装饰色", "加载动画色", "次要文字色", "代码块背景色",
-    ]
-    for key in color_keys:
-        if key in ui:
-            colors[key] = ui[key]
+    # 1. 顶层开关字段（中英均可，提取后从 raw 清理）
+    show_cost = _pop_bool_any(raw, "show_cost", "显示费用")
+    show_balance = _pop_bool_any(raw, "show_balance", "显示余额")
+    max_tokens = _pop_int_any(raw, default=max_output_tokens, keys=("max_output_tokens", "最大输出token数"))
 
-    return UIConfig(
-        max_output_tokens=max_output_tokens,
-        show_cost=bool(ui.get("显示费用", False)),
-        show_balance=bool(ui.get("显示余额", False)),
-        colors=colors,
-    )
+    # 2. Section 名称中→英
+    for zh, en in _SECTION_MAP.items():
+        if zh in raw and en not in raw:
+            raw[en] = raw.pop(zh)
+
+    # 3. 每个 section 内部 key 中→英
+    for section, key_map in _KEY_MAPS.items():
+        if section not in raw:
+            continue
+        sec = raw[section]
+        if not isinstance(sec, dict):
+            continue
+        for zh, en in key_map.items():
+            if zh in sec:
+                sec[en] = sec.pop(zh)
+
+    # 4. 兼容旧中文 key（扁平旧格式 "用户输入色" 等）
+    _OLD_COLOR_MAP = {
+        "用户输入色": ("base_colors", "user"),
+        "AI输出色": ("base_colors", "primary"),
+        "标题色": ("base_colors", "accent"),
+        "成功色": ("base_colors", "success"),
+        "行内代码色": ("base_colors", "warning"),
+        "错误色": ("base_colors", "error"),
+        "链接色": ("base_colors", "link"),
+        "装饰色": ("base_colors", "decoration"),
+        "加载动画色": ("base_colors", "emphasis"),
+        "次要文字色": ("base_colors", "secondary"),
+        "代码块背景色": ("codeblock", "background"),
+    }
+    for old_key, (section, new_key) in _OLD_COLOR_MAP.items():
+        if old_key in raw:
+            raw.setdefault(section, {})[new_key] = raw.pop(old_key)
+
+    # 5. 配方值中的中文色名 → 英文（如 "bold 强调色" → "bold accent"）
+    _COLOR_ZH_EN = {}
+    _COLOR_ZH_EN.update(_KEY_MAPS.get("colors", {}))
+    _COLOR_ZH_EN.update(_KEY_MAPS.get("base_colors", {}))
+    if _COLOR_ZH_EN:
+        for section_name in ("colors", "markdown", "codeblock", "diff", "ui", "cmd", "prompt"):
+            sec = raw.get(section_name)
+            if not isinstance(sec, dict):
+                continue
+            for k, v in list(sec.items()):
+                if isinstance(v, str):
+                    for zh, en in _COLOR_ZH_EN.items():
+                        v = v.replace(zh, en)
+                    sec[k] = v
+
+    return UIConfig(raw=raw, show_cost=show_cost, show_balance=show_balance,
+                    max_output_tokens=max_tokens)
+
+
+def _pop_bool_any(d: dict, *keys) -> bool:
+    for k in keys:
+        if k in d:
+            return bool(d.pop(k))
+    return False
+
+
+def _pop_int_any(d: dict, *, keys: tuple = (), default: int = 0) -> int:
+    for k in keys:
+        if k in d:
+            return int(d.pop(k))
+    return default
 
 
 def _build_pricing_config(data: dict) -> PricingConfig:
@@ -392,7 +508,11 @@ def load_config(project_root: Optional[str] = None) -> Config:
                         },
                         "接口密钥组": {"websearch": "", "websearch_url": "https://api.anysearch.com/mcp"},
                         "定价": {"模型": {}},
-                        "界面": {},
+                        "界面": {
+                            "show_cost": False,
+                            "show_balance": False,
+                            "max_output_tokens": 128000
+                        },
                         "工具": {"输出上限KB": DEFAULT_MAX_TOOL_OUTPUT_KB},
                         "会话": {},
                         "压缩": {},

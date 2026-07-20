@@ -39,8 +39,12 @@ class Assembly:
         # 1. 配置
         config = load_config(project_root)
 
-        # 2. UI 样式
-        apply_style(config)
+        # 2. UI 样式（show_cost/show_balance/max_tokens 被 loader 弹出到 UIConfig 属性，
+        #   需补回 raw 中供 apply_style 读取）
+        config.ui.raw["show_cost"] = config.ui.show_cost
+        config.ui.raw["show_balance"] = config.ui.show_balance
+        config.ui.raw["max_output_tokens"] = config.ui.max_output_tokens
+        apply_style(config.ui.raw)
 
         # 3. 全局工具配置（过渡期保留全局 setter，Phase 5 消除）
         set_max_sessions(config.tools.max_sessions)
