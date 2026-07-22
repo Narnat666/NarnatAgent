@@ -75,8 +75,10 @@ def save_session(narnat_dir: str, name: str,
         "last_summarized_at": last_summarized_at if last_summarized_at is not None else existing.get("last_summarized_at"),
     }
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(_strip_surrogates(data), f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
         return ""
     except (OSError, UnicodeEncodeError) as e:
         return f"保存失败: {e}"
