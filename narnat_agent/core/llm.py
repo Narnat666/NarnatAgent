@@ -493,6 +493,8 @@ class _AnthropicBackend:
             content_buffer = []
             thinking_buffer = []  # 兜底：DeepSeek V4 有时只返回 thinking 不返回 text
             tool_use_blocks = {}
+            _msg_delta_seen = False  # 守卫：防止 message_delta 正常到达后兜底重复 yield
+            _start_usage = None     # message_start 中的初始 usage，兜底时补用
 
             line_queue = queue.Queue()
 
@@ -535,6 +537,18 @@ class _AnthropicBackend:
 
                 dtype = data.get("type", "")
 
+                if dtype == "message_start":
+                    # 捕获初始 usage，供 message_delta 缺失时兜底
+                    msg = data.get("message", {})
+                    usage = msg.get("usage", {})
+                    if usage:
+                        _start_usage = {
+                            "prompt_tokens": usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0),
+                            "completion_tokens": 0,
+                            "cached_tokens": usage.get("cache_read_input_tokens", 0),
+                        }
+                    continue
+
                 if dtype == "content_block_start":
                     cb = data.get("content_block", {})
                     idx = data.get("index", 0)
@@ -569,6 +583,7 @@ class _AnthropicBackend:
                             tool_use_blocks[idx]["input_json"] += pj
 
                 elif dtype == "message_delta":
+                    _msg_delta_seen = True
                     stop_reason = data.get("delta", {}).get("stop_reason") or "end_turn"
                     if stop_reason:
                         if stop_reason == "end_turn":
@@ -623,6 +638,50 @@ class _AnthropicBackend:
                     err_msg = data.get("error", {}).get("message", "未知错误")
                     yield {"content": f"错误: {err_msg}", "finish_reason": "error"}
                     return
+
+            # ── 兜底：流正常结束但未收到 message_delta（DeepSeek 偶发漏发）──
+            # 此时缓冲区可能已有完整内容，直接使用
+            if not _msg_delta_seen:
+                if _start_usage:
+                    yield {"usage": _start_usage}
+                if tool_use_blocks:
+                    completed_calls = []
+                    for idx in sorted(tool_use_blocks.keys()):
+                        tu = tool_use_blocks[idx]
+                        if tu["id"] and tu["name"]:
+                            completed_calls.append({
+                                "id": tu["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": tu["name"],
+                                    "arguments": tu["input_json"],
+                                },
+                            })
+                    if completed_calls:
+                        yield {"tool_calls": completed_calls, "finish_reason": "tool_calls"}
+                        if self._logger:
+                            self._logger.info(
+                                "core.llm",
+                                f"兜底: 未收到message_delta，从缓冲区提取{len(completed_calls)}个工具调用",
+                            )
+                elif not content_buffer and thinking_buffer:
+                    fallback_text = "".join(thinking_buffer)
+                    content_buffer.append(fallback_text)
+                    yield {"content": fallback_text}
+                    yield {"finish_reason": "stop"}
+                    if self._logger:
+                        self._logger.info(
+                            "core.llm",
+                            f"兜底: 未收到message_delta，将thinking({len(fallback_text)}字符)作为text输出",
+                        )
+                elif content_buffer:
+                    yield {"finish_reason": "stop"}
+                    if self._logger:
+                        self._logger.info(
+                            "core.llm",
+                            f"兜底: 未收到message_delta，但已有文字内容({len(''.join(content_buffer))}字符)",
+                        )
+
         finally:
             _active_llm_response = None
             resp.close()
