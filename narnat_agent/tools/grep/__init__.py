@@ -75,7 +75,7 @@ DEFINITION = {
                 },
                 "head_limit": {
                     "type": "integer",
-                    "description": "最大返回结果数（默认100）；files_with_matches/count按文件计数，content按行计数",
+                    "description": "最大返回结果数（正整数，默认100）；files_with_matches/count按文件计数，content按行计数",
                 },
             },
             "required": ["pattern"],
@@ -118,9 +118,8 @@ def execute(
         A = C
         B = C
 
-    # head_limit=0 合法：表示不返回任何结果
-    if head_limit is not None and head_limit == 0:
-        return "(无匹配)"
+    if head_limit is not None and head_limit <= 0:
+        return "[错误: head_limit需为正整数]"
 
     root = path or os.getcwd()
     if os.path.isfile(root):

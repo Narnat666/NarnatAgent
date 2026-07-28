@@ -19,6 +19,7 @@ from .defaults import (
     DEFAULT_GIT_SKIP, DEFAULT_RM_SKIP,
     DEFAULT_REQUIRE_PLAN, DEFAULT_MIN_TOOLS,
     DEFAULT_MAX_TOOL_OUTPUT_KB,
+    DEFAULT_MAX_TIMEOUT_SECONDS,
     DEFAULT_AUTO_SAVE,
 )
 
@@ -62,6 +63,7 @@ class ToolConfig:
     max_sessions: int = 5                              # SSH最大会话数
     max_transfer_mb: int = 100                          # 文件传输上限(MB)
     max_output_chars: int = DEFAULT_MAX_TOOL_OUTPUT_KB * 1024  # 工具输出上限(字符数)
+    max_timeout_seconds: int = DEFAULT_MAX_TIMEOUT_SECONDS     # 工具超时上限(秒)，0=不限制
     ignore_dirs: tuple = ()                             # 忽略目录（tuple保证不可变）
 
 
@@ -515,7 +517,7 @@ def load_config(project_root: Optional[str] = None) -> Config:
                             "show_balance": False,
                             "max_output_tokens": 128000
                         },
-                        "工具": {"输出上限KB": DEFAULT_MAX_TOOL_OUTPUT_KB},
+                        "工具": {"输出上限KB": DEFAULT_MAX_TOOL_OUTPUT_KB, "超时上限秒": DEFAULT_MAX_TIMEOUT_SECONDS},
                         "会话": {},
                         "压缩": {},
                         "计划": {},
@@ -575,6 +577,7 @@ def load_config(project_root: Optional[str] = None) -> Config:
             max_sessions=int(data.get("工具", {}).get("SSH最大会话数", 5)),
             max_transfer_mb=int(data.get("工具", {}).get("最大传输文件MB", 100)),
             max_output_chars=max_output_chars,
+            max_timeout_seconds=int(data.get("工具", {}).get("超时上限秒", DEFAULT_MAX_TIMEOUT_SECONDS)),
             ignore_dirs=tuple(data.get("忽略目录", list(_DEFAULT_IGNORE_DIRS))),
         ),
         safety=SafetyConfig(

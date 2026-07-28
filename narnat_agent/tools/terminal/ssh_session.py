@@ -44,7 +44,7 @@ _RE_PASSWORD_PROMPT = re.compile(
 def _truncate_output(text: str, max_chars: int) -> str:
     """截断输出到指定字符数，超出部分附加提示"""
     if max_chars <= 0:
-        return "(max_output_chars必须为正整数)"
+        return "[错误: max_output_chars需为正整数]"
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + f"\n...[已截断: 输出共{len(text)}字符, 当前显示前{max_chars}字符。增大max_output_chars可获取完整输出]"
@@ -108,7 +108,7 @@ class SSHSession:
             display_path = "~" + self._cwd[len(home_prefix):]
         return f"{self.username}@{self.host}:{display_path}$"
 
-    def execute(self, command: str, timeout: int = 0, max_output_chars: int = 2000) -> str:
+    def execute(self, command: str, timeout: int = 0, max_output_chars: int = 4000) -> str:
         """在远程shell中执行命令，返回输出+prompt
 
         纯管道原则: AI输入什么就发送什么，不做翻译/注入。
@@ -121,7 +121,7 @@ class SSHSession:
           >0  - 等待指定秒数，超时返回已收集输出+超时提示
           ≤0  - 等价于0（由上层校验保证不传，此处仅兜底）
         max_output_chars:
-          返回内容最大字符数，默认2000。设为0或负数表示不限制
+          返回内容最大字符数，正整数，默认4000
         """
         # 通道忙(上一个命令超时未完成)，直接告知AI
         if self._busy:
@@ -140,7 +140,7 @@ class SSHSession:
         result = self._read_until_marker(marker, pwd_marker, timeout=timeout)
         return _truncate_output(result, max_output_chars)
 
-    def send_input(self, text: str, timeout: int = 0, max_output_chars: int = 2000) -> str:
+    def send_input(self, text: str, timeout: int = 0, max_output_chars: int = 4000) -> str:
         """向当前终端发送交互输入（如sudo密码、确认提示等）
 
         直接通过channel写入文本+换行，然后读取直到下一个prompt。
@@ -149,7 +149,7 @@ class SSHSession:
         Args:
             text: 要输入的文本（如密码、y/n确认等）
             timeout: 等待响应的超时秒数，默认由上层传入120秒
-            max_output_chars: 返回内容最大字符数，默认2000。设为0或负数表示不限制
+            max_output_chars: 返回内容最大字符数，正整数，默认4000
         """
         if self._busy:
             return f"[上一个命令尚未完成，此终端暂不可用]\n{self.prompt}"

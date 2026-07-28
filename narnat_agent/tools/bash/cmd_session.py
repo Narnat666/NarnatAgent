@@ -21,7 +21,7 @@ from typing import Optional
 
 def _truncate_output(text: str, max_chars: int) -> str:
     if max_chars <= 0:
-        return text
+        return "[错误: max_output_chars需为正整数]"
     if len(text) <= max_chars:
         return text
     return (
@@ -129,7 +129,7 @@ class CmdSession:
     # ── 公开接口 ──
 
     def execute(
-        self, command: str, timeout: int = 120, max_output_chars: int = 2000
+        self, command: str, timeout: int = 120, max_output_chars: int = 4000
     ) -> str:
         if self._dead:
             return "错误: cmd.exe 会话已超时死亡，正在重建..."

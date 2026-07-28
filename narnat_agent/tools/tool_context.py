@@ -37,6 +37,9 @@ class ToolContext:
     # 工具输出全局硬上限（字符数），0=不限制。由配置"工具输出上限KB"驱动
     max_tool_output_chars: int = 65536
 
+    # 工具超时全局上限（秒），0=不限制。由配置"工具超时上限秒"驱动
+    max_timeout_seconds: int = 1800
+
     # 计划优先开关（由配置驱动）
     require_plan: bool = False       # True=强制AI先写TodoWrite再执行其他工具
     min_tools: int = 2               # 单轮工具调用数≥此值时才强制要求先写计划

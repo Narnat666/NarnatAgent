@@ -67,12 +67,12 @@ def _merge_cr_line(line: str) -> str:
 def _truncate_output(text: str, max_chars: int) -> str:
     """截断输出到指定字符数"""
     if max_chars <= 0:
-        return text
+        return "[错误: max_output_chars需为正整数]"
     if len(text) <= max_chars:
         return text
     return (
         text[:max_chars]
-        + f"\n...[已截断: 输出共{len(text)}字符, 当前显示前{max_chars}字符]"
+        + f"\n...[已截断: 输出共{len(text)}字符, 当前显示前{max_chars}字符。增大max_output_chars可获取完整输出]"
     )
 
 
@@ -166,8 +166,8 @@ class SerialSession:
             return "[上一个命令尚未完成，此串口暂不可用]"
         return None
 
-    def execute(self, command: str, timeout: int = 60,
-                max_output_chars: int = 2000) -> str:
+    def execute(self, command: str, timeout: int = 120,
+                max_output_chars: int = 4000) -> str:
         """发送命令，等待提示符或超时，返回输出"""
         err = self._ensure_ready()
         if err:
@@ -179,13 +179,13 @@ class SerialSession:
         finally:
             self._busy = False
 
-    def send_input(self, text: str, timeout: int = 60,
-                   max_output_chars: int = 2000) -> str:
+    def send_input(self, text: str, timeout: int = 120,
+                   max_output_chars: int = 4000) -> str:
         """发送交互输入（密码、y/n 等），等待提示符或超时——等同于 execute"""
         return self.execute(text, timeout, max_output_chars)
 
-    def raw_execute(self, command: str, timeout: int = 60,
-                    max_output_chars: int = 2000) -> str:
+    def raw_execute(self, command: str, timeout: int = 120,
+                    max_output_chars: int = 4000) -> str:
         """发送命令，纯超时返回，不做提示符检测。
 
         适用场景:

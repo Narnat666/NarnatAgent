@@ -12,8 +12,6 @@ from typing import Optional
 from . import get_session, SSHSession
 from ..diff_utils import colorize_diff
 
-MAX_OUTPUT_CHARS = 128 * 1024  # 128KB 总输出上限，与本地Read一致
-
 
 def _get_sftp(session: SSHSession):
     """从SSH会话获取SFTP客户端"""
@@ -49,27 +47,19 @@ def remote_read(file_path: str, offset: int = 0, limit: int = 2000,
 
     start = max(offset - 1, 0) if offset > 0 else 0
     if limit <= 0:
-        return "错误: limit必须>0"
+        return "[错误: limit需为正整数]"
     lines = lines[start:start + limit]
 
-    # 格式化输出，同时检查总字符数
+    # 格式化输出
     result = []
-    char_count = 0
-    truncated_by_size = False
     for i, line in enumerate(lines):
         line_num = start + i + 1
         text = line.rstrip("\n\r")
         formatted = f"  {line_num}→{text}"
-        char_count += len(formatted) + 1  # +1 for \n
-        if char_count > MAX_OUTPUT_CHARS:
-            truncated_by_size = True
-            break
         result.append(formatted)
 
-    # 截断提示（优先报字符数截断）
-    if truncated_by_size:
-        result.append(f"  ... [输出截断: 已达 {MAX_OUTPUT_CHARS // 1024}KB 上限。使用 offset/limit 参数可读取其余部分]")
-    elif len(lines) > 0 and start + len(lines) < total_lines:
+    # 截断提示
+    if start + limit < total_lines:
         result.append(f"  ... [截断: 文件共 {total_lines} 行，已显示 {len(lines)} 行。使用 offset/limit 参数可读取其余部分]")
 
     return "\n".join(result)

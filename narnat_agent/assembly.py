@@ -118,6 +118,7 @@ class Assembly:
             rm_skip_confirm=config.safety.rm_skip_confirm,
             max_transfer_mb=config.tools.max_transfer_mb,
             max_tool_output_chars=config.tools.max_output_chars,
+            max_timeout_seconds=config.tools.max_timeout_seconds,
             require_plan=config.plan.require_plan,
             min_tools=config.plan.min_tools,
         )

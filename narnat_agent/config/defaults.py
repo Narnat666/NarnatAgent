@@ -12,6 +12,9 @@ DEFAULT_RM_SKIP = False     # rm 命令默认不免确认（即需要二次确�
 # ── 工具输出全局上限（KB），0=不限制 ──
 DEFAULT_MAX_TOOL_OUTPUT_KB = 64
 
+# ── 工具超时全局上限（秒），0=不限制 ──
+DEFAULT_MAX_TIMEOUT_SECONDS = 1800
+
 # ── 计划优先默认值 ──
 DEFAULT_REQUIRE_PLAN = False  # 是否强制AI先制定计划再执行工具
 DEFAULT_MIN_TOOLS = 2         # 单轮工具调用数≥此值时才强制要求先写计划

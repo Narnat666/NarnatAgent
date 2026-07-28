@@ -64,9 +64,9 @@ DEFINITION = {
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "命令"},
-                "timeout": {"type": "integer", "description": "超时秒数（默认120，上限1800）"},
+                "timeout": {"type": "integer", "description": "超时秒数（正整数，默认120）"},
                 "run_in_background": {"type": "boolean", "description": "是否后台运行（默认否）"},
-                "max_output_chars": {"type": "integer", "description": "最大输出字符数（默认2000）"},
+                "max_output_chars": {"type": "integer", "description": "最大输出字符数（正整数，默认4000）"},
             },
             "required": ["command"],
         },
@@ -183,7 +183,7 @@ def _kill_proc_tree(proc: subprocess.Popen):
 def _truncate_output(text: str, max_chars: int) -> str:
     """截断输出到指定字符数，超出部分附加提示"""
     if max_chars <= 0:
-        return "(max_output_chars必须为正整数)"
+        return "[错误: max_output_chars需为正整数]"
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + f"\n...[已截断: 输出共{len(text)}字符, 当前显示前{max_chars}字符。增大max_output_chars可获取完整输出]"
@@ -208,7 +208,7 @@ def execute(
     command: str,
     timeout: int = 120,
     run_in_background: bool = False,
-    max_output_chars: int = 2000,
+    max_output_chars: int = 4000,
     _tool_context=None,
 ) -> str:
     """
@@ -221,7 +221,7 @@ def execute(
         command: shell命令
         timeout: 超时秒数
         run_in_background: 后台运行，立即返回
-        max_output_chars: 返回内容最大字符数，默认2000。设为0或负数表示不限制
+        max_output_chars: 返回内容最大字符数，正整数，默认4000
         _tool_context: 工具运行时上下文（内部参数，由registry注入）
 
     Returns:
@@ -253,9 +253,10 @@ def execute(
                 return "__AWAIT_CONFIRM__"
 
     if timeout <= 0:
-        return "错误: timeout必须为正整数（秒）。"
+        return "[错误: timeout需为正整数（秒）]"
 
-    timeout = min(timeout, 1800)
+    if _tool_context and _tool_context.max_timeout_seconds > 0:
+        timeout = min(timeout, _tool_context.max_timeout_seconds)
 
     # ── 后台运行：始终走独立子进程 ──
     if run_in_background:
@@ -414,7 +415,6 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
     """Windows: shell=True 起子进程。cmd 交互式解析（引号按用户预期处理），
     stdin 继承控制台（避免 eza 等工具因管道 stdin 阻塞）。"""
     global _interrupted
-    timeout = min(timeout, 1800)
     try:
         proc = subprocess.Popen(
             command,
@@ -569,7 +569,7 @@ def _execute_segments(segments: list, timeout: int, run_in_background: bool,
     3. cd 命令作用到 os.chdir() 而非子进程
     后台模式：重组为单行 cmd /c 调用，委托 _run_background。
     """
-    timeout_sec = min(timeout, 1800)
+    timeout_sec = timeout
     if run_in_background:
         reassembled = " ".join(f"{op} {seg}" if op else seg for op, seg in segments)
         return _run_background(reassembled, reassembled)

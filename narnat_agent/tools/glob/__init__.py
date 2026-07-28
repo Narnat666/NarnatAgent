@@ -21,7 +21,7 @@ _DEFAULT_IGNORE_DIRS: set[str] = {
     ".cache", ".idea", ".vscode", ".tox", ".nox",
 }
 _MAX_BRACE_EXPANSIONS = 100
-_MAX_HARD_LIMIT = 10_000
+_MAX_HARD_LIMIT = 50_000
 
 
 # ── 花括号展开 ────────────────────────────────────────────────
@@ -381,7 +381,7 @@ DEFINITION = {
             "properties": {
                 "pattern": {"type": "string", "description": "Glob模式"},
                 "path": {"type": "string", "description": "搜索目录（默认当前目录）"},
-                "max_results": {"type": "integer", "description": "最大结果数（默认500）"},
+                "max_results": {"type": "integer", "description": "最大结果数（正整数，默认500）"},
             },
             "required": ["pattern"],
         },
@@ -395,7 +395,7 @@ def execute(pattern: str, path: str = "", max_results: int = 500, _tool_context=
         return f"错误: 目录不存在: {root}"
 
     if max_results <= 0:
-        return "(max_results必须为正整数)"
+        return "[错误: max_results需为正整数]"
 
     # 硬上限防止 OOM（对齐 fd 设计）
     max_results = min(max_results, _MAX_HARD_LIMIT)

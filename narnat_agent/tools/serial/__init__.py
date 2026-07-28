@@ -97,7 +97,7 @@ DEFINITION = {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "超时秒数，默认60",
+                    "description": "超时秒数（正整数，默认120）",
                 },
                 "session_id": {
                     "type": "integer",
@@ -105,7 +105,7 @@ DEFINITION = {
                 },
                 "max_output_chars": {
                     "type": "integer",
-                    "description": "最大输出字符数，默认2000",
+                    "description": "最大输出字符数（正整数，默认4000）",
                 },
             },
             "required": [],
@@ -139,9 +139,9 @@ def execute(
     prompt_pattern: str = "",
     command: str = "",
     input: str = "",  # 参数名 "input" 与 DEFINITION 对齐，不可改名（LLM 通过 **arguments 传参）
-    timeout: int = 60,
+    timeout: int = 120,
     session_id: int = -1,
-    max_output_chars: int = 2000,
+    max_output_chars: int = 4000,
     _tool_context=None,
 ) -> str:
     """
@@ -301,13 +301,16 @@ def _check_delete_safety(command: str, session_id: int, timeout: int,
     return AWAIT_CONFIRM
 
 
-def _exec(session_id: int, command: str, timeout: int = 60,
-          max_output_chars: int = 2000, _tool_context=None) -> str:
+def _exec(session_id: int, command: str, timeout: int = 120,
+          max_output_chars: int = 4000, _tool_context=None) -> str:
     """在指定会话中发送命令"""
     if not command:
         return "错误: exec 需要提供 command"
     if timeout <= 0:
-        return "错误: timeout 必须为正整数（秒）"
+        return "[错误: timeout 需为正整数（秒）]"
+
+    if _tool_context and _tool_context.max_timeout_seconds > 0:
+        timeout = min(timeout, _tool_context.max_timeout_seconds)
 
     blocked = _check_delete_safety(command, session_id, timeout,
                                    max_output_chars, "exec", _tool_context)
@@ -337,8 +340,8 @@ def _exec(session_id: int, command: str, timeout: int = 60,
         return f"错误: 终端{sid}命令执行失败: {e}"
 
 
-def _raw_exec(session_id: int, command: str, timeout: int = 60,
-              max_output_chars: int = 2000, _tool_context=None) -> str:
+def _raw_exec(session_id: int, command: str, timeout: int = 120,
+              max_output_chars: int = 4000, _tool_context=None) -> str:
     """在指定会话中发送命令，纯超时返回，不检测提示符。
 
     适用场景:
@@ -348,7 +351,10 @@ def _raw_exec(session_id: int, command: str, timeout: int = 60,
     if not command:
         return "错误: raw_exec 需要提供 command"
     if timeout <= 0:
-        return "错误: timeout 必须为正整数（秒）"
+        return "[错误: timeout 需为正整数（秒）]"
+
+    if _tool_context and _tool_context.max_timeout_seconds > 0:
+        timeout = min(timeout, _tool_context.max_timeout_seconds)
 
     # 安全检查（与 _exec 保持一致）
     blocked = _check_delete_safety(command, session_id, timeout,
@@ -379,13 +385,16 @@ def _raw_exec(session_id: int, command: str, timeout: int = 60,
         return f"错误: 终端{sid}命令执行失败: {e}"
 
 
-def _input(session_id: int, text: str, timeout: int = 60,
-           max_output_chars: int = 2000, _tool_context=None) -> str:
+def _input(session_id: int, text: str, timeout: int = 120,
+           max_output_chars: int = 4000, _tool_context=None) -> str:
     """向串口发送交互输入"""
     if not text:
         return "错误: input 需要提供 input 内容"
     if timeout <= 0:
-        return "错误: timeout 必须为正整数（秒）"
+        return "[错误: timeout 需为正整数（秒）]"
+
+    if _tool_context and _tool_context.max_timeout_seconds > 0:
+        timeout = min(timeout, _tool_context.max_timeout_seconds)
 
     blocked = _check_delete_safety(text, session_id, timeout,
                                    max_output_chars, "input", _tool_context)

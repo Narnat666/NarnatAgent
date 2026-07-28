@@ -28,7 +28,7 @@ DEFINITION = {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "搜索查询词"},
-                "num": {"type": "integer", "description": "返回结果数量（默认5）"},
+                "num": {"type": "integer", "description": "返回结果数量（正整数，默认5）"},
             },
             "required": ["query"],
         },
@@ -136,6 +136,8 @@ def execute(query: str, num: int = 5, _tool_context=None) -> str:
     Returns:
         格式化的搜索结果，每条含标题、URL、描述
     """
+    if num <= 0:
+        return "[错误: num需为正整数]"
     # 从tool_context注入API Key和URL
     global _ANYSEARCH_API_KEY, _ANYSEARCH_URL
     if _tool_context and _tool_context.api_keys:
