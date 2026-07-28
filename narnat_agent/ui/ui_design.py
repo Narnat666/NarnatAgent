@@ -11,12 +11,14 @@ narnat UI - 简洁输入交互界面
   ui_design.py        ── UIInterface 总接口 + UIStreamSession
 """
 
+import os
 import sys
 import threading
 import time
 from typing import Optional
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import ANSI
@@ -247,9 +249,10 @@ class UIInterface:
     """UI 总接口，后端只和此类交互"""
 
     def __init__(self, model_name: str = "narnat",
-                 session_manager=None) -> None:
+                 session_manager=None, data_dir: str = "") -> None:
         self._model = model_name
         self._mgr = session_manager
+        self._data_dir = data_dir
         self._session: Optional[PromptSession] = None
         self._compress_stop: Optional[threading.Event] = None
         self._compress_thread: Optional[threading.Thread] = None
@@ -259,7 +262,7 @@ class UIInterface:
     def start(self) -> None:
         _interrupt_ctrl.enter_input_mode()
         show_header(self._model)
-        self._session = _create_session(self._mgr)
+        self._session = _create_session(self._mgr, self._data_dir)
 
     def read_input(self) -> Optional[str]:
         if self._session is None:
@@ -269,7 +272,7 @@ class UIInterface:
         _interrupt_ctrl.enter_input_mode()
         line = read_input(self._session)
         if line is None:
-            self._session = _create_session(self._mgr)
+            self._session = _create_session(self._mgr, self._data_dir)
         return line
 
     def read_input_with_prompt(self, prompt_text: str) -> Optional[str]:
@@ -281,7 +284,7 @@ class UIInterface:
         _interrupt_ctrl.enter_input_mode()
         line = read_input_with_prompt(self._session, prompt_text)
         if line is None:
-            self._session = _create_session(self._mgr)
+            self._session = _create_session(self._mgr, self._data_dir)
         return line
 
     def dispatch_command(self, cmd: str, args: str) -> CommandResult:
@@ -295,7 +298,7 @@ class UIInterface:
 
     def on_interrupted(self) -> None:
         _interrupt_ctrl.enter_input_mode()
-        self._session = _create_session(self._mgr)
+        self._session = _create_session(self._mgr, self._data_dir)
 
     def begin_compressing(self) -> None:
         self._compress_stop = threading.Event()
@@ -365,12 +368,17 @@ def _get_prompt_style() -> Style:
     })
 
 
-def _create_session(session_manager) -> PromptSession:
+def _create_session(session_manager, data_dir: str = "") -> PromptSession:
+    if data_dir:
+        history_path = os.path.join(data_dir, ".narnat_history")
+    else:
+        history_path = os.path.join(os.path.expanduser("~"), ".narnat_history")
     return PromptSession(
         style=_get_prompt_style(),
         multiline=True,
         completer=_CommandCompleter(session_manager),
-        key_bindings=_make_keybindings())
+        key_bindings=_make_keybindings(),
+        history=FileHistory(history_path))
 
 
 def read_input(session: PromptSession) -> Optional[str]:

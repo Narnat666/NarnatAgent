@@ -102,7 +102,7 @@ class Assembly:
         )
 
         # 11. UI
-        ui = UIInterface(config.ai.model, session_mgr)
+        ui = UIInterface(config.ai.model, session_mgr, config.paths.data_dir)
 
         # 补充 session_mgr 的 UI 回调（需要 ui 先创建）
         session_mgr.summary_anim_start = lambda: ui.begin_summarizing()
