@@ -57,7 +57,7 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
         return result
         
     if not os.path.isfile(file_path):
-        return f"错误: 文件不存在: {file_path}"
+        return f"[错误: 文件不存在: {file_path}]"
 
     # 统一转为绝对路径，供 _tool_context 标记和校验
     abs_path = os.path.abspath(file_path)
@@ -96,9 +96,9 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
                     truncated_by_limit = True
 
     except PermissionError:
-        return f"错误: 权限不足: {file_path}"
+        return f"[错误: 权限不足: {file_path}]"
     except OSError as e:
-        return f"错误: 读取失败: {e}"
+        return f"[错误: 读取失败: {e}]"
 
     # 截断提示
     if truncated_by_limit:

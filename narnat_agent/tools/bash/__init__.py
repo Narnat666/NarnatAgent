@@ -238,7 +238,7 @@ def execute(
     if need_confirm:
         if sys.platform == "win32":
             if tc and tc.confirm_callback and not tc.confirm_callback(command):
-                return "操作已取消: 此命令需用户确认"
+                return "[操作已取消: 此命令需用户确认]"
         else:
             if tc and tc._delete_confirmed:
                 tc._delete_confirmed = False
@@ -265,7 +265,7 @@ def execute(
         else:
             shell = _find_executable("bash", "sh")
             if shell is None:
-                return "错误: 未找到shell，请安装bash或sh后重试"
+                return "[错误: 未找到shell，请安装bash或sh后重试]"
             return _run_background([shell, "-c", command], command)
 
     # ═════════════════════════════════════════════════════════════
@@ -298,7 +298,7 @@ def execute(
     # ═════════════════════════════════════════════════════════════
     shell = _find_executable("bash", "sh")
     if shell is None:
-        return "错误: 未找到shell，请安装bash或sh后重试"
+        return "[错误: 未找到shell，请安装bash或sh后重试]"
 
     # 多段命令(&&/||)由Python端拆分后逐段执行
     segments = _split_commands(command)
@@ -319,9 +319,9 @@ def execute(
             start_new_session=True,
         )
     except FileNotFoundError as e:
-        return f"错误: Shell未找到: {e}"
+        return f"[错误: Shell未找到: {e}]"
     except OSError as e:
-        return f"错误: 启动失败: {e}"
+        return f"[错误: 启动失败: {e}]"
 
     with _active_proc_lock:
         global _active_proc
@@ -424,9 +424,9 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
             cwd=os.getcwd(),
         )
     except FileNotFoundError as e:
-        return f"错误: cmd.exe未找到: {e}"
+        return f"[错误: cmd.exe未找到: {e}]"
     except OSError as e:
-        return f"错误: 启动失败: {e}"
+        return f"[错误: 启动失败: {e}]"
 
     with _active_proc_lock:
         global _active_proc
@@ -535,9 +535,9 @@ def _run_background(shell_cmd, original_command: str) -> str:
                 cwd=os.getcwd(),
             )
     except FileNotFoundError as e:
-        return f"错误: Shell未找到: {e}"
+        return f"[错误: Shell未找到: {e}]"
     except OSError as e:
-        return f"错误: 启动失败: {e}"
+        return f"[错误: 启动失败: {e}]"
 
     pid = proc.pid
     start_time = time.time()
@@ -617,7 +617,7 @@ def _execute_segments(segments: list, timeout: int, run_in_background: bool,
                 start_new_session=True,
             )
         except OSError as e:
-            all_parts.append(f"错误: 段{i}启动失败: {e}")
+            all_parts.append(f"[错误: 段{i}启动失败: {e}]")
             prev_rc = -1
             break
 
@@ -703,7 +703,7 @@ def _execute_segments(segments: list, timeout: int, run_in_background: bool,
 def get_background_status() -> str:
     """查询所有后台进程状态（内部接口）"""
     if not _background_procs:
-        return "(无后台进程)"
+        return "[无后台进程]"
 
     lines = []
     now = time.time()

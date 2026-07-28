@@ -171,7 +171,7 @@ def execute(
     elif action == "close":
         return _close(session_id)
     else:
-        return f"错误: 未知action '{action}'，可选: scan/connect/exec/raw_exec/input/status/close"
+        return f"[错误: 未知action '{action}'，可选: scan/connect/exec/raw_exec/input/status/close]"
 
 
 # ── 内部实现 ──
@@ -182,11 +182,11 @@ def _scan() -> str:
         from serial.tools.list_ports import comports
         ports = list(comports())
     except ImportError:
-        return "错误: 无法导入 pyserial，请确认已安装"
+        return "[错误: 无法导入 pyserial，请确认已安装]"
     except Exception as e:
-        return f"错误: 扫描串口失败: {e}"
+        return f"[错误: 扫描串口失败: {e}]"
     if not ports:
-        return "(未检测到串口设备)"
+        return "[未检测到串口设备]"
 
     lines = ["可用串口:"]
     for i, p in enumerate(ports):
@@ -207,7 +207,7 @@ def _connect(port: str, baudrate: int = 115200, databits: int = 8,
              session_id: int = -1) -> str:
     """打开串口连接"""
     if not port:
-        return "错误: connect 需要提供 port（串口设备名）"
+        return "[错误: connect 需要提供 port（串口设备名）]"
 
     # 规范化 line_ending（LLM 可能传 "\\n" 转义字符串）
     _LE_ESCAPED = {"\\n": "\n", "\\r\\n": "\r\n", "\\r": "\r"}
@@ -226,16 +226,16 @@ def _connect(port: str, baudrate: int = 115200, databits: int = 8,
                 continue
             existing_port = s.port.upper() if sys.platform == "win32" else s.port
             if existing_port == port_key and s.is_alive:
-                return f"错误: {port} 已被终端{sid}占用，请先 close 终端{sid}"
+                return f"[错误: {port} 已被终端{sid}占用，请先 close 终端{sid}]"
 
 
         if session_id >= 0:
             if session_id >= MAX_SESSIONS:
-                return f"错误: session_id 范围 0-{MAX_SESSIONS - 1}"
+                return f"[错误: session_id 范围 0-{MAX_SESSIONS - 1}]"
             if session_id in _sessions:
                 old = _sessions[session_id]
                 if old is not None and old.is_alive:
-                    return f"串口终端{session_id}已连接: {old.prompt_info}"
+                    return f"[串口终端{session_id}已连接: {old.prompt_info}]"
                 else:
                     if old is not None:
                         old.close()
@@ -245,7 +245,7 @@ def _connect(port: str, baudrate: int = 115200, databits: int = 8,
             alloc_id = _allocate_session_id()
             if alloc_id < 0:
                 active = list(_sessions.keys())
-                return f"错误: 已达最大会话数({MAX_SESSIONS})，当前终端: {active}，请先 close 释放"
+                return f"[错误: 已达最大会话数({MAX_SESSIONS})，当前终端: {active}，请先 close 释放]"
 
         # 预留 slot（置 None），防止锁外构造期间其他线程抢占同一 alloc_id
         _sessions[alloc_id] = None
@@ -262,13 +262,13 @@ def _connect(port: str, baudrate: int = 115200, databits: int = 8,
         with _sessions_lock:
             if _sessions.get(alloc_id) is None:
                 del _sessions[alloc_id]
-        return f"错误: 无法打开串口 {port}: {e}"
+        return f"[错误: 无法打开串口 {port}: {e}]"
 
     # ── 阶段3: 锁内存储正式 session ──
     with _sessions_lock:
         _sessions[alloc_id] = session
 
-    parts = [f"已连接终端{alloc_id}: {session.prompt_info}"]
+    parts = [f"[已连接终端{alloc_id}: {session.prompt_info}]"]
     if session.initial_output:
         parts.append(session.initial_output)
     return "\n".join(parts)
@@ -283,7 +283,7 @@ def _check_delete_safety(command: str, session_id: int, timeout: int,
 
     if sys.platform == "win32":
         if _tool_context.confirm_callback and not _tool_context.confirm_callback(command):
-            return "操作已取消: 此命令需用户确认"
+            return "[操作已取消: 此命令需用户确认]"
         return None
 
     # Linux/macOS: 终端被 prompt_toolkit 占用，无法在子线程读取输入
@@ -305,7 +305,7 @@ def _exec(session_id: int, command: str, timeout: int = 120,
           max_output_chars: int = 4000, _tool_context=None) -> str:
     """在指定会话中发送命令"""
     if not command:
-        return "错误: exec 需要提供 command"
+        return "[错误: exec 需要提供 command]"
     if timeout <= 0:
         return "[错误: timeout 需为正整数（秒）]"
 
@@ -320,12 +320,12 @@ def _exec(session_id: int, command: str, timeout: int = 120,
     try:
         sid, session = _resolve_session_id(session_id)
     except ValueError as e:
-        return f"错误: {e}"
+        return f"[错误: {e}]"
 
     if not session.is_alive:
         with _sessions_lock:
             _sessions.pop(sid, None)
-        return f"错误: 终端{sid}串口已断开，请重新 connect"
+        return f"[错误: 终端{sid}串口已断开，请重新 connect]"
 
     try:
         with _active_exec_lock:
@@ -337,7 +337,7 @@ def _exec(session_id: int, command: str, timeout: int = 120,
                 _active_exec_sids.discard(sid)
         return f"[终端{sid}] {result}"
     except Exception as e:
-        return f"错误: 终端{sid}命令执行失败: {e}"
+        return f"[错误: 终端{sid}命令执行失败: {e}]"
 
 
 def _raw_exec(session_id: int, command: str, timeout: int = 120,
@@ -349,7 +349,7 @@ def _raw_exec(session_id: int, command: str, timeout: int = 120,
     - 输出中含大量提示符字符导致 exec 误判
     """
     if not command:
-        return "错误: raw_exec 需要提供 command"
+        return "[错误: raw_exec 需要提供 command]"
     if timeout <= 0:
         return "[错误: timeout 需为正整数（秒）]"
 
@@ -365,12 +365,12 @@ def _raw_exec(session_id: int, command: str, timeout: int = 120,
     try:
         sid, session = _resolve_session_id(session_id)
     except ValueError as e:
-        return f"错误: {e}"
+        return f"[错误: {e}]"
 
     if not session.is_alive:
         with _sessions_lock:
             _sessions.pop(sid, None)
-        return f"错误: 终端{sid}串口已断开，请重新 connect"
+        return f"[错误: 终端{sid}串口已断开，请重新 connect]"
 
     try:
         with _active_exec_lock:
@@ -382,14 +382,14 @@ def _raw_exec(session_id: int, command: str, timeout: int = 120,
                 _active_exec_sids.discard(sid)
         return f"[终端{sid}] {result}"
     except Exception as e:
-        return f"错误: 终端{sid}命令执行失败: {e}"
+        return f"[错误: 终端{sid}命令执行失败: {e}]"
 
 
 def _input(session_id: int, text: str, timeout: int = 120,
            max_output_chars: int = 4000, _tool_context=None) -> str:
     """向串口发送交互输入"""
     if not text:
-        return "错误: input 需要提供 input 内容"
+        return "[错误: input 需要提供 input 内容]"
     if timeout <= 0:
         return "[错误: timeout 需为正整数（秒）]"
 
@@ -404,12 +404,12 @@ def _input(session_id: int, text: str, timeout: int = 120,
     try:
         sid, session = _resolve_session_id(session_id)
     except ValueError as e:
-        return f"错误: {e}"
+        return f"[错误: {e}]"
 
     if not session.is_alive:
         with _sessions_lock:
             _sessions.pop(sid, None)
-        return f"错误: 终端{sid}串口已断开，请重新 connect"
+        return f"[错误: 终端{sid}串口已断开，请重新 connect]"
 
     try:
         with _active_exec_lock:
@@ -421,28 +421,28 @@ def _input(session_id: int, text: str, timeout: int = 120,
                 _active_exec_sids.discard(sid)
         return f"[终端{sid}] {result}"
     except Exception as e:
-        return f"错误: 终端{sid}输入发送失败: {e}"
+        return f"[错误: 终端{sid}输入发送失败: {e}]"
 
 
 def _status() -> str:
     """查看所有会话状态"""
     with _sessions_lock:
         if not _sessions:
-            return f"(无活跃串口会话，最多支持{MAX_SESSIONS}个并发终端)"
+            return f"[无活跃串口会话，最多支持{MAX_SESSIONS}个并发终端]"
 
         lines = []
         for sid in sorted(_sessions.keys()):
             session = _sessions[sid]
             if session is None:
-                lines.append(f"  终端{sid}: (连接中...)")
+                lines.append(f"  终端{sid}: [连接中...]")
                 continue
             alive = "活跃" if session.is_alive else "已断开"
             busy = "忙" if session.busy else "闲"
             lines.append(f"  终端{sid}: {session.prompt_info} [{alive}|{busy}]")
         free = MAX_SESSIONS - len(_sessions)
         if free > 0:
-            lines.append(f"  ({free}个空闲)")
-        return "串口会话:\n" + "\n".join(lines)
+            lines.append(f"  [{free}个空闲]")
+        return "[串口会话]\n" + "\n".join(lines)
 
 
 def _close(session_id: int) -> str:
@@ -456,21 +456,21 @@ def _close(session_id: int) -> str:
             _sessions.clear()
             with _active_exec_lock:
                 _active_exec_sids.clear()
-            return f"已关闭{count}个串口会话"
+            return f"[已关闭{count}个串口会话]"
 
         if session_id not in _sessions:
-            return f"终端{session_id}未连接"
+            return f"[终端{session_id}未连接]"
 
         session = _sessions[session_id]
         if session is None:
             del _sessions[session_id]
-            return f"终端{session_id}连接中，已取消"
+            return f"[终端{session_id}连接中，已取消]"
 
         session.close()
         del _sessions[session_id]
         with _active_exec_lock:
             _active_exec_sids.discard(session_id)
-        return f"已关闭终端{session_id}"
+        return f"[已关闭终端{session_id}]"
 
 
 def cleanup():

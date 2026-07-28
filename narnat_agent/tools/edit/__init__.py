@@ -80,31 +80,31 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
                           line_start, line_end, host)
 
     if not os.path.isfile(file_path):
-        return (f"错误: 文件不存在: {file_path}，如需创建请用Write工具", "")
+        return (f"[错误: 文件不存在: {file_path}，如需创建请用Write工具]", "")
 
     abs_path = os.path.abspath(file_path)
     if _tool_context and not _tool_context.is_read(abs_path):
-        return (f"错误: 编辑前必须先Read该文件: {file_path}", "")
+        return (f"[错误: 编辑前必须先Read该文件: {file_path}]", "")
 
     try:
         with open(file_path, "r", encoding="utf-8-sig", newline='') as f:
             content = f.read()
     except PermissionError:
-        return (f"错误: 权限不足: {file_path}", "")
+        return (f"[错误: 权限不足: {file_path}]", "")
     except OSError as e:
-        return (f"错误: 读取失败: {e}", "")
+        return (f"[错误: 读取失败: {e}]", "")
 
     # ── 参数互斥检查 ──
     has_line_mode = line_start > 0
     has_string_mode = bool(old_string)
 
     if has_line_mode and has_string_mode:
-        return ("错误: line_start 和 old_string 不能同时使用，请选择一种模式:\n"
+        return ("[错误: line_start 和 old_string 不能同时使用，请选择一种模式:\n"
                 "  - 行号模式: line_start + new_string\n"
                 "  - 字符串模式: old_string + new_string", "")
 
     if has_line_mode and replace_all:
-        return ("错误: replace_all 仅用于字符串模式，行号模式不支持", "")
+        return ("[错误: replace_all 仅用于字符串模式，行号模式不支持]", "")
 
     # ── 行号模式 ──
     if has_line_mode:
@@ -118,7 +118,7 @@ def _edit_by_string(content: str, old_string: str, new_string: str,
                     _tool_context=None) -> tuple:
     """字符串精确替换，自动兼容换行符"""
     if not old_string:
-        return ("错误: old_string不能为空（或使用line_start行号模式）", "")
+        return ("[错误: old_string不能为空（或使用line_start行号模式）]", "")
 
     # 检测文件换行符风格，转换 old_string/new_string 以匹配
     has_crlf = '\r\n' in content
@@ -133,10 +133,10 @@ def _edit_by_string(content: str, old_string: str, new_string: str,
     count = content.count(old_string_normalized)
     if count == 0:
         hint = _find_similar(content, old_string)
-        return (f"错误: 未找到匹配文本。请先Read确认文件内容。\n{hint}", "")
+        return (f"[错误: 未找到匹配文本。请先Read确认文件内容。]\n{hint}", "")
 
     if count > 1 and not replace_all:
-        return (f"错误: 找到{count}处匹配，old_string不唯一。请扩大上下文使其唯一，或设置replace_all=True", "")
+        return (f"[错误: 找到{count}处匹配，old_string不唯一。请扩大上下文使其唯一，或设置replace_all=True]", "")
 
     if replace_all:
         new_content = content.replace(old_string_normalized, new_string_normalized)
@@ -160,13 +160,13 @@ def _edit_by_lines(content: str, file_path: str,
 
     # 边界检查
     if total == 0:
-        return ("错误: 文件为空，无法按行号编辑", "")
+        return ("[错误: 文件为空，无法按行号编辑]", "")
     if line_start < 1 or line_start > total:
-        return (f"错误: line_start={line_start} 超出范围（1-{total}）", "")
+        return (f"[错误: line_start={line_start} 超出范围（1-{total}）]", "")
     if line_end < line_start:
-        return (f"错误: line_end={line_end} < line_start={line_start}", "")
+        return (f"[错误: line_end={line_end} < line_start={line_start}]", "")
     if line_end > total:
-        return (f"错误: line_end={line_end} 超出范围（1-{total}）", "")
+        return (f"[错误: line_end={line_end} 超出范围（1-{total}）]", "")
 
     # 构造新内容：按文件换行符风格归一化 new_string
     line_ending = _detect_line_ending(content)
@@ -210,16 +210,16 @@ def _write_and_diff(old_content: str, new_content: str, file_path: str,
         with open(file_path, "w", encoding="utf-8", newline='') as f:
             f.write(new_content)
     except OSError as e:
-        return (f"错误: 写入失败: {e}", "")
+        return (f"[错误: 写入失败: {e}]", "")
 
     if _tool_context:
         _tool_context.mark_read(file_path)
 
     diff = _make_diff(old_content, new_content, file_path)
     if range_desc:
-        llm_result = f"已替换{range_desc}（{count}行）\n{diff}"
+        llm_result = f"[已替换{range_desc}（{count}行）]\n{diff}"
     else:
-        llm_result = f"已替换{count}处\n{diff}"
+        llm_result = f"[已替换{count}处]\n{diff}"
 
     color_diff = _make_color_diff(diff)
     return (llm_result, color_diff)
@@ -260,7 +260,7 @@ def _make_diff(old_content: str, new_content: str, file_path: str) -> str:
         lineterm="",
     )
     result = "\n".join(diff)
-    return result if result else "(无差异)"
+    return result if result else "[无差异]"
 
 
 def _make_color_diff(diff_text: str) -> str:

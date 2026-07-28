@@ -392,7 +392,7 @@ DEFINITION = {
 def execute(pattern: str, path: str = "", max_results: int = 500, _tool_context=None) -> str:
     root = path or os.getcwd()
     if not os.path.isdir(root):
-        return f"错误: 目录不存在: {root}"
+        return f"[错误: 目录不存在: {root}]"
 
     if max_results <= 0:
         return "[错误: max_results需为正整数]"
@@ -423,7 +423,7 @@ def execute(pattern: str, path: str = "", max_results: int = 500, _tool_context=
     results, total = _collect(root, regexes, ignore_dirs, max_results, skip_hidden_files)
 
     if not results:
-        return "(无匹配)"
+        return "[无匹配]"
 
     output = "\n".join(m[0] for m in results)
 

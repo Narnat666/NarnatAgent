@@ -161,7 +161,7 @@ class SerialSession:
         """检查会话是否可用，返回错误信息或 None"""
         if self._dead or not self._ser.is_open:
             self._dead = True
-            return f"错误: 串口 {self.port} 已断开"
+            return f"[错误: 串口 {self.port} 已断开]"
         if self._busy:
             return "[上一个命令尚未完成，此串口暂不可用]"
         return None
@@ -308,7 +308,7 @@ class SerialSession:
             self._ser.flush()
         except serial.SerialException as e:
             self._dead = True
-            return f"错误: 串口写入失败: {e}"
+            return f"[错误: 串口写入失败: {e}]"
 
         # 等待提示符或超时
         output, found = self._wait_for_prompt(timeout)
@@ -340,7 +340,7 @@ class SerialSession:
             self._ser.flush()
         except serial.SerialException as e:
             self._dead = True
-            return f"错误: 串口写入失败: {e}"
+            return f"[错误: 串口写入失败: {e}]"
 
         # 纯超时等待
         start = time.time()

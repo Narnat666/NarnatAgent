@@ -52,7 +52,7 @@ def execute(file_path: str, content: str,
     # 覆写已有文件前检查是否Read过
     if os.path.isfile(abs_path):
         if _tool_context and not _tool_context.is_read(abs_path):
-            return ((f"错误: 覆写已有文件前必须先Read确认当前内容。"
+            return ((f"[错误: 覆写已有文件前必须先Read确认当前内容。"
                      f"请先Read {file_path}，再决定用Edit还是Write。"), "")
 
     # 自动创建父目录
@@ -77,15 +77,15 @@ def execute(file_path: str, content: str,
         with open(abs_path, "w", encoding="utf-8", newline='') as f:
             f.write(content)
     except OSError as e:
-        return (f"错误: 写入失败: {e}", "")
+        return (f"[错误: 写入失败: {e}]", "")
 
     byte_count = len(content.encode("utf-8"))
     if _tool_context:
         _tool_context.mark_read(abs_path)
 
     if diff:
-        return (f"已写入: {file_path} ({byte_count}字节)\n{diff}", color_diff)
-    return (f"已写入: {file_path} ({byte_count}字节)", color_diff)
+        return (f"[已写入: {file_path} ({byte_count}字节)]\n{diff}", color_diff)
+    return (f"[已写入: {file_path} ({byte_count}字节)]", color_diff)
 
 
 def _make_diff(old_content: str, new_content: str, file_path: str) -> str:
@@ -99,4 +99,4 @@ def _make_diff(old_content: str, new_content: str, file_path: str) -> str:
         lineterm="",
     )
     result = "\n".join(diff)
-    return result if result else "(无差异)"
+    return result if result else "[无差异]"

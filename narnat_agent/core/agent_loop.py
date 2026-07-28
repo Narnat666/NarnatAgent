@@ -227,7 +227,7 @@ class AgentLoop:
                 _stdout_write("\n".join(f"  {line}" for line in color_diff.split("\n")) + "\n\n")
         else:
             # 用户取消
-            self._msg_manager.append_tool_result(confirm_tc_id, "操作已取消: 此命令需用户确认")
+            self._msg_manager.append_tool_result(confirm_tc_id, "[操作已取消: 此命令需用户确认]")
 
         # 创建新的流式输出会话，继续agent_loop
         return self._ui.create_stream()

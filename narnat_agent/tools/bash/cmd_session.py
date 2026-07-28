@@ -132,11 +132,11 @@ class CmdSession:
         self, command: str, timeout: int = 120, max_output_chars: int = 4000
     ) -> str:
         if self._dead:
-            return "错误: cmd.exe 会话已超时死亡，正在重建..."
+            return "[错误: cmd.exe 会话已超时死亡，正在重建...]"
         if self._busy:
             return "[上一个命令尚未完成，此终端暂不可用]"
         if self._proc.poll() is not None:
-            return "错误: cmd.exe 进程已退出，请重启会话"
+            return "[错误: cmd.exe 进程已退出，请重启会话]"
 
         self._busy = True
         try:
@@ -178,7 +178,7 @@ class CmdSession:
             self._proc.stdin.write(full_cmd.encode("gbk", errors="replace"))
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError) as e:
-            return f"错误: cmd.exe 进程通信失败: {e}"
+            return f"[错误: cmd.exe 进程通信失败: {e}]"
 
         raw, found = self._wait_for_marker(timeout)
 

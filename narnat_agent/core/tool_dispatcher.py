@@ -127,7 +127,7 @@ class ToolDispatcher:
                         result = fut.result()
                         results[idx] = (tc_id, result)
                     except Exception as e:
-                        results[idx] = (tc_id, f"错误: 工具执行失败: {e}")
+                        results[idx] = (tc_id, f"[错误: 工具执行失败: {e}]")
             else:
                 futures = {}
                 for group in file_groups:
@@ -172,7 +172,7 @@ class ToolDispatcher:
                     result = fut.result()
                     results[idx] = (tc_id, result)
                 except Exception as e:
-                    results[idx] = (tc_id, f"错误: 工具执行失败: {e}")
+                    results[idx] = (tc_id, f"[错误: 工具执行失败: {e}]")
 
         return [results[i] for i in range(len(parsed)) if i in results]
 
@@ -222,7 +222,7 @@ class ToolDispatcher:
                     result = fut.result()
                     results[idx] = (tc_id, result)
                 except Exception as e:
-                    results[idx] = (tc_id, f"错误: 工具执行失败({name}): {e}")
+                    results[idx] = (tc_id, f"[错误: 工具执行失败({name}): {e}]")
             return
 
         futures = {}
@@ -245,7 +245,7 @@ class ToolDispatcher:
                     result = fut.result()
                     results[idx] = (tc_id, result)
                 except Exception as e:
-                    results[idx] = (tc_id, f"错误: 工具执行失败({name}): {e}")
+                    results[idx] = (tc_id, f"[错误: 工具执行失败({name}): {e}]")
 
     def _run_sequential_group(self, group, results, stream) -> None:
         """串行执行同一文件组的写入工具"""
@@ -285,12 +285,12 @@ class ToolDispatcher:
         if self._logger:
             self._logger.info("dispatcher", f"计划优先拦截: {non_todo_names}")
         hint = (
-            f"计划优先模式已开启：请先使用TodoWrite制定计划（至少1项in_progress），"
-            f"再执行其他工具。当前尝试调用的工具: {', '.join(non_todo_names)}"
+            f"[计划优先模式已开启: 请先使用TodoWrite制定计划（至少1项in_progress），"
+            f"再执行其他工具。当前尝试调用的工具: {', '.join(non_todo_names)}]"
         )
         results = []
         for i, tc_id in enumerate(non_todo_ids):
-            results.append((tc_id, hint if i == 0 else "计划优先拦截，详见上方"))
+            results.append((tc_id, hint if i == 0 else "[计划优先拦截，详见上方]"))
         return results
 
     @staticmethod

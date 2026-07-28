@@ -168,7 +168,7 @@ class NoSession(SessionState):
 
     def enter(self, name: str) -> str:
         if not name:
-            return "错误: 请指定会话名称"
+            return "[错误: 请指定会话名称]"
         target_name, target_parent, err = self._mgr.resolve_session_name(name)
         if err:
             return err
@@ -190,7 +190,7 @@ class NoSession(SessionState):
 
     def delete(self, name: str) -> str:
         if not name:
-            return "错误: 请指定会话名称"
+            return "[错误: 请指定会话名称]"
         if name == "--all":
             tree = list_sessions_tree(self._mgr.narnat_dir)
             for root in tree:
@@ -273,7 +273,7 @@ class RootSession(SessionState):
 
     def enter(self, name: str) -> str:
         if not name:
-            return "错误: 请指定会话名称"
+            return "[错误: 请指定会话名称]"
         self._persist()
         target_name, target_parent, err = self._mgr.resolve_session_name(name)
         if err:
@@ -296,7 +296,7 @@ class RootSession(SessionState):
 
     def delete(self, name: str) -> str:
         if not name:
-            return "错误: 请指定会话名称"
+            return "[错误: 请指定会话名称]"
         if name == "--all":
             tree = list_sessions_tree(self._mgr.narnat_dir)
             for root in tree:
@@ -324,9 +324,9 @@ class RootSession(SessionState):
 
     def explore(self, name: str) -> str:
         if not name:
-            return "错误: 请指定分支名称"
+            return "[错误: 请指定分支名称]"
         if name == self._name:
-            return f"错误: 分支名不可与父会话同名（'{name}'），请换一个名称"
+            return f"[错误: 分支名不可与父会话同名（'{name}'），请换一个名称]"
         self._persist()
         msgs = [dict(m) for m in self._mgr.get_messages()]
         parent_msg_count = len(msgs)
@@ -405,7 +405,7 @@ class ChildSession(SessionState):
 
     def enter(self, name: str) -> str:
         if not name:
-            return "错误: 请指定会话名称"
+            return "[错误: 请指定会话名称]"
         self._persist()
         target_name, target_parent, err = self._mgr.resolve_session_name(name)
         if err:

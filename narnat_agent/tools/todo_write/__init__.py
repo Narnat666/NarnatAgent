@@ -49,22 +49,22 @@ def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
     """
     # 校验非空
     if not todos:
-        return "错误: todos不能为空"
+        return "[错误: todos不能为空]"
 
     # 校验每个todo的字段
     for i, todo in enumerate(todos):
         if not isinstance(todo, dict):
-            return f"错误: 第{i+1}项不是对象"
+            return f"[错误: 第{i+1}项不是对象]"
         for field in ("content", "activeForm", "status"):
             if field not in todo:
-                return f"错误: 第{i+1}项缺少必填字段: {field}"
+                return f"[错误: 第{i+1}项缺少必填字段: {field}]"
         if todo["status"] not in ("pending", "in_progress", "completed"):
-            return f"错误: 第{i+1}项status非法: {todo['status']}"
+            return f"[错误: 第{i+1}项status非法: {todo['status']}]"
 
     # 校验in_progress数量：允许0个（初始状态）或1个，禁止多个
     in_progress_count = sum(1 for t in todos if t["status"] == "in_progress")
     if in_progress_count > 1:
-        return f"错误: 最多1个in_progress任务，当前有{in_progress_count}个"
+        return f"[错误: 最多1个in_progress任务，当前有{in_progress_count}个]"
 
     # 通知UI更新
     if _tool_context and _tool_context.ui_callback:
@@ -78,13 +78,13 @@ def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
     unfinished = [t for t in todos if t["status"] != "completed"]
 
     if not unfinished:
-        return "任务全部完成。"
+        return "[任务全部完成]"
 
-    lines = ["你有未完成的任务，请继续：", ""]
+    lines = ["[你有未完成的任务，请继续:]", ""]
     for i, t in enumerate(unfinished, 1):
         status_label = "进行中" if t["status"] == "in_progress" else "待处理"
         lines.append(f"{i}. [{status_label}] {t['content']}")
     lines.append("")
-    lines.append("完成后请使用 TodoWrite 更新任务状态。")
+    lines.append("[完成后请使用 TodoWrite 更新任务状态。]")
 
     return "\n".join(lines)

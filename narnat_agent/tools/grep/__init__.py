@@ -99,11 +99,11 @@ def execute(
 ) -> str:
     # ── ReDoS 防护 ──
     if len(pattern) > _MAX_PATTERN_LENGTH:
-        return f"错误: 正则表达式过长（>{_MAX_PATTERN_LENGTH}字符），拒绝执行以防ReDoS"
+        return f"[错误: 正则表达式过长（>{_MAX_PATTERN_LENGTH}字符），拒绝执行以防ReDoS]"
 
     # ── output_mode 运行时校验 ──
     if output_mode not in ("files_with_matches", "content", "count"):
-        return f"错误: 无效的 output_mode: {output_mode}"
+        return f"[错误: 无效的 output_mode: {output_mode}]"
 
     flags = 0
     if i:
@@ -112,7 +112,7 @@ def execute(
     try:
         regex = re.compile(pattern, flags)
     except re.error as e:
-        return f"错误: 非法正则: {e}"
+        return f"[错误: 非法正则: {e}]"
 
     if C > 0:
         A = C
@@ -125,7 +125,7 @@ def execute(
     if os.path.isfile(root):
         return _search_single_file(root, regex, output_mode, n, A, B, head_limit)
     if not os.path.isdir(root):
-        return f"错误: 路径不存在: {root}"
+        return f"[错误: 路径不存在: {root}]"
 
     # ignore_dirs 合并而非覆盖
     ignore_dirs = _DEFAULT_IGNORE_DIRS.copy()
@@ -155,9 +155,9 @@ def _format_results(file_matches, output_mode, head_limit):
                 break
     else:
         # content 模式：streaming 引擎保证匹配行数 ≤ head_limit
-        return "\n".join(file_matches) if file_matches else "(无匹配)"
+        return "\n".join(file_matches) if file_matches else "[无匹配]"
 
-    output = "\n".join(results) if results else "(无匹配)"
+    output = "\n".join(results) if results else "[无匹配]"
     if truncated:
         output += f"\n...[已截断: 超出head_limit({head_limit})限制]"
     return output
@@ -481,11 +481,11 @@ def _search_single_file(file_path, regex, output_mode, show_n, A, B, head_limit)
     )
 
     if output_mode == "files_with_matches":
-        return results[0] if results else "(无匹配)"
+        return results[0] if results else "[无匹配]"
     elif output_mode == "count":
-        return f"{file_path}:{count}" if count else "(无匹配)"
+        return f"{file_path}:{count}" if count else "[无匹配]"
     else:
-        return "\n".join(results) if results else "(无匹配)"
+        return "\n".join(results) if results else "[无匹配]"
 
 
 # ═══════════════════════════════════════════════════════════════

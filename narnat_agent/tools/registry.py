@@ -74,7 +74,7 @@ def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolCon
     """
     impl = _TOOL_IMPLEMENTATIONS.get(name)
     if impl is None:
-        return (f"错误: 未知工具: {name}", "")
+        return (f"[错误: 未知工具: {name}]", "")
 
     # 需要tool_context的工具：注入上下文参数
     _CONTEXT_TOOLS = {"Shell", "Terminal", "TodoWrite", "WebSearch", "Write", "Read", "Glob", "Grep", "Edit", "Serial"}
@@ -102,9 +102,9 @@ def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolCon
 
         return (llm_result, color_diff)
     except TypeError as e:
-        return (f"错误: 工具参数错误({name}): {e}", "")
+        return (f"[错误: 工具参数错误({name}): {e}]", "")
     except Exception as e:
-        return (f"错误: 工具执行失败({name}): {e}", "")
+        return (f"[错误: 工具执行失败({name}): {e}]", "")
 
 
 def get_tool_names() -> List[str]:

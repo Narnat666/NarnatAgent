@@ -157,7 +157,7 @@ def execute(
     elif action == "transfer":
         return _transfer(source_host, source_path, target_host, target_path, _tool_context)
     else:
-        return f"错误: 未知action '{action}'，可选: connect/exec/input/status/close/transfer"
+        return f"[错误: 未知action '{action}'，可选: connect/exec/input/status/close/transfer]"
 
 
 def _allocate_session_id() -> int:
@@ -207,17 +207,17 @@ def _connect(host: str, username: str, port: int = 22,
              session_id: int = -1) -> str:
     """建立SSH会话"""
     if not host or not username:
-        return "错误: connect需要提供host和username"
+        return "[错误: connect需要提供host和username]"
 
     with _sessions_lock:
         # 指定了session_id
         if session_id >= 0:
             if session_id >= MAX_SESSIONS:
-                return f"错误: session_id范围0-{MAX_SESSIONS - 1}"
+                return f"[错误: session_id范围0-{MAX_SESSIONS - 1}]"
             if session_id in _sessions:
                 session = _sessions[session_id]
                 if not session._channel.closed:
-                    return f"终端{session_id}已连接: {session.username}@{session.host}\n{session.prompt}"
+                    return f"[终端{session_id}已连接: {session.username}@{session.host}]\n{session.prompt}"
                 else:
                     session.close()
                     del _sessions[session_id]
@@ -227,7 +227,7 @@ def _connect(host: str, username: str, port: int = 22,
             alloc_id = _allocate_session_id()
             if alloc_id < 0:
                 active = list(_sessions.keys())
-                return f"错误: 已达最大会话数({MAX_SESSIONS})，当前终端: {active}，请先close释放"
+                return f"[错误: 已达最大会话数({MAX_SESSIONS})，当前终端: {active}，请先close释放]"
 
     try:
         kwargs = {"host": host, "username": username, "port": port}
@@ -253,7 +253,7 @@ def _connect(host: str, username: str, port: int = 22,
         with _sessions_lock:
             _sessions[alloc_id] = session
 
-        parts = [f"已连接终端{alloc_id}: {username}@{host}"]
+        parts = [f"[已连接终端{alloc_id}: {username}@{host}]"]
         if session._initial_output:
             parts.append(session._initial_output)
         else:
@@ -264,17 +264,17 @@ def _connect(host: str, username: str, port: int = 22,
         hint = ""
         if not password and not key_path:
             hint = "。未提供password或key_path，大多数设备需要password认证，请提供password参数后重试"
-        return f"错误: 认证失败({username}@{host})，请检查key_path或password{hint}"
+        return f"[错误: 认证失败({username}@{host})，请检查key_path或password{hint}]"
     except paramiko.SSHException as e:
-        return f"错误: SSH连接失败({username}@{host}): {e}"
+        return f"[错误: SSH连接失败({username}@{host}): {e}]"
     except Exception as e:
-        return f"错误: 连接失败({username}@{host}): {e}"
+        return f"[错误: 连接失败({username}@{host}): {e}]"
 
 
 def _exec(session_id: int, host: str, command: str, timeout: int = 120, max_output_chars: int = 4000, _tool_context=None) -> str:
     """在指定会话中执行命令"""
     if not command:
-        return "错误: exec需要提供command"
+        return "[错误: exec需要提供command]"
     if timeout <= 0:
         return "[错误: timeout需为正整数（秒）]"
 
@@ -293,7 +293,7 @@ def _exec(session_id: int, host: str, command: str, timeout: int = 120, max_outp
         if sys.platform == "win32":
             # Windows: prompt_toolkit和input()用不同的输入系统，直接用input()确认
             if tc and tc.confirm_callback and not tc.confirm_callback(command):
-                return "操作已取消: 此命令需用户确认"
+                return "[操作已取消: 此命令需用户确认]"
         else:
             # Linux/macOS: 终端被prompt_toolkit占用，无法在子线程中读取输入
             # 用户已确认过（_delete_confirmed=True），直接执行
@@ -315,13 +315,13 @@ def _exec(session_id: int, host: str, command: str, timeout: int = 120, max_outp
     try:
         sid, session = _resolve_session_id(session_id, host)
     except ValueError as e:
-        return f"错误: {e}"
+        return f"[错误: {e}]"
 
     if session._channel.closed:
         with _sessions_lock:
             _sessions.pop(sid, None)
         session.close()
-        return f"错误: 终端{sid}会话已断开，请重新connect"
+        return f"[错误: 终端{sid}会话已断开，请重新connect]"
 
     try:
         # 注册活跃会话，agent层ESC打断后可通过kill_active_exec发送Ctrl+C
@@ -336,13 +336,13 @@ def _exec(session_id: int, host: str, command: str, timeout: int = 120, max_outp
         # 在结果前标注终端编号
         return f"[终端{sid}] {result}"
     except Exception as e:
-        return f"错误: 终端{sid}命令执行失败: {e}"
+        return f"[错误: 终端{sid}命令执行失败: {e}]"
 
 
 def _input(session_id: int, host: str, input: str, timeout: int = 120, max_output_chars: int = 4000, _tool_context=None) -> str:
     """向终端发送交互输入"""
     if not input:
-        return "错误: input需要提供input内容"
+        return "[错误: input需要提供input内容]"
     if timeout <= 0:
         return "[错误: timeout需为正整数（秒）]"
 
@@ -352,26 +352,26 @@ def _input(session_id: int, host: str, input: str, timeout: int = 120, max_outpu
     try:
         sid, session = _resolve_session_id(session_id, host)
     except ValueError as e:
-        return f"错误: {e}"
+        return f"[错误: {e}]"
 
     if session._channel.closed:
         with _sessions_lock:
             _sessions.pop(sid, None)
         session.close()
-        return f"错误: 终端{sid}会话已断开，请重新connect"
+        return f"[错误: 终端{sid}会话已断开，请重新connect]"
 
     try:
         result = session.send_input(input, timeout=timeout, max_output_chars=max_output_chars)
         return f"[终端{sid}] {result}"
     except Exception as e:
-        return f"错误: 终端{sid}输入发送失败: {e}"
+        return f"[错误: 终端{sid}输入发送失败: {e}]"
 
 
 def _status() -> str:
     """查看所有会话状态"""
     with _sessions_lock:
         if not _sessions:
-            return f"(无活跃SSH会话，最多支持{MAX_SESSIONS}个并发终端)"
+            return f"[无活跃SSH会话，最多支持{MAX_SESSIONS}个并发终端]"
 
         lines = []
         for sid in range(MAX_SESSIONS):
@@ -381,8 +381,8 @@ def _status() -> str:
                 busy = "忙" if session._busy else "闲"
                 lines.append(f"  终端{sid}: {session.username}@{session.host} [{alive}|{busy}] {session.prompt}")
             else:
-                lines.append(f"  终端{sid}: (空闲)")
-        return "SSH会话:\n" + "\n".join(lines)
+                lines.append(f"  终端{sid}: [空闲]")
+        return "[SSH会话]\n" + "\n".join(lines)
 
 
 def _close(session_id: int, host: str) -> str:
@@ -394,15 +394,15 @@ def _close(session_id: int, host: str) -> str:
                 session.close()
             count = len(_sessions)
             _sessions.clear()
-            return f"已关闭{count}个会话"
+            return f"[已关闭{count}个会话]"
 
         # 指定了session_id
         if session_id >= 0:
             if session_id not in _sessions:
-                return f"终端{session_id}未连接"
+                return f"[终端{session_id}未连接]"
             _sessions[session_id].close()
             del _sessions[session_id]
-            return f"已关闭终端{session_id}"
+            return f"[已关闭终端{session_id}]"
 
         # 按host匹配
         matched = None
@@ -412,11 +412,11 @@ def _close(session_id: int, host: str) -> str:
                 break
 
         if matched is None:
-            return f"未找到host={host}的会话"
+            return f"[未找到host={host}的会话]"
 
         _sessions[matched].close()
         del _sessions[matched]
-        return f"已关闭终端{matched}"
+        return f"[已关闭终端{matched}]"
 
 
 def cleanup():
@@ -506,19 +506,19 @@ def _ensure_local_dir(local_path: str) -> bool:
 
 def _transfer_local_to_remote(source_path: str, target_host: str, target_path: str, max_transfer_mb: int) -> str:
     if not os.path.isfile(source_path):
-        return f"错误: 源文件不存在: {source_path}"
+        return f"[错误: 源文件不存在: {source_path}]"
 
     size = os.path.getsize(source_path)
     err = _check_transfer_size(size, max_transfer_mb)
     if err:
-        return f"错误: {err}"
+        return f"[错误: {err}]"
 
     session = get_session(host=target_host)
     if session is None:
-        return f"错误: 目标设备 {target_host} 未连接，请先connect"
+        return f"[错误: 目标设备 {target_host} 未连接，请先connect]"
 
     if not _ensure_remote_dir(session, target_path):
-        return f"错误: 无法创建远程目标目录: {target_path}"
+        return f"[错误: 无法创建远程目标目录: {target_path}]"
 
     try:
         sftp = session._client.open_sftp()
@@ -527,26 +527,26 @@ def _transfer_local_to_remote(source_path: str, target_host: str, target_path: s
         finally:
             sftp.close()
     except Exception as e:
-        return f"错误: 传输失败: {e}"
+        return f"[错误: 传输失败: {e}]"
 
-    return f"已传输: 本机:{source_path} → {target_host}:{target_path} ({_format_size(size)})"
+    return f"[已传输: 本机:{source_path} → {target_host}:{target_path} ({_format_size(size)})]"
 
 
 def _transfer_remote_to_local(source_host: str, source_path: str, target_path: str, max_transfer_mb: int) -> str:
     session = get_session(host=source_host)
     if session is None:
-        return f"错误: 源设备 {source_host} 未连接，请先connect"
+        return f"[错误: 源设备 {source_host} 未连接，请先connect]"
 
     size = _get_remote_file_size(session, source_path)
     if size is None:
-        return f"错误: 源文件不存在或无法访问: {source_host}:{source_path}"
+        return f"[错误: 源文件不存在或无法访问: {source_host}:{source_path}]"
 
     err = _check_transfer_size(size, max_transfer_mb)
     if err:
-        return f"错误: {err}"
+        return f"[错误: {err}]"
 
     if not _ensure_local_dir(target_path):
-        return f"错误: 无法创建本地目标目录: {target_path}"
+        return f"[错误: 无法创建本地目标目录: {target_path}]"
 
     try:
         sftp = session._client.open_sftp()
@@ -555,30 +555,30 @@ def _transfer_remote_to_local(source_host: str, source_path: str, target_path: s
         finally:
             sftp.close()
     except Exception as e:
-        return f"错误: 传输失败: {e}"
+        return f"[错误: 传输失败: {e}]"
 
-    return f"已传输: {source_host}:{source_path} → 本机:{target_path} ({_format_size(size)})"
+    return f"[已传输: {source_host}:{source_path} → 本机:{target_path} ({_format_size(size)})]"
 
 
 def _transfer_remote_to_remote(source_host: str, source_path: str, target_host: str, target_path: str, max_transfer_mb: int) -> str:
     src_session = get_session(host=source_host)
     if src_session is None:
-        return f"错误: 源设备 {source_host} 未连接，请先connect"
+        return f"[错误: 源设备 {source_host} 未连接，请先connect]"
 
     tgt_session = get_session(host=target_host)
     if tgt_session is None:
-        return f"错误: 目标设备 {target_host} 未连接，请先connect"
+        return f"[错误: 目标设备 {target_host} 未连接，请先connect]"
 
     size = _get_remote_file_size(src_session, source_path)
     if size is None:
-        return f"错误: 源文件不存在或无法访问: {source_host}:{source_path}"
+        return f"[错误: 源文件不存在或无法访问: {source_host}:{source_path}]"
 
     err = _check_transfer_size(size, max_transfer_mb)
     if err:
-        return f"错误: {err}"
+        return f"[错误: {err}]"
 
     if not _ensure_remote_dir(tgt_session, target_path):
-        return f"错误: 无法创建远程目标目录: {target_path}"
+        return f"[错误: 无法创建远程目标目录: {target_path}]"
 
     transferred = 0
     try:
@@ -601,18 +601,18 @@ def _transfer_remote_to_remote(source_host: str, source_path: str, target_host: 
             src_sftp.close()
             tgt_sftp.close()
     except Exception as e:
-        return f"错误: 传输中断，已传输 {_format_size(transferred)}/{_format_size(size)}: {e}"
+        return f"[错误: 传输中断，已传输 {_format_size(transferred)}/{_format_size(size)}: {e}]"
 
-    return f"已传输: {source_host}:{source_path} → {target_host}:{target_path} ({_format_size(size)})"
+    return f"[已传输: {source_host}:{source_path} → {target_host}:{target_path} ({_format_size(size)})]"
 
 
 def _transfer(source_host: str, source_path: str, target_host: str, target_path: str, _tool_context=None) -> str:
     if not source_path:
-        return "错误: transfer需要提供source_path（源文件路径）"
+        return "[错误: transfer需要提供source_path（源文件路径）]"
     if not target_path:
-        return "错误: transfer需要提供target_path（目标文件路径）"
+        return "[错误: transfer需要提供target_path（目标文件路径）]"
     if source_host == target_host and source_path == target_path:
-        return "错误: 源和目标相同，无需传输"
+        return "[错误: 源和目标相同，无需传输]"
 
     max_transfer_mb = 100
     if _tool_context and hasattr(_tool_context, "max_transfer_mb"):
@@ -622,7 +622,7 @@ def _transfer(source_host: str, source_path: str, target_host: str, target_path:
     target_is_local = not target_host
 
     if source_is_local and target_is_local:
-        return "错误: 源和目标都是本机，请使用本地文件操作工具"
+        return "[错误: 源和目标都是本机，请使用本地文件操作工具]"
     elif source_is_local:
         return _transfer_local_to_remote(source_path, target_host, target_path, max_transfer_mb)
     elif target_is_local:

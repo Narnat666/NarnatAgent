@@ -11,8 +11,8 @@ def colorize_diff(diff_text: str) -> str:
 
     保留行首的 +/- 符号，仅对内容着色，不改变文本结构。
     """
-    if not diff_text or diff_text == "(无差异)":
-        return f"{G}(无差异){R}"
+    if not diff_text or diff_text == "[无差异]":
+        return f"{G}[无差异]{R}"
 
     out = []
     for line in diff_text.split("\n"):

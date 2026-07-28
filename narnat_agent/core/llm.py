@@ -189,7 +189,7 @@ class _OpenAIBackend:
                 if status in (400, 401, 403, 404, 422):
                     if self._logger:
                         self._logger.error("core.llm", f"API调用失败(不可重试): {e}")
-                    yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
+                    yield {"content": f"[错误: API调用失败: {e}]", "finish_reason": "error"}
                     return
                 if cancel_check and cancel_check():
                     return
@@ -209,7 +209,7 @@ class _OpenAIBackend:
                     continue
                 if self._logger:
                     self._logger.error("core.llm", f"API调用失败(重试耗尽): {e}")
-                yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
+                yield {"content": f"[错误: API调用失败: {e}]", "finish_reason": "error"}
                 return
 
             except (APIConnectionError, APITimeoutError) as e:
@@ -225,7 +225,7 @@ class _OpenAIBackend:
                     continue
                 if self._logger:
                     self._logger.error("core.llm", f"网络错误(重试耗尽): {e}")
-                yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
+                yield {"content": f"[错误: API调用失败: {e}]", "finish_reason": "error"}
                 return
 
             except Exception as e:
@@ -234,7 +234,7 @@ class _OpenAIBackend:
                     return
                 if self._logger:
                     self._logger.error("core.llm", f"API调用失败: {e}")
-                yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
+                yield {"content": f"[错误: API调用失败: {e}]", "finish_reason": "error"}
                 return
 
         _active_llm_response = stream
@@ -363,7 +363,7 @@ class _AnthropicBackend:
             system, anthropic_msgs = self._convert_messages(messages)
             anthropic_tools = self._convert_tools(self._tool_defs)
         except Exception as e:
-            yield {"content": f"错误: 消息格式转换失败: {e}", "finish_reason": "error"}
+            yield {"content": f"[错误: 消息格式转换失败: {e}]", "finish_reason": "error"}
             return
 
         # 动态构造 thinking 参数
@@ -412,7 +412,7 @@ class _AnthropicBackend:
                     _active_llm_response = None
                     if self._logger:
                         self._logger.error("core.llm", f"API调用失败(不可重试): {status} {err_text[:200]}")
-                    yield {"content": f"错误: API调用失败({status}): {err_text[:200]}", "finish_reason": "error"}
+                    yield {"content": f"[错误: API调用失败({status}): {err_text[:200]}]", "finish_reason": "error"}
                     return
 
                 # 429 速率限制
@@ -428,7 +428,7 @@ class _AnthropicBackend:
                             return
                         continue
                     _active_llm_response = None
-                    yield {"content": f"错误: API返回429速率限制(已重试{_MAX_RATE_RETRIES}次)", "finish_reason": "error"}
+                    yield {"content": f"[错误: API返回429速率限制(已重试{_MAX_RATE_RETRIES}次)]", "finish_reason": "error"}
                     return
 
                 # 可重试服务端错误
@@ -444,7 +444,7 @@ class _AnthropicBackend:
                             return
                         continue
                     _active_llm_response = None
-                    yield {"content": f"错误: API返回{status}错误(已重试{_MAX_NETWORK_RETRIES}次)", "finish_reason": "error"}
+                    yield {"content": f"[错误: API返回{status}错误(已重试{_MAX_NETWORK_RETRIES}次)]", "finish_reason": "error"}
                     return
 
                 # 成功
@@ -455,7 +455,7 @@ class _AnthropicBackend:
                     _active_llm_response = None
                     if self._logger:
                         self._logger.error("core.llm", f"API调用失败: {status} {err_text[:200]}")
-                    yield {"content": f"错误: API调用失败({status}): {err_text[:200]}", "finish_reason": "error"}
+                    yield {"content": f"[错误: API调用失败({status}): {err_text[:200]}]", "finish_reason": "error"}
                     return
                 break
 
@@ -473,7 +473,7 @@ class _AnthropicBackend:
                     continue
                 if self._logger:
                     self._logger.error("core.llm", f"网络错误(重试耗尽): {e}")
-                yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
+                yield {"content": f"[错误: API调用失败: {e}]", "finish_reason": "error"}
                 return
 
             except Exception as e:
@@ -483,7 +483,7 @@ class _AnthropicBackend:
                     return
                 if self._logger:
                     self._logger.error("core.llm", f"API调用失败: {e}")
-                yield {"content": f"错误: API调用失败: {e}", "finish_reason": "error"}
+                yield {"content": f"[错误: API调用失败: {e}]", "finish_reason": "error"}
                 return
 
         # 解析 Anthropic SSE 流（resp 已是 stream=True 模式）
@@ -636,7 +636,7 @@ class _AnthropicBackend:
 
                 elif dtype == "error":
                     err_msg = data.get("error", {}).get("message", "未知错误")
-                    yield {"content": f"错误: {err_msg}", "finish_reason": "error"}
+                    yield {"content": f"[错误: {err_msg}]", "finish_reason": "error"}
                     return
 
             # ── 兜底：流正常结束但未收到 message_delta（DeepSeek 偶发漏发）──

@@ -146,8 +146,8 @@ def _wrap_cell(ansi_text: str, max_width: int) -> List[str]:
 
 def colorize_diff(diff_text: str) -> str:
     """对 unified diff 文本添加 ANSI 颜色"""
-    if not diff_text or diff_text == "(无差异)":
-        return f"{C_SECONDARY}(无差异){R}"
+    if not diff_text or diff_text == "[无差异]":
+        return f"{C_SECONDARY}[无差异]{R}"
     out = []
     for line in diff_text.split("\n"):
         if line.startswith("---") or line.startswith("+++"):
