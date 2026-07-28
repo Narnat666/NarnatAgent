@@ -167,12 +167,14 @@ def _is_nuitka_onefile() -> bool:
 
 
 def _find_narnat_exe_dir() -> Optional[str]:
-    """通过 PATH 查找 narnat.exe 所在目录。"""
-    import shutil
-    for name in ("narnat.exe", "narnat"):
-        found = shutil.which(name)
-        if found:
-            return os.path.dirname(os.path.abspath(found))
+    """通过 sys.argv[0] 获取真实 exe 所在目录。
+
+    Nuitka onefile 模式下 sys.argv[0] 保存原始 exe 路径，
+    不依赖名字、不依赖 PATH，改名也能正常工作。
+    """
+    argv0 = sys.argv[0]
+    if argv0 and os.path.isfile(argv0):
+        return os.path.dirname(os.path.abspath(argv0))
     return None
 
 
