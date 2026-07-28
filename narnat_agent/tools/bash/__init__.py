@@ -64,7 +64,7 @@ DEFINITION = {
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "命令"},
-                "timeout": {"type": "integer", "description": "超时秒数（默认120，上限600）"},
+                "timeout": {"type": "integer", "description": "超时秒数（默认120，上限1800）"},
                 "run_in_background": {"type": "boolean", "description": "是否后台运行（默认否）"},
                 "max_output_chars": {"type": "integer", "description": "最大输出字符数（默认2000）"},
             },
@@ -255,7 +255,7 @@ def execute(
     if timeout <= 0:
         return "错误: timeout必须为正整数（秒）。"
 
-    timeout = min(timeout, 600)
+    timeout = min(timeout, 1800)
 
     # ── 后台运行：始终走独立子进程 ──
     if run_in_background:
@@ -414,7 +414,7 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
     """Windows: shell=True 起子进程。cmd 交互式解析（引号按用户预期处理），
     stdin 继承控制台（避免 eza 等工具因管道 stdin 阻塞）。"""
     global _interrupted
-    timeout = min(timeout, 600)
+    timeout = min(timeout, 1800)
     try:
         proc = subprocess.Popen(
             command,
@@ -564,17 +564,17 @@ def _execute_segments(segments: list, timeout: int, run_in_background: bool,
     """逐段执行 &&/|| 分割的命令，短路段跳过。
 
     虽然 cmd /c 本身支持 &&，但 Python 端拆分为逐段执行以获得：
-    1. 每段独立的超时控制
-    2. ESC 可在段间打断
+    1. 每段独立的超时控制（超时时强杀整棵进程树）
+    2. ESC 可在段内/段间打断
     3. cd 命令作用到 os.chdir() 而非子进程
     后台模式：重组为单行 cmd /c 调用，委托 _run_background。
     """
-    timeout_sec = min(timeout, 600)
+    timeout_sec = min(timeout, 1800)
     if run_in_background:
         reassembled = " ".join(f"{op} {seg}" if op else seg for op, seg in segments)
         return _run_background(reassembled, reassembled)
 
-    global _interrupted
+    global _interrupted, _active_proc
     _interrupted = False  # 入口清零：上轮残留的中断标志不污染本轮
     all_parts = []
     prev_rc = 0
@@ -604,21 +604,85 @@ def _execute_segments(segments: list, timeout: int, run_in_background: bool,
                     prev_rc = 1
             continue
 
-        # 执行单段
+        # 执行单段（Popen + 进程树杀，与 _execute_win32 行为统一）
+        seg_budget = remaining_timeout
         seg_start = time.time()
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 seg,
                 shell=True,
-                capture_output=True,
-                timeout=remaining_timeout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 cwd=os.getcwd(),
+                start_new_session=True,
             )
+        except OSError as e:
+            all_parts.append(f"错误: 段{i}启动失败: {e}")
+            prev_rc = -1
+            break
+
+        with _active_proc_lock:
+            _active_proc = proc
+
+        try:
+            stdout_chunks = []
+            stderr_chunks = []
+
+            def _reader(stream, chunks):
+                try:
+                    while True:
+                        data = stream.read(4096)
+                        if not data:
+                            break
+                        chunks.append(data)
+                except Exception:
+                    pass
+
+            t_out = threading.Thread(target=_reader, args=(proc.stdout, stdout_chunks), daemon=True)
+            t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_chunks), daemon=True)
+            for t in (t_out, t_err):
+                t.start()
+
+            deadline = time.time() + seg_budget
+            timed_out = False
+
+            while proc.poll() is None:
+                if time.time() >= deadline:
+                    timed_out = True
+                    break
+                if _interrupted:
+                    _interrupted = False
+                    was_interrupted = True
+                    break
+                time.sleep(0.05)
+
+            for t in (t_out, t_err):
+                t.join(timeout=5.0)
+
             seg_elapsed = time.time() - seg_start
             remaining_timeout = max(0, remaining_timeout - seg_elapsed)
 
-            out = _decode_output(proc.stdout)
-            err = _decode_output(proc.stderr)
+            if was_interrupted:
+                _kill_proc_tree(proc)
+                proc.wait(timeout=5)
+                break
+
+            if timed_out:
+                _kill_proc_tree(proc)
+                proc.wait(timeout=5)
+                out = _decode_output(b"".join(stdout_chunks))
+                err = _decode_output(b"".join(stderr_chunks))
+                parts = [f"[超时: 段{i}执行超过{int(seg_elapsed)}秒]"]
+                if out.strip():
+                    parts.append(out.strip())
+                if err.strip():
+                    parts.append(f"[stderr]\n{err.strip()}")
+                all_parts.append("\n".join(parts))
+                prev_rc = -1
+                break
+
+            out = _decode_output(b"".join(stdout_chunks))
+            err = _decode_output(b"".join(stderr_chunks))
             parts = [f"[exit code: {proc.returncode}]"]
             if out.strip():
                 parts.append(out.strip())
@@ -626,20 +690,9 @@ def _execute_segments(segments: list, timeout: int, run_in_background: bool,
                 parts.append(f"[stderr]\n{err.strip()}")
             all_parts.append("\n".join(parts))
             prev_rc = proc.returncode
-        except subprocess.TimeoutExpired:
-            all_parts.append(f"[超时: 段{i}执行超过{remaining_timeout:.0f}秒]")
-            prev_rc = -1
-            break
-        except Exception as e:
-            all_parts.append(f"错误: 段{i}失败: {e}")
-            prev_rc = -1
-            break
-
-        # 检查ESC打断
-        if _interrupted:
-            _interrupted = False
-            was_interrupted = True
-            break
+        finally:
+            with _active_proc_lock:
+                _active_proc = None
 
     if was_interrupted:
         all_parts.append("[用户中断]")
