@@ -672,7 +672,7 @@ def _execute_segments(segments: list, timeout: int, run_in_background: bool,
                 proc.wait(timeout=5)
                 out = _decode_output(b"".join(stdout_chunks))
                 err = _decode_output(b"".join(stderr_chunks))
-                parts = [f"[超时: 段{i}执行超过{int(seg_elapsed)}秒]"]
+                parts = [f"[超时: 命令执行超过{int(seg_elapsed)}秒，已终止]"]
                 if out.strip():
                     parts.append(out.strip())
                 if err.strip():

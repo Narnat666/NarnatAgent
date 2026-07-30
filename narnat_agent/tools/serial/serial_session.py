@@ -320,7 +320,7 @@ class SerialSession:
 
         # 超时/中断
         interrupted = self._interrupt.is_set()
-        tag = "[ESC中断]" if interrupted else f"[超时: {timeout}秒未检测到提示符]"
+        tag = "[用户中断]" if interrupted else f"[超时: 命令执行超过{timeout}秒]"
         cleaned = self._clean_output(output)
         if cleaned:
             return _truncate_output(f"{cleaned}\n{tag}", max_output_chars)
@@ -358,7 +358,7 @@ class SerialSession:
             output = self._buffer
 
         interrupted = self._interrupt.is_set()
-        tag = "[ESC中断]" if interrupted else f"[超时: {timeout}秒]"
+        tag = "[用户中断]" if interrupted else f"[超时: 命令执行超过{timeout}秒]"
         cleaned = self._clean_output(output)
         result = f"{cleaned}\n{tag}" if cleaned else tag
         return _truncate_output(result, max_output_chars)

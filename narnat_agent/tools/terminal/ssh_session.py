@@ -428,7 +428,7 @@ class SSHSession:
                 if cwd:
                     self._cwd = cwd
                 ec = f"[exit code: {exit_code}]\n" if exit_code is not None else ""
-                tag = "[ESC中断]" if interrupted else f"[超时中断: {timeout}秒]"
+                tag = "[用户中断]" if interrupted else f"[超时: 命令执行超过{timeout}秒，已终止]"
                 if cmd_output:
                     return f"{ec}{cmd_output}\n{tag}\n{self.prompt}"
                 else:
@@ -438,7 +438,7 @@ class SSHSession:
             # 不再启动busy_watcher，直接标记空闲
             self._busy = False
             cmd_output = self._parse_partial_output(output, marker)
-            tag = "[ESC中断，未收到哨兵]" if interrupted else f"[超时中断: {timeout}秒，未收到哨兵]"
+            tag = "[用户中断]" if interrupted else f"[超时: 命令执行超过{timeout}秒，已终止]"
             if cmd_output:
                 return f"{cmd_output}\n{tag}\n{self.prompt}"
             else:

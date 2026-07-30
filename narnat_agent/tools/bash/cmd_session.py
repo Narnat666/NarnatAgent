@@ -192,7 +192,7 @@ class CmdSession:
             except Exception:
                 pass
 
-            tag = "[ESC中断]" if interrupted else f"[超时中断: {timeout}秒]"
+            tag = "[用户中断]" if interrupted else f"[超时: 命令执行超过{timeout}秒，已终止]"
             cmd_out, exit_code = self._parse(raw, command)
             ec = f"[exit code: {exit_code}]\n" if exit_code is not None else ""
             body = f"{ec}{cmd_out}" if cmd_out else ec.rstrip()
