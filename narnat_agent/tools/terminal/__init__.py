@@ -72,7 +72,7 @@ DEFINITION = {
                 "input": {"type": "string", "description": "交互输入内容（需先设action=input，如sudo密码、y/n确认）"},
                 "timeout": {"type": "integer", "description": "命令超时秒数（正整数，默认120，超时自动返回通知）"},
                 "session_id": {"type": "integer", "description": "终端ID 0-4（默认自动分配，exec时需指定目标终端）"},
-                "max_output_chars": {"type": "integer", "description": "最大输出字符数（正整数，默认4000，超出截断并提示）"},
+                "max_output_chars": {"type": "integer", "description": "最大输出字符数（正整数，默认8000，超出截断并提示）"},
                 "source_host": {"type": "string", "description": "传输源设备（IP或域名），默认本机（action=transfer时使用）"},
                 "source_path": {"type": "string", "description": "源文件在源设备上的绝对路径（action=transfer时使用）"},
                 "target_host": {"type": "string", "description": "传输目标设备（IP或域名），默认本机（action=transfer时使用）"},
@@ -110,7 +110,7 @@ def execute(
     input: str = "",
     timeout: int = 120,
     session_id: int = -1,
-    max_output_chars: int = 4000,
+    max_output_chars: int = 8000,
     source_host: str = "",
     source_path: str = "",
     target_host: str = "",
@@ -136,7 +136,7 @@ def execute(
       connect时设置，后续exec遇到sudo密码提示自动注入
 
     max_output_chars:
-      返回内容最大字符数，正整数，默认4000
+      返回内容最大字符数，正整数，默认8000
 
     transfer参数:
       source_host  - 源设备host，空字符串表示本机
@@ -271,7 +271,7 @@ def _connect(host: str, username: str, port: int = 22,
         return f"[错误: 连接失败({username}@{host}): {e}]"
 
 
-def _exec(session_id: int, host: str, command: str, timeout: int = 120, max_output_chars: int = 4000, _tool_context=None) -> str:
+def _exec(session_id: int, host: str, command: str, timeout: int = 120, max_output_chars: int = 8000, _tool_context=None) -> str:
     """在指定会话中执行命令"""
     if not command:
         return "[错误: exec需要提供command]"
@@ -339,7 +339,7 @@ def _exec(session_id: int, host: str, command: str, timeout: int = 120, max_outp
         return f"[错误: 终端{sid}命令执行失败: {e}]"
 
 
-def _input(session_id: int, host: str, input: str, timeout: int = 120, max_output_chars: int = 4000, _tool_context=None) -> str:
+def _input(session_id: int, host: str, input: str, timeout: int = 120, max_output_chars: int = 8000, _tool_context=None) -> str:
     """向终端发送交互输入"""
     if not input:
         return "[错误: input需要提供input内容]"
