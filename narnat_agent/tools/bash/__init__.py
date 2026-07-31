@@ -27,6 +27,12 @@ _RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
 # 后台进程注册表 {pid: (proc, start_time)}
 _background_procs: dict = {}
 
+# 子进程环境变量：强制 UTF-8 编码，解决 Windows 下 Python print emoji 等
+# Unicode 字符在 GBK 代码页下报 UnicodeEncodeError 的问题
+_utf8_env = os.environ.copy()
+_utf8_env["PYTHONIOENCODING"] = "utf-8"
+_utf8_env["PYTHONUTF8"] = "1"
+
 # ── 持久化 cmd 会话（Windows only）──
 _cmd_session: Optional[CmdSession] = None
 _cmd_session_lock = threading.Lock()
@@ -317,6 +323,7 @@ def execute(
             stderr=subprocess.PIPE,
             cwd=os.getcwd(),
             start_new_session=True,
+            env=_utf8_env,
         )
     except FileNotFoundError as e:
         return f"[错误: Shell未找到: {e}]"
@@ -422,6 +429,7 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=os.getcwd(),
+            env=_utf8_env,
         )
     except FileNotFoundError as e:
         return f"[错误: cmd.exe未找到: {e}]"
@@ -526,6 +534,7 @@ def _run_background(shell_cmd, original_command: str) -> str:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=os.getcwd(),
+                env=_utf8_env,
             )
         else:
             proc = subprocess.Popen(
@@ -533,6 +542,7 @@ def _run_background(shell_cmd, original_command: str) -> str:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=os.getcwd(),
+                env=_utf8_env,
             )
     except FileNotFoundError as e:
         return f"[错误: Shell未找到: {e}]"
@@ -615,6 +625,7 @@ def _execute_segments(segments: list, timeout: int, run_in_background: bool,
                 stderr=subprocess.PIPE,
                 cwd=os.getcwd(),
                 start_new_session=True,
+                env=_utf8_env,
             )
         except OSError as e:
             all_parts.append(f"[错误: 段{i}启动失败: {e}]")
