@@ -29,13 +29,20 @@ class AutoSaveManager:
         self._auto_save_thread: Optional[threading.Thread] = None
 
     def try_save(self):
-        """启动后台线程做 LLM 命名 + 写磁盘。主线程立即返回。"""
+        """启动后台线程做 LLM 命名 + 写磁盘。主线程立即返回。
+
+        轮数门槛：聊满 auto_save_turns 轮（user 消息数）后才自动保存，
+        避免用户随口聊几句就生成命名会话。
+        """
         if not self._config.session.auto_save:
             return
         if self._mgr._auto_save_done:
             return
         from .session_callbacks import NoSession
         if not isinstance(self._mgr.state, NoSession):
+            return
+        user_turns = self._message_list.view().count_role("user")
+        if user_turns < self._config.session.auto_save_turns:
             return
         self._mgr._auto_save_done = True
 

@@ -21,6 +21,7 @@ from .defaults import (
     DEFAULT_MAX_TOOL_OUTPUT_KB,
     DEFAULT_MAX_TIMEOUT_SECONDS,
     DEFAULT_AUTO_SAVE,
+    DEFAULT_AUTO_SAVE_TURNS,
 )
 
 
@@ -85,6 +86,7 @@ class PlanConfig:
 class SessionConfig:
     """会话与上下文配置（只读）"""
     auto_save: bool = DEFAULT_AUTO_SAVE
+    auto_save_turns: int = DEFAULT_AUTO_SAVE_TURNS
     compress_turn: int = COMPRESS_TURN
     warn_turn_1: int = WARN_TURN_1
     warn_turn_2: int = WARN_TURN_2
@@ -518,7 +520,7 @@ def load_config(project_root: Optional[str] = None) -> Config:
                             "max_output_tokens": 128000
                         },
                         "工具": {"输出上限KB": DEFAULT_MAX_TOOL_OUTPUT_KB, "超时上限秒": DEFAULT_MAX_TIMEOUT_SECONDS},
-                        "会话": {},
+                        "会话": {"自动保存轮数": DEFAULT_AUTO_SAVE_TURNS},
                         "压缩": {},
                         "计划": {},
                         "忽略目录": _DEFAULT_IGNORE_DIRS,
@@ -590,6 +592,8 @@ def load_config(project_root: Optional[str] = None) -> Config:
         ),
         session=SessionConfig(
             auto_save=bool(data.get("会话", {}).get("自动保存", DEFAULT_AUTO_SAVE)),
+            auto_save_turns=max(1, _coerce(data.get("会话", {}).get("自动保存轮数"), int)
+                                or DEFAULT_AUTO_SAVE_TURNS),
             compress_turn=int(data.get("压缩", {}).get("压缩轮次", COMPRESS_TURN)),
             warn_turn_1=int(data.get("压缩", {}).get("警告轮次1", WARN_TURN_1)),
             warn_turn_2=int(data.get("压缩", {}).get("警告轮次2", WARN_TURN_2)),
