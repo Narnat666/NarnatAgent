@@ -15,7 +15,7 @@ from .defaults import (
     CONFIG_SUBDIR, DATA_SUBDIR, LOGS_SUBDIR,
     DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL,
     DEFAULT_PROTOCOL, DEFAULT_THINKING_ENABLED, DEFAULT_THINKING_EFFORT,
-    WARN_TURN_1, WARN_TURN_2, COMPRESS_TURN,
+    DEFAULT_CONTEXT_WINDOW, DEFAULT_SHOW_RATIO, DEFAULT_WARN_RATIO, DEFAULT_COMPRESS_RATIO,
     DEFAULT_GIT_SKIP, DEFAULT_RM_SKIP,
     DEFAULT_REQUIRE_PLAN, DEFAULT_MIN_TOOLS,
     DEFAULT_MAX_TOOL_OUTPUT_KB,
@@ -45,6 +45,7 @@ class AIConfig:
     thinking_enabled: bool = DEFAULT_THINKING_ENABLED
     thinking_effort: str = DEFAULT_THINKING_EFFORT
     thinking_options: dict = field(default_factory=lambda: {"high": "高", "max": "全开"})
+    context_window: int = DEFAULT_CONTEXT_WINDOW   # 模型上下文窗口（token数），≤0 视为无效
     retry_count: int = 3
 
 
@@ -87,9 +88,9 @@ class SessionConfig:
     """会话与上下文配置（只读）"""
     auto_save: bool = DEFAULT_AUTO_SAVE
     auto_save_turns: int = DEFAULT_AUTO_SAVE_TURNS
-    compress_turn: int = COMPRESS_TURN
-    warn_turn_1: int = WARN_TURN_1
-    warn_turn_2: int = WARN_TURN_2
+    show_ratio: bool = DEFAULT_SHOW_RATIO
+    warn_ratio: int = DEFAULT_WARN_RATIO
+    compress_ratio: int = DEFAULT_COMPRESS_RATIO
 
 
 @dataclass(frozen=True)
@@ -269,6 +270,10 @@ def _build_ai_config(data: dict) -> AIConfig:
     thinking_effort = thinking_cfg.get("强度", DEFAULT_THINKING_EFFORT)
     thinking_options = thinking_cfg.get("强度选项", {"high": "高", "max": "全开"})
 
+    # 上下文窗口：缺失/非法 → 默认；显式 ≤0 → 保留原值（下游视为无效，占比显示 --）
+    parsed_cw = _coerce(ai.get("上下文窗口大小"), int)
+    context_window = DEFAULT_CONTEXT_WINDOW if parsed_cw is None else parsed_cw
+
     return AIConfig(
         api_key=ai.get("接口密钥", DEFAULT_API_KEY),
         base_url=ai.get("接口地址", DEFAULT_BASE_URL),
@@ -279,6 +284,7 @@ def _build_ai_config(data: dict) -> AIConfig:
         thinking_enabled=thinking_enabled,
         thinking_effort=thinking_effort,
         thinking_options=thinking_options,
+        context_window=context_window,
     )
 
 
@@ -498,6 +504,7 @@ def load_config(project_root: Optional[str] = None) -> Config:
                             "协议": "anthropic",
                             "温度": None,
                             "最大输出token数": 128000,
+                            "上下文窗口大小": DEFAULT_CONTEXT_WINDOW,
                             "思考": {
                                 "启用": True,
                                 "强度": "high",
@@ -521,7 +528,11 @@ def load_config(project_root: Optional[str] = None) -> Config:
                         },
                         "工具": {"输出上限KB": DEFAULT_MAX_TOOL_OUTPUT_KB, "超时上限秒": DEFAULT_MAX_TIMEOUT_SECONDS},
                         "会话": {"自动保存轮数": DEFAULT_AUTO_SAVE_TURNS},
-                        "压缩": {},
+                        "压缩": {
+                            "占比显示": DEFAULT_SHOW_RATIO,
+                            "告警": DEFAULT_WARN_RATIO,
+                            "压缩": DEFAULT_COMPRESS_RATIO,
+                        },
                         "计划": {},
                         "忽略目录": _DEFAULT_IGNORE_DIRS,
                     }, f, indent=2, ensure_ascii=False)
@@ -563,6 +574,7 @@ def load_config(project_root: Optional[str] = None) -> Config:
         thinking_enabled=ai_config.thinking_enabled,
         thinking_effort=ai_config.thinking_effort,
         thinking_options=ai_config.thinking_options,
+        context_window=ai_config.context_window,
         retry_count=int(data.get("智能体", {}).get("LLM重试次数", 3)),
     )
 
@@ -594,9 +606,9 @@ def load_config(project_root: Optional[str] = None) -> Config:
             auto_save=bool(data.get("会话", {}).get("自动保存", DEFAULT_AUTO_SAVE)),
             auto_save_turns=max(1, _coerce(data.get("会话", {}).get("自动保存轮数"), int)
                                 or DEFAULT_AUTO_SAVE_TURNS),
-            compress_turn=int(data.get("压缩", {}).get("压缩轮次", COMPRESS_TURN)),
-            warn_turn_1=int(data.get("压缩", {}).get("警告轮次1", WARN_TURN_1)),
-            warn_turn_2=int(data.get("压缩", {}).get("警告轮次2", WARN_TURN_2)),
+            show_ratio=bool(data.get("压缩", {}).get("占比显示", DEFAULT_SHOW_RATIO)),
+            warn_ratio=_coerce(data.get("压缩", {}).get("告警"), int) or DEFAULT_WARN_RATIO,
+            compress_ratio=_coerce(data.get("压缩", {}).get("压缩"), int) or DEFAULT_COMPRESS_RATIO,
         ),
         pricing=pricing_config,
         balance=balance_config,

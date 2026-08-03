@@ -40,10 +40,12 @@ class Assembly:
         config = load_config(project_root)
 
         # 2. UI 样式（show_cost/show_balance/max_tokens 被 loader 弹出到 UIConfig 属性，
-        #   需补回 raw 中供 apply_style 读取）
+        #   需补回 raw 中供 apply_style 读取；show_ratio/context_window 来自其他分组）
         config.ui.raw["show_cost"] = config.ui.show_cost
         config.ui.raw["show_balance"] = config.ui.show_balance
         config.ui.raw["max_output_tokens"] = config.ui.max_output_tokens
+        config.ui.raw["show_ratio"] = config.session.show_ratio
+        config.ui.raw["context_window"] = config.ai.context_window
         apply_style(config.ui.raw)
 
         # 3. 全局工具配置（过渡期保留全局 setter，Phase 5 消除）
@@ -70,9 +72,9 @@ class Assembly:
         # 6. 上下文管理
         context = ContextManager(
             logger,
-            config.session.warn_turn_1,
-            config.session.warn_turn_2,
-            config.session.compress_turn,
+            context_window=config.ai.context_window,
+            warn_ratio=config.session.warn_ratio,
+            compress_ratio=config.session.compress_ratio,
         )
 
         # 7. 压缩器
@@ -89,7 +91,6 @@ class Assembly:
         session_mgr = SessionManager(
             config.paths.narnat_dir,
             message_list,
-            context_manager=context,
             config_dir=config.paths.config_dir,
             thinking_effort_getter=lambda: config.ai.thinking_effort,
             thinking_effort_setter=lambda v: setattr(config.ai, 'thinking_effort', v),

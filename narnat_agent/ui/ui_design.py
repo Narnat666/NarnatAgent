@@ -131,6 +131,8 @@ def show_stats(input_tokens: int, output_tokens: int,
     _show_cost = _output.SHOW_COST
     _show_balance = _output.SHOW_BALANCE
     _max_tokens = _output.MAX_TOKENS
+    _show_ratio = _output.SHOW_RATIO
+    _context_window = _output.CONTEXT_WINDOW
 
     si = f"{input_tokens / 1000:.1f}k" if input_tokens >= 1000 else str(input_tokens)
     so = f"{output_tokens / 1000:.1f}k" if output_tokens >= 1000 else str(output_tokens)
@@ -140,7 +142,13 @@ def show_stats(input_tokens: int, output_tokens: int,
     cs = f"  缓存:{cache / 1000:.1f}k" if cache > 0 else ""
     co = f"  费用:¥{cost:.4f}" if _show_cost else ""
     ba = f"  余额:¥{balance:.2f}" if _show_balance and balance > 0 else ""
-    _stdout_write(f"  {UI_STATS_LABEL}输入:{si} 输出:{so}{cs}{th}  最大输出:{mt}{R}{UI_STATS_VALUE}{co}{ba}{R}\n")
+    rt = ""
+    if _show_ratio:
+        if _context_window > 0 and input_tokens > 0:
+            rt = f"  窗口占比:{input_tokens / _context_window * 100:.0f}%"
+        else:
+            rt = "  窗口占比:--"
+    _stdout_write(f"  {UI_STATS_LABEL}输入:{si} 输出:{so}{cs}{th}{rt}  最大输出:{mt}{R}{UI_STATS_VALUE}{co}{ba}{R}\n")
 
 
 # ═══════════════════════════════════════════════════════════════

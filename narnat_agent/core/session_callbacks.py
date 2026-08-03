@@ -516,7 +516,6 @@ class SessionManager:
 
     def __init__(self, narnat_dir: str,
                  messages: 'MessageList',
-                 context_manager=None,
                  config_dir: str = "",
                  thinking_effort_getter: Callable[[], str] = None,
                  thinking_effort_setter: Callable[[str], None] = None,
@@ -528,7 +527,6 @@ class SessionManager:
                  name_func: Callable[[List[Dict[str, Any]]], str] = None):
         self.narnat_dir = narnat_dir
         self._messages = messages
-        self._context = context_manager
         self._config_dir = config_dir
         self._get_thinking_effort = thinking_effort_getter
         self._set_thinking_effort = thinking_effort_setter
@@ -552,9 +550,8 @@ class SessionManager:
         return self._messages
 
     def replace_messages(self, new_msgs: List[Dict[str, Any]]):
+        # 恢复历史会话时占比从 0 开始（历史 token 数未持久化），第一轮回复结束后恢复真实值
         self._messages.replace_all(new_msgs)
-        if self._context is not None:
-            self._context.sync_from_messages(self._messages.view().to_list())
 
     def switch_state(self, new_state: SessionState):
         self._state = new_state

@@ -14,6 +14,8 @@ import os
 import sys
 import threading
 
+from .config.defaults import DEFAULT_CONTEXT_WINDOW
+
 
 # ═══════════════════════════════════════════════════════════════
 # stdout 线程安全写入
@@ -306,6 +308,7 @@ def apply_style(ui_config: dict) -> None:
     传入的 dict 即 UIConfig.raw，结构见 config/loader.py。
     """
     global SHOW_COST, SHOW_BALANCE, MAX_TOKENS
+    global SHOW_RATIO, CONTEXT_WINDOW
     global PTK_PROMPT_SYMBOL, PTK_PROMPT_TEXT, PTK_PROMPT_CUSTOM
 
     # 1. 基础色板（"颜色" 分区：纯调色板，只注册 hex 值。跳过 _ 开头的元数据 key）
@@ -393,6 +396,8 @@ def apply_style(ui_config: dict) -> None:
     SHOW_COST    = bool(ui_config.get("show_cost", False))
     SHOW_BALANCE = bool(ui_config.get("show_balance", False))
     MAX_TOKENS   = int(ui_config.get("max_output_tokens", 128000))
+    SHOW_RATIO   = bool(ui_config.get("show_ratio", False))
+    CONTEXT_WINDOW = int(ui_config.get("context_window", DEFAULT_CONTEXT_WINDOW))
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -402,3 +407,5 @@ def apply_style(ui_config: dict) -> None:
 SHOW_COST = False
 SHOW_BALANCE = False
 MAX_TOKENS = 128000
+SHOW_RATIO = False
+CONTEXT_WINDOW = DEFAULT_CONTEXT_WINDOW

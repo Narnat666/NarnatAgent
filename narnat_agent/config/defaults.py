@@ -20,10 +20,11 @@ DEFAULT_MAX_TIMEOUT_SECONDS = 1800
 DEFAULT_REQUIRE_PLAN = False  # 是否强制AI先制定计划再执行工具
 DEFAULT_MIN_TOOLS = 2         # 单轮工具调用数≥此值时才强制要求先写计划
 
-# ── 上下文压缩阈值 ──
-WARN_TURN_1 = 50    # 提示对话已50轮
-WARN_TURN_2 = 80   # 提示已80轮，建议开新对话
-COMPRESS_TURN = 100  # 强制压缩
+# ── 上下文窗口占比阈值 ──
+DEFAULT_CONTEXT_WINDOW = 1000000  # 模型上下文窗口（token数），≤0 视为无效
+DEFAULT_SHOW_RATIO = False        # 统计栏是否显示 窗口占比:x%
+DEFAULT_WARN_RATIO = 50           # 窗口占比 ≥ 此百分比时提示一次
+DEFAULT_COMPRESS_RATIO = 95       # 窗口占比 ≥ 此百分比时先压缩再请求
 
 # ── 基础Prompt模板 ──
 BASE_PROMPT_TEMPLATE = """\

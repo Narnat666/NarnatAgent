@@ -67,34 +67,29 @@ class Agent:
                     if result == 1:
                         continue
 
-                # 2. 轮次计数
+                # 2. 轮次计数（余额查询周期用）+ 余额查询
                 self._round += 1
-                warn = self._context.increment()
-                if warn:
-                    _stdout_write(f"  ⚠ {warn}\n")
-
-                # 3. 余额查询
                 api_key = getattr(self._config.ai, 'api_key', None)
                 self._stats.fetch_balance(api_key, self._round)
 
-                # 4. 压缩检查
+                # 3. 压缩检查
                 compress_ok = False
                 if self._context.need_compress():
                     compress_ok = self._compression.compress(stripped)
                     if not compress_ok:
                         continue
 
-                # 5. 追加用户消息
+                # 4. 追加用户消息
                 if not compress_ok:
                     self._msg_manager.repair()
                     self._msg_manager.append_user(stripped)
                     self._logger.info("core.agent", f"用户输入: {stripped[:100]}")
 
-                # 6. 创建流式输出
+                # 5. 创建流式输出
                 stream = self._ui.create_stream()
 
                 try:
-                    # 7. 工具调度内循环
+                    # 6. 工具调度内循环
                     self._agent_loop.run(stream)
                 except KeyboardInterrupt:
                     self._ui.on_interrupted()
@@ -108,6 +103,12 @@ class Agent:
                     if not stream.aborted:
                         self._mgr.on_auto_save()
                         self._auto_save.try_save()
+
+                # 7. 回复结束：更新窗口占比 + 告警提示（中断/异常时统计沿用上一轮值）
+                self._context.update_ratio(self._stats.input_tokens)
+                warn = self._context.check_warn()
+                if warn:
+                    _stdout_write(f"  ⚠ {warn}\n")
 
         finally:
             self._parts.dispatcher._executor.shutdown(wait=False)
