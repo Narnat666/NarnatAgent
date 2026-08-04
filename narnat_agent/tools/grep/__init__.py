@@ -46,7 +46,7 @@ DEFINITION = {
                 },
                 "glob": {
                     "type": "string",
-                    "description": "文件类型过滤，如*.py（默认空）",
+                    "description": "文件过滤，如*.py、src/*.c、**/*.c（默认空）",
                 },
                 "output_mode": {
                     "type": "string",
@@ -492,6 +492,25 @@ def _search_single_file(file_path, regex, output_mode, show_n, A, B, head_limit)
 # 并行文件遍历 + 流式搜索
 # ═══════════════════════════════════════════════════════════════
 
+def _match_glob(fname: str, rel: str, glob_filter: str) -> bool:
+    """glob 过滤：支持纯文件名或相对路径（含通配符），与 Glob 工具语义对齐。
+
+    - 匹配对象为相对路径或纯文件名，二者任一命中即通过；
+    - Windows 下正反斜杠等价（glob 与 rel 均归一化为 /）；
+    - **/ 前缀可匹配零层目录（即根目录下的文件）。
+    """
+    if os.name == "nt":
+        glob_filter = glob_filter.replace("\\", "/")
+        rel = rel.replace("\\", "/")
+    patterns = [glob_filter]
+    if glob_filter.startswith("**/"):
+        patterns.append(glob_filter[3:])  # **/ 可匹配零层目录
+    return any(
+        fnmatch.fnmatchcase(fname, p) or fnmatch.fnmatchcase(rel, p)
+        for p in patterns
+    )
+
+
 def _search_files(root, regex, glob_filter, output_mode, show_n, A, B, head_limit, ignore_dirs):
     """遍历文件执行搜索（并行 + 流式读取）。"""
     # ── 收集 + 排序（保证遍历顺序确定）──
@@ -499,10 +518,10 @@ def _search_files(root, regex, glob_filter, output_mode, show_n, A, B, head_limi
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in ignore_dirs]
         for fname in filenames:
-            if glob_filter and not fnmatch.fnmatchcase(fname, glob_filter):
-                continue
             full = os.path.join(dirpath, fname)
             rel = os.path.relpath(full, root)
+            if glob_filter and not _match_glob(fname, rel, glob_filter):
+                continue
             file_list.append((full, rel))
 
     if not file_list:
