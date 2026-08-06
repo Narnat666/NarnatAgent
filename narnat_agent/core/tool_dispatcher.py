@@ -11,9 +11,19 @@ from typing import List, Dict, Any, Tuple, Optional
 from ..tools.registry import execute as tool_execute
 from ..tools.bash import kill_active as _kill_bash
 from ..tools.terminal import kill_active_exec as _kill_terminal_exec
+from ..tools.terminal import resolve_dev_display as _dev_display
 from ..tools.serial import kill_active_exec as _kill_serial_exec
 from ..tools.tool_context import ToolContext
 from ..output import write as _stdout_write, D, E, R, Y, G, B, C
+
+
+def _local_hostname() -> str:
+    """本机主机名（用于UI判断dev0显示）"""
+    try:
+        import socket
+        return socket.gethostname()
+    except Exception:
+        return "localhost"
 
 
 # ── 工具分类 ──
@@ -310,7 +320,13 @@ class ToolDispatcher:
         label = _TOOL_LABELS.get(name, name)
         summary = ""
         if name in _FILE_PATH_TOOLS:
-            summary = arguments.get("file_path", "")
+            dev_raw = arguments.get("device", "")
+            # 只有远程设备(dev1..devn)才显示设备；dev0/省略=本机不显示
+            dev = _dev_display(dev_raw) if dev_raw else ""
+            if dev == _local_hostname():
+                dev = ""
+            fp = arguments.get("file_path", "")
+            summary = f"{dev}:{fp}" if dev else fp
         elif name == "Shell":
             summary = self._fmt_cmd(arguments.get("command", ""))
         elif name == "Terminal":
@@ -318,25 +334,32 @@ class ToolDispatcher:
             if not action and arguments.get("command", ""):
                 action = "exec"
             sid = arguments.get("session_id", -1)
-            sid_str = f"[{sid}]" if sid >= 0 else ""
+            sid_str = f"[dev{sid + 1}]" if sid >= 0 else ""
             if action == "connect":
                 host = arguments.get("host", "")
                 username = arguments.get("username", "")
                 summary = f"connect{sid_str} {username}@{host}"
             elif action == "exec":
-                summary = f"exec{sid_str} {self._fmt_cmd(arguments.get('command', ''))}"
+                dev_raw = arguments.get("host", "")
+                dev = _dev_display(dev_raw) if dev_raw else ""
+                dev_str = f"[{dev}]" if dev else ""
+                summary = f"exec{dev_str} {self._fmt_cmd(arguments.get('command', ''))}"
             elif action == "status":
                 summary = "status"
             elif action == "close":
-                summary = f"close{sid_str} {arguments.get('host', '')}"
+                dev = arguments.get("host", "")
+                summary = f"close {_dev_display(dev)}" if dev else "close"
             elif action == "transfer":
-                src_h = arguments.get("source_host", "") or "本机"
+                src_h = _dev_display(arguments.get("source_host", ""))
                 src_p = arguments.get("source_path", "")
-                tgt_h = arguments.get("target_host", "") or "本机"
+                tgt_h = _dev_display(arguments.get("target_host", ""))
                 tgt_p = arguments.get("target_path", "")
                 summary = f"transfer {src_h}:{src_p} → {tgt_h}:{tgt_p}"
             elif action == "input":
-                summary = f"input{sid_str} {self._fmt_cmd(arguments.get('input', ''), '(空)')}"
+                dev_raw = arguments.get("host", "")
+                dev = _dev_display(dev_raw) if dev_raw else ""
+                dev_str = f"[{dev}]" if dev else ""
+                summary = f"input{dev_str} {self._fmt_cmd(arguments.get('input', ''), '(空)')}"
             else:
                 summary = f"{action or '(未知)'}{sid_str}"
         elif name == "Grep":

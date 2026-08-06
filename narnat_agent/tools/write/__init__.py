@@ -1,22 +1,25 @@
-"""Write工具 —— 创建新文件或完整覆写文件"""
+"""Write工具 —— 创建新文件或完整覆写文件
+
+设备语义: device=dev0或省略 → 本机(dev0)；device=dev1..devn → 被控设备(需先Terminal connect)。
+"""
 
 import os
 import difflib
 
 from ..diff_utils import colorize_diff
+from ..terminal import _normalize_device_for_tools
 
 DEFINITION = {
     "type": "function",
     "function": {
         "name": "Write",
-        "description": "创建新文件或全量覆盖文件。本地或远程写入文件时使用。",
+        "description": "创建新文件或全量覆盖文件。支持本地或远程写入文件。",
         "parameters": {
             "type": "object",
             "properties": {
                 "file_path": {"type": "string", "description": "文件路径（绝对或相对）"},
                 "content": {"type": "string", "description": "完整文件内容"},
-                "remote": {"type": "boolean", "description": "是否写入远程文件（默认否，启用前需先Terminal连接）"},
-                "host": {"type": "string", "description": "远程主机IP或域名（默认空，需启用remote）"},
+                "device": {"type": "string", "description": "设备dev编号：默认dev0（可省略）写入本机文件，设置dev1..devn则写入被控设备文件（需先Terminal connect被控设备获取dev编号）"},
             },
             "required": ["file_path", "content"],
         },
@@ -26,7 +29,7 @@ DEFINITION = {
 
 
 def execute(file_path: str, content: str,
-            remote: bool = False, host: str = "",
+            device: str = "",
             _tool_context=None) -> tuple:
     """
     创建或覆写文件。
@@ -34,8 +37,7 @@ def execute(file_path: str, content: str,
     Args:
         file_path: 文件路径
         content: 完整文件内容
-        remote: 通过SFTP写入远程文件（需先Terminal connect）
-        host: 远程主机（仅remote=True时使用）
+        device: 设备dev编号：dev0=本机（默认），dev1..devn=被控设备（需先Terminal connect）
         _tool_context: 工具运行时上下文（内部参数，由registry注入）
 
     Returns:
@@ -43,10 +45,13 @@ def execute(file_path: str, content: str,
         - llm_result: 纯文本确认信息，传给LLM
         - color_diff: 着色diff，传给终端展示；空串表示新建文件无需diff
     """
-    remote = bool(remote)
-    if remote:
+    device = _normalize_device_for_tools(device)
+    if device is None:
+        return ("[错误: 设备标识使用devN编号(dev0=本机, dev1..devn=被控设备)]", "")
+
+    if device:
         from ..terminal.remote import remote_write
-        return remote_write(file_path, content, host, _tool_context=_tool_context)
+        return remote_write(file_path, content, device, _tool_context=_tool_context)
     abs_path = os.path.abspath(file_path)
 
     # 覆写已有文件前检查是否Read过

@@ -1,7 +1,7 @@
 """远程文件操作 —— 通过SFTP在远程Linux上读写文件
 
 当AI在Terminal会话中时，Read/Edit/Write可通过SFTP操作远程文件。
-AI通过 remote=True 参数显式指定远程操作。
+AI通过 device 参数（dev1..devn）指定远程设备。
 """
 
 import io
@@ -11,6 +11,15 @@ from typing import Optional
 
 from . import get_session, SSHSession
 from ..diff_utils import colorize_diff
+
+
+def _no_session_msg() -> str:
+    """无可用会话时的提示：说明dev编号用法 + 当前已连接设备"""
+    try:
+        from . import _list_devices
+        return f"无可用SSH会话。设备标识只支持devN编号(dev1..devn)，请先Terminal connect。当前已连接: {_list_devices()}"
+    except Exception:
+        return "无可用SSH会话，请先Terminal connect"
 
 
 def _get_sftp(session: SSHSession):
@@ -25,7 +34,7 @@ def remote_read(file_path: str, offset: int = 0, limit: int = 2000,
     """通过SFTP读取远程文件"""
     session = get_session(host=host)
     if session is None:
-        return "[错误: 无活跃SSH会话，请先Terminal connect]"
+        return _no_session_msg()
 
     try:
         sftp = _get_sftp(session)
@@ -72,7 +81,7 @@ def remote_write(file_path: str, content: str, host: str = "", _tool_context=Non
     """通过SFTP写入远程文件"""
     session = get_session(host=host)
     if session is None:
-        return ("[错误: 无活跃SSH会话，请先Terminal connect]", "")
+        return (_no_session_msg(), "")
 
     key = f"{host}:{file_path}" if host else file_path
 
@@ -126,7 +135,7 @@ def remote_edit(file_path: str, old_string: str = "", new_string: str = "",
     """通过SFTP修改远程文件"""
     session = get_session(host=host)
     if session is None:
-        return ("[错误: 无活跃SSH会话，请先Terminal connect]", "")
+        return (_no_session_msg(), "")
 
     try:
         sftp = _get_sftp(session)

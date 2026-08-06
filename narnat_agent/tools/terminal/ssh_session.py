@@ -40,6 +40,19 @@ _RE_PASSWORD_PROMPT = re.compile(
     re.IGNORECASE,
 )
 
+# ANSI转义序列（模块级复用: _clean_output清洗 + _strip_echo判断续行）
+_ANSI_RE = re.compile(
+    r'\x1b\[\??[0-9;]*[a-zA-Z]'
+    r'|\x1b\].*?(?:\x07|\x1b\\)'
+    r'|\x1b[()][A-Za-z0-9]'
+    r'|\x1b[0-9:;<=>?@[A-Z\[\]^_`]'  # DEC私有序列: ESC 7(保存光标), ESC 8(恢复光标)等
+)
+
+
+def _ansi_sub(text: str) -> str:
+    """剥离ANSI转义序列"""
+    return _ANSI_RE.sub('', text)
+
 
 def _truncate_output(text: str, max_chars: int) -> str:
     """截断输出到指定字符数，超出部分附加提示"""
@@ -85,6 +98,7 @@ class SSHSession:
 
         self._busy = False  # 通道是否被未完成的前台命令占用
         self._interrupt = threading.Event()  # ESC中断标志，各读取方法检测此标志退出
+        self._last_command = ""  # 最近执行的命令，供_parse_output剥离命令回显
 
     def _initialize(self):
         """阻塞初始化：读初始输出、更新cwd。必须在 connect 中注册 _active_exec_session 之后调用，
@@ -136,6 +150,7 @@ class SSHSession:
 
         # 用 $? 捕获退出码附加在marker行，pwd -P 独立获取路径
         full_cmd = f"{command}; echo {marker}$?; pwd -P; echo {pwd_marker}\n"
+        self._last_command = command  # 供_parse_output剥离多行命令首行回显
         self._channel.send(full_cmd)
 
         result = self._read_until_marker(marker, pwd_marker, timeout=timeout)
@@ -465,12 +480,13 @@ class SSHSession:
         lines = raw.split("\n")
 
         # 按行查找: marker行以marker开头(后跟退出码数字)
+        # 注意: 无输出命令时 \x1b[?2004l\r 会紧贴marker行前（如 true），需先剥离ANSI和\r
         marker_line_idx = None
         for i, line in enumerate(lines):
-            if line.strip().startswith(marker):
+            if _ansi_sub(line).replace("\r", "").strip().startswith(marker):
                 marker_line_idx = i
                 # 提取退出码: marker行 = __NARNAT_MARKER_xxx__N
-                exit_str = line.strip()[len(marker):]
+                exit_str = _ansi_sub(line).replace("\r", "").strip()[len(marker):]
                 try:
                     exit_code = int(exit_str)
                 except ValueError:
@@ -499,13 +515,30 @@ class SSHSession:
         else:
             before_marker = raw
 
-        # 剥离 send_input 产生的标记命令回声（第二条 PTY 回显行）
-        before_marker = "\n".join(
-            l for l in before_marker.split("\n")
-            if not (l.strip().startswith("echo ") and marker in l)
-        )
+        # 剥离命令回显：
+        # 1. 含marker的行（命令回显/末行续行回显包含 "; echo <marker>" 片段）
+        # 2. "> "续行回显行（多行命令的中间续行，特征为含PTY续行序列 \x1b[?2004h 且剥离后以"> "开头）
+        # 3. 命令首行回显（不含marker，特征为等于命令首行文本）
+        # 注意: 真实输出行不含以上特征，不会被误删；这是比"首行=回显"更可靠的判断
+        echo_fragment = f"; echo {marker}"
+        first_line = (self._last_command or "").split("\n")[0].strip()
+        filtered = []
+        for l in before_marker.split("\n"):
+            ansi_clean = _ansi_sub(l).replace("\r", "").strip()
+            if echo_fragment in l:
+                continue  # 含marker的回显行
+            # 续行回显: PTY续行提示特征为 "\x1b[?2004h> "（开启序列后紧跟"> "提示符）。
+            # 输出行是 "\x1b[?2004l\r内容"（关闭序列+内容，"> "是内容本身），不受影响
+            if "\x1b[?2004h> " in l or "\x1b[?2004h>" in l:
+                continue  # 续行回显
+            if first_line and l.strip().startswith(first_line):
+                continue  # 命令首行回显
+            filtered.append(l)
 
-        cmd_output = self._strip_echo(before_marker)
+        before_marker = "\n".join(filtered)
+
+        # 命令回显已在上面剥离，首行是真实输出，不能再无条件跳首行（否则丢第一条输出）
+        cmd_output = self._strip_echo(before_marker, drop_echo_first_line=False)
 
         return self._clean_output(cmd_output), cwd, exit_code
 
@@ -513,10 +546,10 @@ class SSHSession:
         """解析超时时的部分输出（marker可能还没出现）"""
         lines = raw.split("\n")
 
-        # 按行查找marker行(以marker开头)
+        # 按行查找marker行(以marker开头，先剥离ANSI和\r)
         marker_line_idx = None
         for i, line in enumerate(lines):
-            if line.strip().startswith(marker):
+            if _ansi_sub(line).replace("\r", "").strip().startswith(marker):
                 marker_line_idx = i
                 break
 
@@ -550,35 +583,27 @@ class SSHSession:
         return self._clean_output(output)
 
     @staticmethod
-    def _strip_echo(raw: str) -> str:
-        """剥离PTY命令回显(第一行+续行"> "前缀)"""
+    def _strip_echo(raw: str, drop_echo_first_line: bool = True) -> str:
+        """剥离PTY命令回显(第一行)。
+
+        drop_echo_first_line:
+          True  - 跳过第一行（默认，用于未过滤的原始输出如超时路径，首行是命令回显）
+          False - 不跳第一行（用于已过滤命令回显的路径，首行是真实输出）
+
+        注: 续行回显("> "提示)已在_parse_output的过滤步骤按"\x1b[?2004h>"特征剥离，
+        此处不做续行判断，避免误删真实输出中"> "开头的行。
+        """
         lines = raw.split("\n")
         if not lines:
             return raw
 
-        # 跳过第一行（命令回显首行）
-        start = 1
-
-        # 跳过续行回显: PTY在多行输入时回显 "> " 前缀
-        while start < len(lines):
-            stripped = lines[start].strip()
-            if stripped.startswith("> ") or stripped == ">":
-                start += 1
-            else:
-                break
-
+        start = 1 if drop_echo_first_line else 0
         return "\n".join(lines[start:])
 
     @staticmethod
     def _clean_output(raw: str) -> str:
         """清洗ANSI转义码、回车覆盖、内部标记(PTY噪声)"""
-        ansi_re = re.compile(
-            r'\x1b\[\??[0-9;]*[a-zA-Z]'
-            r'|\x1b\].*?(?:\x07|\x1b\\)'
-            r'|\x1b[()][A-Za-z0-9]'
-            r'|\x1b[0-9:;<=>?@[A-Z\[\]^_`]'  # DEC私有序列: ESC 7(保存光标), ESC 8(恢复光标)等
-        )
-        cleaned = ansi_re.sub('', raw)
+        cleaned = _ansi_sub(raw)
 
         # 回车覆盖合并: \r后面的内容覆盖同行前面内容
         # 逐行处理，每行内按\r分段，后段覆盖前段
@@ -606,8 +631,8 @@ class SSHSession:
         # 清理内部标记: __NARNAT_MARKER_xxx__, __NARNAT_CWD_xxx__, __NARNAT_PWD_xxx__
         cleaned = re.sub(r'__NARNAT_(?:MARKER|CWD|PWD)_\d+__', '', cleaned)
 
-        # 清理续行提示符: 行首的 "> " (PS2 prompt回显)
-        cleaned = re.sub(r'(^|\n)> ', r'\1', cleaned)
+        # 注: 续行提示符("> ")的剥离已在_parse_output过滤步骤按"\x1b[?2004h>"特征处理，
+        # 此处不再按行首"> "删——否则会误删真实输出中以"> "开头的行（如 echo '> quote'）
 
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         return cleaned.strip()

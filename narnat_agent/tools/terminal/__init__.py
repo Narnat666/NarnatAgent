@@ -2,11 +2,11 @@
 Terminal工具 ── 多终端可持续SSH + 文件传输
 
 核心设计:
-- 支持最多MAX_SESSIONS(5)个并发SSH会话，每个会话有唯一session_id(0-4)
-- AI通过session_id指定在哪个终端操作，实现多终端并行
+- 支持最多MAX_SESSIONS(5)个并发SSH会话，内部用session_id(0-4)标识
+- AI通过dev编号引用设备: dev0=本机，dev1..devn=被控设备(终端N-1)
 - 会话持久化，多次调用复用同一连接
 - timeout默认120秒，超时告知AI命令仍在运行（AI可去其他终端继续工作）
-- transfer: 在已连接的设备间传输文件，远程间流式中转不落盘
+- transfer: 在任意设备间传输文件（本机↔设备、设备↔设备），远程间流式中转不落盘
 """
 
 import os
@@ -19,7 +19,7 @@ import paramiko
 
 from .ssh_session import SSHSession, _truncate_output
 
-__all__ = ["execute", "DEFINITION", "get_session", "SSHSession", "kill_active_exec", "cleanup", "set_max_sessions"]
+__all__ = ["execute", "DEFINITION", "get_session", "SSHSession", "kill_active_exec", "cleanup", "set_max_sessions", "resolve_dev_display"]
 
 
 # 删除命令正则
@@ -27,6 +27,9 @@ _RE_DELETE = re.compile(
     r"\b(rm\s|del\s|Remove-Item\s|rmdir\s|rd\s)",
     re.IGNORECASE,
 )
+
+# dev编号正则: dev0=本机(当前设备), devN(N>=1)=第N台被控设备(终端N-1)
+_RE_DEV = re.compile(r"^dev(\d+)$", re.IGNORECASE)
 
 # 匹配 git 命令的简单正则（出现 git 即命中）
 _RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
@@ -53,7 +56,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Terminal",
-        "description": "多终端持久SSH，最多5个并发。connect建立会话，exec执行命令，input发送交互输入，status查看会话，close关闭会话，transfer在所有被connect设备（含本机）之间传输文件时使用。",
+        "description": "多终端持久SSH，最多5个并发。connect建立会话，exec执行命令，input发送交互输入，status查看所有设备，close关闭会话，transfer在任意设备间传输文件(本机↔设备、设备↔设备)。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -62,8 +65,8 @@ DEFINITION = {
                     "enum": ["connect", "exec", "input", "status", "close", "transfer"],
                     "description": "操作类型（默认exec）",
                 },
-                "host": {"type": "string", "description": "远程主机IP或域名（action=connect时使用）"},
-                "username": {"type": "string", "description": "SSH用户名"},
+                "host": {"type": "string", "description": "connect时填被控设备IP/域名（建立连接，连接成功后每个设备返回唯一dev编号）；exec/input/close时填dev编号（dev1..devn）"},
+                "username": {"type": "string", "description": "SSH用户名（connect时使用）"},
                 "port": {"type": "integer", "description": "SSH端口（默认22）"},
                 "key_path": {"type": "string", "description": "SSH私钥路径（如~/.ssh/id_rsa）"},
                 "password": {"type": "string", "description": "SSH密码（不填则自动尝试密钥认证）"},
@@ -71,11 +74,10 @@ DEFINITION = {
                 "command": {"type": "string", "description": "执行的命令（需先设action=exec）"},
                 "input": {"type": "string", "description": "交互输入内容（需先设action=input，如sudo密码、y/n确认）"},
                 "timeout": {"type": "integer", "description": "命令超时秒数（正整数，默认120，超时自动返回通知）"},
-                "session_id": {"type": "integer", "description": "终端ID 0-4（默认自动分配，exec时需指定目标终端）"},
                 "max_output_chars": {"type": "integer", "description": "最大输出字符数（正整数，默认8000，超出截断并提示）"},
-                "source_host": {"type": "string", "description": "传输源设备（IP或域名），默认本机（action=transfer时使用）"},
+                "source_host": {"type": "string", "description": "传输源设备：默认dev0即本机（可省略），设置dev1..devn选择被控设备（action=transfer时使用）"},
                 "source_path": {"type": "string", "description": "源文件在源设备上的绝对路径（action=transfer时使用）"},
-                "target_host": {"type": "string", "description": "传输目标设备（IP或域名），默认本机（action=transfer时使用）"},
+                "target_host": {"type": "string", "description": "传输目标设备：默认dev0即本机（可省略），设置dev1..devn选择被控设备（action=transfer时使用）"},
                 "target_path": {"type": "string", "description": "目标文件在目标设备上的绝对路径（action=transfer时使用）"},
             },
             "required": [],
@@ -121,16 +123,19 @@ def execute(
     Terminal工具：多终端可持续SSH + 文件传输。
 
     action:
-      connect  - 建立SSH会话（首次连接或重连），自动分配或使用指定session_id
-      exec     - 在指定会话中执行命令
-      input    - 向终端发送交互输入（如sudo密码、确认提示等）
-      status   - 查看当前所有会话状态
-      close    - 关闭指定会话
-      transfer - 在已连接的设备间传输文件
+      connect  - 建立SSH会话（首次连接或重连），连接成功后返回该设备的dev编号
+      exec     - 在指定设备（host=devN）执行命令
+      input    - 向设备发送交互输入（如sudo密码、确认提示等）
+      status   - 查看所有设备状态（dev0本机 + dev1..devn）
+      close    - 关闭指定设备（host=devN）会话
+      transfer - 在任意设备间传输文件（dev0本机 ↔ dev1..devn被控设备）
+
+    device标识:
+      dev0=本机(无需connect)，dev1..devn=已connect的被控设备
+      设备引用统一用dev编号（host参数），不填host时自动选唯一会话
 
     session_id:
-      0-4  - 指定终端编号
-      -1   - 自动选择（connect时自动分配，exec时选唯一活跃会话）
+      内部参数，AI无需使用（设备引用统一用host=devN）
 
     sudo_password:
       connect时设置，后续exec遇到sudo密码提示自动注入
@@ -139,9 +144,9 @@ def execute(
       返回内容最大字符数，正整数，默认8000
 
     transfer参数:
-      source_host  - 源设备host，空字符串表示本机
+      source_host  - 传输源设备，dev0=本机(可省略)，dev1..devn=被控设备
       source_path  - 源文件在源设备上的绝对路径
-      target_host  - 目标设备host，空字符串表示本机
+      target_host  - 传输目标设备，dev0=本机(可省略)，dev1..devn=被控设备
       target_path  - 目标文件在目标设备上的绝对路径
     """
     if action == "connect":
@@ -168,6 +173,94 @@ def _allocate_session_id() -> int:
     return -1
 
 
+def _normalize_device(host: str) -> str:
+    """设备标识归一化: 空/dev0 → 空字符串(本机)；devN(N>=1) → 原样保留；其余原样交由校验报错"""
+    if not host:
+        return ""
+    h = host.strip()
+    m = _RE_DEV.match(h)
+    return "" if m and int(m.group(1)) == 0 else h
+
+
+def _normalize_device_for_tools(device: str) -> Optional[str]:
+    """文件工具(Read/Edit/Write)的设备标识归一化: 合法返回规范值(本机为""), 非法返回None"""
+    if not device:
+        return ""
+    h = device.strip()
+    m = _RE_DEV.match(h)
+    if not m:
+        return None
+    return "" if int(m.group(1)) == 0 else h
+
+
+def _device_error(host: str) -> Optional[str]:
+    """校验设备标识是否合法devN（dev0~devN），非法返回错误信息，合法返回None"""
+    if not host:
+        return None
+    if _RE_DEV.match(host.strip()):
+        return None
+    with _sessions_lock:
+        return f"[错误: {_dev_hint_locked()}]"
+
+
+def _dev_label(sid: int) -> str:
+    """终端session_id → dev编号标签: 终端0=dev1, 终端1=dev2 ..."""
+    return f"dev{sid + 1}(终端{sid})"
+
+
+def _list_devices_locked() -> str:
+    """当前已连接设备的dev清单（调用者需持有_sessions_lock）"""
+    devs = [f"dev{sid + 1}({s.username}@{s.host})" for sid, s in sorted(_sessions.items())]
+    return "、".join(devs) if devs else "(无)"
+
+
+def _list_devices() -> str:
+    """当前已连接设备的dev清单（用于报错提示）"""
+    with _sessions_lock:
+        return _list_devices_locked()
+
+
+def _local_host() -> str:
+    """本机显示名：优先取主机名，失败回退localhost"""
+    try:
+        import socket
+        return socket.gethostname()
+    except Exception:
+        return "localhost"
+
+
+def resolve_dev_display(dev: str) -> str:
+    """把设备引用翻译成UI显示名（供tool_dispatcher终端摘要使用）：
+    - 空/dev0/本机 → 本机host（主机名）
+    - devN已连接 → "host"（IP）
+    - devN未连接 → 原样devN
+    - 其他 → 原样
+    """
+    if not dev:
+        return _local_host()
+    h = dev.strip()
+    m = _RE_DEV.match(h)
+    if not m:
+        return h
+    d = int(m.group(1))
+    if d == 0:
+        return _local_host()
+    sid = d - 1
+    with _sessions_lock:
+        session = _sessions.get(sid)
+        if session is not None and not session._channel.closed:
+            return session.host
+    return h
+
+
+def _dev_hint_locked() -> str:
+    """设备标识错误时的统一指导：说明devN用法 + 列出当前可用设备（调用者需持有_sessions_lock）"""
+    devs = _list_devices_locked()
+    if devs == "(无)":
+        return "设备标识使用devN编号(dev0=本机, dev1..devn=被控设备)。当前无已连接设备，请先connect"
+    return f"设备标识使用devN编号(dev0=本机, dev1..devn=被控设备)。当前已连接: {devs}"
+
+
 def _resolve_session_id(session_id: int, host: str = "") -> tuple[int, "SSHSession"]:
     """解析session_id，返回 (session_id, session) 或抛出ValueError
 
@@ -180,15 +273,21 @@ def _resolve_session_id(session_id: int, host: str = "") -> tuple[int, "SSHSessi
         # 指定了session_id
         if session_id >= 0:
             if session_id not in _sessions:
-                raise ValueError(f"终端{session_id}未连接，请先connect")
+                raise ValueError(f"{_dev_label(session_id)}未连接，请先connect")
             return session_id, _sessions[session_id]
 
-        # 未指定session_id，按host匹配
+        # 未指定session_id，按host匹配（只认devN）
         if host:
-            for sid, session in _sessions.items():
-                if host in session.host or host in f"{session.username}@{session.host}":
-                    return sid, session
-            raise ValueError(f"未找到host={host}的会话，请先connect")
+            m = _RE_DEV.match(host.strip())
+            if not m:
+                raise ValueError(_dev_hint_locked())
+            d = int(m.group(1))
+            if d == 0:
+                raise ValueError("dev0是当前设备(本机)，无SSH会话，仅transfer可用")
+            sid = d - 1
+            if sid >= MAX_SESSIONS or sid not in _sessions:
+                raise ValueError(f"dev{d}未连接，请先connect")
+            return sid, _sessions[sid]
 
         # 未指定session_id和host，自动选择唯一会话
         if len(_sessions) == 1:
@@ -197,8 +296,8 @@ def _resolve_session_id(session_id: int, host: str = "") -> tuple[int, "SSHSessi
         elif len(_sessions) == 0:
             raise ValueError("无活跃会话，请先connect")
         else:
-            keys = list(_sessions.keys())
-            raise ValueError(f"有多个会话，请指定session_id，当前终端: {keys}")
+            keys = [_dev_label(s) for s in sorted(_sessions.keys())]
+            raise ValueError(f"有多个会话，请指定host=dev编号，当前已连接: {keys}")
 
 
 def _connect(host: str, username: str, port: int = 22,
@@ -217,7 +316,7 @@ def _connect(host: str, username: str, port: int = 22,
             if session_id in _sessions:
                 session = _sessions[session_id]
                 if not session._channel.closed:
-                    return f"[终端{session_id}已连接: {session.username}@{session.host}]\n{session.prompt}"
+                    return f"[{_dev_label(session_id)}已连接: {session.username}@{session.host}]\n{session.prompt}"
                 else:
                     session.close()
                     del _sessions[session_id]
@@ -226,8 +325,8 @@ def _connect(host: str, username: str, port: int = 22,
             # 自动分配
             alloc_id = _allocate_session_id()
             if alloc_id < 0:
-                active = list(_sessions.keys())
-                return f"[错误: 已达最大会话数({MAX_SESSIONS})，当前终端: {active}，请先close释放]"
+                active = [_dev_label(s) for s in sorted(_sessions.keys())]
+                return f"[错误: 已达最大会话数({MAX_SESSIONS})，当前已连接: {active}，请先close释放]"
 
     try:
         kwargs = {"host": host, "username": username, "port": port}
@@ -253,7 +352,7 @@ def _connect(host: str, username: str, port: int = 22,
         with _sessions_lock:
             _sessions[alloc_id] = session
 
-        parts = [f"[已连接终端{alloc_id}: {username}@{host}]"]
+        parts = [f"[已连接 {_dev_label(alloc_id)}: {username}@{host}]"]
         if session._initial_output:
             parts.append(session._initial_output)
         else:
@@ -321,7 +420,7 @@ def _exec(session_id: int, host: str, command: str, timeout: int = 120, max_outp
         with _sessions_lock:
             _sessions.pop(sid, None)
         session.close()
-        return f"[错误: 终端{sid}会话已断开，请重新connect]"
+        return f"[错误: {_dev_label(sid)}会话已断开，请重新connect]"
 
     try:
         # 注册活跃会话，agent层ESC打断后可通过kill_active_exec发送Ctrl+C
@@ -333,10 +432,10 @@ def _exec(session_id: int, host: str, command: str, timeout: int = 120, max_outp
         finally:
             with _active_exec_lock:
                 _active_exec_session = None
-        # 在结果前标注终端编号
-        return f"[终端{sid}] {result}"
+        # 在结果前标注dev编号
+        return f"[{_dev_label(sid)}] {result}"
     except Exception as e:
-        return f"[错误: 终端{sid}命令执行失败: {e}]"
+        return f"[错误: {_dev_label(sid)}命令执行失败: {e}]"
 
 
 def _input(session_id: int, host: str, input: str, timeout: int = 120, max_output_chars: int = 8000, _tool_context=None) -> str:
@@ -358,30 +457,29 @@ def _input(session_id: int, host: str, input: str, timeout: int = 120, max_outpu
         with _sessions_lock:
             _sessions.pop(sid, None)
         session.close()
-        return f"[错误: 终端{sid}会话已断开，请重新connect]"
+        return f"[错误: {_dev_label(sid)}会话已断开，请重新connect]"
 
     try:
         result = session.send_input(input, timeout=timeout, max_output_chars=max_output_chars)
-        return f"[终端{sid}] {result}"
+        return f"[{_dev_label(sid)}] {result}"
     except Exception as e:
-        return f"[错误: 终端{sid}输入发送失败: {e}]"
+        return f"[错误: {_dev_label(sid)}输入发送失败: {e}]"
 
 
 def _status() -> str:
     """查看所有会话状态"""
     with _sessions_lock:
-        if not _sessions:
-            return f"[无活跃SSH会话，最多支持{MAX_SESSIONS}个并发终端]"
-
-        lines = []
+        lines = ["dev0: 本机(当前设备)"]
         for sid in range(MAX_SESSIONS):
             if sid in _sessions:
                 session = _sessions[sid]
                 alive = "活跃" if not session._channel.closed else "已断开"
                 busy = "忙" if session._busy else "闲"
-                lines.append(f"  终端{sid}: {session.username}@{session.host} [{alive}|{busy}] {session.prompt}")
+                lines.append(f"  {_dev_label(sid)}: {session.username}@{session.host} [{alive}|{busy}] {session.prompt}")
             else:
-                lines.append(f"  终端{sid}: [空闲]")
+                lines.append(f"  {_dev_label(sid)}: [空闲]")
+        if len(_sessions) == 0:
+            return "[SSH会话]\n" + "\n".join(lines) + f"\n(无已连接设备，最多支持{MAX_SESSIONS}个并发终端)"
         return "[SSH会话]\n" + "\n".join(lines)
 
 
@@ -399,24 +497,27 @@ def _close(session_id: int, host: str) -> str:
         # 指定了session_id
         if session_id >= 0:
             if session_id not in _sessions:
-                return f"[终端{session_id}未连接]"
+                return f"[{_dev_label(session_id)}未连接]"
             _sessions[session_id].close()
             del _sessions[session_id]
-            return f"[已关闭终端{session_id}]"
+            return f"[已关闭 {_dev_label(session_id)}]"
 
-        # 按host匹配
-        matched = None
-        for sid, session in _sessions.items():
-            if host in session.host or host in f"{session.username}@{session.host}":
-                matched = sid
-                break
+        # 按host匹配（只认devN）
+        if host:
+            m = _RE_DEV.match(host.strip())
+            if not m:
+                return f"[错误: {_dev_hint_locked()}]"
+            d = int(m.group(1))
+            if d == 0:
+                return "[dev0是当前设备(本机)，无需关闭]"
+            sid = d - 1
+            if sid >= MAX_SESSIONS or sid not in _sessions:
+                return f"[dev{d}未连接]"
+            _sessions[sid].close()
+            del _sessions[sid]
+            return f"[已关闭 {_dev_label(sid)}]"
 
-        if matched is None:
-            return f"[未找到host={host}的会话]"
-
-        _sessions[matched].close()
-        del _sessions[matched]
-        return f"[已关闭终端{matched}]"
+        return "[错误: close需要指定dev编号(如host=dev1)或session_id]"
 
 
 def cleanup():
@@ -515,7 +616,7 @@ def _transfer_local_to_remote(source_path: str, target_host: str, target_path: s
 
     session = get_session(host=target_host)
     if session is None:
-        return f"[错误: 目标设备 {target_host} 未连接，请先connect]"
+        return f"[错误: 目标设备 {target_host} 未连接，请先connect。当前已连接: {_list_devices()}]"
 
     if not _ensure_remote_dir(session, target_path):
         return f"[错误: 无法创建远程目标目录: {target_path}]"
@@ -535,7 +636,7 @@ def _transfer_local_to_remote(source_path: str, target_host: str, target_path: s
 def _transfer_remote_to_local(source_host: str, source_path: str, target_path: str, max_transfer_mb: int) -> str:
     session = get_session(host=source_host)
     if session is None:
-        return f"[错误: 源设备 {source_host} 未连接，请先connect]"
+        return f"[错误: 源设备 {source_host} 未连接，请先connect。当前已连接: {_list_devices()}]"
 
     size = _get_remote_file_size(session, source_path)
     if size is None:
@@ -563,11 +664,11 @@ def _transfer_remote_to_local(source_host: str, source_path: str, target_path: s
 def _transfer_remote_to_remote(source_host: str, source_path: str, target_host: str, target_path: str, max_transfer_mb: int) -> str:
     src_session = get_session(host=source_host)
     if src_session is None:
-        return f"[错误: 源设备 {source_host} 未连接，请先connect]"
+        return f"[错误: 源设备 {source_host} 未连接，请先connect。当前已连接: {_list_devices()}]"
 
     tgt_session = get_session(host=target_host)
     if tgt_session is None:
-        return f"[错误: 目标设备 {target_host} 未连接，请先connect]"
+        return f"[错误: 目标设备 {target_host} 未连接，请先connect。当前已连接: {_list_devices()}]"
 
     size = _get_remote_file_size(src_session, source_path)
     if size is None:
@@ -611,6 +712,14 @@ def _transfer(source_host: str, source_path: str, target_host: str, target_path:
         return "[错误: transfer需要提供source_path（源文件路径）]"
     if not target_path:
         return "[错误: transfer需要提供target_path（目标文件路径）]"
+
+    # 设备标识校验（只认devN: dev0=本机可省略，dev1..devN=被控设备）
+    source_host = _normalize_device(source_host)
+    target_host = _normalize_device(target_host)
+    err = _device_error(source_host) or _device_error(target_host)
+    if err:
+        return err
+
     if source_host == target_host and source_path == target_path:
         return "[错误: 源和目标相同，无需传输]"
 
@@ -622,7 +731,7 @@ def _transfer(source_host: str, source_path: str, target_host: str, target_path:
     target_is_local = not target_host
 
     if source_is_local and target_is_local:
-        return "[错误: 源和目标都是本机，请使用本地文件操作工具]"
+        return "[错误: 源和目标都是本机(dev0)，请使用本地文件操作工具]"
     elif source_is_local:
         return _transfer_local_to_remote(source_path, target_host, target_path, max_transfer_mb)
     elif target_is_local:

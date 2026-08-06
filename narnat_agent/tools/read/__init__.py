@@ -1,23 +1,26 @@
 """Read工具 —— 读取文件内容，带行号
 
 默认上限2000行，超出自动截断并提示。limit需为正整数。最终输出由系统全局上限控制。
+
+设备语义: device=dev0或省略 → 本机(dev0)；device=dev1..devn → 被控设备(需先Terminal connect)。
 """
 
 import os
+
+from ..terminal import _normalize_device_for_tools
 
 DEFINITION = {
     "type": "function",
     "function": {
         "name": "Read",
-        "description": "读取纯文本文件内容，返还内容带行号（由1开始）。不可读取二进制文件。本地或远程读取文件时使用。",
+        "description": "读取纯文本文件内容，返还内容带行号（由1开始）。不可读取二进制文件。支持本地或远程读取文件。",
         "parameters": {
             "type": "object",
             "properties": {
                 "file_path": {"type": "string", "description": "文件路径（绝对或相对）"},
                 "offset": {"type": "integer", "description": "起始行（默认1，含本行）"},
                 "limit": {"type": "integer", "description": "读取行数（正整数，默认2000）"},
-                "remote": {"type": "boolean", "description": "是否读取远程（默认否，启用前需先Terminal连接）"},
-                "host": {"type": "string", "description": "远程主机IP或域名（默认空，需启用remote）"},
+                "device": {"type": "string", "description": "设备dev编号：默认dev0（可省略）读取本机文件，设置dev1..devn则读取被控设备文件（需先Terminal connect被控设备获取dev编号）"},
             },
             "required": ["file_path"],
         },
@@ -26,7 +29,7 @@ DEFINITION = {
 
 
 def execute(file_path: str, offset: int = 0, limit: int = 2000,
-            remote: bool = False, host: str = "",
+            device: str = "",
             _tool_context=None) -> str:
     """
     读取文件内容。
@@ -35,8 +38,7 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
         file_path: 文件绝对路径
         offset: 起始行号(1-based)，0表示从头读
         limit: 最大行数，正整数，默认2000
-        remote: 通过SFTP读取远程文件（需先Terminal connect）
-        host: 远程主机IP（仅remote=True时使用）
+        device: 设备dev编号：dev0=本机（默认），dev1..devn=被控设备（需先Terminal connect）
         _tool_context: 工具运行时上下文（内部参数，由registry注入）
 
     Returns:
@@ -47,13 +49,16 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
     limit = int(limit) if limit is not None else 2000
     if limit <= 0:
         return "[错误: limit需为正整数]"
-    
-    remote = bool(remote)
-    if remote:
+
+    device = _normalize_device_for_tools(device)
+    if device is None:
+        return "[错误: 设备标识使用devN编号(dev0=本机, dev1..devn=被控设备)]"
+
+    if device:
         from ..terminal.remote import remote_read
-        result = remote_read(file_path, offset, limit, host)
+        result = remote_read(file_path, offset, limit, device)
         if "错误" not in result and _tool_context:
-            _tool_context.mark_remote_read(file_path, host)
+            _tool_context.mark_remote_read(file_path, device)
         return result
         
     if not os.path.isfile(file_path):

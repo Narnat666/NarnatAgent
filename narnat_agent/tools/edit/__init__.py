@@ -12,18 +12,21 @@
    - 自动兼容 \r\n 和 \n 换行符
 
 注意: line_start 和 old_string 不能同时使用，需选择一种模式。
+
+设备语义: device=dev0或省略 → 本机(dev0)；device=dev1..devn → 被控设备(需先Terminal connect)。
 """
 
 import os
 import difflib
 
 from ..diff_utils import colorize_diff
+from ..terminal import _normalize_device_for_tools
 
 DEFINITION = {
     "type": "function",
     "function": {
         "name": "Edit",
-        "description": "编辑文件（字符串替换或行替换，两种模式互斥）。本地或远程编辑文件时使用。",
+        "description": "编辑文件（字符串替换或行替换，两种模式互斥）。支持本地或远程编辑文件。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -31,10 +34,9 @@ DEFINITION = {
                 "old_string": {"type": "string", "description": "待替换文本（字符串模式）"},
                 "new_string": {"type": "string", "description": "替换文本"},
                 "replace_all": {"type": "boolean", "description": "是否替换全部匹配（字符串模式，默认否）"},
-                "line_start": {"type": "integer", "description": "起始行（行号模式，默认不启用，≥1启用，含本行）"},
+                "line_start": {"type": "integer", "description": "起始行（行号模式，默认不启用，配置≥1时启用行替换模式，含本行）"},
                 "line_end": {"type": "integer", "description": "结束行（含本行，默认等于line_start）"},
-                "remote": {"type": "boolean", "description": "是否编辑远程（默认否，启用前需先Terminal连接）"},
-                "host": {"type": "string", "description": "远程主机IP或域名（默认空，需启用remote）"},
+                "device": {"type": "string", "description": "设备dev编号：默认dev0（可省略）编辑本机文件，设置dev1..devn则编辑被控设备文件（需先Terminal connect被控设备获取dev编号）"},
             },
             "required": ["file_path"],
         },
@@ -45,7 +47,7 @@ DEFINITION = {
 def execute(file_path: str, old_string: str = "", new_string: str = "",
             replace_all: bool = False,
             line_start: int = 0, line_end: int = 0,
-            remote: bool = False, host: str = "",
+            device: str = "",
             _tool_context=None) -> tuple:
     """
     修改文件内容。
@@ -60,8 +62,7 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
         replace_all: 替换所有匹配（字符串模式，默认只替换第一个）
         line_start: 起始行号（行号模式，从1开始）
         line_end: 结束行号（行号模式，含此行；0或省略则等于line_start）
-        remote: 通过SFTP修改远程文件（需先Terminal connect）
-        host: 远程主机（仅remote=True时使用）
+        device: 设备dev编号：dev0=本机（默认），dev1..devn=被控设备（需先Terminal connect）
 
     Returns:
         (llm_result, color_diff) 元组:
@@ -72,12 +73,15 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
     line_start = int(line_start) if line_start else 0
     line_end = int(line_end) if line_end else 0
     replace_all = bool(replace_all)
-    remote = bool(remote)
 
-    if remote:
+    device = _normalize_device_for_tools(device)
+    if device is None:
+        return ("[错误: 设备标识使用devN编号(dev0=本机, dev1..devn=被控设备)]", "")
+
+    if device:
         from ..terminal.remote import remote_edit
         return remote_edit(file_path, old_string, new_string, replace_all,
-                          line_start, line_end, host)
+                          line_start, line_end, device)
 
     if not os.path.isfile(file_path):
         return (f"[错误: 文件不存在: {file_path}，如需创建请用Write工具]", "")
