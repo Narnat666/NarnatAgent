@@ -25,9 +25,6 @@ _RE_DELETE = re.compile(
 # 匹配 git 命令的简单正则（出现 git 即命中）
 _RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
 
-# 后台进程注册表 {pid: (proc, start_time)}
-_background_procs: dict = {}
-
 # 子进程环境变量：强制 UTF-8 编码，解决 Windows 下 Python print emoji 等
 # Unicode 字符在 GBK 代码页下报 UnicodeEncodeError 的问题
 _utf8_env = os.environ.copy()
@@ -72,7 +69,6 @@ DEFINITION = {
             "properties": {
                 "command": {"type": "string", "description": "命令"},
                 "timeout": {"type": "integer", "description": "超时秒数（正整数，默认120）"},
-                "run_in_background": {"type": "boolean", "description": "是否后台运行（默认否）"},
                 "max_output_chars": {"type": "integer", "description": "最大输出字符数（正整数，默认4000）"},
             },
             "required": ["command"],
@@ -286,7 +282,6 @@ def _format_prompt() -> str:
 def execute(
     command: str,
     timeout: int = 120,
-    run_in_background: bool = False,
     max_output_chars: int = 4000,
     _tool_context=None,
 ) -> str:
@@ -299,7 +294,6 @@ def execute(
     Args:
         command: shell命令
         timeout: 超时秒数
-        run_in_background: 后台运行，立即返回
         max_output_chars: 返回内容最大字符数，正整数，默认4000
         _tool_context: 工具运行时上下文（内部参数，由registry注入）
 
@@ -326,7 +320,6 @@ def execute(
                     tc.pending_delete = ("Shell", {
                         "command": command,
                         "timeout": timeout,
-                        "run_in_background": run_in_background,
                         "max_output_chars": max_output_chars,
                     })
                 return "__AWAIT_CONFIRM__"
@@ -336,29 +329,6 @@ def execute(
 
     if _tool_context and _tool_context.max_timeout_seconds > 0:
         timeout = min(timeout, _tool_context.max_timeout_seconds)
-
-    # ── 后台运行：始终走独立子进程 ──
-    if run_in_background:
-        # python -c 补丁：先拆段再逐段应用（命令可能带 cd && 等前缀，整条匹配会漏）
-        # 注意：后台模式不能立即删除临时文件（进程异步启动中），
-        # 由 _run_background 的 _wait_and_cleanup 在进程结束后延迟删除
-        segments = _split_commands(command)
-        tmp_files = []
-        new_segments = []
-        for op, seg in segments:
-            new_seg, tmp = _rewrite_python_c(seg)
-            if tmp:
-                tmp_files.append(tmp)
-            new_segments.append((op, new_seg))
-        reassembled = " ".join(f"{op} {seg}" if op else seg for op, seg in new_segments)
-
-        if sys.platform == "win32":
-            return _run_background(reassembled, command, tmp_files)
-        else:
-            shell = _find_executable("bash", "sh")
-            if shell is None:
-                return "[错误: 未找到shell，请安装bash或sh后重试]"
-            return _run_background([shell, "-c", reassembled], command, tmp_files)
 
     # ═════════════════════════════════════════════════════════════
     # Windows: cmd /c 子进程（stdin 继承 TTY，避免外部工具因管道 stdin 阻塞）
@@ -380,7 +350,7 @@ def execute(
         segments = _split_commands(command)
         if len(segments) > 1:
             return _execute_segments(
-                segments, timeout, False, max_output_chars, _tool_context
+                segments, timeout, max_output_chars, _tool_context
             )
 
         # 单段：python -c 补丁（多行/含特殊字符 → 临时脚本，绕开cmd解析）
@@ -405,7 +375,7 @@ def execute(
     segments = _split_commands(command)
     if len(segments) > 1:
         return _execute_segments(
-            segments, timeout, False, max_output_chars, _tool_context
+            segments, timeout, max_output_chars, _tool_context
         )
 
     shell_cmd = [shell, "-c", command]
@@ -618,61 +588,7 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
             _active_proc = None
 
 
-def _run_background(shell_cmd, original_command: str, tmp_files=None) -> str:
-    """后台运行命令，立即返回进程信息。
-    shell_cmd: str → shell=True（Windows）；list → 直接 Popen（Linux bash -c）。
-    tmp_files: python -c 补丁产生的临时脚本列表，进程结束后延迟删除（不能立即删，进程异步启动）。"""
-    if tmp_files is None:
-        tmp_files = []
-    try:
-        if isinstance(shell_cmd, str):
-            proc = subprocess.Popen(
-                shell_cmd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=os.getcwd(),
-                env=_utf8_env,
-            )
-        else:
-            proc = subprocess.Popen(
-                shell_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=os.getcwd(),
-                env=_utf8_env,
-            )
-    except FileNotFoundError as e:
-        return f"[错误: Shell未找到: {e}]"
-    except OSError as e:
-        return f"[错误: 启动失败: {e}]"
-
-    pid = proc.pid
-    start_time = time.time()
-    _background_procs[pid] = (proc, start_time)
-
-    def _wait_and_cleanup():
-        proc.wait()
-        for tf in tmp_files:
-            try:
-                os.remove(tf)
-            except OSError:
-                pass
-        time.sleep(60)
-        _background_procs.pop(pid, None)
-
-    t = threading.Thread(target=_wait_and_cleanup, daemon=True)
-    t.start()
-
-    return (
-        f"[后台进程已启动]\n"
-        f"PID: {pid}\n"
-        f"命令: {original_command}\n"
-        f"提示: 进程在后台运行，输出可通过重定向到文件后用Read查看"
-    )
-
-
-def _execute_segments(segments: list, timeout: int, run_in_background: bool,
+def _execute_segments(segments: list, timeout: int,
                       max_output_chars: int, _tool_context) -> str:
     """逐段执行 &&/|| 分割的命令，短路段跳过。
 
@@ -680,18 +596,12 @@ def _execute_segments(segments: list, timeout: int, run_in_background: bool,
     1. 每段独立的超时控制（超时时强杀整棵进程树）
     2. ESC 可在段内/段间打断
     3. cd 命令作用到 os.chdir() 而非子进程
-    后台模式：重组为单行 cmd /c 调用，委托 _run_background。
     """
-    timeout_sec = timeout
-    if run_in_background:
-        reassembled = " ".join(f"{op} {seg}" if op else seg for op, seg in segments)
-        return _run_background(reassembled, reassembled)
-
     global _interrupted, _active_proc
     _interrupted = False  # 入口清零：上轮残留的中断标志不污染本轮
     all_parts = []
     prev_rc = 0
-    remaining_timeout = timeout_sec
+    remaining_timeout = timeout
     was_interrupted = False
 
     for i, (op, seg) in enumerate(segments):
@@ -825,21 +735,6 @@ def _execute_segments(segments: list, timeout: int, run_in_background: bool,
         all_parts.append("[用户中断]")
 
     return _truncate_output("\n".join(all_parts) + "\n" + _format_prompt(), max_output_chars)
-
-
-def get_background_status() -> str:
-    """查询所有后台进程状态（内部接口）"""
-    if not _background_procs:
-        return "[无后台进程]"
-
-    lines = []
-    now = time.time()
-    for pid, (proc, start) in list(_background_procs.items()):
-        elapsed = now - start
-        status = "运行中" if proc.poll() is None else f"已结束(退出码:{proc.returncode})"
-        lines.append(f"PID {pid}: {status}, 运行{elapsed:.0f}秒")
-
-    return "\n".join(lines)
 
 
 def cleanup():
