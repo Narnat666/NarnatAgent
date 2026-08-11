@@ -21,7 +21,7 @@ from .defaults import (
     DEFAULT_MAX_TOOL_OUTPUT_KB,
     DEFAULT_MAX_TIMEOUT_SECONDS,
     DEFAULT_AUTO_SAVE,
-    DEFAULT_AUTO_SAVE_TURNS,
+    DEFAULT_AUTO_SAVE_TOKENS,
 )
 
 
@@ -87,7 +87,7 @@ class PlanConfig:
 class SessionConfig:
     """会话与上下文配置（只读）"""
     auto_save: bool = DEFAULT_AUTO_SAVE
-    auto_save_turns: int = DEFAULT_AUTO_SAVE_TURNS
+    auto_save_tokens: int = DEFAULT_AUTO_SAVE_TOKENS
     show_ratio: bool = DEFAULT_SHOW_RATIO
     warn_ratio: int = DEFAULT_WARN_RATIO
     compress_ratio: int = DEFAULT_COMPRESS_RATIO
@@ -226,6 +226,29 @@ def _coerce(v, target_type):
         return target_type(v)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_token_amount(v, default: int = 0) -> int:
+    """解析token量配置：支持数字（10000）或 "10k" / "1.5K" 格式，非法值返回 default"""
+    if v in (None, ""):
+        return default
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, (int, float)):
+        try:
+            return max(0, int(v))
+        except (ValueError, OverflowError):
+            return default
+    s = str(v).strip().lower()
+    if s.endswith("k"):
+        try:
+            return max(0, int(float(s[:-1]) * 1000))
+        except ValueError:
+            return default
+    try:
+        return max(0, int(s))
+    except ValueError:
+        return default
 
 
 def _parse_pricing(data: dict) -> Dict[str, Dict[str, float]]:
@@ -527,7 +550,7 @@ def load_config(project_root: Optional[str] = None) -> Config:
                             "max_output_tokens": 128000
                         },
                         "工具": {"输出上限KB": DEFAULT_MAX_TOOL_OUTPUT_KB, "超时上限秒": DEFAULT_MAX_TIMEOUT_SECONDS},
-                        "会话": {"自动保存轮数": DEFAULT_AUTO_SAVE_TURNS},
+                        "会话": {"自动保存Token量": DEFAULT_AUTO_SAVE_TOKENS},
                         "压缩": {
                             "占比显示": DEFAULT_SHOW_RATIO,
                             "告警": DEFAULT_WARN_RATIO,
@@ -604,8 +627,8 @@ def load_config(project_root: Optional[str] = None) -> Config:
         ),
         session=SessionConfig(
             auto_save=bool(data.get("会话", {}).get("自动保存", DEFAULT_AUTO_SAVE)),
-            auto_save_turns=max(1, _coerce(data.get("会话", {}).get("自动保存轮数"), int)
-                                or DEFAULT_AUTO_SAVE_TURNS),
+            auto_save_tokens=_parse_token_amount(
+                data.get("会话", {}).get("自动保存Token量"), DEFAULT_AUTO_SAVE_TOKENS),
             show_ratio=bool(data.get("压缩", {}).get("占比显示", DEFAULT_SHOW_RATIO)),
             warn_ratio=_coerce(data.get("压缩", {}).get("告警"), int) or DEFAULT_WARN_RATIO,
             compress_ratio=_coerce(data.get("压缩", {}).get("压缩"), int) or DEFAULT_COMPRESS_RATIO,

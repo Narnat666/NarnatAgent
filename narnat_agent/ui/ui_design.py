@@ -139,7 +139,9 @@ def show_stats(input_tokens: int, output_tokens: int,
     mt = f"{_max_tokens / 1000:.0f}k" if _max_tokens >= 1000 else str(_max_tokens)
     th = f"  思考:{thinking_effort}"
     _sep()
-    cs = f"  缓存:{cache / 1000:.1f}k" if cache > 0 else ""
+    cs = ""
+    if cache > 0 and input_tokens > 0:
+        cs = f"  缓存:{min(100.0, cache / input_tokens * 100):.1f}%"
     co = f"  费用:¥{cost:.4f}" if _show_cost else ""
     ba = f"  余额:¥{balance:.2f}" if _show_balance and balance > 0 else ""
     rt = ""

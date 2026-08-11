@@ -10,6 +10,7 @@ from typing import Optional
 from ..config.loader import Config
 from .message_list import MessageList
 from .session_callbacks import SessionManager
+from .stats import StatsTracker
 from .summarizer import Summarizer
 from ..logger import AgentLogger
 from ..output import write as _stdout_write, D, E, R
@@ -20,19 +21,21 @@ class AutoSaveManager:
 
     def __init__(self, config: Config, message_list: MessageList,
                  session_mgr: SessionManager, summarizer: Summarizer,
-                 logger: AgentLogger):
+                 stats: StatsTracker, logger: AgentLogger):
         self._config = config
         self._message_list = message_list
         self._mgr = session_mgr
         self._summary = summarizer
+        self._stats = stats
         self._logger = logger
         self._auto_save_thread: Optional[threading.Thread] = None
 
     def try_save(self):
         """启动后台线程做 LLM 命名 + 写磁盘。主线程立即返回。
 
-        轮数门槛：聊满 auto_save_turns 轮（user 消息数）后才自动保存，
-        避免用户随口聊几句就生成命名会话。
+        Token门槛：服务器返回的输入token量（prompt_tokens，含全部历史）
+        大于 auto_save_tokens 阈值后才自动保存，避免用户随口聊几句就生成命名会话；
+        阈值0 = 无门槛，用户输入即自动保存。
         """
         if not self._config.session.auto_save:
             return
@@ -41,8 +44,8 @@ class AutoSaveManager:
         from .session_callbacks import NoSession
         if not isinstance(self._mgr.state, NoSession):
             return
-        user_turns = self._message_list.view().count_role("user")
-        if user_turns < self._config.session.auto_save_turns:
+        threshold = self._config.session.auto_save_tokens
+        if threshold > 0 and self._stats.input_tokens <= threshold:
             return
         self._mgr._auto_save_done = True
 

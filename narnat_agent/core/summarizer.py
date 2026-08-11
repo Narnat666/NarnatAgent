@@ -42,10 +42,10 @@ class Summarizer:
         name_messages = list(messages)
         name_messages.append({
             "role": "user",
-            "content": f"请为以上对话起一个简短标题（15字以内），直接输出标题，不要引号不要解释。{hint}"
+            "content": f"请为以上对话起一个简短标题（15字以内），直接输出标题，不要引号不要解释。{hint}\n【重要】不要调用任何工具，直接输出标题文本。"
         })
         parts = []
-        for chunk in self._llm.chat_stream(name_messages, no_tools=True,
+        for chunk in self._llm.chat_stream(name_messages, no_tools=False, no_thinking=True,
                                            cancel_check=lambda: False):
             if "content" in chunk and "tool_calls" not in chunk:
                 parts.append(chunk["content"])

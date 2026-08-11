@@ -116,8 +116,10 @@ class LLMClient:
         else:
             self._backend = _OpenAIBackend(config, self._tool_defs, logger)
 
-    def chat_stream(self, messages: List[Dict[str, Any]], no_tools: bool = False, cancel_check=None) -> Iterator:
-        return self._backend.chat_stream(_strip_surrogates(messages), no_tools=no_tools, cancel_check=cancel_check)
+    def chat_stream(self, messages: List[Dict[str, Any]], no_tools: bool = False,
+                    no_thinking: bool = False, cancel_check=None) -> Iterator:
+        return self._backend.chat_stream(_strip_surrogates(messages), no_tools=no_tools,
+                                         no_thinking=no_thinking, cancel_check=cancel_check)
 
     @property
     def raw_sse(self):
@@ -144,7 +146,7 @@ class _OpenAIBackend:
             max_retries=0,
         )
 
-    def chat_stream(self, messages, no_tools=False, cancel_check=None):
+    def chat_stream(self, messages, no_tools=False, no_thinking=False, cancel_check=None):
         if self._logger:
             self._logger.info("core.llm", f"发送请求(OpenAI), messages={len(messages)}条")
 
@@ -161,7 +163,8 @@ class _OpenAIBackend:
                 # 动态构造 thinking 参数（不再硬编码）
                 think_body_top, think_extra = resolve_thinking_params(
                     "openai", self._config.model,
-                    self._config.thinking_enabled, self._config.thinking_effort,
+                    self._config.thinking_enabled and not no_thinking,
+                    self._config.thinking_effort,
                 )
                 kwargs = dict(
                     model=self._config.model,
@@ -266,6 +269,11 @@ class _OpenAIBackend:
                     details = getattr(usage, 'prompt_tokens_details', None)
                     if details:
                         cached = getattr(details, 'cached_tokens', 0)
+                    if not cached:
+                        # DeepSeek: 缓存命中数在顶层 prompt_cache_hit_tokens（OpenAI 原生无此字段）
+                        cached = getattr(usage, 'prompt_cache_hit_tokens', 0) or 0
+                        if not cached:
+                            cached = (getattr(usage, 'model_extra', None) or {}).get('prompt_cache_hit_tokens', 0) or 0
                     yield {
                         "usage": {
                             "prompt_tokens": usage.prompt_tokens,
@@ -353,7 +361,7 @@ class _AnthropicBackend:
             "Content-Type": "application/json",
         }
 
-    def chat_stream(self, messages, no_tools=False, cancel_check=None):
+    def chat_stream(self, messages, no_tools=False, no_thinking=False, cancel_check=None):
         self._last_raw_sse.clear()
         if self._logger:
             self._logger.info("core.llm", f"发送请求(Anthropic), messages={len(messages)}条")
@@ -369,7 +377,8 @@ class _AnthropicBackend:
         # 动态构造 thinking 参数
         think_body_top, think_extra = resolve_thinking_params(
             "anthropic", self._config.model,
-            self._config.thinking_enabled, self._config.thinking_effort,
+            self._config.thinking_enabled and not no_thinking,
+            self._config.thinking_effort,
         )
         body = {
             "model": self._config.model,
@@ -542,10 +551,12 @@ class _AnthropicBackend:
                     msg = data.get("message", {})
                     usage = msg.get("usage", {})
                     if usage:
+                        # DeepSeek 兼容层可能返回 cache_read_input_tokens 或 prompt_cache_hit_tokens，双兼容
+                        cached = usage.get("cache_read_input_tokens", 0) or usage.get("prompt_cache_hit_tokens", 0) or 0
                         _start_usage = {
-                            "prompt_tokens": usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0),
+                            "prompt_tokens": usage.get("input_tokens", 0) + cached,
                             "completion_tokens": 0,
-                            "cached_tokens": usage.get("cache_read_input_tokens", 0),
+                            "cached_tokens": cached,
                         }
                     continue
 
@@ -631,7 +642,8 @@ class _AnthropicBackend:
                     usage = data.get("usage", {})
                     if usage:
                         prompt = usage.get("input_tokens", 0)
-                        cached = usage.get("cache_read_input_tokens", 0)
+                        # DeepSeek 兼容层可能返回 cache_read_input_tokens 或 prompt_cache_hit_tokens，双兼容
+                        cached = usage.get("cache_read_input_tokens", 0) or usage.get("prompt_cache_hit_tokens", 0) or 0
                         yield {"usage": {"prompt_tokens": prompt + cached, "completion_tokens": usage.get("output_tokens", 0), "cached_tokens": cached}}
 
                 elif dtype == "error":

@@ -140,7 +140,7 @@ class Assembly:
 
         # 15. 自动保存管理器
         auto_save_mgr = AutoSaveManager(
-            config, message_list, session_mgr, summarizer, logger,
+            config, message_list, session_mgr, summarizer, stats, logger,
         )
 
         # 16. 压缩协调器

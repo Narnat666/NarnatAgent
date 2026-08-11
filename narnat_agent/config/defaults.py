@@ -4,7 +4,7 @@
 
 # ── 自动保存默认值 ──
 DEFAULT_AUTO_SAVE = False   # 默认不自动保存，需用户手动 /save
-DEFAULT_AUTO_SAVE_TURNS = 1  # 自动保存轮数：聊满N轮（用户消息数）后自动保存
+DEFAULT_AUTO_SAVE_TOKENS = 0  # 自动保存输入量：服务器输入token > 此值才自动保存，0=无门槛（用户输入即保存）
 
 # ── 安全确认默认值 ──
 DEFAULT_GIT_SKIP = False   # git 命令默认不免确认（即需要二次确认）
