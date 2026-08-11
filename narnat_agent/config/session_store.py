@@ -250,6 +250,99 @@ def format_session_tree(tree: List[Dict[str, Any]],
     return "\n".join(lines)
 
 
+def format_session_summary(tree: List[Dict[str, Any]],
+                           active_name: Optional[str] = None,
+                           active_parent: Optional[str] = None) -> str:
+    """精简列表：今天全部列出，更早最多3个父会话并提示剩余（/ls --all 查看全部）。
+
+    分组只看父会话 timestamp；子会话挂在父会话下按树形显示，格式与 /ls --all 一致。
+    """
+    if not tree:
+        return ""
+    now = time.localtime()
+    today_midnight = time.mktime((now.tm_year, now.tm_mon, now.tm_mday,
+                                  0, 0, 0, 0, 0, -1))
+
+    def _entry(root):
+        return {
+            "name": root["name"],
+            "timestamp": root["timestamp"],
+            "count": root["message_count"],
+            "active": (root["name"] == active_name and active_parent is None),
+            "deleted": bool(root.get("_delete_marked")),
+            "children": [
+                {
+                    "name": child["name"],
+                    "timestamp": child["timestamp"],
+                    "count": child["message_count"],
+                    "status": child.get("status", "active"),
+                    "active": (child["name"] == active_name and root["name"] == active_parent),
+                    "deleted": bool(child.get("_delete_marked")),
+                }
+                for child in root.get("children", [])
+            ],
+        }
+
+    today, earlier = [], []
+    for root in tree:
+        entry = _entry(root)
+        (today if entry["timestamp"] >= today_midnight else earlier).append(entry)
+    today.sort(key=lambda e: e["timestamp"], reverse=True)
+    earlier.sort(key=lambda e: e["timestamp"], reverse=True)
+
+    def _render(entry, ts_fmt, is_last):
+        lines = []
+        ts = time.strftime(ts_fmt, time.localtime(entry["timestamp"]))
+        marks = ""
+        if entry["deleted"]:
+            marks += "  ✘ 退出后删除"
+        if entry["active"]:
+            marks += "  ◀ 当前"
+        connector = "└──" if is_last else "├──"
+        lines.append(f"  {connector} {entry['name']}  ({ts}, {entry['count']}条){marks}")
+        child_prefix_base = "      " if is_last else "│     "
+        for j, child in enumerate(entry["children"]):
+            is_last_child = (j == len(entry["children"]) - 1)
+            c_connector = "└──" if is_last_child else "├──"
+            child_ts = time.strftime("%m-%d %H:%M", time.localtime(child["timestamp"]))
+            if child["status"] == "completed":
+                status_str = f"✓ 已完成 ({child_ts})"
+            elif child["status"] == "new":
+                status_str = f"({child_ts}, {child['count']}条)"
+            else:
+                status_str = f"⚠ 待完成 ({child_ts}, {child['count']}条)"
+            if child["deleted"]:
+                status_str += "  ✘ 退出后删除"
+            if child["active"]:
+                status_str += "  ◀ 当前"
+            lines.append(f"  {child_prefix_base}{c_connector} {child['name']}  {status_str}")
+        return lines
+
+    lines = []
+    if today:
+        lines.append(f"  今天 ({len(today)})")
+        for i, e in enumerate(today):
+            lines.extend(_render(e, "%H:%M", i == len(today) - 1))
+        if earlier:
+            lines.append("")
+    if earlier:
+        lines.append(f"  更早 ({len(earlier)})")
+        shown = earlier[:3]
+        # 当前会话（父或子）若不在前3棵，追加显示，保证"我在哪"可见
+        current = next((e for e in earlier
+                        if e["active"] or any(c["active"] for c in e["children"])), None)
+        if current is not None and current not in shown:
+            shown = shown + [current]
+        for i, e in enumerate(shown):
+            lines.extend(_render(e, "%m-%d", i == len(shown) - 1))
+        rest = len(earlier) - len(shown)
+        if rest > 0:
+            lines.append(f"  … 还有 {rest} 条更早的会话 (/ls --all 查看)")
+    if active_name is None and active_parent is None:
+        lines.append(f"   ◉  ◀ 当前")
+    return "\n".join(lines)
+
+
 def load_session_meta(narnat_dir: str, name: str, parent: Optional[str] = None) -> dict:
     path = _session_path(narnat_dir, name, parent=parent)
     if not os.path.isfile(path):

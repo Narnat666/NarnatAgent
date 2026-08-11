@@ -43,6 +43,10 @@ class _CommandCompleter(Completer):
         "/thinking": "on_list_thinking_options",
     }
 
+    _STATIC_OPTIONS = {
+        "/ls": ["--all"],
+    }
+
     def __init__(self, mgr):
         self._mgr = mgr
 
@@ -94,6 +98,9 @@ class _CommandCompleter(Completer):
                                     name[len(prefix):],
                                     start_position=0,
                                 )
+            elif num_parts == 1 and text.endswith(" "):
+                for opt in self._STATIC_OPTIONS.get(cmd, []):
+                    yield Completion(opt, start_position=0)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -165,7 +172,7 @@ def _cmd_save(args: str, mgr) -> CommandResult:
 
 @_register("ls")
 def _cmd_ls(args: str, mgr) -> CommandResult:
-    result = mgr.on_show()
+    result = mgr.on_show(args)
     if result:
         _stdout_write(result + "\n")
     else:

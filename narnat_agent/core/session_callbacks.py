@@ -16,7 +16,7 @@ from typing import Optional, List, Dict, Any, Callable, Set, Tuple
 from ..config.session_store import (
     save_session, load_session, list_sessions, delete_session,
     format_session_list, list_sessions_tree, format_session_tree,
-    load_session_meta,
+    format_session_summary, load_session_meta,
 )
 from ..config.skill_store import load_skill, list_skill_names
 from .message_list import MessageList
@@ -154,10 +154,13 @@ class NoSession(SessionState):
         self._mgr.switch_state(new_state)
         return ""
 
-    def show(self) -> str:
+    def show(self, args: str = "") -> str:
         tree = list_sessions_tree(self._mgr.narnat_dir)
         self._mgr.apply_delete_marks(tree)
-        result = format_session_tree(tree, None, None)
+        if args == "--all":
+            result = format_session_tree(tree, None, None)
+        else:
+            result = format_session_summary(tree, None, None)
         if not result:
             return ""
         from ..ui.colors import C, R, X
@@ -261,10 +264,13 @@ class RootSession(SessionState):
             self._mgr.switch_state(new_state)
         return ""
 
-    def show(self) -> str:
+    def show(self, args: str = "") -> str:
         tree = list_sessions_tree(self._mgr.narnat_dir)
         self._mgr.apply_delete_marks(tree)
-        result = format_session_tree(tree, self._name, None)
+        if args == "--all":
+            result = format_session_tree(tree, self._name, None)
+        else:
+            result = format_session_summary(tree, self._name, None)
         from ..ui.colors import C, R, X
         result = result.replace("◀ 当前", f"{C}◀ 当前{R}")
         if self._mgr.pending_deletes:
@@ -393,10 +399,13 @@ class ChildSession(SessionState):
                      last_summarized_at=self._last_summarized_at)
         self._msg_count = len(msgs)
 
-    def show(self) -> str:
+    def show(self, args: str = "") -> str:
         tree = list_sessions_tree(self._mgr.narnat_dir)
         self._mgr.apply_delete_marks(tree)
-        result = format_session_tree(tree, self._name, self._parent)
+        if args == "--all":
+            result = format_session_tree(tree, self._name, self._parent)
+        else:
+            result = format_session_summary(tree, self._name, self._parent)
         from ..ui.colors import C, R, X
         result = result.replace("◀ 当前", f"{C}◀ 当前{R}")
         if self._mgr.pending_deletes:
@@ -586,26 +595,29 @@ class SessionManager:
 
     def resolve_session_name(self, name: str) -> Tuple[Optional[str], Optional[str], str]:
         """解析会话名。返回 (target_name, target_parent, error_msg)"""
-        if "/" in name:
-            parts = name.split("/", 1)
-            return parts[1], parts[0], ""
         tree = list_sessions_tree(self.narnat_dir)
-        matches = []
+        # 1) 完整名匹配：根会话名（可能本身含 "/"）或 "父/子" 完整路径
         for root in tree:
             if root["name"] == name:
-                matches.append((root["name"], None))
+                return root["name"], None, ""
+            for child in root.get("children", []):
+                if f"{root['name']}/{child['name']}" == name:
+                    return child["name"], root["name"], ""
+        # 2) 含 "/" 的名字按 parent/child 拆分（"父/子" 快捷写法）
+        if "/" in name:
+            parent, child = name.split("/", 1)
+            return child, parent, ""
+        # 3) 裸名：唯一子会话匹配
+        matches = []
+        for root in tree:
             for child in root.get("children", []):
                 if child["name"] == name:
                     matches.append((child["name"], root["name"]))
-        # 裸名优先匹配根会话；仅当无根匹配时，唯一的子匹配才生效
-        root_matches = [m for m in matches if m[1] is None]
-        if root_matches:
-            return root_matches[0][0], None, ""
         if len(matches) == 1:
             return matches[0][0], matches[0][1], ""
         if len(matches) > 1:
             paths = "\n".join(
-                f"      {p}/{c}" if c else f"      {p}" for p, c in matches
+                f"      {c}/{p}" if c else f"      {p}" for p, c in matches
             )
             return None, None, f"'{name}' 有多个，请用完整路径指定：\n{paths}"
         return None, None, f"会话不存在: {name}"
@@ -619,8 +631,8 @@ class SessionManager:
     def on_save(self, name: str) -> str:
         return self._state.save(name)
 
-    def on_show(self) -> str:
-        return self._state.show()
+    def on_show(self, args: str = "") -> str:
+        return self._state.show(args)
 
     def on_enter(self, name: str) -> str:
         return self._state.enter(name)
