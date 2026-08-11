@@ -8,7 +8,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from typing import Optional, Callable
@@ -110,78 +109,6 @@ def _decode_output(raw: bytes) -> str:
         except UnicodeDecodeError:
             pass
     return raw.decode("utf-8", errors="replace")
-
-
-# 匹配 python -c "代码" 形态（含 python3、python3.11 等），允许后跟重定向/管道/追加命令等
-# 策略: 贪婪匹配到最后一个引号（代码内可含引号），之后是尾部后缀
-# 分组: 1=python解释器, 2=代码(可能含内引号), 3=尾部后缀(重定向/管道/&&等)
-_RE_PY_C = re.compile(r'^(?:@\s*)?(python[\w.\-]*)\s+-c\s+"(.*)"\s*(.*)$', re.DOTALL)
-
-
-def _rewrite_python_c(command: str):
-    """Windows补丁：python -c 的多行/含特殊字符代码，改写为临时脚本文件执行。
-
-    cmd 会把命令行中的换行、%、!、&、|、^ 等按自身规则解析，
-    导致 -c "多行代码" 在传入 Python 前已被破坏。
-    改写为写临时 .py 文件再执行，代码以文件字节流进入，绕开 cmd 解析层。
-
-    返回 (new_command, tmp_path)：tmp_path 非空时调用方执行后需删除。
-    不匹配或单行安全代码则原样返回 (command, None)。
-    """
-    # 仅Windows需要：cmd.exe会破坏多行/%/!等字符，bash无此问题且改写会改变
-    # sys.path[0]（临时目录替代cwd），影响import本地模块，故Linux/macOS一律不干预
-    if sys.platform != "win32":
-        return command, None
-
-    m = _RE_PY_C.match(command)
-    if not m:
-        return command, None
-
-    python_exe, code, suffix = m.group(1), m.group(2), m.group(3)
-
-    # 只有含 cmd 会破坏的字符（换行/%/!）才需要改写，单行安全代码不干预
-    if "\n" not in code and "%" not in code and "!" not in code:
-        return command, None
-
-    # 注意：code 是 JSON 解码后的 Python 代码文本。写入文件前需还原 cmd 的
-    # 引号转义：cmd 会把 \" 解析为 "（Python -c 收到的就是 "），文件模式
-    # 同样需要 "；而 \\ 是字面反斜杠，cmd 不处理，保持原样（不能动）。
-    code = code.replace('\\"', '"')
-    # 写临时脚本（带 UTF-8 声明，中文安全）
-    fd, tmp_path = tempfile.mkstemp(
-        prefix="pyc_", suffix=".py", dir=os.getenv("TEMP", ".")
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write("# -*- coding: utf-8 -*-\n")
-            f.write(code)
-            if not code.endswith("\n"):
-                f.write("\n")
-    except Exception:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        return command, None  # 写文件失败则不干预，按原样执行
-
-    # 语法预检：贪婪正则可能把后缀中的引号吞进代码导致语法错误
-    # （如 python -c "..." | findstr /c:"x"），此时回退原样执行，
-    # 保证补丁永不引入比原样更坏的结果
-    try:
-        import py_compile
-        py_compile.compile(tmp_path, doraise=True)
-    except Exception:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        return command, None
-
-    # 保留尾部后缀（重定向/管道/追加命令等），仅替换 python -c 部分
-    new_cmd = f'{python_exe} "{tmp_path}"'
-    if suffix:
-        new_cmd += " " + suffix
-    return new_cmd, tmp_path
 
 
 def _split_commands(command: str) -> list:
@@ -353,16 +280,7 @@ def execute(
                 segments, timeout, max_output_chars, _tool_context
             )
 
-        # 单段：python -c 补丁（多行/含特殊字符 → 临时脚本，绕开cmd解析）
-        seg, _pyc_tmp = _rewrite_python_c(command)
-        try:
-            return _execute_win32(seg, timeout, max_output_chars)
-        finally:
-            if _pyc_tmp:
-                try:
-                    os.remove(_pyc_tmp)
-                except OSError:
-                    pass
+        return _execute_win32(command, timeout, max_output_chars)
 
     # ═════════════════════════════════════════════════════════════
     # Linux/macOS: bash -c 子进程（原有逻辑）
@@ -627,9 +545,6 @@ def _execute_segments(segments: list, timeout: int,
                     prev_rc = 1
             continue
 
-        # python -c 补丁：多行/含特殊字符段 → 临时脚本文件（绕开cmd解析，执行后清理）
-        seg, _pyc_tmp = _rewrite_python_c(seg)
-
         # 执行单段（Popen + 进程树杀，与 _execute_win32 行为统一）
         seg_budget = remaining_timeout
         seg_start = time.time()
@@ -644,11 +559,6 @@ def _execute_segments(segments: list, timeout: int,
                 env=_utf8_env,
             )
         except OSError as e:
-            if _pyc_tmp:
-                try:
-                    os.remove(_pyc_tmp)
-                except OSError:
-                    pass
             all_parts.append(f"[错误: 段{i}启动失败: {e}]")
             prev_rc = -1
             break
@@ -725,11 +635,6 @@ def _execute_segments(segments: list, timeout: int,
         finally:
             with _active_proc_lock:
                 _active_proc = None
-            if _pyc_tmp:
-                try:
-                    os.remove(_pyc_tmp)
-                except OSError:
-                    pass
 
     if was_interrupted:
         all_parts.append("[用户中断]")
