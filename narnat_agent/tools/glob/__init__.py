@@ -243,7 +243,12 @@ def _compile_pattern(pattern: str) -> re.Pattern[str]:
     if pending_slash:
         parts.append("/")
 
-    flags = 0 if _pattern_has_uppercase(pattern) else re.IGNORECASE
+    # Windows 文件系统不区分大小写，pattern 大小写差异不应导致静默无匹配
+    # （AI 从历史输出/记忆里复述路径时大小写常不一致）。Linux 保持 fd smart case。
+    if os.name == "nt":
+        flags = re.IGNORECASE
+    else:
+        flags = 0 if _pattern_has_uppercase(pattern) else re.IGNORECASE
     return re.compile("".join(parts), flags)
 
 
@@ -366,6 +371,104 @@ def _norm_path(path: str, is_nt: bool) -> str:
     return path
 
 
+def _pattern_has_dot_component(pattern: str) -> bool:
+    """pattern 任意路径组件以 . 开头（如 .narnat/**、**/.narnat/*）→ 不过滤隐藏文件。
+
+    对齐 fd 语义：pattern 中显式出现隐藏组件时启用隐藏文件搜索。
+    仅剥离前导 ./ 与 /（与 _compile_pattern 一致），不剥离组件内部的 .。
+    """
+    p = pattern.replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    p = p.lstrip("/")
+    return any(comp.startswith(".") for comp in p.split("/") if comp)
+
+
+# ── 绝对路径 pattern 支持 ────────────────────────────────────
+
+def _is_abs_pattern(pattern: str) -> bool:
+    """判断 pattern 是否为绝对路径形式。
+    Windows: 盘符(X:\\或X:/)或UNC(\\\\server)；POSIX: / 开头。"""
+    if os.name == "nt":
+        return bool(re.match(r"^[a-zA-Z]:[\\/]", pattern)) or pattern.startswith("\\\\")
+    return pattern.startswith("/")
+
+
+def _split_static_prefix(pattern: str) -> tuple:
+    """绝对 pattern 拆分: (静态目录, 剩余pattern)。
+
+    - 无通配符 → (pattern, "")，调用方做存在性检查
+    - 有通配符 → 首个通配符之前最后一个路径分隔符处切分
+    - 无法切分 → ("", pattern)，调用方按普通pattern处理
+    """
+    wild_pos = -1
+    for i, ch in enumerate(pattern):
+        if ch in "*?[":
+            wild_pos = i
+            break
+    if wild_pos < 0:
+        return pattern, ""
+    sep = max(pattern.rfind("/", 0, wild_pos), pattern.rfind("\\", 0, wild_pos))
+    if sep < 0:
+        return "", pattern
+    static_dir = pattern[:sep]
+    # 盘符单独作为前缀（如 D:\\*.py）时补分隔符：D: 是"盘符相对路径"而非盘根
+    if os.name == "nt" and len(static_dir) == 2 and static_dir[1] == ":":
+        static_dir += "\\"
+    return static_dir, pattern[sep + 1:]
+
+
+def _execute_abs_patterns(patterns: list, root: str, ignore_dirs: set,
+                          max_results: int, skip_hidden_files: bool) -> str:
+    """执行绝对路径 pattern：每个 pattern 按静态前缀拆出搜索目录后在该目录内匹配；
+    无通配符的 pattern 直接做存在性检查。多 pattern 结果合并去重，按 mtime 倒序截断。"""
+    merged: dict[str, float] = {}  # 归一化路径(/分隔) → mtime
+    total = 0
+    missing_dirs: list[str] = []
+
+    for p in patterns:
+        static_dir, rest = _split_static_prefix(p)
+        if not rest:
+            # 无通配符的绝对路径：直接存在性检查，不必遍历全树
+            target = os.path.normpath(p)
+            try:
+                st = os.stat(target)
+            except OSError:
+                continue
+            if os.path.isdir(target) or os.path.isfile(target):
+                merged.setdefault(target.replace("\\", "/"), st.st_mtime)
+                total += 1
+            continue
+        if not static_dir or not os.path.isdir(static_dir):
+            if static_dir:
+                missing_dirs.append(static_dir)
+            continue
+        res, t = _collect(static_dir, [_compile_pattern(rest)], ignore_dirs,
+                          max_results, skip_hidden_files)
+        prefix = static_dir.replace("\\", "/").rstrip("/") + "/"
+        for rel, mtime in res:
+            merged.setdefault(prefix + rel.replace("\\", "/"), mtime)
+        total += t
+
+    if not merged:
+        if missing_dirs:
+            return f"[错误: 目录不存在: {missing_dirs[0]}（当前目录: {os.getcwd()}）]"
+        return f"[无匹配（搜索目录: {root}）]"
+
+    results = sorted(merged.items(), key=lambda kv: (-kv[1], kv[0]))
+    shown = [
+        p.replace("/", os.sep) if os.sep != "/" else p
+        for p, _ in results[:max_results]
+    ]
+    output = "\n".join(shown)
+    if total > max_results:
+        output += (
+            f"\n...[已截断: 共{total}个匹配项, "
+            f"当前显示按修改时间最近的{max_results}个。增大max_results可获取完整列表]"
+        )
+    return output
+
+
 # ── 公共接口 ────────────────────────────────────────────────────
 
 DEFINITION = {
@@ -375,6 +478,9 @@ DEFINITION = {
         "description": (
             '按模式匹配文件和目录。"*" 只匹配当前目录；"**" 递归所有子目录。'
             '例："**/*.h"、"src/**/*.cpp"、"*.{docx,pdf}"。返回匹配路径，按修改时间倒序。'
+            'pattern 支持绝对路径（如 "D:\\work\\**\\*.py"，此时忽略 path 参数）。'
+            '默认跳过隐藏文件与.git/node_modules等忽略目录；pattern含以.开头的路径组件时匹配隐藏文件。'
+            '（仅支持本机文件，不支持远程设备文件）'
         ),
         "parameters": {
             "type": "object",
@@ -392,7 +498,8 @@ DEFINITION = {
 def execute(pattern: str, path: str = "", max_results: int = 500, _tool_context=None) -> str:
     root = path or os.getcwd()
     if not os.path.isdir(root):
-        return f"[错误: 目录不存在: {root}]"
+        # 相对路径解析依赖当前目录（Shell cd会改变它），报错时带上cwd帮AI一次定位
+        return f"[错误: 目录不存在: {root}（当前目录: {os.getcwd()}）]"
 
     if max_results <= 0:
         return "[错误: max_results需为正整数]"
@@ -414,16 +521,21 @@ def execute(pattern: str, path: str = "", max_results: int = 500, _tool_context=
     # 2. 预编译所有 pattern 为正则
     regexes = [_compile_pattern(p) for p in patterns]
 
-    # 3. 隐藏文件过滤（对齐 fd：pattern 以 . 开头则不过滤隐藏文件）
-    skip_hidden_files = not any(
-        p.lstrip("./").startswith(".") for p in patterns
-    )
+    # 3. 隐藏文件过滤（对齐 fd：pattern 任意路径组件以 . 开头则不过滤隐藏文件）
+    #    注: 不能用 p.lstrip("./")——会把 ".narnat" 开头的 . 误剥离导致判断失效
+    skip_hidden_files = not any(_pattern_has_dot_component(p) for p in patterns)
 
-    # 4. scandir 遍历 + 堆 top-K
+    # 4. 绝对路径 pattern：按静态前缀定位搜索目录（否则永远匹配不上，静默返回无匹配）
+    if all(_is_abs_pattern(p) for p in patterns):
+        return _execute_abs_patterns(patterns, root, ignore_dirs,
+                                     max_results, skip_hidden_files)
+
+    # 5. scandir 遍历 + 堆 top-K
     results, total = _collect(root, regexes, ignore_dirs, max_results, skip_hidden_files)
 
     if not results:
-        return "[无匹配]"
+        # 带上实际搜索目录，帮 AI 一次定位（Shell cd 会改变当前目录，无匹配常因目录不对）
+        return f"[无匹配（搜索目录: {root}）]"
 
     output = "\n".join(m[0] for m in results)
 

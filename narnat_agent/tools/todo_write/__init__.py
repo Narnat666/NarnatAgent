@@ -17,14 +17,14 @@ DEFINITION = {
                         "type": "object",
                         "properties": {
                             "content": {"type": "string", "description": "任务描述（祈使句，如'运行测试'）"},
-                            "activeForm": {"type": "string", "description": "执行时的进行时描述（如'正在运行测试'）"},
+                            "activeForm": {"type": "string", "description": "执行时的进行时描述（如'正在运行测试'；可选，缺省用content）"},
                             "status": {
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "completed"],
                                 "description": "任务状态",
                             },
                         },
-                        "required": ["content", "status", "activeForm"],
+                        "required": ["content", "status"],
                     },
                     "description": "任务列表",
                 },
@@ -55,11 +55,14 @@ def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
     for i, todo in enumerate(todos):
         if not isinstance(todo, dict):
             return f"[错误: 第{i+1}项不是对象]"
-        for field in ("content", "activeForm", "status"):
+        for field in ("content", "status"):
             if field not in todo:
                 return f"[错误: 第{i+1}项缺少必填字段: {field}]"
         if todo["status"] not in ("pending", "in_progress", "completed"):
             return f"[错误: 第{i+1}项status非法: {todo['status']}]"
+        # activeForm可选：缺失时回退content（消费端tool_callbacks已按此兼容）
+        if not todo.get("activeForm"):
+            todo["activeForm"] = todo["content"]
 
     # 校验in_progress数量：允许0个（初始状态）或1个，禁止多个
     in_progress_count = sum(1 for t in todos if t["status"] == "in_progress")
@@ -84,7 +87,5 @@ def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
     for i, t in enumerate(unfinished, 1):
         status_label = "进行中" if t["status"] == "in_progress" else "待处理"
         lines.append(f"{i}. [{status_label}] {t['content']}")
-    lines.append("")
-    lines.append("[完成后请使用 TodoWrite 更新任务状态。]")
 
     return "\n".join(lines)

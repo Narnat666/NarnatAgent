@@ -45,6 +45,7 @@ class AgentLoop:
 
     def run(self, stream):
         """工具调度内循环"""
+        stream_interrupted_retried = False  # 响应流中断（无完成标记）的自动重试只做一次
         while True:
             # a. 修复messages
             self._msg_manager.repair()
@@ -146,20 +147,31 @@ class AgentLoop:
             else:
                 # 空回复
                 self._dump_empty_debug(content_parts, tool_calls_result, parsed_finish_reason, call_usage)
+                # ── 响应流中断 ≠ 正常空回复 ──
+                # finish_reason为None且无内容/无工具调用 → 服务端在响应中途断开SSE流
+                # （正常空回复必有finish_reason）。此时消息列表尚未追加assistant消息，
+                # 重发完全无副作用，自动重试一次；避免误报"空回复，请缩短对话"误导用户
+                if parsed_finish_reason is None and not tool_calls_result and not stream_interrupted_retried:
+                    stream_interrupted_retried = True
+                    if self._logger:
+                        self._logger.warning("agent_loop", "响应流中断(无finish_reason/无内容)，自动重试一次")
+                    stream.feed("\n⚠ 服务端响应流中断，正在自动重试…\n")
+                    continue
                 _empty_msgs = {
                     "stop": "⚠ AI 返回了空回复，请尝试缩短对话或稍后重试。",
                     "max_tokens": "⚠ AI 思考超过了最大输出限制，请增大限制或缩短对话。",
                     "content_filter": "⚠ AI 返回被安全策略拦截，请调整提问内容。",
                     "server_busy": "⚠ 服务器繁忙，请稍后重试。",
                     "error": "⚠ AI 调用出错，请查看上方错误信息。",
+                    "stream_interrupted": "⚠ 服务端响应流中断，请稍后重试。",
                 }
-                reason = parsed_finish_reason or "stop"
+                reason = parsed_finish_reason or "stream_interrupted"
                 msg = _empty_msgs.get(reason, f"⚠ AI 返回异常（{reason}），请稍后重试。")
                 stream.feed(f"\n\n{msg}\n")
                 stream.finish(
                     self._stats.input_tokens,
                     self._stats.output_tokens,
-                    cache=self._stats.cache_tokens,
+                    cache_ratio=self._stats.cache_hit_ratio,
                     cost=self._stats.cost,
                     balance=self._stats.balance,
                     thinking_effort=self._thinking_label,
@@ -173,7 +185,7 @@ class AgentLoop:
             stream.finish(
                 self._stats.input_tokens,
                 self._stats.output_tokens,
-                cache=self._stats.cache_tokens,
+                cache_ratio=self._stats.cache_hit_ratio,
                 cost=self._stats.cost,
                 balance=self._stats.balance,
                 thinking_effort=self._thinking_label,
@@ -204,7 +216,7 @@ class AgentLoop:
         stream.finish(
             self._stats.input_tokens,
             self._stats.output_tokens,
-            cache=self._stats.cache_tokens,
+            cache_ratio=self._stats.cache_hit_ratio,
             cost=self._stats.cost,
             balance=self._stats.balance,
             thinking_effort=self._thinking_label,

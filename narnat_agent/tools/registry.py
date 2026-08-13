@@ -6,6 +6,7 @@
 """
 
 import json
+import re
 from typing import Dict, List, Any, Callable, Optional
 
 from .tool_context import ToolContext
@@ -90,21 +91,56 @@ def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolCon
         else:
             llm_result, color_diff = result, ""
 
-        # ── 全局输出硬截断 ──
+        # ── 全局输出硬截断（保留首尾：尾部常含提示符等关键状态信息）──
         if tool_context and tool_context.max_tool_output_chars > 0:
             if len(llm_result) > tool_context.max_tool_output_chars:
                 original_len = len(llm_result)
                 limit_kb = tool_context.max_tool_output_chars // 1024
+                max_chars = tool_context.max_tool_output_chars
+                head = max_chars * 2 // 3
+                tail = max_chars - head
                 llm_result = (
-                    llm_result[:tool_context.max_tool_output_chars]
-                    + f"\n...[已截断: 输出共{original_len}字符, 已达全局上限{limit_kb}KB]"
+                    llm_result[:head]
+                    + f"\n...[全局截断: 输出共{original_len}字符, 已达全局上限{limit_kb}KB, 已保留首尾。如需更多内容，请缩小本次输出（过滤/分页/减小范围）]"
+                    + llm_result[-tail:]
                 )
 
         return (llm_result, color_diff)
     except TypeError as e:
-        return (f"[错误: 工具参数错误({name}): {e}]", "")
+        return (f"[错误: 工具参数错误({name}): {_friendly_type_error(name, impl, e)}]", "")
     except Exception as e:
         return (f"[错误: 工具执行失败({name}): {e}]", "")
+
+
+def _friendly_type_error(name: str, impl: Callable, err: TypeError) -> str:
+    """把Python原生TypeError转成对LLM友好的中文提示，并列出该工具的有效参数。
+
+    LLM 传错参数名（如 filepath 而非 file_path）或漏传必填参数时，
+    原生的英文报错信息虽可读但不够直接；列出有效参数名能让AI一次修正。
+    """
+    msg = str(err)
+    # 提取该工具的有效参数名（排除框架注入的 _tool_context 和别名兼容用的 **kwargs）
+    try:
+        import inspect
+        params = [
+            p for p in inspect.signature(impl).parameters
+            if p not in ("_tool_context", "kwargs")
+        ]
+    except Exception:
+        params = []
+
+    m = re.search(r"unexpected keyword argument '([^']+)'", msg)
+    if m and params:
+        return (f"收到未知参数 '{m.group(1)}'。"
+                f"{name} 的有效参数: {', '.join(params)}")
+    if "missing" in msg:
+        # 支持单/多参数缺失: "missing 1 required positional argument: 'a'"
+        # 或 "missing 2 required positional arguments: 'a' and 'b'"
+        missing = re.findall(r"'([^']+)'", msg)
+        if missing and params:
+            return (f"缺少必填参数: {', '.join(missing)}。"
+                    f"{name} 的有效参数: {', '.join(params)}")
+    return msg
 
 
 def get_tool_names() -> List[str]:

@@ -36,3 +36,4 @@ Thumbs.db
 .DS_Store
 Desktop.ini
 .venv
+tool_exp/

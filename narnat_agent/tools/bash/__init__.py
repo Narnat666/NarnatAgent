@@ -1,6 +1,6 @@
 """Shell工具 —— 纯管道，AI写什么就执行什么
 
-Windows用持久化cmd会话（命令直写stdin，零转义损耗），Linux/macOS用bash -c。
+Windows用 cmd.exe 子进程执行（shell=True），Linux/macOS用bash -c。
 AI自己负责写正确语法，我们只管送达和返回。
 """
 
@@ -10,14 +10,15 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Optional, Callable
-
-from .cmd_session import CmdSession
+from typing import Optional
 
 
 # 删除命令正则
+# 边界后跟空白或/：覆盖无空格变体（rd/s、del/f、rmdir/q）及erase/format；
+# \b边界防止误伤 delphi、3rd、formatting 等普通词
 _RE_DELETE = re.compile(
-    r"\b(rm\s|del\s|Remove-Item\s|rmdir\s|rd\s)",
+    r"\b(?:rm|del|rd|rmdir|erase|format)\b[\s/]"
+    r"|\bRemove-Item\b",
     re.IGNORECASE,
 )
 
@@ -30,44 +31,25 @@ _utf8_env = os.environ.copy()
 _utf8_env["PYTHONIOENCODING"] = "utf-8"
 _utf8_env["PYTHONUTF8"] = "1"
 
-# ── 持久化 cmd 会话（Windows only）──
-_cmd_session: Optional[CmdSession] = None
-_cmd_session_lock = threading.Lock()
-
-
-def _get_cmd_session() -> CmdSession:
-    """获取或创建持久化 cmd 会话。进程已死或超时死亡则重建。"""
-    global _cmd_session
-    with _cmd_session_lock:
-        if (_cmd_session is None
-                or _cmd_session._proc.poll() is not None
-                or _cmd_session._dead):
-            if _cmd_session is not None:
-                try:
-                    _cmd_session.close()
-                except Exception:
-                    pass
-            _cmd_session = CmdSession()
-        return _cmd_session
-
-
-# 当前运行的前台进程（agent层ESC打断后可调用kill_active杀掉，Linux路径使用）
+# 当前运行的前台进程（agent层ESC打断后可调用kill_active杀掉）
 _active_proc: Optional[subprocess.Popen] = None
 _active_proc_lock = threading.Lock()
 
 # ESC打断标记，kill_active()设置，execute()检查后清除
 _interrupted = False
 
+_PLATFORM_LABEL = "Windows(cmd)" if sys.platform == "win32" else "Linux/macOS(bash)"
+
 DEFINITION = {
     "type": "function",
     "function": {
         "name": "Shell",
-        "description": f"持久化本地Shell — 在{__import__('sys').platform}执行命令。",
+        "description": f"本地Shell — 在{_PLATFORM_LABEL}执行命令。",
         "parameters": {
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "命令"},
-                "timeout": {"type": "integer", "description": "超时秒数（正整数，默认120）"},
+                "timeout": {"type": "integer", "description": "超时秒数（正整数，默认120，超时后命令会被终止）"},
                 "max_output_chars": {"type": "integer", "description": "最大输出字符数（正整数，默认4000）"},
             },
             "required": ["command"],
@@ -112,20 +94,34 @@ def _decode_output(raw: bytes) -> str:
 
 
 def _split_commands(command: str) -> list:
-    """在引号外按 && 和 || 分割，返回 [(op, cmd), ...]。
-    op: '' 表示首段，'&&' 或 '||' 表示后续段。"""
+    """在引号外、括号组外按 && 和 || 分割，返回 [(op, cmd), ...]。
+    op: '' 表示首段，'&&' 或 '||' 表示后续段。
+
+    括号内的 &&/|| 不分割：cmd/bash 中 () 是分组语法，
+    (a && b) 是一个整体命令，拆开会导致语法错误。
+    ^ 转义（cmd）：^ 后一字符是字面量，跳过不参与括号深度和分割。
+    """
     splits = []  # [(pos, '&&'|'||')]
     in_quote = False
+    paren_depth = 0
     i = 0
-    while i < len(command):
+    n = len(command)
+    while i < n:
         ch = command[i]
         if ch == '"':
             in_quote = not in_quote
-        elif not in_quote and i + 1 < len(command):
-            two = command[i:i+2]
-            if two in ("&&", "||"):
-                splits.append((i, two))
-                i += 1
+        elif not in_quote:
+            if ch == "^" and i + 1 < n:
+                i += 1  # cmd转义: 跳过后一字符（^&、^( 等为字面量）
+            elif ch == "(":
+                paren_depth += 1
+            elif ch == ")":
+                paren_depth = max(paren_depth - 1, 0)
+            elif paren_depth == 0 and i + 1 < n:
+                two = command[i:i+2]
+                if two in ("&&", "||"):
+                    splits.append((i, two))
+                    i += 1
         i += 1
 
     if not splits:
@@ -139,17 +135,68 @@ def _split_commands(command: str) -> list:
 
 
 def _is_cd_command(cmd: str) -> bool:
-    """判断是否为 cd/chdir 命令（仅纯cd，不含 &/| 等复合操作符）"""
-    lower = cmd.lower()
-    # 拒绝复合命令：含 & | && ||
-    if "&" in cmd or "|" in cmd:
+    """判断是否为 cd/chdir 命令（仅纯cd，不含 &/|/; 等复合操作符）"""
+    lower = cmd.lower().strip()
+    # 拒绝复合命令：含 & | && || ;
+    # bash 的 ; 也是命令分隔符：`cd /tmp; ls` 若被误判为纯cd，
+    # 会执行 os.chdir("/tmp; ls") 整体失败；cmd 虽不认 ; 作分隔符，
+    # 但这类写法在 cmd 下本就不是合法cd，放行到子进程执行同样合理
+    if "&" in cmd or "|" in cmd or ";" in cmd:
         return False
+    # cmd 无空格简写: cd..(父目录)、cd...(祖父目录)、cd\(根目录)
+    if lower in ("cd..", "cd...", "chdir..", "chdir...", "cd\\", "chdir\\"):
+        return True
     return lower.startswith("cd ") or lower == "cd" or lower.startswith("chdir ") or lower == "chdir"
+
+
+def _has_nonpersistent_cd(command: str) -> bool:
+    """检测复合命令中是否存在不会持久化的 cd 段。
+
+    纯 cd 命令由 _is_cd_command 路径处理（os.chdir 持久化）；
+    && / || 分段由 _execute_segments 处理（cd 段同样持久化）；
+    但单个 & 或 ; 不分段，整条命令在子进程执行，其中的 cd 段只在子进程内生效。
+    此时返回 True，调用方追加提示告知 AI，避免 AI 误以为目录已切换。
+    """
+    if "&" not in command and ";" not in command:
+        return False
+    # 与执行路径一致：先按 &&/|| 分段（分段器已把 cd 段拆出并持久化），
+    # 仅检查各段内部含单个 & 或 ; 的 cd（如 `cd /tmp; ls`、`echo hi & cd x`）。
+    # 不能直接在整条命令上搜 `(^|&|;)\s*cd`：`cd X && cmd 2>&1` 中 cd 已持久化，
+    # 但 2>&1 的 & 会让整条正则命中开头的 cd，误报"cd 不持久化"误导 AI。
+    for _op, seg in _split_commands(command):
+        if "&" in seg or ";" in seg:
+            if re.search(r"(^|&|;)\s*(cd|chdir)\s+", seg, re.IGNORECASE):
+                return True
+    return False
+
+
+def _append_cd_hint(result: str, command: str) -> str:
+    """复合命令含不持久化的 cd 段时，在结果尾部（prompt 行后）追加提示。"""
+    if not _has_nonpersistent_cd(command):
+        return result
+    hint = "[提示: 复合命令中的 cd 仅在该命令内生效，不会改变后续工具调用的当前目录。如需切换目录，请单独执行 cd 命令]"
+    lines = result.rstrip("\n").split("\n")
+    # 找到最后一个 prompt 行（以 > 或 $ 结尾），提示插到其后
+    idx = len(lines) - 1
+    while idx >= 0 and not lines[idx].rstrip().endswith((">", "$")):
+        idx -= 1
+    if idx >= 0:
+        lines.insert(idx + 1, hint)
+        return "\n".join(lines)
+    return result.rstrip("\n") + "\n" + hint
 
 
 def _extract_cd_path(cmd: str) -> Optional[str]:
     """从 cd 命令中提取目标路径，处理 /d 等cmd标志。
     返回 None 表示无参数cd（仅显示当前目录，不切换）。"""
+    # cmd 无空格简写: cd.. → 父目录、cd... → 祖父目录、cd\ → 当前盘根目录
+    stripped = cmd.strip().lower()
+    if stripped in ("cd..", "chdir.."):
+        return ".."
+    if stripped in ("cd...", "chdir..."):
+        return os.path.join("..", "..")
+    if stripped in ("cd\\", "chdir\\"):
+        return "\\"
     parts = cmd.split(None, 1)
     if len(parts) < 2:
         return None  # 无参数cd：仅显示当前目录，不切换
@@ -157,7 +204,9 @@ def _extract_cd_path(cmd: str) -> Optional[str]:
     # 去掉cmd的 /d 标志
     if args.lower().startswith("/d "):
         args = args[3:].strip()
-    return args.strip('"')
+    # 展开环境变量（%TEMP%、%USERPROFILE% 等，与cmd行为一致）和 ~（bash语义；
+    # Windows下 expanduser 对非~开头路径原样返回，无副作用）
+    return os.path.expanduser(os.path.expandvars(args.strip('"')))
 
 
 def _kill_proc_tree(proc: subprocess.Popen):
@@ -183,12 +232,18 @@ def _kill_proc_tree(proc: subprocess.Popen):
 
 
 def _truncate_output(text: str, max_chars: int) -> str:
-    """截断输出到指定字符数，超出部分附加提示"""
+    """截断输出：保留头部和尾部（尾部含提示符，对AI判断shell状态至关重要），中段提示"""
     if max_chars <= 0:
         return "[错误: max_output_chars需为正整数]"
     if len(text) <= max_chars:
         return text
-    return text[:max_chars] + f"\n...[已截断: 输出共{len(text)}字符, 当前显示前{max_chars}字符。增大max_output_chars可获取完整输出]"
+    head = max_chars * 2 // 3
+    tail = max_chars - head
+    return (
+        text[:head]
+        + f"\n...[中间截断: 输出共{len(text)}字符, 已保留首{head}字符+尾{tail}字符。增大max_output_chars可获取完整输出]\n"
+        + text[-tail:]
+    )
 
 
 def _format_prompt() -> str:
@@ -270,17 +325,21 @@ def execute(
             try:
                 os.chdir(path)
             except OSError as e:
-                return f"cd: {e}\n{_format_prompt()}"
+                # 带上退出码标记：与普通命令失败形态一致，AI一眼识别失败
+                return f"cd: {e}\n[exit code: 1]\n{_format_prompt()}"
             return f"[exit code: 0]\n{_format_prompt()}"
 
         # 多段命令(&&/||)由Python端拆分后逐段执行
         segments = _split_commands(command)
         if len(segments) > 1:
-            return _execute_segments(
-                segments, timeout, max_output_chars, _tool_context
+            return _append_cd_hint(
+                _execute_segments(segments, timeout, max_output_chars, _tool_context),
+                command,
             )
 
-        return _execute_win32(command, timeout, max_output_chars)
+        return _append_cd_hint(
+            _execute_win32(command, timeout, max_output_chars), command
+        )
 
     # ═════════════════════════════════════════════════════════════
     # Linux/macOS: bash -c 子进程（原有逻辑）
@@ -289,11 +348,26 @@ def execute(
     if shell is None:
         return "[错误: 未找到shell，请安装bash或sh后重试]"
 
+    # cd 命令：同步更新 Python 进程的 CWD（与 Windows 分支一致）。
+    # 此前 cd 走 bash -c 子进程执行，目录切换不持久且无任何提示，
+    # AI 会误以为已切换目录（DEFINITION 承诺"单独执行 cd 可改变后续调用的当前目录"）
+    if _is_cd_command(command):
+        path = _extract_cd_path(command)
+        if path is None:
+            # 无参数cd：bash 语义是回到 $HOME（cmd 是显示当前目录，已在 Windows 分支处理）
+            path = os.path.expanduser("~")
+        try:
+            os.chdir(path)
+        except OSError as e:
+            return f"cd: {e}\n[exit code: 1]\n{_format_prompt()}"
+        return f"[exit code: 0]\n{_format_prompt()}"
+
     # 多段命令(&&/||)由Python端拆分后逐段执行
     segments = _split_commands(command)
     if len(segments) > 1:
-        return _execute_segments(
-            segments, timeout, max_output_chars, _tool_context
+        return _append_cd_hint(
+            _execute_segments(segments, timeout, max_output_chars, _tool_context),
+            command,
         )
 
     shell_cmd = [shell, "-c", command]
@@ -356,6 +430,13 @@ def execute(
                 break
             time.sleep(0.05)
 
+        # 先杀进程树再收尾输出："超时/中断"的语义是命令已被终止。
+        # 若先 join 读线程(最多5秒)，进程在 join 窗口内自然跑完时会
+        # 输出完整结果却仍标注"已终止"，语义矛盾且每次超时白等5秒。
+        if was_interrupted or timed_out:
+            _kill_proc_tree(proc)
+            proc.wait(timeout=5)
+
         for t in (t_out, t_err):
             t.join(timeout=5.0)
 
@@ -363,8 +444,6 @@ def execute(
         stderr = b"".join(stderr_chunks)
 
         if was_interrupted:
-            _kill_proc_tree(proc)
-            proc.wait(timeout=5)
             parts = []
             out = _decode_output(stdout)
             if out.strip():
@@ -376,8 +455,6 @@ def execute(
             return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
 
         if timed_out:
-            _kill_proc_tree(proc)
-            proc.wait(timeout=5)
             parts = []
             out = _decode_output(stdout)
             if out.strip():
@@ -461,6 +538,11 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
                 break
             time.sleep(0.05)
 
+        # 先杀进程树再收尾输出（与 Linux 路径一致）：保证"已终止"语义真实
+        if was_interrupted or timed_out:
+            _kill_proc_tree(proc)
+            proc.wait(timeout=5)
+
         for t in (t_out, t_err):
             t.join(timeout=5.0)
 
@@ -468,8 +550,6 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
         stderr = b"".join(stderr_chunks)
 
         if was_interrupted:
-            _kill_proc_tree(proc)
-            proc.wait(timeout=5)
             parts = []
             out = _decode_output(stdout)
             if out.strip():
@@ -481,8 +561,6 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
             return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
 
         if timed_out:
-            _kill_proc_tree(proc)
-            proc.wait(timeout=5)
             parts = []
             out = _decode_output(stdout)
             if out.strip():
@@ -598,23 +676,24 @@ def _execute_segments(segments: list, timeout: int,
                     break
                 time.sleep(0.05)
 
-            for t in (t_out, t_err):
-                t.join(timeout=5.0)
-
             seg_elapsed = time.time() - seg_start
             remaining_timeout = max(0, remaining_timeout - seg_elapsed)
 
-            if was_interrupted:
+            # 先杀进程树再收尾输出（与 _execute_win32 一致）
+            if was_interrupted or timed_out:
                 _kill_proc_tree(proc)
                 proc.wait(timeout=5)
+
+            for t in (t_out, t_err):
+                t.join(timeout=5.0)
+
+            if was_interrupted:
                 break
 
             if timed_out:
-                _kill_proc_tree(proc)
-                proc.wait(timeout=5)
                 out = _decode_output(b"".join(stdout_chunks))
                 err = _decode_output(b"".join(stderr_chunks))
-                parts = [f"[超时: 命令执行超过{int(seg_elapsed)}秒，已终止]"]
+                parts = [f"[超时: 命令执行超过{max(seg_elapsed, 1.0):.1f}秒，已终止]"]
                 if out.strip():
                     parts.append(out.strip())
                 if err.strip():
@@ -625,12 +704,17 @@ def _execute_segments(segments: list, timeout: int,
 
             out = _decode_output(b"".join(stdout_chunks))
             err = _decode_output(b"".join(stderr_chunks))
-            parts = [f"[exit code: {proc.returncode}]"]
+            # 成功的段不逐段输出[exit code: 0]（AI视角是纯噪音），
+            # 失败段保留各自的退出码标注便于定位；总退出码统一在末尾输出
+            parts = []
+            if proc.returncode != 0:
+                parts.append(f"[exit code: {proc.returncode}]")
             if out.strip():
                 parts.append(out.strip())
             if err.strip():
                 parts.append(f"[stderr]\n{err.strip()}")
-            all_parts.append("\n".join(parts))
+            if parts:
+                all_parts.append("\n".join(parts))
             prev_rc = proc.returncode
         finally:
             with _active_proc_lock:
@@ -639,16 +723,8 @@ def _execute_segments(segments: list, timeout: int,
     if was_interrupted:
         all_parts.append("[用户中断]")
 
+    # 总退出码（最后执行段的退出码；超时/中断时不显示，避免误导AI）
+    if prev_rc >= 0 and not was_interrupted:
+        all_parts.append(f"[exit code: {prev_rc}]")
+
     return _truncate_output("\n".join(all_parts) + "\n" + _format_prompt(), max_output_chars)
-
-
-def cleanup():
-    """程序退出时清理持久化 cmd 会话（由 agent 调用）"""
-    global _cmd_session
-    with _cmd_session_lock:
-        if _cmd_session is not None:
-            try:
-                _cmd_session.close()
-            except Exception:
-                pass
-            _cmd_session = None

@@ -579,7 +579,9 @@ def load_config(project_root: Optional[str] = None) -> Config:
         user_md=user_md,
         cwd=os.getcwd(),
         os_name=platform.system(),
-        shell_name="PowerShell" if sys.platform == "win32" else "bash",
+        # 修正: Windows下Shell工具实际用cmd.exe（原为PowerShell，事实错误）。
+        # 当前BASE_PROMPT_TEMPLATE未引用{shell}，此值仅备将来模板使用
+        shell_name="cmd.exe" if sys.platform == "win32" else "bash",
     )
 
     # ── 单位转换在此完成 ──

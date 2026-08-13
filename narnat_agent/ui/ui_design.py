@@ -123,7 +123,7 @@ def show_interrupted() -> None:
 
 
 def show_stats(input_tokens: int, output_tokens: int,
-               cache: int = 0, cost: float = 0.0,
+               cache_ratio: float = 0.0, cost: float = 0.0,
                balance: float = 0.0,
                thinking_effort: str = "高") -> None:
     # 动态从 output 模块读取，确保 apply_style 修改后生效
@@ -140,8 +140,8 @@ def show_stats(input_tokens: int, output_tokens: int,
     th = f"  思考:{thinking_effort}"
     _sep()
     cs = ""
-    if cache > 0 and input_tokens > 0:
-        cs = f"  缓存:{min(100.0, cache / input_tokens * 100):.1f}%"
+    if cache_ratio > 0:
+        cs = f"  缓存:{min(100.0, cache_ratio * 100):.1f}%"
     co = f"  费用:¥{cost:.4f}" if _show_cost else ""
     ba = f"  余额:¥{balance:.2f}" if _show_balance and balance > 0 else ""
     rt = ""
@@ -237,12 +237,12 @@ class UIStreamSession:
             self._start_spinner()
 
     def finish(self, input_tokens: int = 0, output_tokens: int = 0,
-               cache: int = 0, cost: float = 0.0,
+               cache_ratio: float = 0.0, cost: float = 0.0,
                balance: float = 0.0, thinking_effort: str = "高") -> None:
         _interrupt_ctrl.enter_input_mode()  # 立即停止ESC轮询，防止误触发
         self._stop_spinner()
         self._renderer.flush()
-        show_stats(input_tokens, output_tokens, cache, cost, balance, thinking_effort)
+        show_stats(input_tokens, output_tokens, cache_ratio, cost, balance, thinking_effort)
 
     def abort(self) -> None:
         self._aborted = True  # 标记已打断，防止后台线程resume_spinner重启

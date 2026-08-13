@@ -8,6 +8,9 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
+from ..param_utils import to_bool
+from ..glob import _expand_braces, _unescape_braces
+
 _DEFAULT_IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache"}
 
 # ── 滚动缓冲区大小（64KB，与 ripgrep 的 DEFAULT_BUFFER_CAPACITY 一致）──
@@ -32,7 +35,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Grep",
-        "description": "正则搜索文件内容。",
+        "description": "正则搜索文件内容（仅支持本机文件，不支持远程设备文件）。默认跳过.git/node_modules等忽略目录。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -59,7 +62,7 @@ DEFINITION = {
                 },
                 "n": {
                     "type": "boolean",
-                    "description": "是否显示行号（content模式专用，默认否）",
+                    "description": "是否显示行号（content模式专用，默认是）",
                 },
                 "A": {
                     "type": "integer",
@@ -84,19 +87,73 @@ DEFINITION = {
 }
 
 
+def _detect_text_encoding(head: bytes) -> str:
+    """utf-8 严格解码成功 → utf-8-sig；失败 → gbk（策略与Read一致）。
+
+    此前固定utf-8+replace解码流式读取：GBK中文文件每个字节都被替换为U+FFFD，
+    任何中文pattern都无法命中，AI会误以为内容不存在。首块判定编码后按正确
+    编码打开。尾部3字节窗口重试防止多字节序列边界截断误判。
+    """
+    trial = head
+    for _ in range(3):
+        try:
+            trial.decode("utf-8")
+            return "utf-8-sig"
+        except UnicodeDecodeError as e:
+            if e.start >= len(trial) - 3:
+                trial = head[: e.start]
+                continue
+            break
+    return "gbk"
+
+
 def execute(
     pattern: str,
     path: str = "",
     glob: str = "",
     output_mode: str = "files_with_matches",
     i: bool = False,
-    n: bool = False,
+    n: bool = True,
     A: int = 0,
     B: int = 0,
     C: int = 0,
     head_limit: int = 100,
     _tool_context=None,
+    **kwargs,
 ) -> str:
+    # ── CLI风格参数别名兼容: -C/-B/-A/-n/-i/-head_limit → C/B/A/n/i/head_limit ──
+    # LLM训练数据中grep/ripgrep的CLI用法极常见，模型本能地传-C/-n等带横杠参数。
+    # 未知的横杠参数保留原名，走下方TypeError提示有效参数，不静默吞掉错字。
+    aliases = {}
+    for key in list(kwargs):
+        if key.startswith("-") and key[1:] in ("i", "n", "A", "B", "C", "head_limit"):
+            aliases[key[1:]] = kwargs.pop(key)
+    if kwargs:
+        raise TypeError(f"got an unexpected keyword argument '{next(iter(kwargs))}'")
+    # 显式传参优先，别名仅补默认值（head_limit默认100无法区分"未传"与"传100"，直接覆盖）
+    if "i" in aliases and not i:
+        i = aliases["i"]
+    # n默认已改为True，别名必须无条件覆盖（AI传"-n": false 要能关掉行号）
+    if "n" in aliases:
+        n = aliases["n"]
+    if "A" in aliases and not A:
+        A = aliases["A"]
+    if "B" in aliases and not B:
+        B = aliases["B"]
+    if "C" in aliases and not C:
+        C = aliases["C"]
+    if "head_limit" in aliases:
+        head_limit = aliases["head_limit"]
+
+    # AI可能传字符串类型的数值参数，统一转int（A/B/C/head_limit）
+    try:
+        A = int(A) if A is not None else 0
+        B = int(B) if B is not None else 0
+        C = int(C) if C is not None else 0
+        head_limit = int(head_limit) if head_limit is not None else 100
+    except (TypeError, ValueError):
+        return "[错误: A/B/C/head_limit需为整数]"
+
     # ── ReDoS 防护 ──
     if len(pattern) > _MAX_PATTERN_LENGTH:
         return f"[错误: 正则表达式过长（>{_MAX_PATTERN_LENGTH}字符），拒绝执行以防ReDoS]"
@@ -106,8 +163,10 @@ def execute(
         return f"[错误: 无效的 output_mode: {output_mode}]"
 
     flags = 0
-    if i:
+    # 归一化布尔参数: LLM 偶发传 "false"/"true" 字符串
+    if to_bool(i):
         flags |= re.IGNORECASE
+    n = to_bool(n)
 
     try:
         regex = re.compile(pattern, flags)
@@ -125,21 +184,26 @@ def execute(
     if os.path.isfile(root):
         return _search_single_file(root, regex, output_mode, n, A, B, head_limit)
     if not os.path.isdir(root):
-        return f"[错误: 路径不存在: {root}]"
+        # 相对路径解析依赖当前目录（Shell cd会改变它），报错时带上cwd帮AI一次定位
+        return f"[错误: 路径不存在: {root}（当前目录: {os.getcwd()}）]"
 
     # ignore_dirs 合并而非覆盖
     ignore_dirs = _DEFAULT_IGNORE_DIRS.copy()
     if _tool_context and _tool_context.ignore_dirs:
         ignore_dirs |= set(_tool_context.ignore_dirs)
 
-    file_matches = _search_files(root, regex, glob, output_mode, n, A, B, head_limit, ignore_dirs)
-    return _format_results(file_matches, output_mode, head_limit)
+    file_matches, limit_hit = _search_files(root, regex, glob, output_mode, n, A, B, head_limit, ignore_dirs)
+    return _format_results(file_matches, output_mode, head_limit, limit_hit, root)
 
 
-def _format_results(file_matches, output_mode, head_limit):
-    """格式化输出结果"""
+def _format_results(file_matches, output_mode, head_limit, limit_hit=False, search_dir=""):
+    """格式化输出结果。limit_hit=True表示引擎因head_limit提前停止，
+    content模式也需提示截断，避免AI把部分结果当作全部结果。
+    search_dir: 无匹配时附带搜索目录（Shell cd会改变当前目录，
+    与Glob/Read的报错风格对齐，帮AI一次定位"搜了哪里"）。"""
     results = []
     truncated = False
+    no_match = f"[无匹配（搜索目录: {search_dir}）]" if search_dir else "[无匹配]"
 
     if output_mode == "files_with_matches":
         for rel_path in file_matches:
@@ -154,11 +218,15 @@ def _format_results(file_matches, output_mode, head_limit):
                 truncated = True
                 break
     else:
-        # content 模式：streaming 引擎保证匹配行数 ≤ head_limit
-        return "\n".join(file_matches) if file_matches else "[无匹配]"
+        # content 模式：streaming 引擎保证匹配行数 ≤ head_limit，
+        # 但命中上限时须显式提示（此前静默丢弃其余匹配，AI会误以为只有这些结果）
+        output = "\n".join(file_matches) if file_matches else no_match
+        if limit_hit:
+            output += f"\n...[已截断: 达到head_limit({head_limit})，可能还有更多匹配。增大head_limit可获取完整结果]"
+        return output
 
-    output = "\n".join(results) if results else "[无匹配]"
-    if truncated:
+    output = "\n".join(results) if results else no_match
+    if truncated or limit_hit:
         output += f"\n...[已截断: 超出head_limit({head_limit})限制]"
     return output
 
@@ -274,6 +342,10 @@ def _search_file_streaming(
         if _check_binary_first_chunk(first_chunk):
             return [], 0
 
+        # 编码探测（GBK回退）：GBK文件按utf-8+replace读会把中文替换为U+FFFD，
+        # 任何中文pattern都无法命中。用首块判定编码，文本打开时按正确编码解码。
+        encoding = _detect_text_encoding(first_chunk)
+
         # 包装为文本流（从已读取的首块继续）
         f = io.TextIOWrapper(
             raw_f,
@@ -293,8 +365,9 @@ def _search_file_streaming(
 
     # 重新以文本模式打开（确保 TextIOWrapper 状态干净）
     # 二进制首块已判定非二进制，第二次打开 I/O 可接受
+    # encoding 由首块探测得出：GBK 文件按正确编码解码，中文pattern才能命中
     try:
-        f = open(file_path, "r", encoding="utf-8-sig", errors="replace", newline="")
+        f = open(file_path, "r", encoding=encoding, errors="replace", newline="")
     except (PermissionError, OSError):
         return [], 0
 
@@ -485,7 +558,10 @@ def _search_single_file(file_path, regex, output_mode, show_n, A, B, head_limit)
     elif output_mode == "count":
         return f"{file_path}:{count}" if count else "[无匹配]"
     else:
-        return "\n".join(results) if results else "[无匹配]"
+        output = "\n".join(results) if results else "[无匹配]"
+        if head_limit is not None and counter["count"] >= head_limit and results:
+            output += f"\n...[已截断: 达到head_limit({head_limit})，可能还有更多匹配。增大head_limit可获取完整结果]"
+        return output
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -496,17 +572,25 @@ def _match_glob(fname: str, rel: str, glob_filter: str) -> bool:
     """glob 过滤：支持纯文件名或相对路径（含通配符），与 Glob 工具语义对齐。
 
     - 匹配对象为相对路径或纯文件名，二者任一命中即通过；
-    - Windows 下正反斜杠等价（glob 与 rel 均归一化为 /）；
+    - 花括号展开与 Glob 工具一致（复用 _expand_braces/_unescape_braces）：
+      AI 在 Glob 学到的写法（如 {a,b}/x.py）在 Grep 中同样有效，
+      否则同一 glob 语法在两个工具间行为分裂，Grep 静默"[无匹配]"会误导 AI；
+    - Windows 下正反斜杠等价（glob 与 rel 均归一化为 /），且大小写不敏感
+      （fnmatch 内部经 normcase，与 Windows 文件系统语义一致；POSIX 下 normcase 恒等）；
     - **/ 前缀可匹配零层目录（即根目录下的文件）。
     """
     if os.name == "nt":
         glob_filter = glob_filter.replace("\\", "/")
         rel = rel.replace("\\", "/")
-    patterns = [glob_filter]
-    if glob_filter.startswith("**/"):
-        patterns.append(glob_filter[3:])  # **/ 可匹配零层目录
+    raw_patterns = _expand_braces(glob_filter)
+    patterns = []
+    for p in raw_patterns:
+        p = _unescape_braces(p)
+        patterns.append(p)
+        if p.startswith("**/"):
+            patterns.append(p[3:])  # **/ 可匹配零层目录
     return any(
-        fnmatch.fnmatchcase(fname, p) or fnmatch.fnmatchcase(rel, p)
+        fnmatch.fnmatch(fname, p) or fnmatch.fnmatch(rel, p)
         for p in patterns
     )
 
@@ -525,7 +609,7 @@ def _search_files(root, regex, glob_filter, output_mode, show_n, A, B, head_limi
             file_list.append((full, rel))
 
     if not file_list:
-        return []
+        return [], False
 
     # 文件名排序，保证遍历顺序确定
     file_list.sort(key=lambda t: t[1])
@@ -628,4 +712,5 @@ def _search_files(root, regex, glob_filter, output_mode, show_n, A, B, head_limi
             else:
                 results.extend(file_results)
 
-    return results
+    limit_hit = head_limit is not None and counter["count"] >= head_limit
+    return results, limit_hit

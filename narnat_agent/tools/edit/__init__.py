@@ -20,7 +20,8 @@ import os
 import difflib
 
 from ..diff_utils import colorize_diff
-from ..terminal import _normalize_device_for_tools
+from ..param_utils import to_bool
+from ..terminal import _normalize_device_for_tools, _file_tool_device_hint
 
 DEFINITION = {
     "type": "function",
@@ -34,7 +35,7 @@ DEFINITION = {
                 "old_string": {"type": "string", "description": "待替换文本（字符串模式）"},
                 "new_string": {"type": "string", "description": "替换文本"},
                 "replace_all": {"type": "boolean", "description": "是否替换全部匹配（字符串模式，默认否）"},
-                "line_start": {"type": "integer", "description": "起始行（行号模式，默认不启用，配置≥1时启用行替换模式，含本行）"},
+                "line_start": {"type": "integer", "description": "起始行（行号模式，默认不启用，传值≥1时启用行替换模式，含本行）"},
                 "line_end": {"type": "integer", "description": "结束行（含本行，默认等于line_start）"},
                 "device": {"type": "string", "description": "设备dev编号：默认dev0（可省略）编辑本机文件，设置dev1..devn则编辑被控设备文件（需先Terminal connect被控设备获取dev编号）"},
             },
@@ -42,6 +43,34 @@ DEFINITION = {
         },
     },
 }
+
+
+def _read_for_edit(file_path: str) -> tuple:
+    """读取文件内容用于编辑，返回 (content, 写回编码)。
+
+    编码策略与 Read 一致（首块探测 utf-8-sig / gbk），但必须严格解码：
+    Edit 会把内容写回文件，errors="replace" 会以 U+FFFD 永久替换原字节，
+    造成静默数据损坏。探测结果无法严格解码时抛 UnicodeDecodeError，
+    由调用方拒绝编辑（对齐远程 Edit 行为）。
+
+    Raises:
+        ValueError: 二进制文件（含NUL字节）
+        UnicodeDecodeError: 无法按 UTF-8/GBK 严格解码
+    """
+    from ..read import _detect_text_encoding
+    with open(file_path, "rb") as fb:
+        head = fb.read(8192)
+    if b"\x00" in head:
+        raise ValueError("binary")
+    encoding = _detect_text_encoding(head)
+    with open(file_path, "r", encoding=encoding, newline="") as f:
+        content = f.read()
+    # 写回编码保持原文件形态：UTF-8 有 BOM 保留 BOM、无 BOM 不添加，GBK 写回 GBK
+    if encoding == "utf-8-sig":
+        write_encoding = "utf-8-sig" if head.startswith(b"\xef\xbb\xbf") else "utf-8"
+    else:
+        write_encoding = "gbk"
+    return content, write_encoding
 
 
 def execute(file_path: str, old_string: str = "", new_string: str = "",
@@ -72,31 +101,38 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
     # AI可能传字符串类型的数值参数，确保类型正确
     line_start = int(line_start) if line_start else 0
     line_end = int(line_end) if line_end else 0
-    replace_all = bool(replace_all)
+    # 归一化布尔参数: LLM 偶发传 "false" 字符串，bool("false") 恒为 True
+    # 会导致全量替换（与意图相反的危险行为），必须按字符串语义解析
+    replace_all = to_bool(replace_all)
 
     device = _normalize_device_for_tools(device)
     if device is None:
-        return ("[错误: 设备标识使用devN编号(dev0=本机, dev1..devn=被控设备)]", "")
+        return (f"[错误: {_file_tool_device_hint()}]", "")
 
     if device:
         from ..terminal.remote import remote_edit
         return remote_edit(file_path, old_string, new_string, replace_all,
-                          line_start, line_end, device)
+                          line_start, line_end, device, _tool_context=_tool_context)
 
     if not os.path.isfile(file_path):
         return (f"[错误: 文件不存在: {file_path}，如需创建请用Write工具]", "")
 
     abs_path = os.path.abspath(file_path)
     if _tool_context and not _tool_context.is_read(abs_path):
-        return (f"[错误: 编辑前必须先Read该文件: {file_path}]", "")
+        return (f"[错误: 编辑前必须先Read该文件: {file_path}。"
+                f"若Read已报错（如二进制文件），说明该文件无法用Edit编辑，请改用Shell工具处理]", "")
 
     try:
-        with open(file_path, "r", encoding="utf-8-sig", newline='') as f:
-            content = f.read()
+        content, write_encoding = _read_for_edit(file_path)
     except PermissionError:
         return (f"[错误: 权限不足: {file_path}]", "")
     except OSError as e:
         return (f"[错误: 读取失败: {e}]", "")
+    except ValueError:
+        return ("[错误: 检测到二进制文件（含NUL字节），Edit仅支持文本文件。请使用Shell工具处理]", "")
+    except UnicodeDecodeError:
+        return ((f"[错误: 文件非UTF-8/GBK编码，为防止内容损坏已拒绝编辑: {file_path}。"
+                 f"请用Shell工具处理（如iconv转码后再编辑）]"), "")
 
     # ── 参数互斥检查 ──
     has_line_mode = line_start > 0
@@ -112,14 +148,16 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
 
     # ── 行号模式 ──
     if has_line_mode:
-        return _edit_by_lines(content, file_path, line_start, line_end, new_string, _tool_context)
+        return _edit_by_lines(content, file_path, line_start, line_end, new_string,
+                              _tool_context, write_encoding)
 
-    return _edit_by_string(content, old_string, new_string, replace_all, file_path, _tool_context)
+    return _edit_by_string(content, old_string, new_string, replace_all, file_path,
+                           _tool_context, write_encoding)
 
 
 def _edit_by_string(content: str, old_string: str, new_string: str,
                     replace_all: bool, file_path: str,
-                    _tool_context=None) -> tuple:
+                    _tool_context=None, write_encoding: str = "utf-8") -> tuple:
     """字符串精确替换，自动兼容换行符"""
     if not old_string:
         return ("[错误: old_string不能为空（或使用line_start行号模式）]", "")
@@ -148,12 +186,12 @@ def _edit_by_string(content: str, old_string: str, new_string: str,
         new_content = content.replace(old_string_normalized, new_string_normalized, 1)
 
     return _write_and_diff(content, new_content, file_path, count if replace_all else 1,
-                           _tool_context=_tool_context)
+                           _tool_context=_tool_context, write_encoding=write_encoding)
 
 
 def _edit_by_lines(content: str, file_path: str,
                    line_start: int, line_end: int, new_string: str,
-                   _tool_context=None) -> tuple:
+                   _tool_context=None, write_encoding: str = "utf-8") -> tuple:
     """行号范围替换"""
     lines = content.splitlines(keepends=True)
     total = len(lines)
@@ -190,7 +228,8 @@ def _edit_by_lines(content: str, file_path: str,
 
     replaced_count = line_end - line_start + 1
     return _write_and_diff(content, new_content, file_path, replaced_count,
-                           f"行{line_start}-{line_end}", _tool_context=_tool_context)
+                           f"行{line_start}-{line_end}", _tool_context=_tool_context,
+                           write_encoding=write_encoding)
 
 
 def _detect_line_ending(content: str) -> str:
@@ -202,7 +241,7 @@ def _detect_line_ending(content: str) -> str:
 
 def _write_and_diff(old_content: str, new_content: str, file_path: str,
                     count: int, range_desc: str = "",
-                    _tool_context=None) -> tuple:
+                    _tool_context=None, write_encoding: str = "utf-8") -> tuple:
     """写回文件并生成diff。
 
     Returns:
@@ -211,10 +250,13 @@ def _write_and_diff(old_content: str, new_content: str, file_path: str,
         - color_diff: 着色diff，传给终端展示；空串表示无差异
     """
     try:
-        with open(file_path, "w", encoding="utf-8", newline='') as f:
+        with open(file_path, "w", encoding=write_encoding, newline='') as f:
             f.write(new_content)
     except OSError as e:
         return (f"[错误: 写入失败: {e}]", "")
+    except UnicodeEncodeError:
+        # 新内容含文件编码无法表示的字符（如 GBK 文件中写入 emoji）
+        return (f"[错误: 新内容包含文件编码({write_encoding})无法表示的字符，写入失败: {file_path}]", "")
 
     if _tool_context:
         _tool_context.mark_read(file_path)

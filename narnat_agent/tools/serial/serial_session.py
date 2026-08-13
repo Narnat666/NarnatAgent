@@ -65,14 +65,17 @@ def _merge_cr_line(line: str) -> str:
 
 
 def _truncate_output(text: str, max_chars: int) -> str:
-    """截断输出到指定字符数"""
+    """截断输出：保留头部和尾部（尾部常含设备提示符等关键状态），中段提示"""
     if max_chars <= 0:
         return "[错误: max_output_chars需为正整数]"
     if len(text) <= max_chars:
         return text
+    head = max_chars * 2 // 3
+    tail = max_chars - head
     return (
-        text[:max_chars]
-        + f"\n...[已截断: 输出共{len(text)}字符, 当前显示前{max_chars}字符。增大max_output_chars可获取完整输出]"
+        text[:head]
+        + f"\n...[中间截断: 输出共{len(text)}字符, 已保留首{head}字符+尾{tail}字符。增大max_output_chars可获取完整输出]\n"
+        + text[-tail:]
     )
 
 

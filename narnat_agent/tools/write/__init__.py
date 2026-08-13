@@ -7,7 +7,7 @@ import os
 import difflib
 
 from ..diff_utils import colorize_diff
-from ..terminal import _normalize_device_for_tools
+from ..terminal import _normalize_device_for_tools, _file_tool_device_hint
 
 DEFINITION = {
     "type": "function",
@@ -47,12 +47,16 @@ def execute(file_path: str, content: str,
     """
     device = _normalize_device_for_tools(device)
     if device is None:
-        return ("[错误: 设备标识使用devN编号(dev0=本机, dev1..devn=被控设备)]", "")
+        return (f"[错误: {_file_tool_device_hint()}]", "")
 
     if device:
         from ..terminal.remote import remote_write
         return remote_write(file_path, content, device, _tool_context=_tool_context)
     abs_path = os.path.abspath(file_path)
+
+    # 目录路径：open()会报Permission denied，误导AI去查权限而非换路径，提前拦截给出真实原因
+    if os.path.isdir(abs_path):
+        return (f"[错误: {file_path} 是目录，请使用正确的文件路径]", "")
 
     # 覆写已有文件前检查是否Read过
     if os.path.isfile(abs_path):
@@ -71,10 +75,17 @@ def execute(file_path: str, content: str,
     diff = ""
     if os.path.isfile(abs_path):
         try:
-            with open(abs_path, "r", encoding="utf-8-sig", newline='') as f:
-                old_content = f.read()
-            diff = _make_diff(old_content, content, file_path)
-            color_diff = colorize_diff(diff)
+            # 旧内容编码探测（与Read一致）：GBK文件按utf-8-sig读会抛异常导致diff静默丢失，
+            # AI 覆写后看不到差异。此处仅用于展示diff，errors=replace 不影响写入内容
+            from ..read import _detect_text_encoding
+            with open(abs_path, "rb") as fb:
+                head = fb.read(8192)
+            if not (head and b"\x00" in head):
+                encoding = _detect_text_encoding(head)
+                with open(abs_path, "r", encoding=encoding, errors="replace", newline='') as f:
+                    old_content = f.read()
+                diff = _make_diff(old_content, content, file_path)
+                color_diff = colorize_diff(diff)
         except Exception:
             pass
 

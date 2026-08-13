@@ -11,6 +11,7 @@ Terminal工具 ── 多终端可持续SSH + 文件传输
 
 import os
 import re
+import stat
 import sys
 import threading
 from typing import Optional
@@ -23,8 +24,11 @@ __all__ = ["execute", "DEFINITION", "get_session", "SSHSession", "kill_active_ex
 
 
 # 删除命令正则
+# 边界后跟空白或/：覆盖无空格变体（rd/s、del/f、rmdir/q）及erase/format；
+# \b边界防止误伤 delphi、3rd、formatting 等普通词
 _RE_DELETE = re.compile(
-    r"\b(rm\s|del\s|Remove-Item\s|rmdir\s|rd\s)",
+    r"\b(?:rm|del|rd|rmdir|erase|format)\b[\s/]"
+    r"|\bRemove-Item\b",
     re.IGNORECASE,
 )
 
@@ -65,15 +69,15 @@ DEFINITION = {
                     "enum": ["connect", "exec", "input", "status", "close", "transfer"],
                     "description": "操作类型（默认exec）",
                 },
-                "host": {"type": "string", "description": "connect时填被控设备IP/域名（建立连接，连接成功后每个设备返回唯一dev编号）；exec/input/close时填dev编号（dev1..devn）"},
+                "host": {"type": "string", "description": "connect时填被控设备IP/域名（建立连接，连接成功后每个设备返回唯一dev编号）；exec/input/close时填dev编号（dev1..devn，也支持直接填已连接设备的IP）"},
                 "username": {"type": "string", "description": "SSH用户名（connect时使用）"},
                 "port": {"type": "integer", "description": "SSH端口（默认22）"},
                 "key_path": {"type": "string", "description": "SSH私钥路径（如~/.ssh/id_rsa）"},
                 "password": {"type": "string", "description": "SSH密码（不填则自动尝试密钥认证）"},
                 "sudo_password": {"type": "string", "description": "sudo密码（connect时设置，后续exec遇sudo自动注入）"},
                 "command": {"type": "string", "description": "执行的命令（需先设action=exec）"},
-                "input": {"type": "string", "description": "交互输入内容（需先设action=input，如sudo密码、y/n确认）"},
-                "timeout": {"type": "integer", "description": "命令超时秒数（正整数，默认120，超时自动返回通知）"},
+                "input": {"type": "string", "description": "交互输入内容（需先设action=input，如sudo密码、y/n确认）。仅当有命令在等待输入时有效（通常是上个命令超时仍在后台运行）；发送 ^C 可中断仍在运行的命令；空闲终端发送会被拒绝"},
+                "timeout": {"type": "integer", "description": "命令超时秒数（正整数）。exec/input默认120，超时后命令继续后台运行，可用input应答其交互提示或^C中断；connect默认15，连不上时快速报错"},
                 "max_output_chars": {"type": "integer", "description": "最大输出字符数（正整数，默认8000，超出截断并提示）"},
                 "source_host": {"type": "string", "description": "传输源设备：默认dev0即本机（可省略），设置dev1..devn选择被控设备（action=transfer时使用）"},
                 "source_path": {"type": "string", "description": "源文件在源设备上的绝对路径（action=transfer时使用）"},
@@ -87,13 +91,30 @@ DEFINITION = {
 
 
 def kill_active_exec():
-    """ESC打断：发Ctrl+C终止远程进程，设中断标志让本地读取线程退出。"""
+    """ESC打断：发Ctrl+C终止远程进程，设中断标志让本地读取线程退出。
+
+    同时覆盖后台运行中的命令（超时后仍在运行的busy会话），
+    使ESC能自愈busy状态：watcher检测到中断标志后退出并清除busy。
+    """
     with _active_exec_lock:
         session = _active_exec_session
     if session is not None:
         session._interrupt.set()
         try:
             session._channel.send("\x03")
+        except Exception:
+            pass
+
+    # 后台运行中的busy会话（无活跃exec时也打断）
+    with _sessions_lock:
+        busy_sessions = [
+            s for s in _sessions.values()
+            if s is not None and s._busy and s is not session
+        ]
+    for s in busy_sessions:
+        s._interrupt.set()
+        try:
+            s._channel.send("\x03")
         except Exception:
             pass
 
@@ -110,7 +131,7 @@ def execute(
     sudo_password: str = "",
     command: str = "",
     input: str = "",
-    timeout: int = 120,
+    timeout: Optional[int] = None,
     session_id: int = -1,
     max_output_chars: int = 8000,
     source_host: str = "",
@@ -150,11 +171,18 @@ def execute(
       target_path  - 目标文件在目标设备上的绝对路径
     """
     if action == "connect":
-        return _connect(host, username, port, key_path, password, sudo_password, session_id)
+        # connect默认超时15秒（exec/input默认120秒）：连错IP/黑洞IP时快速失败，
+        # 避免OS默认TCP重试阻塞数十秒。同时受全局超时上限约束
+        connect_timeout = 15 if timeout is None else timeout
+        if _tool_context and _tool_context.max_timeout_seconds > 0:
+            connect_timeout = min(connect_timeout, _tool_context.max_timeout_seconds)
+        return _connect(host, username, port, key_path, password, sudo_password, session_id, connect_timeout)
     elif action == "exec":
-        return _exec(session_id, host, command, timeout, max_output_chars, _tool_context)
+        exec_timeout = 120 if timeout is None else timeout
+        return _exec(session_id, host, command, exec_timeout, max_output_chars, _tool_context)
     elif action == "input":
-        return _input(session_id, host, input, timeout, max_output_chars, _tool_context)
+        input_timeout = 120 if timeout is None else timeout
+        return _input(session_id, host, input, input_timeout, max_output_chars, _tool_context)
     elif action == "status":
         return _status()
     elif action == "close":
@@ -166,9 +194,19 @@ def execute(
 
 
 def _allocate_session_id() -> int:
-    """分配一个空闲的session_id，返回-1表示已满"""
+    """分配一个空闲的session_id，返回-1表示已满。
+
+    死会话（channel已关闭，如网络断开）自动回收槽位：
+    否则连接意外断开后槽位被死会话占用，AI重连时报"已达最大会话数"却无法释放。
+    调用者需持有_sessions_lock。
+    """
     for i in range(MAX_SESSIONS):
-        if i not in _sessions:
+        session = _sessions.get(i)
+        if session is None:
+            return i
+        if session._channel.closed:
+            session.close()
+            del _sessions[i]
             return i
     return -1
 
@@ -191,6 +229,16 @@ def _normalize_device_for_tools(device: str) -> Optional[str]:
     if not m:
         return None
     return "" if int(m.group(1)) == 0 else h
+
+
+def _file_tool_device_hint() -> str:
+    """文件工具(Read/Edit/Write)设备标识错误时的统一指导：
+    附当前已连接设备清单，减少AI回查status的往返"""
+    base = "设备标识使用devN编号(dev0=本机, dev1..devn=被控设备)"
+    devs = _list_devices()
+    if devs == "(无)":
+        return f"{base}。当前无已连接设备，请先Terminal connect"
+    return f"{base}。当前已连接: {devs}"
 
 
 def _device_error(host: str) -> Optional[str]:
@@ -273,20 +321,34 @@ def _resolve_session_id(session_id: int, host: str = "") -> tuple[int, "SSHSessi
         # 指定了session_id
         if session_id >= 0:
             if session_id not in _sessions:
-                raise ValueError(f"{_dev_label(session_id)}未连接，请先connect")
+                raise ValueError(f"{_dev_label(session_id)}未连接，请先connect。当前已连接: {_list_devices_locked()}")
             return session_id, _sessions[session_id]
 
-        # 未指定session_id，按host匹配（只认devN）
+        # 未指定session_id，按host匹配（优先devN，其次IP/用户名@IP宽松匹配）
         if host:
-            m = _RE_DEV.match(host.strip())
+            h = host.strip()
+            m = _RE_DEV.match(h)
             if not m:
+                # 宽松匹配: 允许直接用IP或用户名@IP引用已连接设备，
+                # 减少AI回查dev编号的往返（如 exec host=192.168.1.213）
+                matched = [
+                    sid for sid, s in _sessions.items()
+                    if s is not None and (s.host == h or f"{s.username}@{s.host}" == h)
+                ]
+                if len(matched) == 1:
+                    return matched[0], _sessions[matched[0]]
+                if len(matched) > 1:
+                    raise ValueError(
+                        f"多个会话匹配 '{h}'，请用dev编号区分: "
+                        f"{'、'.join(f'dev{s + 1}({_sessions[s].username}@{_sessions[s].host})' for s in matched)}"
+                    )
                 raise ValueError(_dev_hint_locked())
             d = int(m.group(1))
             if d == 0:
                 raise ValueError("dev0是当前设备(本机)，无SSH会话，仅transfer可用")
             sid = d - 1
             if sid >= MAX_SESSIONS or sid not in _sessions:
-                raise ValueError(f"dev{d}未连接，请先connect")
+                raise ValueError(f"dev{d}未连接，请先connect。当前已连接: {_list_devices_locked()}")
             return sid, _sessions[sid]
 
         # 未指定session_id和host，自动选择唯一会话
@@ -296,17 +358,22 @@ def _resolve_session_id(session_id: int, host: str = "") -> tuple[int, "SSHSessi
         elif len(_sessions) == 0:
             raise ValueError("无活跃会话，请先connect")
         else:
-            keys = [_dev_label(s) for s in sorted(_sessions.keys())]
-            raise ValueError(f"有多个会话，请指定host=dev编号，当前已连接: {keys}")
+            keys = [f"dev{s + 1}({_sessions[s].username}@{_sessions[s].host})" for s in sorted(_sessions.keys())]
+            raise ValueError(f"有多个会话，请指定host=dev编号，当前已连接: {'、'.join(keys)}")
 
 
 def _connect(host: str, username: str, port: int = 22,
              key_path: str = "", password: str = "",
              sudo_password: str = "",
-             session_id: int = -1) -> str:
-    """建立SSH会话"""
+             session_id: int = -1,
+             timeout: int = 15) -> str:
+    """建立SSH会话。timeout为连接超时（默认15秒），黑洞IP快速失败。"""
     if not host or not username:
         return "[错误: connect需要提供host和username]"
+
+    # timeout非正整数时兜底默认15秒（LLM可能传0/负数）
+    if not timeout or timeout <= 0:
+        timeout = 15
 
     with _sessions_lock:
         # 指定了session_id
@@ -337,6 +404,7 @@ def _connect(host: str, username: str, port: int = 22,
         if sudo_password:
             kwargs["sudo_password"] = sudo_password
 
+        kwargs["timeout"] = timeout
         session = SSHSession(**kwargs)
 
         # 注册活跃会话，让 ESC 能在 connect 的阻塞初始化阶段打断
@@ -352,9 +420,34 @@ def _connect(host: str, username: str, port: int = 22,
         with _sessions_lock:
             _sessions[alloc_id] = session
 
+        # 重复连接提示: 相同设备已有会话时提醒AI直接用现有dev编号，
+        # 避免无谓地多开会话占用槽位、造成多终端选择歧义
+        # 示例引用用纯devN（AI可照抄host参数），展示名devN(终端N)括号含内部槽位号，照抄会报错
+        with _sessions_lock:
+            dup_sids = [
+                sid for sid, s in _sessions.items()
+                if s is not None and sid != alloc_id
+                and not s._channel.closed
+                and s.host == host and s.username == username
+            ]
+            dup_devs = [_dev_label(sid) for sid in dup_sids]
+
         parts = [f"[已连接 {_dev_label(alloc_id)}: {username}@{host}]"]
+        if dup_devs:
+            dup_refs = "、".join(f"dev{sid + 1}" for sid in dup_sids)
+            parts.append(
+                f"[注意: 相同设备已有连接: {'、'.join(dup_devs)}。"
+                f"如非必要请勿重复连接，可直接用 host={dup_refs} 执行命令]"
+            )
         if session._initial_output:
-            parts.append(session._initial_output)
+            # 折叠登录横幅噪音：>4行时只保留首行(系统版本)+末两行(last login/prompt)
+            banner_lines = session._initial_output.rstrip().split("\n")
+            if len(banner_lines) > 4:
+                parts.append(banner_lines[0])
+                parts.append(f"...(已省略{len(banner_lines) - 3}行登录横幅)")
+                parts.append("\n".join(banner_lines[-2:]))
+            else:
+                parts.append(session._initial_output)
         else:
             parts.append(session.prompt)
         return "\n".join(parts)
@@ -448,6 +541,33 @@ def _input(session_id: int, host: str, input: str, timeout: int = 120, max_outpu
     if _tool_context and _tool_context.max_timeout_seconds > 0:
         timeout = min(timeout, _tool_context.max_timeout_seconds)
 
+    # 安全检查：input内容与exec一致走删除/git确认（防止通过input绕过安全确认）
+    need_confirm = False
+    tc = _tool_context
+    if tc and not tc.rm_skip_confirm and _RE_DELETE.search(input):
+        need_confirm = True
+    elif tc and not tc.git_skip_confirm and _RE_GIT.search(input):
+        need_confirm = True
+
+    if need_confirm:
+        if sys.platform == "win32":
+            if tc and tc.confirm_callback and not tc.confirm_callback(input):
+                return "[操作已取消: 此命令需用户确认]"
+        else:
+            if tc and tc._delete_confirmed:
+                tc._delete_confirmed = False
+            else:
+                if tc is not None:
+                    tc.pending_delete = ("Terminal", {
+                        "action": "input",
+                        "session_id": session_id,
+                        "host": host,
+                        "input": input,
+                        "timeout": timeout,
+                        "max_output_chars": max_output_chars,
+                    })
+                return "__AWAIT_CONFIRM__"
+
     try:
         sid, session = _resolve_session_id(session_id, host)
     except ValueError as e:
@@ -460,7 +580,15 @@ def _input(session_id: int, host: str, input: str, timeout: int = 120, max_outpu
         return f"[错误: {_dev_label(sid)}会话已断开，请重新connect]"
 
     try:
-        result = session.send_input(input, timeout=timeout, max_output_chars=max_output_chars)
+        # 注册活跃会话，agent层ESC打断后可通过kill_active_exec发送Ctrl+C
+        with _active_exec_lock:
+            global _active_exec_session
+            _active_exec_session = session
+        try:
+            result = session.send_input(input, timeout=timeout, max_output_chars=max_output_chars)
+        finally:
+            with _active_exec_lock:
+                _active_exec_session = None
         return f"[{_dev_label(sid)}] {result}"
     except Exception as e:
         return f"[错误: {_dev_label(sid)}输入发送失败: {e}]"
@@ -475,9 +603,10 @@ def _status() -> str:
                 session = _sessions[sid]
                 alive = "活跃" if not session._channel.closed else "已断开"
                 busy = "忙" if session._busy else "闲"
-                lines.append(f"  {_dev_label(sid)}: {session.username}@{session.host} [{alive}|{busy}] {session.prompt}")
+                # 只显示cwd（prompt会重复user@host，纯噪音；cwd才是AI关心的状态信息）
+                lines.append(f"  {_dev_label(sid)}: {session.username}@{session.host} [{alive}|{busy}] 目录:{session._cwd}")
             else:
-                lines.append(f"  {_dev_label(sid)}: [空闲]")
+                lines.append(f"  {_dev_label(sid)}: [未连接]")
         if len(_sessions) == 0:
             return "[SSH会话]\n" + "\n".join(lines) + f"\n(无已连接设备，最多支持{MAX_SESSIONS}个并发终端)"
         return "[SSH会话]\n" + "\n".join(lines)
@@ -559,12 +688,15 @@ def _check_transfer_size(size_bytes: int, max_transfer_mb: int) -> Optional[str]
     return None
 
 
-def _get_remote_file_size(session: "SSHSession", path: str) -> Optional[int]:
+def _get_remote_file_size(session: "SSHSession", path: str) -> Optional[tuple]:
+    """获取远程文件 (大小, 是否目录)。目录也返回而非None——
+    区分"不存在"与"是目录"，让transfer给出明确指引而非paramiko的"Failure"。
+    返回None表示无法访问（不存在/权限）。"""
     try:
         sftp = session._client.open_sftp()
         try:
-            stat = sftp.stat(path)
-            return stat.st_size
+            st = sftp.stat(path)
+            return st.st_size, stat.S_ISDIR(st.st_mode)
         finally:
             sftp.close()
     except Exception:
@@ -606,6 +738,9 @@ def _ensure_local_dir(local_path: str) -> bool:
 
 
 def _transfer_local_to_remote(source_path: str, target_host: str, target_path: str, max_transfer_mb: int) -> str:
+    if os.path.isdir(source_path):
+        return (f"[错误: 源是目录，transfer仅支持文件传输。"
+                f"目录请先用 Shell 打包（如 tar czf x.tar.gz 目录）再传输: {source_path}]")
     if not os.path.isfile(source_path):
         return f"[错误: 源文件不存在: {source_path}]"
 
@@ -638,9 +773,13 @@ def _transfer_remote_to_local(source_host: str, source_path: str, target_path: s
     if session is None:
         return f"[错误: 源设备 {source_host} 未连接，请先connect。当前已连接: {_list_devices()}]"
 
-    size = _get_remote_file_size(session, source_path)
-    if size is None:
+    st = _get_remote_file_size(session, source_path)
+    if st is None:
         return f"[错误: 源文件不存在或无法访问: {source_host}:{source_path}]"
+    size, is_dir = st
+    if is_dir:
+        return (f"[错误: 源是目录，transfer仅支持文件传输。"
+                f"目录请先用 exec 打包（如 tar czf /tmp/x.tar.gz 目录）再传输: {source_host}:{source_path}]")
 
     err = _check_transfer_size(size, max_transfer_mb)
     if err:
@@ -670,9 +809,13 @@ def _transfer_remote_to_remote(source_host: str, source_path: str, target_host: 
     if tgt_session is None:
         return f"[错误: 目标设备 {target_host} 未连接，请先connect。当前已连接: {_list_devices()}]"
 
-    size = _get_remote_file_size(src_session, source_path)
-    if size is None:
+    st = _get_remote_file_size(src_session, source_path)
+    if st is None:
         return f"[错误: 源文件不存在或无法访问: {source_host}:{source_path}]"
+    size, is_dir = st
+    if is_dir:
+        return (f"[错误: 源是目录，transfer仅支持文件传输。"
+                f"目录请先在源设备 exec 打包（如 tar czf /tmp/x.tar.gz 目录）再传输: {source_host}:{source_path}]")
 
     err = _check_transfer_size(size, max_transfer_mb)
     if err:

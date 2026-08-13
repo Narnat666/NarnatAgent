@@ -16,7 +16,8 @@ class StatsTracker:
         self._balance_cfg = balance_cfg
         self._total_input_tokens = 0
         self._total_output_tokens = 0
-        self._total_cache_tokens = 0
+        self._total_prompt_tokens = 0  # 累计输入token（所有轮次求和）
+        self._total_cache_tokens = 0   # 累计缓存命中token
         self._total_cost = 0.0
         self._balance_to_show = 0.0
 
@@ -25,9 +26,12 @@ class StatsTracker:
 
         usage: {"prompt_tokens": int, "completion_tokens": int, "cached_tokens": int}
         """
+        prompt = usage["prompt_tokens"]
         self._total_output_tokens += usage["completion_tokens"]
-        self._total_input_tokens = usage["prompt_tokens"]  # 赋值：每轮已含全部历史
-        self._total_cache_tokens = usage.get("cached_tokens", 0)  # 赋值：每轮是当前快照
+        self._total_input_tokens = prompt  # 赋值：每轮已含全部历史（当前上下文快照）
+        # 累计：用于计算全程 token 加权缓存命中率（小轮次不会被等权放大）
+        self._total_prompt_tokens += prompt
+        self._total_cache_tokens += usage.get("cached_tokens", 0)
         self._total_cost += calculate_cost(
             self._model,
             usage["prompt_tokens"],
@@ -54,8 +58,11 @@ class StatsTracker:
         return self._total_output_tokens
 
     @property
-    def cache_tokens(self) -> int:
-        return self._total_cache_tokens
+    def cache_hit_ratio(self) -> float:
+        """全程累计缓存命中率（0~1）：累计命中token / 累计输入token，token加权"""
+        if self._total_prompt_tokens == 0:
+            return 0.0
+        return self._total_cache_tokens / self._total_prompt_tokens
 
     @property
     def cost(self) -> float:

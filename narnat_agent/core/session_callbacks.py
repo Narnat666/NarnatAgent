@@ -533,7 +533,8 @@ class SessionManager:
                  summary_anim_start: Callable[[], None] = None,
                  summary_anim_stop: Callable[[], None] = None,
                  cancel_check: Callable[[], bool] = None,
-                 name_func: Callable[[List[Dict[str, Any]]], str] = None):
+                 name_func: Callable[[List[Dict[str, Any]]], str] = None,
+                 on_switch_state: Callable[[], None] = None):
         self.narnat_dir = narnat_dir
         self._messages = messages
         self._config_dir = config_dir
@@ -545,6 +546,7 @@ class SessionManager:
         self.summary_anim_stop = summary_anim_stop
         self.cancel_check = cancel_check or (lambda: False)
         self.name_func = name_func
+        self._on_switch_state = on_switch_state
         self._auto_save_done: bool = False
         self._pending_auto_save_name: Optional[str] = None
         self.pending_deletes: Set[Tuple[str, Optional[str]]] = set()
@@ -564,6 +566,11 @@ class SessionManager:
 
     def switch_state(self, new_state: SessionState):
         self._state = new_state
+        # 会话切换后AI的记忆（消息上下文）已整体更换，工具层的"已Read文件"等
+        # 运行时状态必须同步清空：否则AI在新会话中未读过文件却能直接Edit/Write，
+        # 绕过"先Read后写"的覆写保护（旧会话读过的文件状态泄漏到新会话）
+        if self._on_switch_state is not None:
+            self._on_switch_state()
 
     def create_root_state(self, name: str) -> RootSession:
         return RootSession(self, name)

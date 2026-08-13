@@ -28,7 +28,7 @@ DEFINITION = {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "搜索查询词"},
-                "num": {"type": "integer", "description": "返回结果数量（正整数，默认5）"},
+                "num": {"type": "integer", "description": "返回结果数量（正整数，默认5，上限20）"},
             },
             "required": ["query"],
         },
@@ -65,13 +65,20 @@ def _relevance_score(result: Dict, query: str) -> float:
 
 
 def _format_results(results: List[Dict]) -> str:
-    """格式化搜索结果为可读文本"""
+    """格式化搜索结果为可读文本（描述压缩空白并截断，避免大段噪音灌给LLM）"""
     lines = []
     for i, r in enumerate(results, 1):
-        lines.append(f"{i}. {r['title']}")
+        title = r.get("title", "") or ""
+        if len(title) > 120:
+            title = title[:120] + "…"
+        lines.append(f"{i}. {title}")
         lines.append(f"   URL: {r['url']}")
         desc = r.get("description", "")
         if desc:
+            # 压缩换行/连续空白为单空格，截断到300字符
+            desc = re.sub(r"\s+", " ", desc).strip()
+            if len(desc) > 300:
+                desc = desc[:300] + "…"
             lines.append(f"   {desc}")
     return "\n".join(lines)
 
@@ -138,6 +145,8 @@ def execute(query: str, num: int = 5, _tool_context=None) -> str:
     """
     if num <= 0:
         return "[错误: num需为正整数]"
+    # 上限20：结果逐条灌给LLM，超大num既拖慢响应又浪费配额，且全局截断会砍掉尾部
+    num = min(num, 20)
     # 从tool_context注入API Key和URL
     global _ANYSEARCH_API_KEY, _ANYSEARCH_URL
     if _tool_context and _tool_context.api_keys:

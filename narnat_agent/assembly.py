@@ -24,7 +24,6 @@ from .core.auto_save_manager import AutoSaveManager
 from .core.compression_coordinator import CompressionCoordinator
 from .tools.tool_context import ToolContext
 from .tools.terminal import set_max_sessions, cleanup as _terminal_cleanup
-from .tools.bash import cleanup as _bash_cleanup
 from .ui.ui_design import UIInterface, apply_style
 from .ui.interrupt import _interrupt_ctrl
 from .logger import AgentLogger
@@ -87,29 +86,7 @@ class Assembly:
         # 9. 摘要器
         summarizer = Summarizer(llm, config, logger)
 
-        # 10. 会话管理器
-        session_mgr = SessionManager(
-            config.paths.narnat_dir,
-            message_list,
-            config_dir=config.paths.config_dir,
-            thinking_effort_getter=lambda: config.ai.thinking_effort,
-            thinking_effort_setter=lambda v: setattr(config.ai, 'thinking_effort', v),
-            thinking_options=config.ai.thinking_options,
-            summarize_func=lambda msgs, cancel: summarizer.summarize(msgs, cancel),
-            summary_anim_start=None,  # 由 Agent 在 run() 中设置
-            summary_anim_stop=None,
-            cancel_check=lambda: _interrupt_ctrl.is_set,
-            name_func=lambda msgs: summarizer.name_session(msgs),
-        )
-
-        # 11. UI
-        ui = UIInterface(config.ai.model, session_mgr, config.paths.data_dir)
-
-        # 补充 session_mgr 的 UI 回调（需要 ui 先创建）
-        session_mgr.summary_anim_start = lambda: ui.begin_summarizing()
-        session_mgr.summary_anim_stop = lambda: ui.end_summarizing()
-
-        # 12. 工具上下文
+        # 9.5 工具上下文（先于SessionManager创建：会话切换回调需引用它清空已读状态）
         tool_context = ToolContext(
             confirm_callback=SafetyCallbacks.confirm_delete if sys.platform == "win32" else None,
             ui_callback=TodoCallbacks.on_todo_update,
@@ -124,7 +101,30 @@ class Assembly:
             min_tools=config.plan.min_tools,
         )
 
-        # 13. 工具调度器
+        # 10. 会话管理器
+        session_mgr = SessionManager(
+            config.paths.narnat_dir,
+            message_list,
+            config_dir=config.paths.config_dir,
+            thinking_effort_getter=lambda: config.ai.thinking_effort,
+            thinking_effort_setter=lambda v: setattr(config.ai, 'thinking_effort', v),
+            thinking_options=config.ai.thinking_options,
+            summarize_func=lambda msgs, cancel: summarizer.summarize(msgs, cancel),
+            summary_anim_start=None,  # 由 Agent 在 run() 中设置
+            summary_anim_stop=None,
+            cancel_check=lambda: _interrupt_ctrl.is_set,
+            name_func=lambda msgs: summarizer.name_session(msgs),
+            on_switch_state=tool_context.clear_read_files,
+        )
+
+        # 11. UI
+        ui = UIInterface(config.ai.model, session_mgr, config.paths.data_dir)
+
+        # 补充 session_mgr 的 UI 回调（需要 ui 先创建）
+        session_mgr.summary_anim_start = lambda: ui.begin_summarizing()
+        session_mgr.summary_anim_stop = lambda: ui.end_summarizing()
+
+        # 12. 工具调度器
         dispatcher = ToolDispatcher(
             tool_context,
             ThreadPoolExecutor(max_workers=16),

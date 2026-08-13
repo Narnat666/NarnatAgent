@@ -21,8 +21,11 @@ __all__ = ["execute", "DEFINITION", "kill_active_exec", "cleanup", "set_max_sess
 MAX_SESSIONS = 5
 
 # 删除命令正则（串口设备误删更危险）
+# 边界后跟空白或/：覆盖无空格变体（rd/s、del/f、rmdir/q）及erase/format；
+# \b边界防止误伤 delphi、3rd、formatting 等普通词
 _RE_DELETE = re.compile(
-    r"\b(rm\s|del\s|Remove-Item\s|rmdir\s|rd\s|format\s)",
+    r"\b(?:rm|del|rd|rmdir|erase|format)\b[\s/]"
+    r"|\bRemove-Item\b",
     re.IGNORECASE,
 )
 
@@ -485,9 +488,20 @@ def cleanup():
 
 
 def _allocate_session_id() -> int:
-    """分配空闲 session_id，返回 -1 表示已满"""
+    """分配空闲 session_id，返回 -1 表示已满。
+
+    死会话（is_alive=False，如串口被拔出）自动回收槽位：
+    否则设备断开后槽位被死会话占用，AI重连时报"已达最大会话数"却无法释放。
+    调用者需持有_sessions_lock。
+    """
     for i in range(MAX_SESSIONS):
         if i not in _sessions:
+            return i
+        session = _sessions[i]
+        # None=正在连接中的占位槽，不可抢占；只回收已断开的死会话
+        if session is not None and not session.is_alive:
+            session.close()
+            del _sessions[i]
             return i
     return -1
 
