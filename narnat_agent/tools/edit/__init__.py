@@ -27,7 +27,11 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Edit",
-        "description": "编辑文件（字符串替换或行替换，两种模式互斥）。支持本地或远程编辑文件。",
+        "description": (
+            "编辑文件（字符串替换或行替换，两种模式互斥）。支持本地或远程编辑文件。"
+            "首次编辑某文件前必须先Read该文件（未Read直接报错）。"
+            "自动识别并保持原编码（UTF-8/GBK），自动兼容CRLF/LF换行。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {

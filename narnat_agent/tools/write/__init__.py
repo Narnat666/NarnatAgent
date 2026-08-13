@@ -13,7 +13,10 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Write",
-        "description": "创建新文件或全量覆盖文件。支持本地或远程写入文件。",
+        "description": (
+            "创建新文件或全量覆盖文件。支持本地或远程写入文件。"
+            "覆写已有文件前必须先Read该文件（未Read直接报错）。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {

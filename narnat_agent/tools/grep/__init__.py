@@ -35,7 +35,12 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Grep",
-        "description": "正则搜索文件内容（仅支持本机文件，不支持远程设备文件）。默认跳过.git/node_modules等忽略目录。",
+        "description": (
+            "正则搜索文件内容（仅支持本机文件，不支持远程设备文件）。"
+            "默认跳过.git/node_modules等忽略目录。"
+            "path 支持目录或单个文件路径（直接填文件路径即只搜该文件）。"
+            "glob 支持花括号多模式（与Glob工具语法一致），如 *.{c,h}、src/**/*.{py,md}。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -45,11 +50,11 @@ DEFINITION = {
                 },
                 "path": {
                     "type": "string",
-                    "description": "搜索路径（默认当前）",
+                    "description": "搜索路径（默认当前目录）；也可直接填单个文件路径（如 D:\\work\\src\\main.c），此时只搜该文件",
                 },
                 "glob": {
                     "type": "string",
-                    "description": "文件过滤，如*.py、src/*.c、**/*.c（默认空）",
+                    "description": "文件过滤，如*.py、src/*.c、**/*.c、*.{c,h}（花括号多模式，默认空）",
                 },
                 "output_mode": {
                     "type": "string",
