@@ -14,6 +14,9 @@ def main():
     parser = argparse.ArgumentParser(description="Narnat Agent - 代码智能体")
     parser.add_argument("-d", "--debug", action="store_true", help="调试模式，记录详细日志")
     parser.add_argument("-v", "--version", action="store_true", help="显示版本号")
+    parser.add_argument("--web", action="store_true",
+                        help="启用 DSH Web 前端界面（中转模块），浏览器访问 http://127.0.0.1:<port>")
+    parser.add_argument("--port", type=int, default=8765, help="Web 界面端口（默认 8765）")
     args = parser.parse_args()
 
     if args.version:
@@ -27,7 +30,7 @@ def main():
 
     from narnat_agent.core.agent import Agent
 
-    agent = Agent(debug=args.debug)
+    agent = Agent(debug=args.debug, web=args.web, web_port=args.port)
     agent.run()
 
 

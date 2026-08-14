@@ -37,3 +37,6 @@ Thumbs.db
 Desktop.ini
 .venv
 tool_exp/
+
+# ═══ DSH Web 前端工件（生成物，用 collect_dsh 再生成）═══
+narnat_agent/web/dsh_static/

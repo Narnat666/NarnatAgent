@@ -20,7 +20,8 @@ from ..output import write as _stdout_write
 class Agent:
     """Narnat Agent 主控 — 纯编排者"""
 
-    def __init__(self, project_root: Optional[str] = None, debug: bool = False):
+    def __init__(self, project_root: Optional[str] = None, debug: bool = False,
+                 web: bool = False, web_port: int = 8765):
         self._parts: AssemblyResult = Assembly.build(project_root, debug)
         self._config = self._parts.config
         self._logger = self._parts.logger
@@ -34,15 +35,39 @@ class Agent:
         self._compression = self._parts.compression_coordinator
         self._round = 0
 
+        # DSH Web 前端桥（中转模块）：合并终端与 Web 输入、双向事件翻译
+        self._web_bridge = None
+        if web:
+            from ..web.dsh.bridge import DshBridge
+            static_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "web", "dsh_static")
+            self._web_bridge = DshBridge(self._parts, static_dir, port=web_port, debug=debug)
+
     def run(self):
         """主循环"""
-        self._ui.start()
+        if self._web_bridge is not None:
+            # Web 模式：终端 UI 启动失败（如无控制台的后台运行）→ 降级纯 Web 模式
+            try:
+                self._ui.start()
+            except Exception as e:
+                self._logger.warning("core.agent", f"终端UI不可用，进入纯Web模式: {e}")
+        else:
+            self._ui.start()
+        if self._web_bridge is not None:
+            self._web_bridge.start()
         self._logger.info("core.agent", f"Agent启动, model={self._config.ai.model}")
 
         try:
             while True:
                 # 1. 读取用户输入
-                user_input = self._ui.read_input()
+                try:
+                    if self._web_bridge is not None:
+                        user_input = self._web_bridge.read_input()
+                    else:
+                        user_input = self._ui.read_input()
+                except KeyboardInterrupt:
+                    continue
                 if user_input is None:
                     continue
 
@@ -63,6 +88,8 @@ class Agent:
                         self._auto_save.on_exit()
                         self._logger.info("core.agent", "用户退出")
                         self._logger.close()
+                        if self._web_bridge is not None:
+                            self._web_bridge.shutdown()
                         os._exit(0)
                     if result == 1:
                         continue
@@ -87,6 +114,8 @@ class Agent:
 
                 # 5. 创建流式输出
                 stream = self._ui.create_stream()
+                if self._web_bridge is not None:
+                    stream = self._web_bridge.wrap_stream(stream)
 
                 try:
                     # 6. 工具调度内循环
@@ -103,6 +132,10 @@ class Agent:
                     if not stream.aborted:
                         self._mgr.on_auto_save()
                         self._auto_save.try_save()
+
+                # 6.5 通知 Web 桥本轮结束（差量同步消息 → DSH 事件）
+                if self._web_bridge is not None:
+                    self._web_bridge.turn_finished(ok=not stream.aborted)
 
                 # 7. 回复结束：更新窗口占比 + 告警提示（中断/异常时统计沿用上一轮值）
                 self._context.update_ratio(self._stats.input_tokens)
