@@ -224,9 +224,13 @@ class UIStreamSession:
             self._stop_spinner()
 
     def flush_renderer(self) -> None:
-        """flush渲染器缓冲区，确保之前的文字已完整输出到终端"""
+        """flush渲染器缓冲区，确保之前的文字已完整输出到终端。
+
+        非最终 flush：未完成的表格行会保留缓冲，等表格完整后再整体渲染，
+        避免工具调用边界把一张表格拆成两半。
+        """
         if self._started:
-            self._renderer.flush()
+            self._renderer.flush(final=False)
 
     def resume_spinner(self) -> None:
         """恢复spinner（工具执行后调用），所有并行工具完成后才真正恢复"""
@@ -241,7 +245,7 @@ class UIStreamSession:
                balance: float = 0.0, thinking_effort: str = "高") -> None:
         _interrupt_ctrl.enter_input_mode()  # 立即停止ESC轮询，防止误触发
         self._stop_spinner()
-        self._renderer.flush()
+        self._renderer.flush(final=True)
         show_stats(input_tokens, output_tokens, cache_ratio, cost, balance, thinking_effort)
 
     def abort(self) -> None:

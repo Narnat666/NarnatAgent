@@ -12,6 +12,7 @@
 import io
 import re
 import shutil
+import sys
 import unicodedata
 from typing import Optional, Callable, List, Match
 
@@ -39,23 +40,84 @@ from .colors import (
 _MAX_TERMINAL_WIDTH = 160
 
 
-def _terminal_width() -> int:
+def _windows_console_window_cols() -> int:
+    """Windows 控制台「可见窗口」宽度（列数）。
+
+    仅对存在真实可见窗口的传统 conhost 生效（如直接运行在 cmd.exe 窗口里）：
+    此时缓冲区宽度可能大于可见窗口宽度（如 120 缓冲 + 80 窗口），
+    按缓冲区宽度渲染会导致输出行超出可见窗口、被终端强制折行，破坏表格对齐。
+    此时用窗口客户区宽度 / 字体宽度换算真实可见列数。
+
+    Windows Terminal / VS Code 等 ConPTY 环境没有可见的控制台窗口
+    （GetConsoleWindow 返回隐藏窗口，srWindow 可能是过期的初始值），
+    返回 0，由调用方回退到缓冲区宽度（ConPTY 下缓冲区宽度与终端窗格一致）。
+    """
+    if sys.platform != "win32":
+        return 0
     try:
-        return min(shutil.get_terminal_size().columns, _MAX_TERMINAL_WIDTH)
+        import ctypes
+
+        class _RECT(ctypes.Structure):
+            _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                        ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+        kernel32 = ctypes.windll.kernel32
+        user32 = ctypes.windll.user32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        hwnd = kernel32.GetConsoleWindow()
+        if not hwnd or not user32.IsWindowVisible(hwnd):
+            return 0
+        rect = _RECT()
+        if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
+            return 0
+        client_w = rect.right - rect.left
+        if client_w <= 0:
+            return 0
+        # CONSOLE_FONT_INFO: DWORD nFont + COORD dwFontSize(X, Y)，共 8 字节
+        info = ctypes.create_string_buffer(8)
+        if not kernel32.GetCurrentConsoleFont(handle, False, info):
+            return 0
+        font_x = int.from_bytes(info.raw[4:6], "little")
+        if font_x <= 0:
+            return 0
+        cols = client_w // font_x
+        return cols if cols > 0 else 0
     except Exception:
-        return 120
+        return 0
+
+
+def _terminal_width() -> int:
+    # 传统 conhost（有真实可见窗口）：以可见窗口宽度为准，防止按缓冲区宽度渲染导致折行
+    win_cols = _windows_console_window_cols()
+    if win_cols:
+        cols = win_cols
+    else:
+        # ConPTY（Windows Terminal/VS Code 等）或管道：缓冲区宽度即实际可用宽度
+        try:
+            cols = shutil.get_terminal_size().columns
+        except Exception:
+            cols = 120
+    return max(min(cols, _MAX_TERMINAL_WIDTH), 20)
 
 
 _re_ansi = re.compile(r"\x1b\[[0-9;]*m")
 
 
+def _char_width(ch: str) -> int:
+    """单字符的终端显示宽度（CJK/全角=2，其余=1）。
+
+    歧义宽度字符（east_asian_width == 'A'，如 → ≈ 等）统一按 1 列计算：
+    Windows Terminal / VS Code / 多数 Linux 终端默认按窄字符渲染，
+    中文版控制台对 GBK 中不存在的字符（如 →）同样按窄字符渲染。
+    若按 2 列计算，单元格右边框会向左偏移 1 列，出现可见的边框不齐。
+    """
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
 def _display_width(text: str) -> int:
     """终端显示宽度：CJK字符=2列，跳过ANSI转义序列。"""
     text = _re_ansi.sub("", text)
-    w = 0
-    for ch in text:
-        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
-    return w
+    return sum(_char_width(ch) for ch in text)
 
 
 def _visual_chars(text: str) -> List[str]:
@@ -121,7 +183,7 @@ def _wrap_cell(ansi_text: str, max_width: int) -> List[str]:
             continue
 
         # 计算该字符的显示宽度
-        cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        cw = _char_width(ch)
 
         if current_width + cw > max_width:
             # 超出宽度，换行
@@ -296,6 +358,36 @@ def _render_paragraph(_line: str, _m: Match) -> str:
 
 
 _RE_TABLE_SEP = re.compile(r"^[-:]+$")
+
+
+def _fit_widths(natural: List[int], avail: int, min_col: int = 2) -> List[int]:
+    """把各列自然宽度压缩到总宽度 avail 以内，保证 sum(widths) == avail（或尽量接近）。
+
+    优先保证每列 min_col，剩余按自然宽度比例分配，最后修正舍入误差。
+    avail 小于 cols*min_col 时退化为均分。
+    """
+    cols = len(natural)
+    if cols <= 0:
+        return []
+    if avail < cols * min_col:
+        base = max(1, avail // cols)
+        widths = [base] * cols
+    else:
+        widths = [min_col] * cols
+        remaining = avail - cols * min_col
+        total_natural = sum(natural)
+        if remaining > 0 and total_natural > 0:
+            for i in range(cols):
+                widths[i] += int(remaining * natural[i] / total_natural)
+    # 修正舍入误差（不超出 avail）
+    diff = avail - sum(widths)
+    if diff > 0:
+        for i in range(diff):
+            widths[i % cols] += 1
+    elif diff < 0:
+        # 只可能出现在 avail < cols*min_col 时 base=avail//cols 但求和超出（不会），防御性裁剪
+        widths[-1] = max(1, widths[-1] + diff)
+    return widths
 
 
 def _is_table_separator(cells: List[str]) -> bool:
@@ -503,8 +595,8 @@ class StreamingRenderer:
 
         # ── 计算列宽（带终端宽度限制） ──
         term_w = _terminal_width()
-        # 表格可用宽度 = 终端宽度 - 4(缩进) - 1(左边框) - 1(右边框)
-        table_avail = max(term_w - 6, 20)
+        # 表格可用宽度 = 终端宽度 - 4(缩进) - 2(安全余量，防终端 pending-wrap 折行破坏边框)
+        table_avail = max(term_w - 6, 8)
 
         all_rows = header_rows + data_rows
         rows_cells = [[c.strip() for c in line.strip("|").split("|")] for line in all_rows]
@@ -529,33 +621,17 @@ class StreamingRenderer:
         total_natural = sum(natural_widths) + col_overhead
 
         if total_natural <= table_avail:
-            # ── 正常宽度：原逻辑，不折行 ──
+            # ── 正常宽度：不折行 ──
             widths = natural_widths
             self._render_table_block(rendered, widths, cols, alignments=alignments)
         else:
-            # ── 超宽：需要限制列宽+折行 ──
-            # 策略：给每列设上限，均等分配可用宽度
-            # 优先保证每列至少6字符（3个中文字符），剩余按自然宽度比例分配
-            min_col = 6
+            # ── 超宽：限制列宽 + 折行，保证整表不超出终端宽度 ──
             avail_for_content = table_avail - col_overhead
-            # 如果连最小宽度都放不下，减少列数（分块）
-            if cols * min_col > avail_for_content:
-                # 分块：计算每块能放多少列
-                self._render_table_chunked(rendered, cols, table_avail, col_overhead, min_col, alignments=alignments)
+            # 连每列 2 字符都放不下 → 按列分块输出
+            if avail_for_content < cols * 2:
+                self._render_table_chunked(rendered, natural_widths, cols, table_avail, alignments=alignments)
             else:
-                # 限制列宽：先保证每列min_col，剩余按自然宽度比例分配
-                widths = [min_col] * cols
-                remaining = avail_for_content - cols * min_col
-                if remaining > 0 and sum(natural_widths) > 0:
-                    for i in range(cols):
-                        ratio = natural_widths[i] / sum(natural_widths)
-                        widths[i] += int(remaining * ratio)
-                    # 修正舍入误差
-                    diff = avail_for_content - sum(widths)
-                    if diff > 0:
-                        for i in range(diff):
-                            widths[i % cols] += 1
-
+                widths = _fit_widths(natural_widths, avail_for_content)
                 # 折行渲染
                 self._render_table_block(rendered, widths, cols, wrap=True, alignments=alignments)
 
@@ -665,70 +741,81 @@ class StreamingRenderer:
         _stdout_write("\n".join(parts) + "\n")
 
     def _render_table_chunked(self, rendered: List[List[str]],
+                              natural_widths: List[int],
                               cols: int, table_avail: int,
-                              col_overhead: int, min_col: int,
                               alignments: Optional[List[str]] = None) -> None:
-        """列数过多时按列分块输出，首列作为锚点重复。
+        """列数过多、放不下时按列分块输出，首列作为锚点重复。
+
+        每个分块都是完整的子表（锚点列 + 若干附加列），
+        块内列宽用 _fit_widths 保证子表总宽不超过 table_avail，
+        避免输出行超出终端宽度被强制折行、破坏边框。
 
         Args:
-            rendered: 已渲染的单元格
+            rendered: 已做 InlineRules 渲染的单元格
+            natural_widths: 各列自然宽度
             cols: 总列数
-            table_avail: 表格可用宽度
-            col_overhead: 列的边框+内边距总开销
-            min_col: 每列最小宽度
+            table_avail: 表格可用宽度（含边框）
             alignments: 各列对齐方式
         """
         if alignments is None:
             alignments = ["left"] * cols
-        # 每列开销：3 (| + 两边空格)
-        per_col_overhead = 3
-        # 锚点列(第0列)固定占用
-        anchor_width = min_col
-        # 每块可用宽度（减去锚点列）
-        chunk_avail = table_avail - anchor_width - per_col_overhead - 1  # -1 右边框
-        # 每块能放的附加列数
-        cols_per_chunk = max(1, chunk_avail // (min_col + per_col_overhead))
+        if cols <= 1:
+            # 单列表：直接按可用宽度压缩渲染
+            avail_for_content = max(1, table_avail - 4)
+            widths = _fit_widths([natural_widths[0]], avail_for_content)
+            self._render_table_block(rendered, widths, 1, wrap=True, alignments=alignments[:1])
+            return
 
-        # 分块：第0列(锚点) + 每块cols_per_chunk个附加列
+        # 每列开销：3（| + 两侧空格）；表额外开销：最右 | = 1
+        per_col_overhead = 3
+        # 单列子表至少需要的宽度：min_col(2) + 3 + 1 = 6
+        min_single_col_total = 2 + per_col_overhead + 1
+        if table_avail < min_single_col_total:
+            # 终端太窄，连一列表格都画不下 → 降级为段落输出
+            self._demote_to_paragraphs()
+            return
+
+        # 分块：第0列(锚点) + 每块若干附加列；放不下锚点的列单独成块
+        def _min_total(n: int) -> int:
+            """n 列子表的最小总宽：每列 2 内容 + 3 边框内边距 + 1 右框"""
+            return 2 * n + per_col_overhead * n + 1
+
         data_col_indices = list(range(1, cols))
         chunks: List[List[int]] = []
         i = 0
         while i < len(data_col_indices):
-            chunk = [0] + data_col_indices[i:i + cols_per_chunk]
-            chunks.append(chunk)
-            i += cols_per_chunk
+            chunk = [0]
+            # 贪心加入附加列：保证块内每列最少 2 字符宽
+            while i < len(data_col_indices):
+                trial = chunk + [data_col_indices[i]]
+                if _min_total(len(trial)) > table_avail:
+                    break
+                chunk = trial
+                i += 1
+            if len(chunk) == 1:
+                # 锚点旁放不下任何列 → 该列单独输出（无锚点）
+                chunks.append([data_col_indices[i]])
+                i += 1
+            else:
+                chunks.append(chunk)
 
         total_chunks = len(chunks)
 
         for chunk_idx, col_indices in enumerate(chunks):
             # 提取子表数据
-            sub_rendered = []
-            for row in rendered:
-                sub_row = [row[c] if c < len(row) else "" for c in col_indices]
-                sub_rendered.append(sub_row)
+            sub_rendered = [[row[c] if c < len(row) else "" for c in col_indices]
+                            for row in rendered]
+            sub_alignments = [alignments[c] if c < len(alignments) else "left"
+                              for c in col_indices]
+            sub_natural = [natural_widths[c] if c < len(natural_widths) else 2
+                           for c in col_indices]
 
-            # 子集对齐
-            sub_alignments = [alignments[c] if c < len(alignments) else "left" for c in col_indices]
-
-            # 计算子表列宽
+            # 子表列宽：保证 sum + 开销 ≤ table_avail
             sub_cols = len(col_indices)
-            sub_widths = [0] * sub_cols
-            for row in sub_rendered:
-                for i, c in enumerate(row):
-                    w = _display_width(c)
-                    if w > sub_widths[i]:
-                        sub_widths[i] = w
-
-            # 检查子表是否超宽，超宽则限制列宽
-            sub_col_overhead = 3 * sub_cols + 1
-            sub_total = sum(sub_widths) + sub_col_overhead
-            if sub_total > table_avail:
-                avail_for_content = table_avail - sub_col_overhead
-                for i in range(sub_cols):
-                    sub_widths[i] = min(sub_widths[i], max(min_col, avail_for_content // sub_cols))
-                self._render_table_block(sub_rendered, sub_widths, sub_cols, wrap=True, alignments=sub_alignments)
-            else:
-                self._render_table_block(sub_rendered, sub_widths, sub_cols, wrap=False, alignments=sub_alignments)
+            avail_for_content = table_avail - (per_col_overhead * sub_cols + 1)
+            sub_widths = _fit_widths(sub_natural, max(sub_cols * 1, avail_for_content))
+            self._render_table_block(sub_rendered, sub_widths, sub_cols,
+                                     wrap=True, alignments=sub_alignments)
 
             # 分块标签
             if total_chunks > 1:
@@ -744,7 +831,14 @@ class StreamingRenderer:
         self._code_lines.clear()
         self._code_lang = ""
 
-    def flush(self) -> None:
+    def flush(self, final: bool = False) -> None:
+        """消费缓冲区残留内容。
+
+        Args:
+            final: True 表示输出已结束（如整轮回复完成），强制渲染残留表格；
+                   False 表示中途 flush（如工具执行前），此时保留未完成的表格行，
+                   避免把一张表格拆成两半渲染导致边框错乱。
+        """
         # 先消费缓冲区残留行（流式输出最后一行常不带 \n）
         remaining = self._buf_get_and_clear()
         if remaining.strip():
@@ -753,8 +847,11 @@ class StreamingRenderer:
             self._flush_code_block()
             self._in_code = False
         if self._table_rows:
-            self._flush_table()
-            self._table_has_separator = False
+            if final:
+                # 最终强制渲染：缓冲的表格行（可能不完整）按现有规则输出
+                self._flush_table()
+            # 非 final：保留缓冲。表格行只有遇到非竖线行（触发 _flush_table）
+            # 或最终 flush 才会渲染，避免中途 flush 把一张表格拆成两半。
         leftover = self._buf_get_and_clear()
         if leftover.strip():
             _stdout_write(render_line(leftover) + "\n")
