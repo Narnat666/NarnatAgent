@@ -82,13 +82,18 @@ def abort_active_llm_request():
 register_abort(abort_active_llm_request)
 
 
-def _iter_to_queue(iterator, q):
-    """后台线程：将迭代器的元素逐个放入队列，最后放入_STREAM_END。"""
+def _iter_to_queue(iterator, q, err_box=None):
+    """后台线程：将迭代器的元素逐个放入队列，最后放入_STREAM_END。
+
+    迭代异常（如服务端中途断开）记录到 err_box，供主线程判断流是否被中断；
+    不再静默吞掉，避免把截断响应当作正常完成。
+    """
     try:
         for item in iterator:
             q.put(item)
-    except Exception:
-        pass
+    except Exception as e:
+        if err_box is not None:
+            err_box.append(e)
     finally:
         q.put(_STREAM_END)
 
@@ -171,7 +176,8 @@ class _OpenAIBackend:
                     messages=messages,
                     stream=True,
                     stream_options={"include_usage": True},
-                    timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=30.0),
+                    # read 放宽到 120s：thinking 模式下思考期可能长时间无字节输出
+                    timeout=httpx.Timeout(connect=5.0, read=120.0, write=30.0, pool=30.0),
                 )
                 kwargs.update(think_body_top)
                 if think_extra:
@@ -249,8 +255,10 @@ class _OpenAIBackend:
             _tc_idx = 0
 
             chunk_queue = queue.Queue()
+            stream_err = []   # 流迭代异常（服务端中途断开）
+            received_finish = False
             reader = threading.Thread(
-                target=_iter_to_queue, args=(iter(stream), chunk_queue), daemon=True)
+                target=_iter_to_queue, args=(iter(stream), chunk_queue, stream_err), daemon=True)
             reader.start()
 
             while True:
@@ -312,6 +320,7 @@ class _OpenAIBackend:
                             buf["arguments"] += tc.function.arguments
 
                 if finish_reason:
+                    received_finish = True
                     if tool_calls_buffer:
                         completed_calls = []
                         for tc_id, buf in tool_calls_buffer.items():
@@ -327,6 +336,12 @@ class _OpenAIBackend:
                     if self._logger:
                         total_out = len("".join(content_buffer))
                         self._logger.info("core.llm", f"响应完成, content_len={total_out}")
+
+            # ── 流中断检测：迭代器异常退出且未收到完成标记 ──
+            # 不 yield 虚假完成标记，由上层（agent_loop）决定整轮重试
+            if stream_err and not received_finish:
+                if self._logger:
+                    self._logger.warning("core.llm", f"响应流中断: {stream_err[0]}")
         finally:
             _active_llm_response = None
 
@@ -468,7 +483,9 @@ class _AnthropicBackend:
                     return
                 break
 
-            except (httpx.ConnectError, httpx.TimeoutException) as e:
+            # TransportError 覆盖 Connect/Read/Write/RemoteProtocol 全部连接类异常，
+            # 包括 "Server disconnected without sending a response"（RemoteProtocolError）
+            except (httpx.TransportError, httpx.TimeoutException) as e:
                 client.close()
                 _active_llm_response = None
                 if cancel_check and cancel_check():
@@ -506,14 +523,15 @@ class _AnthropicBackend:
             _start_usage = None     # message_start 中的初始 usage，兜底时补用
 
             line_queue = queue.Queue()
+            stream_err = []  # 流读取异常（服务端中途断开）
 
             def _read_lines():
                 """后台线程：从 httpx 流式响应中逐行读取 SSE"""
                 try:
                     for line in resp.iter_lines():
                         line_queue.put(line)
-                except Exception:
-                    pass
+                except Exception as e:
+                    stream_err.append(e)
                 finally:
                     line_queue.put(_STREAM_END)
 
@@ -651,9 +669,15 @@ class _AnthropicBackend:
                     yield {"content": f"[错误: {err_msg}]", "finish_reason": "error"}
                     return
 
+            # ── 流中断：服务端中途断开且未收到完成标记 ──
+            # 不 yield 虚假完成标记，由上层（agent_loop）决定整轮重试
+            if stream_err and not _msg_delta_seen:
+                if self._logger:
+                    self._logger.warning("core.llm", f"响应流中断: {stream_err[0]}")
+
             # ── 兜底：流正常结束但未收到 message_delta（DeepSeek 偶发漏发）──
             # 此时缓冲区可能已有完整内容，直接使用
-            if not _msg_delta_seen:
+            elif not _msg_delta_seen:
                 if _start_usage:
                     yield {"usage": _start_usage}
                 if tool_use_blocks:
