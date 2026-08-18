@@ -10,6 +10,7 @@
 """
 
 import io
+import os
 import re
 import shutil
 import sys
@@ -43,14 +44,16 @@ _MAX_TERMINAL_WIDTH = 160
 def _windows_console_window_cols() -> int:
     """Windows 控制台「可见窗口」宽度（列数）。
 
-    仅对存在真实可见窗口的传统 conhost 生效（如直接运行在 cmd.exe 窗口里）：
-    此时缓冲区宽度可能大于可见窗口宽度（如 120 缓冲 + 80 窗口），
-    按缓冲区宽度渲染会导致输出行超出可见窗口、被终端强制折行，破坏表格对齐。
-    此时用窗口客户区宽度 / 字体宽度换算真实可见列数。
+    仅对传统 conhost（真实控制台窗口）生效，此时缓冲区宽度可能大于
+    可见窗口宽度（如 120 缓冲 + 80 窗口），按缓冲区宽度渲染会导致输出行
+    超出可见窗口、被终端强制折行，破坏表格对齐。
 
-    Windows Terminal / VS Code 等 ConPTY 环境没有可见的控制台窗口
-    （GetConsoleWindow 返回隐藏窗口，srWindow 可能是过期的初始值），
-    返回 0，由调用方回退到缓冲区宽度（ConPTY 下缓冲区宽度与终端窗格一致）。
+    判定顺序：
+    1. Windows Terminal / ConPTY 环境（有 WT_SESSION 或 GetConsoleWindow 为 0）
+       → 返回 0，调用方回退到 shutil（ConPTY 下缓冲区宽度与窗格一致）。
+    2. conhost 可见窗口：用客户区宽度 / 字体宽度换算真实列数。
+    3. conhost 隐藏窗口（如从启动器拉起）：退而求其次用 srWindow，
+       仍比缓冲区宽度可靠。
     """
     if sys.platform != "win32":
         return 0
@@ -64,29 +67,47 @@ def _windows_console_window_cols() -> int:
         kernel32 = ctypes.windll.kernel32
         user32 = ctypes.windll.user32
         handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+
+        # Windows Terminal / ConPTY：没有真实控制台窗口，交给 shutil
+        if os.environ.get("WT_SESSION"):
+            return 0
         hwnd = kernel32.GetConsoleWindow()
-        if not hwnd or not user32.IsWindowVisible(hwnd):
+        if not hwnd:
             return 0
+
+        # conhost：量窗口客户区宽度
         rect = _RECT()
-        if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
-            return 0
-        client_w = rect.right - rect.left
-        if client_w <= 0:
-            return 0
-        # CONSOLE_FONT_INFO: DWORD nFont + COORD dwFontSize(X, Y)，共 8 字节
-        info = ctypes.create_string_buffer(8)
-        if not kernel32.GetCurrentConsoleFont(handle, False, info):
-            return 0
-        font_x = int.from_bytes(info.raw[4:6], "little")
-        if font_x <= 0:
-            return 0
-        cols = client_w // font_x
-        return cols if cols > 0 else 0
+        if user32.GetClientRect(hwnd, ctypes.byref(rect)):
+            client_w = rect.right - rect.left
+            if client_w > 0:
+                # CONSOLE_FONT_INFO: DWORD nFont + COORD dwFontSize(X, Y)，共 8 字节
+                info = ctypes.create_string_buffer(8)
+                if kernel32.GetCurrentConsoleFont(handle, False, info):
+                    font_x = int.from_bytes(info.raw[4:6], "little")
+                    if font_x > 0:
+                        cols = client_w // font_x
+                        if cols > 0:
+                            return cols
+
+        # 隐藏窗口量不到客户区 → 退而求其次用 srWindow（仍优于缓冲区宽度）
+        # CONSOLE_SCREEN_BUFFER_INFO: dwSize(4) dwCursorPos(4) wAttr(2) srWindow(8) maxWinSize(4)
+        info = ctypes.create_string_buffer(22)
+        if kernel32.GetConsoleScreenBufferInfo(handle, info):
+            left = int.from_bytes(info.raw[10:12], "little", signed=True)
+            right = int.from_bytes(info.raw[12:14], "little", signed=True)
+            cols = right - left + 1
+            if cols > 0:
+                return cols
     except Exception:
-        return 0
+        pass
+    return 0
 
 
 def _terminal_width() -> int:
+    # 手动兜底：极端环境下终端宽度检测不可靠时，可用环境变量强制指定
+    forced = os.environ.get("NARNAT_TERM_WIDTH", "").strip()
+    if forced.isdigit():
+        return max(min(int(forced), _MAX_TERMINAL_WIDTH), 20)
     # 传统 conhost（有真实可见窗口）：以可见窗口宽度为准，防止按缓冲区宽度渲染导致折行
     win_cols = _windows_console_window_cols()
     if win_cols:
@@ -839,19 +860,31 @@ class StreamingRenderer:
                    False 表示中途 flush（如工具执行前），此时保留未完成的表格行，
                    避免把一张表格拆成两半渲染导致边框错乱。
         """
-        # 先消费缓冲区残留行（流式输出最后一行常不带 \n）
+        # 缓冲区里最后一行可能不完整（流式输出最后一行常不带 \n）。
+        # 非最终 flush 时保留该半行：工具调用恰好在表格行中间插入时，
+        # 半行被当作完整表格行缓存会导致表格错位（行被拆成两半）。
         remaining = self._buf_get_and_clear()
         if remaining.strip():
-            self._on_normal_line(remaining, "")
+            if final:
+                self._on_normal_line(remaining, "")
+                leftover = self._buf_get_and_clear()
+                if leftover.strip():
+                    _stdout_write(render_line(leftover) + "\n")
+            else:
+                self._buf_append(remaining)
+        elif final:
+            leftover = self._buf_get_and_clear()
+            if leftover.strip():
+                _stdout_write(render_line(leftover) + "\n")
         if self._in_code:
-            self._flush_code_block()
-            self._in_code = False
+            if final:
+                self._flush_code_block()
+                self._in_code = False
+            # 非最终 flush：代码块保留缓冲，等结束标记到齐后整体渲染，
+            # 避免工具调用把代码块拆散（半行保留在 _buf 会破坏代码状态机）。
         if self._table_rows:
             if final:
                 # 最终强制渲染：缓冲的表格行（可能不完整）按现有规则输出
                 self._flush_table()
             # 非 final：保留缓冲。表格行只有遇到非竖线行（触发 _flush_table）
             # 或最终 flush 才会渲染，避免中途 flush 把一张表格拆成两半。
-        leftover = self._buf_get_and_clear()
-        if leftover.strip():
-            _stdout_write(render_line(leftover) + "\n")
