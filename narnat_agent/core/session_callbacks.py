@@ -135,6 +135,7 @@ class NoSession(SessionState):
             "/rm":       "删除会话",
             "/skill":    "加载技能",
             "/thinking": "切换思考强度",
+            "/mode":     "切换模型",
             "/exit":     "退出程序",
         }
 
@@ -238,6 +239,7 @@ class RootSession(SessionState):
             "/rm":       "删除子会话",
             "/skill":    "加载技能",
             "/thinking": "切换思考强度",
+            "/mode":     "切换模型",
             "/explore":  "创建探索分支",
             "/exit":     "退出会话",
         }
@@ -383,6 +385,7 @@ class ChildSession(SessionState):
             "/cd":       "进入历史会话",
             "/skill":    "加载技能",
             "/thinking": "切换思考强度",
+            "/mode":     "切换模型",
             "/done":     "完成探索分支",
             "/exit":     "暂离探索分支",
         }
@@ -529,6 +532,9 @@ class SessionManager:
                  thinking_effort_getter: Callable[[], str] = None,
                  thinking_effort_setter: Callable[[str], None] = None,
                  thinking_options: dict = None,
+                 model_getter: Callable[[], str] = None,
+                 model_setter: Callable[[str], None] = None,
+                 model_options: list = None,
                  summarize_func: Callable[[List[Dict[str, Any]], Callable[[], bool]], str] = None,
                  summary_anim_start: Callable[[], None] = None,
                  summary_anim_stop: Callable[[], None] = None,
@@ -541,6 +547,9 @@ class SessionManager:
         self._get_thinking_effort = thinking_effort_getter
         self._set_thinking_effort = thinking_effort_setter
         self._thinking_options = thinking_options or {"high": "高", "max": "全开"}
+        self._get_model = model_getter
+        self._set_model = model_setter
+        self._model_options = model_options or []
         self.summarize_func = summarize_func
         self.summary_anim_start = summary_anim_start
         self.summary_anim_stop = summary_anim_stop
@@ -695,6 +704,38 @@ class SessionManager:
 
     def on_list_thinking_options(self) -> list:
         return list(self._thinking_options.keys())
+
+    def on_mode(self, name: str) -> str:
+        options = list(self._model_options or [])
+        if not name:
+            current = (self._get_model or (lambda: ""))()
+            available = " / ".join(options)
+            return f"当前模型: {current}（可用: {available}）"
+        target = name.strip()
+        matched = None
+        for opt in options:
+            if opt.lower() == target.lower():
+                matched = opt
+                break
+        if matched is None:
+            available = " / ".join(options)
+            return f"无效值: {target}（可用: {available}）"
+        if self._set_model:
+            self._set_model(matched)
+        if self._config_dir:
+            config_path = os.path.join(self._config_dir, "narnat.json")
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                data.setdefault("智能体", {}).setdefault("模型", {})["当前"] = matched
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+            except Exception:
+                pass
+        return f"设置成功: 模型已切换为 {matched}"
+
+    def on_list_model_names(self) -> list:
+        return list(self._model_options or [])
 
     def on_list_names(self) -> list:
         tree = list_sessions_tree(self.narnat_dir)

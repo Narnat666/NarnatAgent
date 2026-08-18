@@ -41,6 +41,7 @@ class _CommandCompleter(Completer):
         "/rm":       "on_list_rm_names",
         "/skill":    "on_list_skill_names",
         "/thinking": "on_list_thinking_options",
+        "/mode":     "on_list_model_names",
     }
 
     _STATIC_OPTIONS = {
@@ -221,6 +222,18 @@ def _cmd_rm(args: str, mgr) -> CommandResult:
 def _cmd_thinking(args: str, mgr) -> CommandResult:
     result = mgr.on_thinking(args.strip() if args else "")
     _stdout_write(f"  {CMD_HIGHLIGHT}{result}{R}\n")
+    return CommandResult.HANDLED
+
+
+@_register("mode")
+def _cmd_mode(args: str, mgr) -> CommandResult:
+    result = mgr.on_mode(args.strip() if args else "")
+    if result.startswith("无效值"):
+        _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
+    elif result.startswith("设置成功"):
+        _stdout_write(f"  {CMD_SUCCESS}{result}{R}\n")
+    else:
+        _stdout_write(f"  {CMD_HIGHLIGHT}{result}{R}\n")
     return CommandResult.HANDLED
 
 

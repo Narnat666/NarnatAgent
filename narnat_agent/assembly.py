@@ -109,6 +109,9 @@ class Assembly:
             thinking_effort_getter=lambda: config.ai.thinking_effort,
             thinking_effort_setter=lambda v: setattr(config.ai, 'thinking_effort', v),
             thinking_options=config.ai.thinking_options,
+            model_getter=lambda: config.ai.model,
+            model_setter=lambda v: setattr(config.ai, 'model', v),
+            model_options=config.ai.model_options,
             summarize_func=lambda msgs, cancel: summarizer.summarize(msgs, cancel),
             summary_anim_start=None,  # 由 Agent 在 run() 中设置
             summary_anim_stop=None,
@@ -137,6 +140,12 @@ class Assembly:
             config.pricing.user_pricing,
             config.balance,
         )
+
+        # 模型切换需同步 stats 持有的模型名（费用计算按模型定价查表），stats 创建后才可接线
+        def _set_model_with_stats(v: str) -> None:
+            config.ai.model = v
+            stats._model = v
+        session_mgr._set_model = _set_model_with_stats
 
         # 15. 自动保存管理器
         auto_save_mgr = AutoSaveManager(

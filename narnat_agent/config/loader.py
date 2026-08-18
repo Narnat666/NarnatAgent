@@ -39,6 +39,7 @@ class AIConfig:
     api_key: str = DEFAULT_API_KEY
     base_url: str = DEFAULT_BASE_URL
     model: str = DEFAULT_MODEL
+    model_options: list = field(default_factory=lambda: [DEFAULT_MODEL])  # /mode 可切换的模型列表
     protocol: str = DEFAULT_PROTOCOL              # "openai" | "anthropic"
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
@@ -282,6 +283,23 @@ def _load_json(config_dir: str) -> dict:
 
 
 
+def _parse_model_config(value) -> tuple:
+    """解析 narnat.json 的 "模型" 配置，返回 (当前模型, 候选列表)。
+
+    格式: {"当前": "deepseek-v4-pro", "列表": ["deepseek-v4-pro", "deepseek-v4-flash"]}
+    """
+    if not isinstance(value, dict):
+        return DEFAULT_MODEL, [DEFAULT_MODEL]
+    options = value.get("列表")
+    if not isinstance(options, list):
+        options = []
+    options = [m for m in options if isinstance(m, str)]
+    current = value.get("当前") or (options[0] if options else DEFAULT_MODEL)
+    if current not in options:
+        options.insert(0, current)
+    return current, options
+
+
 def _build_ai_config(data: dict) -> AIConfig:
     """从narnat.json的"智能体"分组构建AIConfig"""
     ai = data.get("智能体", {})
@@ -293,6 +311,8 @@ def _build_ai_config(data: dict) -> AIConfig:
     thinking_effort = thinking_cfg.get("强度", DEFAULT_THINKING_EFFORT)
     thinking_options = thinking_cfg.get("强度选项", {"high": "高", "max": "全开"})
 
+    model, model_options = _parse_model_config(ai.get("模型"))
+
     # 上下文窗口：缺失/非法 → 默认；显式 ≤0 → 保留原值（下游视为无效，占比显示 --）
     parsed_cw = _coerce(ai.get("上下文窗口大小"), int)
     context_window = DEFAULT_CONTEXT_WINDOW if parsed_cw is None else parsed_cw
@@ -300,7 +320,8 @@ def _build_ai_config(data: dict) -> AIConfig:
     return AIConfig(
         api_key=ai.get("接口密钥", DEFAULT_API_KEY),
         base_url=ai.get("接口地址", DEFAULT_BASE_URL),
-        model=ai.get("模型", DEFAULT_MODEL),
+        model=model,
+        model_options=model_options,
         protocol=protocol,
         temperature=_coerce(ai.get("温度"), float),
         max_tokens=_coerce(ai.get("最大输出token数"), int),
@@ -523,7 +544,10 @@ def load_config(project_root: Optional[str] = None) -> Config:
                         "智能体": {
                             "接口密钥": DEFAULT_API_KEY,
                             "接口地址": DEFAULT_BASE_URL,
-                            "模型": DEFAULT_MODEL,
+                            "模型": {
+                                "当前": DEFAULT_MODEL,
+                                "列表": [DEFAULT_MODEL],
+                            },
                             "协议": "anthropic",
                             "温度": None,
                             "最大输出token数": 128000,
@@ -593,6 +617,7 @@ def load_config(project_root: Optional[str] = None) -> Config:
         api_key=ai_config.api_key,
         base_url=ai_config.base_url,
         model=ai_config.model,
+        model_options=ai_config.model_options,
         protocol=ai_config.protocol,
         temperature=ai_config.temperature,
         max_tokens=ai_config.max_tokens,
