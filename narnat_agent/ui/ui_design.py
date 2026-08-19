@@ -176,6 +176,7 @@ class UIStreamSession:
         self._started = False  # 仅用于flush_renderer守卫，不干预spinner
         self._aborted = False  # abort后resume_spinner不应再启动新spinner
         self._spinner_pause_count = 0  # 并行工具pause计数，归零才恢复spinner
+        self._spinner_lock = threading.Lock()  # 并行工具线程并发pause/resume的计数保护
 
     def _start_spinner(self) -> None:
         """启动spinner线程（带666ms延迟），如果已有则不重复启动"""
@@ -219,8 +220,10 @@ class UIStreamSession:
 
     def pause_spinner(self) -> None:
         """暂停spinner（工具执行前调用），避免与工具输出竞争同一行"""
-        self._spinner_pause_count += 1
-        if self._spinner_pause_count == 1:
+        with self._spinner_lock:
+            self._spinner_pause_count += 1
+            first = self._spinner_pause_count == 1
+        if first:
             self._stop_spinner()
 
     def flush_renderer(self) -> None:
@@ -232,27 +235,41 @@ class UIStreamSession:
         if self._started:
             self._renderer.flush(final=False)
 
+    def reset_renderer(self) -> None:
+        """清空渲染器缓冲与状态（响应流中断自动重试前调用），
+        防止上一轮残留的半行文字/表格行/代码块与重试流拼接错乱。"""
+        self._renderer.reset()
+
     def resume_spinner(self) -> None:
         """恢复spinner（工具执行后调用），所有并行工具完成后才真正恢复"""
         if self._aborted:
             return
-        self._spinner_pause_count = max(0, self._spinner_pause_count - 1)
-        if self._spinner_pause_count == 0:
+        with self._spinner_lock:
+            self._spinner_pause_count = max(0, self._spinner_pause_count - 1)
+            restart = self._spinner_pause_count == 0
+        if restart:
             self._start_spinner()
 
     def finish(self, input_tokens: int = 0, output_tokens: int = 0,
                cache_ratio: float = 0.0, cost: float = 0.0,
-               balance: float = 0.0, thinking_effort: str = "高") -> None:
+               balance: float = 0.0, thinking_effort: str = "高",
+               with_stats: bool = True) -> None:
         _interrupt_ctrl.enter_input_mode()  # 立即停止ESC轮询，防止误触发
         self._stop_spinner()
         self._renderer.flush(final=True)
-        show_stats(input_tokens, output_tokens, cache_ratio, cost, balance, thinking_effort)
+        if with_stats:
+            show_stats(input_tokens, output_tokens, cache_ratio, cost, balance, thinking_effort)
 
-    def abort(self) -> None:
+    def abort(self, message: Optional[str] = None) -> None:
+        """中止输出。message 非空时显示自定义提示（如程序异常），
+        否则显示默认的"已打断"提示。"""
         self._aborted = True  # 标记已打断，防止后台线程resume_spinner重启
         _interrupt_ctrl.enter_input_mode()  # 立即停止ESC轮询
         self._stop_spinner()
-        show_interrupted()
+        if message is None:
+            show_interrupted()
+        else:
+            _stdout_write(message + "\n")
 
 
 # ═══════════════════════════════════════════════════════════════

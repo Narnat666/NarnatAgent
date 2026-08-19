@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import unicodedata
 from typing import Optional, Callable, List, Match
 
@@ -485,6 +486,7 @@ class StreamingRenderer:
         self._normal_line_count = 0
         self._table_rows: List[str] = []       # 缓存原始行（非分隔行）
         self._table_has_separator = False      # 是否见过分隔行
+        self._lock = threading.Lock()          # 并行工具线程可能并发 flush/feed
 
     def _buf_append(self, text: str) -> None:
         self._buf.write(text)
@@ -512,16 +514,18 @@ class StreamingRenderer:
 
     def feed(self, chunk: str) -> None:
         """流式输入入口。状态切换时自动换 handler 继续消费剩余行。"""
-        self._buf_append(chunk)
-        raw = self._buf_get_and_clear()
-        while raw:
-            handler = self._on_code_line if self._in_code else self._on_normal_line
-            if not self._process_lines(raw, handler):
-                break
-            # 状态已切换，取出 handler 放回的剩余行继续处理
+        with self._lock:
+            self._buf_append(chunk)
             raw = self._buf_get_and_clear()
+            while raw:
+                handler = self._on_code_line if self._in_code else self._on_normal_line
+                if not self._process_lines(raw, handler):
+                    break
+                # 状态已切换，取出 handler 放回的剩余行继续处理
+                raw = self._buf_get_and_clear()
 
     def _on_code_line(self, line: str, rest: str) -> bool:
+        line = line.replace("\r", "")  # 剥离\r控制符：防终端回车覆盖行首显示
         stripped = line.strip()
         if not self._code_lines and stripped.startswith("```"):
             self._code_lang = stripped[3:].strip()
@@ -535,6 +539,7 @@ class StreamingRenderer:
         return False
 
     def _on_normal_line(self, line: str, rest: str) -> bool:
+        line = line.replace("\r", "")  # 剥离\r控制符：防终端回车覆盖行首显示
         stripped = line.strip()
         if stripped.startswith("```"):
             self._in_code = True
@@ -860,8 +865,14 @@ class StreamingRenderer:
                    False 表示中途 flush（如工具执行前），此时保留未完成的表格行，
                    避免把一张表格拆成两半渲染导致边框错乱。
         """
+        with self._lock:
+            self._flush_locked(final)
+
+    def _flush_locked(self, final: bool) -> None:
+        """flush 的锁内实现（调用方需持有 _lock）。"""
         # 缓冲区里最后一行可能不完整（流式输出最后一行常不带 \n）。
-        # 非最终 flush 时保留该半行：工具调用恰好在表格行中间插入时，
+        # 非最终 flush 时：普通文字半行应立即渲染（AI 前置说明先于工具调度摘要显示），
+        # 仅表格候选行/代码块内容保留缓冲——工具调用恰好在表格行中间插入时，
         # 半行被当作完整表格行缓存会导致表格错位（行被拆成两半）。
         remaining = self._buf_get_and_clear()
         if remaining.strip():
@@ -871,7 +882,18 @@ class StreamingRenderer:
                 if leftover.strip():
                     _stdout_write(render_line(leftover) + "\n")
             else:
-                self._buf_append(remaining)
+                stripped = remaining.strip()
+                is_table_row = (
+                    (stripped.startswith("|") or stripped.endswith("|"))
+                    and stripped.count("|") >= 2
+                )
+                if self._in_code or is_table_row or stripped.startswith("```"):
+                    self._buf_append(remaining)
+                else:
+                    self._on_normal_line(remaining, "")
+                    leftover = self._buf_get_and_clear()
+                    if leftover.strip():
+                        _stdout_write(render_line(leftover) + "\n")
         elif final:
             leftover = self._buf_get_and_clear()
             if leftover.strip():
@@ -888,3 +910,22 @@ class StreamingRenderer:
                 self._flush_table()
             # 非 final：保留缓冲。表格行只有遇到非竖线行（触发 _flush_table）
             # 或最终 flush 才会渲染，避免中途 flush 把一张表格拆成两半。
+
+    def reset(self) -> None:
+        """清空全部缓冲与状态（响应流中断自动重试前调用）。
+
+        服务端中途断开时，本轮已 feed 的半行文字/表格行/代码块残留在状态机中；
+        重试流会从开头重播同一内容，若不清理会导致：
+        - 半行文字与重播内容拼接重复（"我先了" + "我先了解一下…"）
+        - 表格表头/数据行重复渲染
+        - 未闭合的代码块把重试提示与内容全部吞掉
+        """
+        with self._lock:
+            self._buf.seek(0)
+            self._buf.truncate(0)
+            self._in_code = False
+            self._code_lang = ""
+            self._code_lines.clear()
+            self._table_rows.clear()
+            self._table_has_separator = False
+            self._normal_line_count = 0

@@ -150,6 +150,9 @@ class AgentLoop:
                     stream_interrupted_retried = True
                     if self._logger:
                         self._logger.warning("agent_loop", "响应流中断(无finish_reason)，自动重试一次")
+                    # 清空渲染器缓冲：重试流会从开头重播，上一轮残留的半行文字/
+                    # 表格行/代码块若不清除，会与重播内容拼接重复或错乱。
+                    stream.reset_renderer()
                     stream.feed("\n⚠ 服务端响应流中断，正在自动重试…\n")
                     continue
                 # 重试后仍中断 → 报错结束（截断内容不写入历史，避免污染上下文）
@@ -225,7 +228,7 @@ class AgentLoop:
             if tc_id != confirm_tc_id:
                 self._msg_manager.append_tool_result(tc_id, result)
 
-        # 结束当前流式输出
+        # 结束当前流式输出（本轮还没结束，不显示stats，等确认后最终finish再显示）
         stream.finish(
             self._stats.input_tokens,
             self._stats.output_tokens,
@@ -233,6 +236,7 @@ class AgentLoop:
             cost=self._stats.cost,
             balance=self._stats.balance,
             thinking_effort=self._thinking_label,
+            with_stats=False,
         )
 
         # 在#提示符下显示确认信息，等待用户输入

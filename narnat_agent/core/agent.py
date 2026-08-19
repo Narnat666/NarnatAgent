@@ -14,7 +14,7 @@ import os
 from typing import Optional
 
 from ..assembly import Assembly, AssemblyResult
-from ..output import write as _stdout_write
+from ..output import write as _stdout_write, X, R
 
 
 class Agent:
@@ -98,7 +98,8 @@ class Agent:
                     self._logger.error("core.agent", f"异常: {e}")
                     if hasattr(self._agent_loop, '_last_content_parts') and self._agent_loop._last_content_parts:
                         self._msg_manager.append_assistant("".join(self._agent_loop._last_content_parts))
-                    stream.abort()
+                    # 异常≠用户打断：显示明确的错误提示，而非"已打断"
+                    stream.abort(message=f"  {X}⚠ 程序异常，本轮回复已停止: {e}{R}")
                 else:
                     if not stream.aborted:
                         self._mgr.on_auto_save()
