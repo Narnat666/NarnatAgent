@@ -709,8 +709,7 @@ class SessionManager:
         options = list(self._model_options or [])
         if not name:
             current = (self._get_model or (lambda: ""))()
-            available = " / ".join(options)
-            return f"当前模型: {current}（可用: {available}）"
+            return f"当前模型: {current}"
         target = name.strip()
         matched = None
         for opt in options:
@@ -732,7 +731,7 @@ class SessionManager:
                     json.dump(data, f, indent=2, ensure_ascii=False)
             except Exception:
                 pass
-        return f"设置成功: 模型已切换为 {matched}"
+        return f"设置成功：{matched}"
 
     def on_list_model_names(self) -> list:
         return list(self._model_options or [])
