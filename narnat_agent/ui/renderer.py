@@ -41,6 +41,9 @@ from .colors import (
 
 _MAX_TERMINAL_WIDTH = 160
 
+# 表格行缓冲上限：超长表格时立即落定，避免长时间无输出（"整体收集"的固有代价防御）
+_MAX_TABLE_BUFFER = 60
+
 
 def _windows_console_window_cols() -> int:
     """Windows 控制台「可见窗口」宽度（列数）。
@@ -369,7 +372,7 @@ def _render_blockquote(_line: str, _m: Match) -> str:
 
 
 def _render_table_row(_line: str, _m: Match) -> str:
-    cells = [c.strip() for c in _line.strip("|").split("|")]
+    cells = _split_cells(_line)
     if _is_table_separator(cells):
         return ""
     return f"    {MD_TABLE_CONTENT}" + " | ".join(InlineRules.render(c) for c in cells) + f"{R}"
@@ -380,6 +383,14 @@ def _render_paragraph(_line: str, _m: Match) -> str:
 
 
 _RE_TABLE_SEP = re.compile(r"^[-:]+$")
+
+# 表格单元格拆分：| 前面不是反斜杠的 | 才是列分隔符（支持转义竖线 \| 作为单元格内容）
+_RE_CELL_SPLIT = re.compile(r"(?<!\\)\|")
+
+
+def _split_cells(raw: str) -> List[str]:
+    """按列分隔符拆分表格行，转义竖线（反斜杠+竖线）作为单元格内容保留。"""
+    return [c.strip().replace("\\|", "|") for c in _RE_CELL_SPLIT.split(raw.strip("|"))]
 
 
 def _fit_widths(natural: List[int], avail: int, min_col: int = 2) -> List[int]:
@@ -406,9 +417,6 @@ def _fit_widths(natural: List[int], avail: int, min_col: int = 2) -> List[int]:
     if diff > 0:
         for i in range(diff):
             widths[i % cols] += 1
-    elif diff < 0:
-        # 只可能出现在 avail < cols*min_col 时 base=avail//cols 但求和超出（不会），防御性裁剪
-        widths[-1] = max(1, widths[-1] + diff)
     return widths
 
 
@@ -431,7 +439,7 @@ BLOCK_RULES: List[BlockRule] = sorted([
     BlockRule(40, "ul",          lambda s: _re_ul.match(s),     _render_ul),
     BlockRule(50, "ol",          lambda s: _re_ol.match(s),     _render_ol),
     BlockRule(60, "blockquote",  lambda s: s.startswith(">"),   _render_blockquote),
-    BlockRule(70, "table",       lambda s: (s.startswith("|") or s.endswith("|")) and s.count("|") >= 2, _render_table_row),
+    BlockRule(70, "table",       lambda s: s.startswith("|") and s.endswith("|") and s.count("|") >= 2, _render_table_row),
     BlockRule(100, "paragraph",  lambda s: True,                _render_paragraph),
 ], key=lambda r: r.priority)
 
@@ -483,7 +491,6 @@ class StreamingRenderer:
         self._in_code = False
         self._code_lang = ""
         self._code_lines: List[str] = []
-        self._normal_line_count = 0
         self._table_rows: List[str] = []       # 缓存原始行（非分隔行）
         self._table_has_separator = False      # 是否见过分隔行
         self._lock = threading.Lock()          # 并行工具线程可能并发 flush/feed
@@ -546,12 +553,20 @@ class StreamingRenderer:
             self._code_lang = stripped[3:].strip()
             return True
         # 表格候选行：首尾有|且≥2个|。全部缓冲，flush时统一判断
-        is_table = (stripped.startswith("|") or stripped.endswith("|")) and stripped.count("|") >= 2
+        # 表格候选行：必须以|开头且以|结尾（标准markdown表格形态）。
+        # 严格判定优先防误判：普通文本行含竖线（如"参见下表：| A | B |"）若被当作
+        # 表格候选，会混入真实表格导致列数错乱。无首|的表格（`A | B |`）宁可降级
+        # 为段落渲染，信息无损，也不误判。
+        is_table = stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
         if is_table:
-            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            cells = _split_cells(stripped)
             if _is_table_separator(cells):
                 self._table_has_separator = True
             self._table_rows.append(stripped)
+            # 超长表格防御：整体收集有"长表格期间无输出"的固有代价，
+            # 缓冲达到上限即落定（完整表格渲染/不完整段落化），保证输出持续可见。
+            if len(self._table_rows) >= _MAX_TABLE_BUFFER:
+                self._flush_table()
             return False
         # 非竖线行：先刷出缓冲；若缓冲为空则清标志位防跨表格污染
         if self._table_rows:
@@ -562,7 +577,6 @@ class StreamingRenderer:
         if not rendered:
             return False
         _stdout_write(rendered + "\n")
-        self._normal_line_count += 1
         return False
 
     def _demote_to_paragraphs(self) -> None:
@@ -586,7 +600,7 @@ class StreamingRenderer:
         # 找出分隔行位置（第一个全由---组成的分隔行）
         sep_idx = -1
         for i, raw in enumerate(self._table_rows):
-            cells = [c.strip() for c in raw.strip("|").split("|")]
+            cells = _split_cells(raw)
             if _is_table_separator(cells):
                 sep_idx = i
                 break
@@ -597,7 +611,7 @@ class StreamingRenderer:
         # 从分隔行解析列对齐：:--- → left, :---: → center, ---: → right
         alignments: List[str] = []
         if sep_idx >= 0:
-            sep_cells = [c.strip() for c in self._table_rows[sep_idx].strip("|").split("|")]
+            sep_cells = _split_cells(self._table_rows[sep_idx])
             for cell in sep_cells:
                 l = cell.startswith(":")
                 r = cell.endswith(":")
@@ -613,7 +627,7 @@ class StreamingRenderer:
             self._demote_to_paragraphs()
             return
         # 数据行全部为空 → 不算表格
-        data_cells = [[c.strip() for c in line.strip("|").split("|")] for line in data_rows]
+        data_cells = [_split_cells(line) for line in data_rows]
         if not any(any(c for c in row) for row in data_cells):
             # 数据行全空 → 不是表格
             self._demote_to_paragraphs()
@@ -625,7 +639,7 @@ class StreamingRenderer:
         table_avail = max(term_w - 6, 8)
 
         all_rows = header_rows + data_rows
-        rows_cells = [[c.strip() for c in line.strip("|").split("|")] for line in all_rows]
+        rows_cells = [_split_cells(line) for line in all_rows]
         cols = max(len(row) for row in rows_cells)
         # 补齐短行
         for row in rows_cells:
@@ -860,56 +874,40 @@ class StreamingRenderer:
     def flush(self, final: bool = False) -> None:
         """消费缓冲区残留内容。
 
-        Args:
-            final: True 表示输出已结束（如整轮回复完成），强制渲染残留表格；
-                   False 表示中途 flush（如工具执行前），此时保留未完成的表格行，
-                   避免把一张表格拆成两半渲染导致边框错乱。
+        flush 只出现在 LLM 回复文本完整到达之后（agent_loop 在工具执行前 /
+        回复结束时调用），因此缓冲里的内容就是本轮回复的尾部，一律立即落定：
+        - 普通文字半行 → 立即渲染（先于工具调度摘要显示）
+        - 表格候选行 → 并入表格缓冲后 _flush_table 落定
+          （完整表格渲染为表格；不完整降级为段落）
+        - 代码块内容 → 累积后 _flush_code_block 落定（不吞内容）
+
+        不跨轮保留任何缓冲：上一轮回复尾部的表格行若残留，会与下一轮回复的
+        表格行混合渲染成错乱表格（列数错位），这是"表格回归"的根源。
+
+        final 参数为历史遗留（旧实现曾区分最终/非最终行为，现行为已统一），
+        仅保留以兼容调用方。
         """
         with self._lock:
-            self._flush_locked(final)
+            self._flush_locked()
 
-    def _flush_locked(self, final: bool) -> None:
+    def _flush_locked(self) -> None:
         """flush 的锁内实现（调用方需持有 _lock）。"""
-        # 缓冲区里最后一行可能不完整（流式输出最后一行常不带 \n）。
-        # 非最终 flush 时：普通文字半行应立即渲染（AI 前置说明先于工具调度摘要显示），
-        # 仅表格候选行/代码块内容保留缓冲——工具调用恰好在表格行中间插入时，
-        # 半行被当作完整表格行缓存会导致表格错位（行被拆成两半）。
         remaining = self._buf_get_and_clear()
         if remaining.strip():
-            if final:
-                self._on_normal_line(remaining, "")
-                leftover = self._buf_get_and_clear()
-                if leftover.strip():
-                    _stdout_write(render_line(leftover) + "\n")
+            if self._in_code:
+                self._on_code_line(remaining, "")
             else:
-                stripped = remaining.strip()
-                is_table_row = (
-                    (stripped.startswith("|") or stripped.endswith("|"))
-                    and stripped.count("|") >= 2
-                )
-                if self._in_code or is_table_row or stripped.startswith("```"):
-                    self._buf_append(remaining)
-                else:
-                    self._on_normal_line(remaining, "")
-                    leftover = self._buf_get_and_clear()
-                    if leftover.strip():
-                        _stdout_write(render_line(leftover) + "\n")
-        elif final:
+                self._on_normal_line(remaining, "")
             leftover = self._buf_get_and_clear()
             if leftover.strip():
                 _stdout_write(render_line(leftover) + "\n")
+        # 代码块落定：未闭合也渲染，避免内容被吞
         if self._in_code:
-            if final:
-                self._flush_code_block()
-                self._in_code = False
-            # 非最终 flush：代码块保留缓冲，等结束标记到齐后整体渲染，
-            # 避免工具调用把代码块拆散（半行保留在 _buf 会破坏代码状态机）。
+            self._flush_code_block()
+            self._in_code = False
+        # 表格落定：完整表格渲染；不完整（无分隔行/无数据行）降级为段落
         if self._table_rows:
-            if final:
-                # 最终强制渲染：缓冲的表格行（可能不完整）按现有规则输出
-                self._flush_table()
-            # 非 final：保留缓冲。表格行只有遇到非竖线行（触发 _flush_table）
-            # 或最终 flush 才会渲染，避免中途 flush 把一张表格拆成两半。
+            self._flush_table()
 
     def reset(self) -> None:
         """清空全部缓冲与状态（响应流中断自动重试前调用）。
@@ -928,4 +926,3 @@ class StreamingRenderer:
             self._code_lines.clear()
             self._table_rows.clear()
             self._table_has_separator = False
-            self._normal_line_count = 0

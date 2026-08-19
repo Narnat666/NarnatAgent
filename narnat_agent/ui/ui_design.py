@@ -229,8 +229,8 @@ class UIStreamSession:
     def flush_renderer(self) -> None:
         """flush渲染器缓冲区，确保之前的文字已完整输出到终端。
 
-        非最终 flush：未完成的表格行会保留缓冲，等表格完整后再整体渲染，
-        避免工具调用边界把一张表格拆成两半。
+        一律立即落定：普通文字半行渲染、表格完整渲染（不完整降级为段落）、
+        代码块内容渲染。不跨轮保留缓冲，避免上一轮表格行与下一轮混合错乱。
         """
         if self._started:
             self._renderer.flush(final=False)
