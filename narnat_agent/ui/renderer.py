@@ -897,7 +897,19 @@ class StreamingRenderer:
             if self._in_code:
                 self._on_code_line(remaining, "")
             else:
-                self._on_normal_line(remaining, "")
+                # 残留行是"未完成行"（没有换行结尾）。它可能是被流式 chunk
+                # 切断的表格行片段：若按表格候选行缓冲，会在下方 _flush_table
+                # 渲染出残缺表格（列内容丢失），后半行到达时又裸奔为段落 →
+                # 表格错乱。因此表格形态的未完成行一律降级为段落输出
+                # （信息不丢，也不污染表格缓冲）。
+                stripped = remaining.strip()
+                if (stripped.startswith("|") and stripped.endswith("|")
+                        and stripped.count("|") >= 2):
+                    rendered = _render_paragraph(stripped, None)
+                    if rendered:
+                        _stdout_write(rendered + "\n")
+                else:
+                    self._on_normal_line(remaining, "")
             leftover = self._buf_get_and_clear()
             if leftover.strip():
                 _stdout_write(render_line(leftover) + "\n")
