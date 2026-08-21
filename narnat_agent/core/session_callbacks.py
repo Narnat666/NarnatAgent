@@ -136,6 +136,7 @@ class NoSession(SessionState):
             "/skill":    "加载技能",
             "/thinking": "切换思考强度",
             "/mode":     "切换模型",
+            "/goal":     "目标模式开关",
             "/exit":     "退出程序",
         }
 
@@ -240,6 +241,7 @@ class RootSession(SessionState):
             "/skill":    "加载技能",
             "/thinking": "切换思考强度",
             "/mode":     "切换模型",
+            "/goal":     "目标模式开关",
             "/explore":  "创建探索分支",
             "/exit":     "退出会话",
         }
@@ -386,6 +388,7 @@ class ChildSession(SessionState):
             "/skill":    "加载技能",
             "/thinking": "切换思考强度",
             "/mode":     "切换模型",
+            "/goal":     "目标模式开关",
             "/done":     "完成探索分支",
             "/exit":     "暂离探索分支",
         }
@@ -540,7 +543,9 @@ class SessionManager:
                  summary_anim_stop: Callable[[], None] = None,
                  cancel_check: Callable[[], bool] = None,
                  name_func: Callable[[List[Dict[str, Any]]], str] = None,
-                 on_switch_state: Callable[[], None] = None):
+                 on_switch_state: Callable[[], None] = None,
+                 goal_tool_setter: Callable[[bool], None] = None,
+                 goal_max_rounds: int = 0):
         self.narnat_dir = narnat_dir
         self._messages = messages
         self._config_dir = config_dir
@@ -556,10 +561,16 @@ class SessionManager:
         self.cancel_check = cancel_check or (lambda: False)
         self.name_func = name_func
         self._on_switch_state = on_switch_state
+        self._set_goal_tool = goal_tool_setter
         self._auto_save_done: bool = False
         self._pending_auto_save_name: Optional[str] = None
         self.pending_deletes: Set[Tuple[str, Optional[str]]] = set()
         self._state: SessionState = NoSession(self)
+        # 目标模式状态：_goal_enabled=开关；_goal_max_rounds=临时轮数覆盖（0=用配置默认值）；
+        # _goal_default_rounds=配置默认轮数上限（供 /goal 查询显示具体值）
+        self._goal_enabled: bool = False
+        self._goal_max_rounds: int = 0
+        self._goal_default_rounds: int = goal_max_rounds
 
     def get_messages(self) -> List[Dict[str, Any]]:
         """返回 messages 的浅拷贝列表（供状态类读取/保存使用）"""

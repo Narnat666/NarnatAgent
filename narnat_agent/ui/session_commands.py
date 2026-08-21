@@ -156,6 +156,57 @@ def _cmd_done(args: str, mgr) -> CommandResult:
     return CommandResult.HANDLED
 
 
+@_register("goal")
+def _cmd_goal(args: str, mgr) -> CommandResult:
+    """目标模式：/goal on [N] 开启（N=临时轮数上限），/goal off 关闭，/goal 查看状态"""
+    arg = args.strip().lower()
+    if arg == "on" or arg.startswith("on "):
+        # /goal on [N]：可选临时轮数上限
+        override = 0
+        rest = arg[2:].strip()
+        if rest:
+            try:
+                override = int(rest)
+            except ValueError:
+                _stdout_write(f"  {CMD_ERROR}无效轮数: {rest}{R}\n")
+                return CommandResult.HANDLED
+            if override < 1:
+                _stdout_write(f"  {CMD_ERROR}轮数必须为正整数{R}\n")
+                return CommandResult.HANDLED
+        mgr._goal_enabled = True
+        mgr._goal_max_rounds = override
+        # 目标模式开启：向 LLM 动态注入 GoalComplete 工具
+        if getattr(mgr, '_set_goal_tool', None):
+            mgr._set_goal_tool(True)
+        if override:
+            _stdout_write(f"  {CMD_SUCCESS}目标模式已开启{R}  "
+                          f"{CMD_MUTED}(本轮上限 {CMD_HIGHLIGHT}{override}{R}{CMD_MUTED} 轮){R}\n")
+        else:
+            _stdout_write(f"  {CMD_SUCCESS}目标模式已开启{R}\n")
+        return CommandResult.HANDLED
+    if arg == "off":
+        was_enabled = mgr._goal_enabled
+        mgr._goal_enabled = False
+        mgr._goal_max_rounds = 0  # 关闭时清除临时轮数覆盖
+        # 目标模式关闭：从 LLM 工具定义中移除 GoalComplete
+        if getattr(mgr, '_set_goal_tool', None):
+            mgr._set_goal_tool(False)
+        if was_enabled:
+            _stdout_write(f"  {CMD_SUCCESS}目标模式已关闭{R}\n")
+        else:
+            _stdout_write(f"  {CMD_MUTED}目标模式已是关闭状态{R}\n")
+        return CommandResult.HANDLED
+    # 无参数：查看状态
+    if mgr._goal_enabled:
+        # 实际生效轮数：临时覆盖 > 配置默认值 > 兜底"默认"
+        limit = mgr._goal_max_rounds or getattr(mgr, '_goal_default_rounds', 0) or "默认"
+        _stdout_write(f"  {CMD_HIGHLIGHT}目标模式: 已开启{R}  "
+                      f"{CMD_MUTED}(轮数上限: {CMD_HIGHLIGHT}{limit}{R}{CMD_MUTED}){R}\n")
+    else:
+        _stdout_write(f"  {CMD_MUTED}目标模式: 已关闭{R}\n")
+    return CommandResult.HANDLED
+
+
 @_register("save")
 def _cmd_save(args: str, mgr) -> CommandResult:
     result = mgr.on_save(args)
@@ -267,6 +318,8 @@ def _dispatch_command(cmd: str, args: str, mgr) -> CommandResult:
         return _cmd_clear(args, mgr)
     if mgr is None:
         return CommandResult.UNKNOWN
+    if cmd == "goal":
+        return _cmd_goal(args, mgr)
     available = mgr.available_commands()
 
 

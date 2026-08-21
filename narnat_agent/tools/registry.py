@@ -23,6 +23,7 @@ from .terminal import execute as terminal_execute, DEFINITION as TERMINAL_DEF
 from .web_search import execute as web_search_execute, DEFINITION as WEBSEARCH_DEF
 from .todo_write import execute as todo_write_execute, DEFINITION as TODOWRITE_DEF
 from .serial import execute as serial_execute, DEFINITION as SERIAL_DEF
+from .goal_complete import execute as goal_complete_execute, DEFINITION as GOALCOMPLETE_DEF
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -41,6 +42,7 @@ _TOOL_IMPLEMENTATIONS: Dict[str, Callable] = {
     "WebSearch": web_search_execute,
     "TodoWrite": todo_write_execute,
     "Serial": serial_execute,
+    "GoalComplete": goal_complete_execute,
 }
 
 
@@ -53,6 +55,8 @@ TOOL_DEFINITIONS: List[Dict] = [
     BASH_DEF, TERMINAL_DEF, WEBSEARCH_DEF, TODOWRITE_DEF,
     SERIAL_DEF,
 ]
+# GoalComplete 不进默认工具定义：由 /goal 开启时通过 LLMClient.set_goal_tool(True) 动态注入，
+# 普通模式不暴露给 LLM（执行能力始终注册，兼容历史残留调用）。
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -78,7 +82,7 @@ def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolCon
         return (f"[错误: 未知工具: {name}]", "")
 
     # 需要tool_context的工具：注入上下文参数
-    _CONTEXT_TOOLS = {"Shell", "Terminal", "TodoWrite", "WebSearch", "Write", "Read", "Glob", "Grep", "Edit", "Serial"}
+    _CONTEXT_TOOLS = {"Shell", "Terminal", "TodoWrite", "WebSearch", "Write", "Read", "Glob", "Grep", "Edit", "Serial", "GoalComplete"}
 
     try:
         if tool_context and name in _CONTEXT_TOOLS:

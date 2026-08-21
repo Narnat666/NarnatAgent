@@ -73,6 +73,9 @@ class Agent:
                 self._stats.fetch_balance(api_key, self._round)
 
                 # 3. 压缩检查
+                # 每次用户新输入都复位目标模式完成标记：防止普通模式下AI调用过
+                # GoalComplete（或收尾轮调用）后残留，导致下个任务首轮被误判完成
+                self._parts.tool_context.goal_complete = False
                 compress_ok = False
                 if self._context.need_compress():
                     compress_ok = self._compression.compress(stripped)
@@ -85,25 +88,70 @@ class Agent:
                     self._msg_manager.append_user(stripped)
                     self._logger.info("core.agent", f"用户输入: {stripped[:100]}")
 
-                # 5. 创建流式输出
-                stream = self._ui.create_stream()
-
-                try:
-                    # 6. 工具调度内循环
-                    self._agent_loop.run(stream)
-                except KeyboardInterrupt:
-                    self._ui.on_interrupted()
-                    stream.abort()
-                except Exception as e:
-                    self._logger.error("core.agent", f"异常: {e}")
-                    if hasattr(self._agent_loop, '_last_content_parts') and self._agent_loop._last_content_parts:
-                        self._msg_manager.append_assistant("".join(self._agent_loop._last_content_parts))
-                    # 异常≠用户打断：显示明确的错误提示，而非"已打断"
-                    stream.abort(message=f"  {X}⚠ 程序异常，本轮回复已停止: {e}{R}")
+                # 5. 目标模式：解析轮数上限（临时覆盖优先，否则用配置默认值）
+                goal_enabled = self._mgr._goal_enabled
+                if goal_enabled:
+                    goal_limit = self._mgr._goal_max_rounds or self._config.ai.goal_max_rounds
+                    goal_task = stripped
+                    goal_round = 0
                 else:
-                    if not stream.aborted:
-                        self._mgr.on_auto_save()
-                        self._auto_save.try_save()
+                    goal_limit = 0
+                    goal_task = ""
+                    goal_round = 0
+
+                while True:
+                    # 5. 创建流式输出
+                    stream = self._ui.create_stream()
+
+                    try:
+                        # 6. 工具调度内循环
+                        self._agent_loop.run(stream)
+                    except KeyboardInterrupt:
+                        self._ui.on_interrupted()
+                        stream.abort()
+                    except Exception as e:
+                        self._logger.error("core.agent", f"异常: {e}")
+                        if hasattr(self._agent_loop, '_last_content_parts') and self._agent_loop._last_content_parts:
+                            self._msg_manager.append_assistant("".join(self._agent_loop._last_content_parts))
+                        # 异常≠用户打断：显示明确的错误提示，而非"已打断"
+                        stream.abort(message=f"  {X}⚠ 程序异常，本轮回复已停止: {e}{R}")
+                    else:
+                        if not stream.aborted:
+                            self._mgr.on_auto_save()
+                            self._auto_save.try_save()
+
+                    goal_round += 1
+
+                    # ── 目标模式自动续跑判断 ──
+                    if not goal_enabled:
+                        break
+                    if stream.aborted:
+                        break  # 用户中断/程序异常：保持现状退出
+                    if not self._agent_loop._last_round_ok:
+                        break  # 出错/空回复等非正常结束：保持现状退出
+                    if self._parts.tool_context.goal_complete:
+                        # AI已调用GoalComplete声明完成：复位标记，结束续跑
+                        self._parts.tool_context.goal_complete = False
+                        break
+                    if goal_round >= goal_limit:
+                        # 达到轮数上限：注入收尾指令，让AI总结后结束（不再续跑）
+                        self._logger.info("core.agent", f"目标模式达到轮数上限({goal_limit})，停止续跑")
+                        self._msg_manager.append_user(
+                            f"【系统提示】目标模式已达到轮数上限（{goal_limit}轮），任务尚未完成。"
+                            "请向用户总结当前进度、已完成工作和未完成原因，无需继续执行新任务。"
+                        )
+                        stream = self._ui.create_stream()
+                        self._agent_loop.run(stream)
+                        if not stream.aborted:
+                            self._mgr.on_auto_save()
+                            self._auto_save.try_save()
+                        break
+                    # 任务未完成：注入继续消息，再跑一轮
+                    self._logger.info("core.agent", f"目标模式自动续跑: 第{goal_round}轮完成，继续")
+                    self._msg_manager.append_user(
+                        f"【自动续跑】已完成{goal_round}轮，任务：{goal_task}\n"
+                        "请继续推进任务。若任务已完成，请调用GoalComplete工具声明完成。"
+                    )
 
                 # 7. 回复结束：更新窗口占比 + 告警提示（中断/异常时统计沿用上一轮值）
                 self._context.update_ratio(self._stats.input_tokens)

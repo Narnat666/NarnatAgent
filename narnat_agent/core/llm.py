@@ -109,7 +109,8 @@ class LLMClient:
                  tool_definitions: list = None):
         self._config = config
         self._logger = logger
-        self._tool_defs = tool_definitions or []
+        # 复制一份：set_goal_tool 动态增删 GoalComplete 时不影响调用方持有的原列表
+        self._tool_defs = list(tool_definitions or [])
         self._max_output_tokens = max_output_tokens
 
         # 协议由 config.protocol 显式指定
@@ -125,6 +126,27 @@ class LLMClient:
                     no_thinking: bool = False, cancel_check=None) -> Iterator:
         return self._backend.chat_stream(_strip_surrogates(messages), no_tools=no_tools,
                                          no_thinking=no_thinking, cancel_check=cancel_check)
+
+    def set_goal_tool(self, enabled: bool) -> None:
+        """动态注入/移除 GoalComplete 工具定义。
+
+        目标模式（/goal on）开启时注入，关闭时移除；普通模式不向 LLM 暴露该工具。
+        幂等：重复开启/关闭不会重复添加或报错。
+        """
+        # 局部导入避免模块顶层循环依赖
+        from ..tools.goal_complete import DEFINITION as _GOAL_DEF
+        name = _GOAL_DEF["function"]["name"]
+        exists = any(
+            d.get("function", {}).get("name") == name
+            for d in self._tool_defs
+        )
+        if enabled and not exists:
+            self._tool_defs.append(_GOAL_DEF)
+        elif not enabled and exists:
+            self._tool_defs[:] = [
+                d for d in self._tool_defs
+                if d.get("function", {}).get("name") != name
+            ]
 
     @property
     def raw_sse(self):

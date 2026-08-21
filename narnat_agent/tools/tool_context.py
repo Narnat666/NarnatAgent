@@ -60,6 +60,9 @@ class ToolContext:
     # 用户已确认删除，下次执行删除命令时跳过确认直接执行
     _delete_confirmed: bool = field(default=False, repr=False)
 
+    # 目标模式完成标记：GoalComplete工具调用时置True，主循环据此停止自动续跑
+    goal_complete: bool = field(default=False, repr=False)
+
     def confirm_delete(self, command: str) -> bool:
         """调用删除确认回调（仅Windows使用）"""
         if self.confirm_callback:

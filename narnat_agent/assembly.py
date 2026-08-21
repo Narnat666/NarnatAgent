@@ -118,6 +118,8 @@ class Assembly:
             cancel_check=lambda: _interrupt_ctrl.is_set,
             name_func=lambda msgs: summarizer.name_session(msgs),
             on_switch_state=tool_context.clear_read_files,
+            goal_tool_setter=llm.set_goal_tool,
+            goal_max_rounds=config.ai.goal_max_rounds,
         )
 
         # 11. UI

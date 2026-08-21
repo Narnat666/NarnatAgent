@@ -45,6 +45,9 @@ class AgentLoop:
 
     def run(self, stream):
         """工具调度内循环"""
+        # 本轮是否正常完成（无tool_call纯文本输出结束）。目标模式续跑据此判断，
+        # 出错/中断/空回复等非正常结束不触发自动续跑。
+        self._last_round_ok = False
         stream_interrupted_retried = False  # 响应流中断（无完成标记）的自动重试只做一次
         while True:
             # a. 修复messages
@@ -198,6 +201,7 @@ class AgentLoop:
             if call_usage:
                 self._stats.update(call_usage)
 
+            self._last_round_ok = True  # 正常完成：无tool_call纯文本输出
             stream.finish(
                 self._stats.input_tokens,
                 self._stats.output_tokens,

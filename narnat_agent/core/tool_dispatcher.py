@@ -29,7 +29,7 @@ def _local_hostname() -> str:
 # ── 工具分类 ──
 _READONLY_TOOLS = {"Read", "Glob", "Grep", "WebSearch"}
 _WRITE_TOOLS = {"Edit", "Write"}
-_SERIAL_TOOLS = {"Shell", "Terminal", "TodoWrite", "Serial"}
+_SERIAL_TOOLS = {"Shell", "Terminal", "TodoWrite", "Serial", "GoalComplete"}
 
 # 工具名→简短描述映射
 _TOOL_LABELS = {
@@ -43,6 +43,7 @@ _TOOL_LABELS = {
     "WebSearch": "联网搜索",
     "TodoWrite": "更新计划",
     "Serial": "串口",
+    "GoalComplete": "声明完成",
 }
 
 # 工具摘要提取：文件类工具取file_path

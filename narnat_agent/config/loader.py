@@ -22,6 +22,7 @@ from .defaults import (
     DEFAULT_MAX_TIMEOUT_SECONDS,
     DEFAULT_AUTO_SAVE,
     DEFAULT_AUTO_SAVE_TOKENS,
+    DEFAULT_GOAL_MAX_ROUNDS,
 )
 
 
@@ -48,6 +49,7 @@ class AIConfig:
     thinking_options: dict = field(default_factory=lambda: {"high": "高", "max": "全开"})
     context_window: int = DEFAULT_CONTEXT_WINDOW   # 模型上下文窗口（token数），≤0 视为无效
     retry_count: int = 3
+    goal_max_rounds: int = DEFAULT_GOAL_MAX_ROUNDS  # 目标模式单个任务的自动续跑轮数上限
 
 
 @dataclass(frozen=True)
@@ -329,6 +331,7 @@ def _build_ai_config(data: dict) -> AIConfig:
         thinking_effort=thinking_effort,
         thinking_options=thinking_options,
         context_window=context_window,
+        goal_max_rounds=_coerce(ai.get("目标模式最大轮数"), int) or DEFAULT_GOAL_MAX_ROUNDS,
     )
 
 
@@ -552,6 +555,7 @@ def load_config(project_root: Optional[str] = None) -> Config:
                             "温度": None,
                             "最大输出token数": 128000,
                             "上下文窗口大小": DEFAULT_CONTEXT_WINDOW,
+                            "目标模式最大轮数": DEFAULT_GOAL_MAX_ROUNDS,
                             "思考": {
                                 "启用": True,
                                 "强度": "high",
@@ -626,6 +630,7 @@ def load_config(project_root: Optional[str] = None) -> Config:
         thinking_options=ai_config.thinking_options,
         context_window=ai_config.context_window,
         retry_count=int(data.get("智能体", {}).get("LLM重试次数", 3)),
+        goal_max_rounds=ai_config.goal_max_rounds,
     )
 
     return Config(

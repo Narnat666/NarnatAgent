@@ -20,6 +20,9 @@ DEFAULT_MAX_TIMEOUT_SECONDS = 1800
 DEFAULT_REQUIRE_PLAN = False  # 是否强制AI先制定计划再执行工具
 DEFAULT_MIN_TOOLS = 2         # 单轮工具调用数≥此值时才强制要求先写计划
 
+# ── 目标模式默认值 ──
+DEFAULT_GOAL_MAX_ROUNDS = 100  # /goal 开启后单个任务的自动续跑轮数上限
+
 # ── 上下文窗口占比阈值 ──
 DEFAULT_CONTEXT_WINDOW = 1000000  # 模型上下文窗口（token数），≤0 视为无效
 DEFAULT_SHOW_RATIO = False        # 统计栏是否显示 窗口占比:x%
