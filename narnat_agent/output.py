@@ -23,16 +23,24 @@ from .config.defaults import DEFAULT_CONTEXT_WINDOW
 
 _stdout_lock = threading.Lock()
 
+# VT 重申所需的缓存句柄（Windows 控制台），None 表示不适用/不可用
+_vt_handle = None
+_ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+
 
 def _enable_vt_on_windows() -> None:
-    """在 Windows 控制台上启用 VT（虚拟终端）处理。
+    """在 Windows 控制台上启用 VT（虚拟终端）处理，并缓存句柄供后续重申。
 
-    部分启动方式（GUI 启动器、start 等创建的 conhost/ConPTY）默认
-    ENABLE_VIRTUAL_TERMINAL_PROCESSING 是关闭的：此时渲染器输出的
-    ANSI 颜色序列会被当作普通字符写进缓冲区、逐个占格，行宽膨胀后在
-    缓冲右缘折行——表格渲染成错位碎片（边框尾部落到下一行行首、数据行
-    断成多段）。启动时强制打开 VT 即可根治。
+    VT 关闭时，渲染器输出的 ANSI 颜色序列不被解析、原样占据字符格：
+    一行 43 显示列的表格行带 ANSI 后是 214 个字符，占满 156 列窗格后被
+    终端折行 → 表格断成碎片（第三列被挤到下一行）。
+
+    仅在启动时设置一次不够：Shell/Terminal 工具派生的子进程（cmd.exe、
+    ssh 等使用 legacy console API 的程序）共享同一控制台，可能把
+    console mode 重置回无 VT 状态（实测：同一机器上部分会话 mode=0x3、
+    部分 mode=0x7）。因此 write() 每次写出前都会重申一次（见 _assert_vt）。
     """
+    global _vt_handle
     if sys.platform != "win32":
         return
     try:
@@ -43,7 +51,28 @@ def _enable_vt_on_windows() -> None:
             return
         mode = ctypes.c_ulong()
         if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-            kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            kernel32.SetConsoleMode(handle, mode.value | _ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+            _vt_handle = handle
+    except Exception:
+        pass
+
+
+def _assert_vt() -> None:
+    """写出前重申 VT 已开启（防子进程把 console mode 重置回 legacy）。
+
+    单次 GetConsoleMode + 条件 SetConsoleMode，开销 ~1μs，远小于一次写出；
+    非 Windows / 无控制台（管道、重定向）时 _vt_handle 为 None，直接跳过。
+    """
+    if _vt_handle is None:
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        mode = ctypes.c_ulong()
+        if kernel32.GetConsoleMode(_vt_handle, ctypes.byref(mode)):
+            if not (mode.value & _ENABLE_VIRTUAL_TERMINAL_PROCESSING):
+                kernel32.SetConsoleMode(
+                    _vt_handle, mode.value | _ENABLE_VIRTUAL_TERMINAL_PROCESSING)
     except Exception:
         pass
 
@@ -54,6 +83,7 @@ _enable_vt_on_windows()
 
 def write(text: str) -> None:
     with _stdout_lock:
+        _assert_vt()
         sys.stdout.write("\r" + text)
         sys.stdout.flush()
 
@@ -61,6 +91,7 @@ def write(text: str) -> None:
 def try_write(text: str) -> bool:
     if _stdout_lock.acquire(blocking=False):
         try:
+            _assert_vt()
             sys.stdout.write(text)
             sys.stdout.flush()
             return True
