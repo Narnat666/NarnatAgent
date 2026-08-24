@@ -59,13 +59,18 @@ DEFINITION = {
 
 
 def kill_active():
-    """杀掉当前正在运行的前台子进程（ESC打断时由agent调用）"""
+    """杀掉当前正在运行的前台子进程（ESC打断时由agent调用）
+
+    杀进程树改在后台线程执行：ESC打断后主线程立即返回，
+    输入界面马上还给用户；杀树期间用户输入新命令不受影响
+    （新命令是新Popen，会覆盖_active_proc，后台线程持有旧proc引用）。
+    """
     global _interrupted
     _interrupted = True
     with _active_proc_lock:
         proc = _active_proc
     if proc is not None and proc.poll() is None:
-        _kill_proc_tree(proc)
+        threading.Thread(target=_kill_proc_tree, args=(proc,), daemon=True).start()
 
 
 def _find_executable(*names: str) -> Optional[str]:
