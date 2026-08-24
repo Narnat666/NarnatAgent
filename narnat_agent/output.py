@@ -24,6 +24,34 @@ from .config.defaults import DEFAULT_CONTEXT_WINDOW
 _stdout_lock = threading.Lock()
 
 
+def _enable_vt_on_windows() -> None:
+    """在 Windows 控制台上启用 VT（虚拟终端）处理。
+
+    部分启动方式（GUI 启动器、start 等创建的 conhost/ConPTY）默认
+    ENABLE_VIRTUAL_TERMINAL_PROCESSING 是关闭的：此时渲染器输出的
+    ANSI 颜色序列会被当作普通字符写进缓冲区、逐个占格，行宽膨胀后在
+    缓冲右缘折行——表格渲染成错位碎片（边框尾部落到下一行行首、数据行
+    断成多段）。启动时强制打开 VT 即可根治。
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        if not handle or handle in (-1, 0):
+            return
+        mode = ctypes.c_ulong()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:
+        pass
+
+
+# 必须在 _supports_truecolor() 之前启用，让颜色能力检测看到 VT 已开启
+_enable_vt_on_windows()
+
+
 def write(text: str) -> None:
     with _stdout_lock:
         sys.stdout.write("\r" + text)

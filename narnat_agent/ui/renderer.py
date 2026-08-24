@@ -95,10 +95,12 @@ def _windows_console_window_cols() -> int:
 
         # 隐藏窗口量不到客户区 → 退而求其次用 srWindow（仍优于缓冲区宽度）
         # CONSOLE_SCREEN_BUFFER_INFO: dwSize(4) dwCursorPos(4) wAttr(2) srWindow(8) maxWinSize(4)
+        # srWindow = SMALL_RECT: Left(2) Top(2) Right(2) Bottom(2)，即 raw[10:12]=Left, raw[12:14]=Top,
+        # raw[14:16]=Right, raw[16:18]=Bottom
         info = ctypes.create_string_buffer(22)
         if kernel32.GetConsoleScreenBufferInfo(handle, info):
             left = int.from_bytes(info.raw[10:12], "little", signed=True)
-            right = int.from_bytes(info.raw[12:14], "little", signed=True)
+            right = int.from_bytes(info.raw[14:16], "little", signed=True)
             cols = right - left + 1
             if cols > 0:
                 return cols
@@ -123,6 +125,36 @@ def _terminal_width() -> int:
         except Exception:
             cols = 120
     return max(min(cols, _MAX_TERMINAL_WIDTH), 20)
+
+
+def _srwindow_cols() -> int:
+    """GetConsoleScreenBufferInfo.srWindow 实测可见窗格列数。
+
+    这是终端「当前真实可见宽度」的最可靠来源（不依赖字体像素换算、不依赖
+    shutil 缓存）。用于表格渲染前的二次校验：若其它宽度测量路径偶发偏大
+    （窗口 resize 竞态、DPI 取整、GetClientRect 未就绪返回 0 等），
+    以实测值为准收缩表格行宽，保证输出行不超出可见窗格、不被终端折行。
+    """
+    if sys.platform != "win32":
+        return 0
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)
+        if not handle or handle in (-1, 0):
+            return 0
+        # CONSOLE_SCREEN_BUFFER_INFO: dwSize(4) dwCursorPos(4) wAttr(2) srWindow(8) maxWinSize(4)
+        # srWindow = SMALL_RECT: Left(2) Top(2) Right(2) Bottom(2)，即 raw[10:12]=Left, raw[12:14]=Top,
+        # raw[14:16]=Right, raw[16:18]=Bottom
+        info = ctypes.create_string_buffer(22)
+        if kernel32.GetConsoleScreenBufferInfo(handle, info):
+            left = int.from_bytes(info.raw[10:12], "little", signed=True)
+            right = int.from_bytes(info.raw[14:16], "little", signed=True)
+            cols = right - left + 1
+            return cols if cols > 0 else 0
+    except Exception:
+        pass
+    return 0
 
 
 _re_ansi = re.compile(r"\x1b\[[0-9;]*m")
@@ -635,6 +667,13 @@ class StreamingRenderer:
 
         # ── 计算列宽（带终端宽度限制） ──
         term_w = _terminal_width()
+        # 二次校验：以 srWindow 实测可见窗格宽为准收缩。
+        # 宽度测量路径偶发偏大（resize 竞态 / DPI 取整 / GetClientRect 未就绪
+        # 返回 0 走错误回退）时，行宽会超出实际窗格被终端折行 → 表格紊乱。
+        # 实测值 ≤ 测量值时以实测值为准，保证输出行不超出可见窗格。
+        real_w = _srwindow_cols()
+        if real_w and 0 < real_w < term_w:
+            term_w = real_w
         # 表格可用宽度 = 终端宽度 - 4(缩进) - 2(安全余量，防终端 pending-wrap 折行破坏边框)
         table_avail = max(term_w - 6, 8)
 
@@ -667,9 +706,15 @@ class StreamingRenderer:
         else:
             # ── 超宽：限制列宽 + 折行，保证整表不超出终端宽度 ──
             avail_for_content = table_avail - col_overhead
-            # 连每列 2 字符都放不下 → 按列分块输出
+            # 连每列 2 字符都放不下 → 按列分块输出。
+            # 但分块在极端窄宽度下会产生"每块1列、单元格碎成小块"的不可读形态
+            # （如 term_w≤16 时 4+ 列表格 → 8 字符小块 + 分块标签 = 用户看到的"表格卡"乱表）。
+            # 此时降级为段落输出：信息不丢、可读性远好于碎片。
             if avail_for_content < cols * 2:
-                self._render_table_chunked(rendered, natural_widths, cols, table_avail, alignments=alignments)
+                if table_avail < 20:
+                    self._demote_to_paragraphs()
+                else:
+                    self._render_table_chunked(rendered, natural_widths, cols, table_avail, alignments=alignments)
             else:
                 widths = _fit_widths(natural_widths, avail_for_content)
                 # 折行渲染
