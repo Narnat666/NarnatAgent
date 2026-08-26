@@ -36,18 +36,96 @@ _RE_PY_C_DIRECT = re.compile(
 )
 
 
-def _try_extract_py_code(seg: str):
-    """识别 `python -c "code"` 形态的段。命中返回 (exe, flags, tail)，否则 None。
+def _scan_code_suffix(tail: str):
+    """扫描 tail（以引号开头的 -c 载荷），定位引号闭合处并剥离后缀。
 
-    仅当 -c 后整段为双引号包裹（无重定向/追加参数等cmd特性）、解释器可解析
-    且实为 .exe 时走直执行路径；其余一律回退 cmd 原路径，零回归。
+    返回 (code_tail, suffix)。引号闭合后允许：空白、`2>&1`（剥离，语义等价）、
+    `|`/`>`（作为 suffix 返回）。其余形态（追加参数等）返回原 tail 交由
+    endswith 守卫回退。引号内按 POSIX 转义规则跳过（\\X 均在引号内）。
+    """
+    j = 1
+    while j < len(tail):
+        ch = tail[j]
+        if ch == "\\" and j + 1 < len(tail):
+            j += 2  # POSIX转义: \X 均在引号内
+            continue
+        if ch == '"':
+            # 引号闭合：跳过空白与 2>&1，找 | / >
+            k = j + 1
+            while k < len(tail):
+                while k < len(tail) and tail[k] in " \t":
+                    k += 1
+                if k + 4 <= len(tail) and tail[k : k + 4] == "2>&1":
+                    k += 4
+                    continue
+                break
+            if k >= len(tail):
+                return tail[: j + 1], None  # 纯 code（仅空白/2>&1 尾随）
+            if tail[k] in "|>":
+                return tail[: j + 1], tail[k:]
+            return tail, None  # 引号后有其他token（追加参数等）→ 回退
+        j += 1
+    return tail, None
+
+
+def _parse_suffix(suffix: str):
+    """解析后缀（suffix[0] 为 '|' 或 '>'）。返回 None 表示形态不支持（回退cmd）。
+
+    支持: `| cmd`(单层、不含<>|&)、`> file`、`>> file`、`> "带空格路径"`、`>nul`。
+    """
+    rest = suffix[1:].strip()
+    if not rest:
+        return None
+    if suffix[0] == "|":
+        if any(c in rest for c in "<>|&"):
+            return None  # 嵌套管道/重定向组合 → 回退
+        return ("pipe", rest)
+    # 重定向
+    mode = "w"
+    if rest.startswith(">"):
+        rest = rest[1:].strip()
+        mode = "a"
+        if not rest:
+            return None
+    if rest.lower() == "nul":
+        return ("discard",)
+    if rest.startswith('"'):
+        end = rest.find('"', 1)
+        if end == -1 or rest[end + 1 :].strip():
+            return None
+        return (mode, rest[1:end])
+    # 裸路径：单 token（cmd 裸路径不能含空格）
+    toks = rest.split(None, 1)
+    if len(toks) > 1:
+        return None
+    return (mode, toks[0])
+
+
+def _try_extract_py_code(seg: str):
+    """识别 `python -c "code"` 形态的段。命中返回 (exe, flags, code_tail, spec)，否则 None。
+
+    spec: None 无后缀 | ('pipe', cmd) | ('w'|'a', path) | ('discard',)
+    仅当 -c 后为双引号包裹（允许尾随 2>&1、|管道、>重定向等AI高频后缀）、
+    解释器可解析且实为 .exe 时走直执行路径；其余一律回退 cmd 原路径，零回归。
+
+    尾随 ` 2>&1` 剥离：工具本就合并展示 stdout+stderr，语义等价。
     """
     m = _RE_PY_C_DIRECT.match(seg)
     if not m:
         return None
     exe, flags, tail = m.group("exe"), m.group("flags"), m.group("tail")
     tail = tail.strip()
-    if len(tail) < 2 or not (tail.startswith('"') and tail.endswith('"')):
+    if len(tail) < 2 or not tail.startswith('"'):
+        return None
+    # 引号闭合处扫描：剥离 2>&1、识别 |管道 / >重定向后缀
+    code_tail, suffix = _scan_code_suffix(tail)
+    if suffix is not None:
+        spec = _parse_suffix(suffix)
+        if spec is None:
+            return None  # 不支持的后缀形态 → 回退cmd
+    else:
+        spec = None
+    if not code_tail.endswith('"'):
         return None
     import shutil
     resolved = shutil.which(exe)
@@ -59,7 +137,7 @@ def _try_extract_py_code(seg: str):
     ext = os.path.splitext(resolved)[1].lower()
     if ext not in ("", ".exe"):
         return None  # .bat垫片等 → 交给cmd处理
-    return exe, flags, tail
+    return exe, flags, code_tail, spec
 
 # 子进程环境变量：强制 UTF-8 编码，解决 Windows 下 Python print emoji 等
 # Unicode 字符在 GBK 代码页下报 UnicodeEncodeError 的问题
@@ -80,10 +158,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Shell",
-        "description": (
-            f"本地Shell — 在{_PLATFORM_LABEL}执行命令。"
-            "Windows下 python -c 载荷绕过cmd直接执行：多行、%、&、|、引号等字符原样传给解释器，无需转义；其余命令仍按cmd语法。"
-        ),
+        "description": f"本地Shell — 在{_PLATFORM_LABEL}执行命令。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -386,9 +461,18 @@ def execute(
             )
 
         # python -c "code" 形态：绕过cmd直执行，多行/%/&/|等原样传给解释器
+        # 尾随AI高频后缀（2>&1、|管道、>重定向）已剥离，一并直执行
         py = _try_extract_py_code(segments[0][1])
         if py is not None:
-            rc, out, err, status = _execute_py_direct(*py, timeout, max_output_chars)
+            exe, flags, code_tail, spec = py
+            if spec is None:
+                rc, out, err, status = _execute_py_direct(
+                    exe, flags, code_tail, timeout, max_output_chars
+                )
+            else:
+                rc, out, err, status = _execute_py_suffixed(
+                    exe, flags, code_tail, spec, timeout, max_output_chars
+                )
             return _format_result(rc, out, err, status, timeout, max_output_chars)
 
         return _append_cd_hint(
@@ -672,6 +756,78 @@ def _execute_py_direct(exe: str, flags: str, tail: str,
     return _collect_proc_output(proc, timeout, max_output_chars)
 
 
+def _execute_py_suffixed(exe: str, flags: str, tail: str, spec,
+                         timeout: int, max_output_chars: int):
+    """直执行 python -c 并处理尾随后缀（|管道 / >重定向）。
+
+    spec: ('pipe', cmd) | ('w'|'a', path) | ('discard',)
+    返回 (rc, out, err, status)，格式与 _collect_proc_output 一致。
+    """
+    if spec[0] == "pipe":
+        return _execute_py_pipe(exe, flags, tail, spec[1], timeout, max_output_chars)
+
+    rc, out, err, status = _execute_py_direct(exe, flags, tail, timeout, max_output_chars)
+    if status != "ok" or spec[0] == "discard":
+        # 中断/超时不写文件；>nul 直接丢弃 stdout（stderr 仍展示）
+        return rc, "", err, status
+
+    mode, target = spec
+    try:
+        with open(target, mode + "b") as f:
+            # PYTHONIOENCODING=utf-8 保证子进程输出UTF-8；\r\n 原样保留（与cmd一致）
+            f.write(out.encode("utf-8"))
+    except OSError as e:
+        return (1, "", f"写入文件失败: {e}", "ok")
+    return rc, "", err, status
+
+
+def _execute_py_pipe(exe: str, flags: str, tail: str, pipe_cmd: str,
+                     timeout: int, max_output_chars: int):
+    """直执行 python -c，stdout 经 cmd 管道命令过滤后合并展示。
+
+    先直执行 python（超时/ESC语义不变）；成功后把 stdout 字节喂给管道命令，
+    剩余时间预算内收集。python 的 stderr 与管道 stderr 合并展示。
+    """
+    start = time.time()
+    rc_py, out_py, err_py, status_py = _execute_py_direct(
+        exe, flags, tail, timeout, max_output_chars
+    )
+    elapsed = time.time() - start
+    if status_py != "ok":
+        return rc_py, out_py, err_py, status_py  # 中断/超时跳过管道阶段
+
+    remaining = max(0.1, timeout - elapsed)
+    try:
+        proc = subprocess.Popen(
+            pipe_cmd,
+            shell=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=os.getcwd(),
+            env=_utf8_env,
+        )
+    except (OSError, ValueError) as e:
+        return (1, out_py, f"{err_py}\n[管道启动失败: {e}]".strip(), "ok")
+
+    def _feed():
+        # 管道命令可能提前退出不读stdin → BrokenPipeError 忽略
+        try:
+            proc.stdin.write(out_py.encode("utf-8"))
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+
+    threading.Thread(target=_feed, daemon=True).start()
+    rc, out, err, status = _collect_proc_output(proc, remaining, max_output_chars)
+    errs = [e for e in (err_py.strip(), err.strip()) if e]
+    return rc, out, "\n".join(errs), status
+
+
 def _execute_segments(segments: list, timeout: int,
                       max_output_chars: int, _tool_context) -> str:
     """逐段执行 &&/|| 分割的命令，短路段跳过。
@@ -712,11 +868,20 @@ def _execute_segments(segments: list, timeout: int,
             continue
 
         # python -c 载荷绕过cmd直执行：换行/%/&/|等不再被cmd吞掉
+        # 尾随AI高频后缀（2>&1、|管道、>重定向）已剥离，一并直执行
         py = _try_extract_py_code(seg)
         if py is not None:
+            exe, flags, code_tail, spec = py
             seg_budget = remaining_timeout
             seg_start = time.time()
-            rc, out, err, status = _execute_py_direct(*py, seg_budget, max_output_chars)
+            if spec is None:
+                rc, out, err, status = _execute_py_direct(
+                    exe, flags, code_tail, seg_budget, max_output_chars
+                )
+            else:
+                rc, out, err, status = _execute_py_suffixed(
+                    exe, flags, code_tail, spec, seg_budget, max_output_chars
+                )
             seg_elapsed = time.time() - seg_start
             remaining_timeout = max(0, remaining_timeout - seg_elapsed)
 
