@@ -1,6 +1,7 @@
 """Shell工具 —— 纯管道，AI写什么就执行什么
 
 Windows用 cmd.exe 子进程执行（shell=True），Linux/macOS用bash -c。
+Windows下 python -c 载荷绕过cmd直接执行（多行/%/&/|等无需转义，见 _try_extract_py_code）。
 AI自己负责写正确语法，我们只管送达和返回。
 """
 
@@ -25,6 +26,41 @@ _RE_DELETE = re.compile(
 # 匹配 git 命令的简单正则（出现 git 即命中）
 _RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
 
+# 识别 `python -c "code"` 形态（py/python3/pythonw及全路径），用于绕过cmd直执行。
+# exe: 解释器名或路径（可带盘符/空格，不可带引号）；flags: -c 前的真实旗标
+# （排除 -c/-m 自身及引号开头项）；tail: -c 后的整段载荷（re.S 允许多行）。
+_RE_PY_C_DIRECT = re.compile(
+    r"^(?i:(?P<exe>(?:[A-Za-z]:)?[\w.\\/ -]*?py(?:thon)?\d*(?:w)?(?:\.exe)?))"
+    r"(?P<flags>(?:\s+(?:-(?!c\b|m\b)\S+|[^\s\"-]\S+))*)\s+-c\s+(?P<tail>.+)$",
+    re.S,
+)
+
+
+def _try_extract_py_code(seg: str):
+    """识别 `python -c "code"` 形态的段。命中返回 (exe, flags, tail)，否则 None。
+
+    仅当 -c 后整段为双引号包裹（无重定向/追加参数等cmd特性）、解释器可解析
+    且实为 .exe 时走直执行路径；其余一律回退 cmd 原路径，零回归。
+    """
+    m = _RE_PY_C_DIRECT.match(seg)
+    if not m:
+        return None
+    exe, flags, tail = m.group("exe"), m.group("flags"), m.group("tail")
+    tail = tail.strip()
+    if len(tail) < 2 or not (tail.startswith('"') and tail.endswith('"')):
+        return None
+    import shutil
+    resolved = shutil.which(exe)
+    if resolved is None:
+        return None
+    base = os.path.splitext(os.path.basename(resolved))[0].lower()
+    if not re.fullmatch(r"py(?:thon)?\d*(?:w)?", base):
+        return None  # 非python解释器（如 spy.exe 等误命中）→ 交给cmd
+    ext = os.path.splitext(resolved)[1].lower()
+    if ext not in ("", ".exe"):
+        return None  # .bat垫片等 → 交给cmd处理
+    return exe, flags, tail
+
 # 子进程环境变量：强制 UTF-8 编码，解决 Windows 下 Python print emoji 等
 # Unicode 字符在 GBK 代码页下报 UnicodeEncodeError 的问题
 _utf8_env = os.environ.copy()
@@ -44,7 +80,10 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Shell",
-        "description": f"本地Shell — 在{_PLATFORM_LABEL}执行命令。",
+        "description": (
+            f"本地Shell — 在{_PLATFORM_LABEL}执行命令。"
+            "Windows下 python -c 载荷绕过cmd直接执行：多行、%、&、|、引号等字符原样传给解释器，无需转义；其余命令仍按cmd语法。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -287,6 +326,7 @@ def execute(
     Returns:
         stdout + stderr + 退出码
     """
+    global _interrupted  # 函数内多分支读写该标志，统一在函数级声明
     # ── 安全检查：删除命令和git命令根据配置决定是否需要确认 ──
     need_confirm = False
     tc = _tool_context
@@ -321,6 +361,9 @@ def execute(
     # Windows: cmd /c 子进程（stdin 继承 TTY，避免外部工具因管道 stdin 阻塞）
     # ═════════════════════════════════════════════════════════════
     if sys.platform == "win32":
+        # 入口清零：上轮残留的ESC中断标志不污染本轮（覆盖单段/多段全部子路径）
+        _interrupted = False
+
         # cd 命令：同步更新 Python 进程的 CWD（供 Read/Glob 等工具使用）
         if _is_cd_command(command):
             path = _extract_cd_path(command)
@@ -341,6 +384,12 @@ def execute(
                 _execute_segments(segments, timeout, max_output_chars, _tool_context),
                 command,
             )
+
+        # python -c "code" 形态：绕过cmd直执行，多行/%/&/|等原样传给解释器
+        py = _try_extract_py_code(segments[0][1])
+        if py is not None:
+            rc, out, err, status = _execute_py_direct(*py, timeout, max_output_chars)
+            return _format_result(rc, out, err, status, timeout, max_output_chars)
 
         return _append_cd_hint(
             _execute_win32(command, timeout, max_output_chars), command
@@ -389,7 +438,8 @@ def execute(
         )
     except FileNotFoundError as e:
         return f"[错误: Shell未找到: {e}]"
-    except OSError as e:
+    except (OSError, ValueError) as e:
+        # ValueError: 命令含NUL等非法字符时 Popen 拒绝启动
         return f"[错误: 启动失败: {e}]"
 
     with _active_proc_lock:
@@ -419,7 +469,6 @@ def execute(
         for t in (t_out, t_err):
             t.start()
 
-        global _interrupted
         _interrupted = False  # 入口清零：上轮残留的中断标志不污染本轮
         deadline = time.time() + timeout
         timed_out = False
@@ -483,26 +532,15 @@ def execute(
             _active_proc = None
 
 
-def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
-    """Windows: shell=True 起子进程。cmd 交互式解析（引号按用户预期处理），
-    stdin 继承控制台（避免 eza 等工具因管道 stdin 阻塞）。"""
-    global _interrupted
-    try:
-        proc = subprocess.Popen(
-            command,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=os.getcwd(),
-            env=_utf8_env,
-        )
-    except FileNotFoundError as e:
-        return f"[错误: cmd.exe未找到: {e}]"
-    except OSError as e:
-        return f"[错误: 启动失败: {e}]"
+def _collect_proc_output(proc: subprocess.Popen, timeout: int, max_output_chars: int):
+    """等待子进程并收集输出（读线程 + 超时/ESC中断 + 进程树杀）。
+
+    返回 (returncode, stdout_text, stderr_text, status)，
+    status: 'ok' | 'timeout' | 'interrupt'（超时/中断时已杀进程树）。
+    """
+    global _active_proc, _interrupted
 
     with _active_proc_lock:
-        global _active_proc
         _active_proc = proc
 
     try:
@@ -528,7 +566,6 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
         for t in (t_out, t_err):
             t.start()
 
-        _interrupted = False  # 入口清零：上轮残留的中断标志不污染本轮
         deadline = time.time() + timeout
         timed_out = False
         was_interrupted = False
@@ -543,7 +580,7 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
                 break
             time.sleep(0.05)
 
-        # 先杀进程树再收尾输出（与 Linux 路径一致）：保证"已终止"语义真实
+        # 先杀进程树再收尾输出："超时/中断"的语义是命令已被终止
         if was_interrupted or timed_out:
             _kill_proc_tree(proc)
             proc.wait(timeout=5)
@@ -551,42 +588,88 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
         for t in (t_out, t_err):
             t.join(timeout=5.0)
 
-        stdout = b"".join(stdout_chunks)
-        stderr = b"".join(stderr_chunks)
+        out = _decode_output(b"".join(stdout_chunks))
+        err = _decode_output(b"".join(stderr_chunks))
 
         if was_interrupted:
-            parts = []
-            out = _decode_output(stdout)
-            if out.strip():
-                parts.append(out.strip())
-            err = _decode_output(stderr)
-            if err.strip():
-                parts.append(f"[stderr]\n{err.strip()}")
-            parts.append("[用户中断]")
-            return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
-
+            return proc.returncode, out, err, "interrupt"
         if timed_out:
-            parts = []
-            out = _decode_output(stdout)
-            if out.strip():
-                parts.append(out.strip())
-            err = _decode_output(stderr)
-            if err.strip():
-                parts.append(f"[stderr]\n{err.strip()}")
-            parts.append(f"[超时: 命令执行超过{timeout:.0f}秒，已终止]")
-            return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
-
-        parts = [f"[exit code: {proc.returncode}]"]
-        out = _decode_output(stdout)
-        if out.strip():
-            parts.append(out.strip())
-        err = _decode_output(stderr)
-        if err.strip():
-            parts.append(f"[stderr]\n{err.strip()}")
-        return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
+            return proc.returncode, out, err, "timeout"
+        return proc.returncode, out, err, "ok"
     finally:
         with _active_proc_lock:
             _active_proc = None
+
+
+def _format_result(rc: int, out: str, err: str, status: str,
+                   timeout: int, max_output_chars: int) -> str:
+    """把 _collect_proc_output 的结果组装成统一输出（与历史格式一致）。"""
+    if status == "interrupt":
+        parts = []
+        if out.strip():
+            parts.append(out.strip())
+        if err.strip():
+            parts.append(f"[stderr]\n{err.strip()}")
+        parts.append("[用户中断]")
+    elif status == "timeout":
+        parts = []
+        if out.strip():
+            parts.append(out.strip())
+        if err.strip():
+            parts.append(f"[stderr]\n{err.strip()}")
+        parts.append(f"[超时: 命令执行超过{timeout:.0f}秒，已终止]")
+    else:
+        parts = [f"[exit code: {rc}]"]
+        if out.strip():
+            parts.append(out.strip())
+        if err.strip():
+            parts.append(f"[stderr]\n{err.strip()}")
+    return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
+
+
+def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
+    """Windows: shell=True 起子进程。cmd 交互式解析（引号按用户预期处理），
+    stdin 继承控制台（避免 eza 等工具因管道 stdin 阻塞）。"""
+    try:
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=os.getcwd(),
+            env=_utf8_env,
+        )
+    except FileNotFoundError as e:
+        return f"[错误: cmd.exe未找到: {e}]"
+    except (OSError, ValueError) as e:
+        # ValueError: 命令行含NUL等非法字符时 Popen 拒绝启动
+        return f"[错误: 启动失败: {e}]"
+
+    rc, out, err, status = _collect_proc_output(proc, timeout, max_output_chars)
+    return _format_result(rc, out, err, status, timeout, max_output_chars)
+
+
+def _execute_py_direct(exe: str, flags: str, tail: str,
+                       timeout: int, max_output_chars: int):
+    """绕过cmd直接CreateProcess执行 python -c 载荷（shell=False）。
+
+    载荷由 CommandLineToArgvW 规则解析：双引号内的换行/%/&/|/<等一律字面
+    传给解释器，从根上规避 cmd 吞多行、改写特殊字符的问题。
+    返回 (rc, out, err, status)，格式与 _collect_proc_output 一致。
+    """
+    try:
+        proc = subprocess.Popen(
+            f'"{exe}"{flags} -c {tail}',
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=os.getcwd(),
+            env=_utf8_env,
+        )
+    except (OSError, ValueError) as e:
+        # ValueError: 载荷含NUL等非法字符时 Popen 拒绝启动
+        return (1, "", f"启动失败: {e}", "ok")
+    return _collect_proc_output(proc, timeout, max_output_chars)
 
 
 def _execute_segments(segments: list, timeout: int,
@@ -628,6 +711,40 @@ def _execute_segments(segments: list, timeout: int,
                     prev_rc = 1
             continue
 
+        # python -c 载荷绕过cmd直执行：换行/%/&/|等不再被cmd吞掉
+        py = _try_extract_py_code(seg)
+        if py is not None:
+            seg_budget = remaining_timeout
+            seg_start = time.time()
+            rc, out, err, status = _execute_py_direct(*py, seg_budget, max_output_chars)
+            seg_elapsed = time.time() - seg_start
+            remaining_timeout = max(0, remaining_timeout - seg_elapsed)
+
+            if status == "interrupt":
+                was_interrupted = True
+                break
+            if status == "timeout":
+                parts = [f"[超时: 命令执行超过{max(seg_elapsed, 1.0):.1f}秒，已终止]"]
+                if out.strip():
+                    parts.append(out.strip())
+                if err.strip():
+                    parts.append(f"[stderr]\n{err.strip()}")
+                all_parts.append("\n".join(parts))
+                prev_rc = -1
+                break
+            # 与shell单段一致：成功段不输出[exit code: 0]，失败段保留退出码
+            parts = []
+            if rc != 0:
+                parts.append(f"[exit code: {rc}]")
+            if out.strip():
+                parts.append(out.strip())
+            if err.strip():
+                parts.append(f"[stderr]\n{err.strip()}")
+            if parts:
+                all_parts.append("\n".join(parts))
+            prev_rc = rc
+            continue
+
         # 执行单段（Popen + 进程树杀，与 _execute_win32 行为统一）
         seg_budget = remaining_timeout
         seg_start = time.time()
@@ -641,7 +758,8 @@ def _execute_segments(segments: list, timeout: int,
                 start_new_session=True,
                 env=_utf8_env,
             )
-        except OSError as e:
+        except (OSError, ValueError) as e:
+            # ValueError: 段含NUL等非法字符时 Popen 拒绝启动
             all_parts.append(f"[错误: 段{i}启动失败: {e}]")
             prev_rc = -1
             break
