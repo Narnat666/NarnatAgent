@@ -144,6 +144,10 @@ def _compile_pattern(pattern: str) -> re.Pattern[str]:
       ?   → [^/]
       [abc] 保持，[!abc] → [^abc]
       其余 → re.escape
+
+    结尾锚定 \\Z（fd 语义：起点不锚定、结尾锚定）：
+    - "*.c" 可命中任意层的 x.c（配合 search），但不会误匹配 x.c.bak
+    - "**/xxx"、"src/**/*.c" 行为不变（本就是结尾对齐）
     """
     # Windows 上 \ 是路径分隔符；Linux 上 \ 是合法文件名字符，不替换
     if os.name == "nt":
@@ -249,7 +253,14 @@ def _compile_pattern(pattern: str) -> re.Pattern[str]:
         flags = re.IGNORECASE
     else:
         flags = 0 if _pattern_has_uppercase(pattern) else re.IGNORECASE
-    return re.compile("".join(parts), flags)
+
+    # 点开头+通配（.*、.?、.[abc] 等）→ 起点锚定：
+    # search 语义下 \.[^/]* 会命中 main.py 的扩展名点，导致 .* 返回全集。
+    # AI 传 .* 的意图是"点开头的隐藏项"（fd 语义），加 ^ 锚定起点。
+    anchor_start = len(p) >= 2 and p[0] == "." and p[1] in "*?["
+    prefix = "^" if anchor_start else ""
+    # 结尾锚定：fd 语义（起点不锚定、结尾锚定），配合 search 使用
+    return re.compile(prefix + "".join(parts) + "\\Z", flags)
 
 
 # ── 目录遍历 & 匹配 ────────────────────────────────────────────
@@ -309,9 +320,9 @@ def _collect(
                         dir_rel = rel_prefix + name  # 无尾部斜杠
                         dir_rel_norm = _norm_path(dir_rel, _is_nt)
                         if single_regex is not None:
-                            dir_matched = single_regex.fullmatch(dir_rel_norm) is not None
+                            dir_matched = single_regex.search(dir_rel_norm) is not None
                         else:
-                            dir_matched = any(rx.fullmatch(dir_rel_norm) for rx in regexes)
+                            dir_matched = any(rx.search(dir_rel_norm) for rx in regexes)
 
                         if dir_matched:
                             try:
@@ -333,10 +344,10 @@ def _collect(
 
                     matched = False
                     if single_regex is not None:
-                        matched = single_regex.fullmatch(rel_match) is not None
+                        matched = single_regex.search(rel_match) is not None
                     else:
                         for rx in regexes:
-                            if rx.fullmatch(rel_match):
+                            if rx.search(rel_match):
                                 matched = True
                                 break
 
@@ -384,18 +395,17 @@ def _pattern_has_dot_component(pattern: str) -> bool:
     return any(comp.startswith(".") for comp in p.split("/") if comp)
 
 
-# ── 绝对路径 pattern 支持 ────────────────────────────────────
+def _hidden_files_hint(skip_hidden_files: bool) -> str:
+    """无匹配时的隐藏文件提示：把默认跳过规则变成可见路标，AI 无需背规则。"""
+    if not skip_hidden_files:
+        return ""
+    return "（注: 隐藏文件默认跳过；pattern中含以.开头的路径组件可匹配隐藏文件）"
 
-def _is_abs_pattern(pattern: str) -> bool:
-    """判断 pattern 是否为绝对路径形式。
-    Windows: 盘符(X:\\或X:/)或UNC(\\\\server)；POSIX: / 开头。"""
-    if os.name == "nt":
-        return bool(re.match(r"^[a-zA-Z]:[\\/]", pattern)) or pattern.startswith("\\\\")
-    return pattern.startswith("/")
 
+# ── 静态前缀拆分 ─────────────────────────────────────────────
 
 def _split_static_prefix(pattern: str) -> tuple:
-    """绝对 pattern 拆分: (静态目录, 剩余pattern)。
+    """pattern 拆分: (静态目录, 剩余pattern)。相对/绝对 pattern 统一适用。
 
     - 无通配符 → (pattern, "")，调用方做存在性检查
     - 有通配符 → 首个通配符之前最后一个路径分隔符处切分
@@ -418,57 +428,6 @@ def _split_static_prefix(pattern: str) -> tuple:
     return static_dir, pattern[sep + 1:]
 
 
-def _execute_abs_patterns(patterns: list, root: str, ignore_dirs: set,
-                          max_results: int, skip_hidden_files: bool) -> str:
-    """执行绝对路径 pattern：每个 pattern 按静态前缀拆出搜索目录后在该目录内匹配；
-    无通配符的 pattern 直接做存在性检查。多 pattern 结果合并去重，按 mtime 倒序截断。"""
-    merged: dict[str, float] = {}  # 归一化路径(/分隔) → mtime
-    total = 0
-    missing_dirs: list[str] = []
-
-    for p in patterns:
-        static_dir, rest = _split_static_prefix(p)
-        if not rest:
-            # 无通配符的绝对路径：直接存在性检查，不必遍历全树
-            target = os.path.normpath(p)
-            try:
-                st = os.stat(target)
-            except OSError:
-                continue
-            if os.path.isdir(target) or os.path.isfile(target):
-                merged.setdefault(target.replace("\\", "/"), st.st_mtime)
-                total += 1
-            continue
-        if not static_dir or not os.path.isdir(static_dir):
-            if static_dir:
-                missing_dirs.append(static_dir)
-            continue
-        res, t = _collect(static_dir, [_compile_pattern(rest)], ignore_dirs,
-                          max_results, skip_hidden_files)
-        prefix = static_dir.replace("\\", "/").rstrip("/") + "/"
-        for rel, mtime in res:
-            merged.setdefault(prefix + rel.replace("\\", "/"), mtime)
-        total += t
-
-    if not merged:
-        if missing_dirs:
-            return f"[错误: 目录不存在: {missing_dirs[0]}（当前目录: {os.getcwd()}）]"
-        return f"[无匹配（搜索目录: {root}）]"
-
-    results = sorted(merged.items(), key=lambda kv: (-kv[1], kv[0]))
-    shown = [
-        p.replace("/", os.sep) if os.sep != "/" else p
-        for p, _ in results[:max_results]
-    ]
-    output = "\n".join(shown)
-    if total > max_results:
-        output += (
-            f"\n...[已截断: 共{total}个匹配项, "
-            f"当前显示按修改时间最近的{max_results}个。增大max_results可获取完整列表]"
-        )
-    return output
-
-
 # ── 公共接口 ────────────────────────────────────────────────────
 
 DEFINITION = {
@@ -476,10 +435,11 @@ DEFINITION = {
     "function": {
         "name": "Glob",
         "description": (
-            '按模式匹配文件和目录。"*" 只匹配当前目录；"**" 递归所有子目录。'
+            '按模式匹配文件和目录。pattern匹配路径任意位置，如 "*.py" 递归匹配所有层的.py文件，'
+            '"dir/*.ext" 递归匹配 dir 下所有层的.ext（含子目录）。'
             '例："**/*.h"、"src/**/*.cpp"、"*.{docx,pdf}"。返回匹配路径，按修改时间倒序。'
-            'pattern 支持绝对路径（如 "D:\\work\\**\\*.py"，此时忽略 path 参数）。'
-            '默认跳过隐藏文件与.git/node_modules等忽略目录；pattern含以.开头的路径组件时匹配隐藏文件。'
+            'pattern 支持绝对路径（如 "D:\\work\\**\\*.py"），绝对与相对写法语义一致。'
+            '默认跳过隐藏文件与.git/node_modules等忽略目录；pattern含以.开头的路径组件时匹配隐藏文件（".*"匹配点开头的项）。'
             '（仅支持本机文件，不支持远程设备文件）'
         ),
         "parameters": {
@@ -487,7 +447,7 @@ DEFINITION = {
             "properties": {
                 "pattern": {"type": "string", "description": "Glob模式"},
                 "path": {"type": "string", "description": "搜索目录（默认当前目录）"},
-                "max_results": {"type": "integer", "description": "最大结果数（正整数，默认500）"},
+                "max_results": {"type": "integer", "description": "最大结果数（正整数，默认50）"},
             },
             "required": ["pattern"],
         },
@@ -495,11 +455,22 @@ DEFINITION = {
 }
 
 
-def execute(pattern: str, path: str = "", max_results: int = 500, _tool_context=None) -> str:
+def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=None) -> str:
+    # ── 空 pattern 拒绝：返回全集会淹没 AI（大型项目海量结果无意义）──
+    if pattern is None or not str(pattern).strip():
+        return "[错误: pattern不能为空]"
+    pattern = str(pattern).strip()
+
     root = path or os.getcwd()
     if not os.path.isdir(root):
         # 相对路径解析依赖当前目录（Shell cd会改变它），报错时带上cwd帮AI一次定位
         return f"[错误: 目录不存在: {root}（当前目录: {os.getcwd()}）]"
+
+    # AI可能传字符串类型的数值参数，统一转int（与Grep容错风格一致）
+    try:
+        max_results = int(max_results) if max_results is not None else 50
+    except (TypeError, ValueError):
+        return "[错误: max_results需为正整数]"
 
     if max_results <= 0:
         return "[错误: max_results需为正整数]"
@@ -518,26 +489,83 @@ def execute(pattern: str, path: str = "", max_results: int = 500, _tool_context=
     raw_patterns = _expand_braces(pattern)
     patterns = [_unescape_braces(p) for p in raw_patterns]
 
-    # 2. 预编译所有 pattern 为正则
-    regexes = [_compile_pattern(p) for p in patterns]
-
-    # 3. 隐藏文件过滤（对齐 fd：pattern 任意路径组件以 . 开头则不过滤隐藏文件）
+    # 2. 隐藏文件过滤（对齐 fd：pattern 任意路径组件以 . 开头则不过滤隐藏文件）
     #    注: 不能用 p.lstrip("./")——会把 ".narnat" 开头的 . 误剥离导致判断失效
     skip_hidden_files = not any(_pattern_has_dot_component(p) for p in patterns)
 
-    # 4. 绝对路径 pattern：按静态前缀定位搜索目录（否则永远匹配不上，静默返回无匹配）
-    if all(_is_abs_pattern(p) for p in patterns):
-        return _execute_abs_patterns(patterns, root, ignore_dirs,
-                                     max_results, skip_hidden_files)
+    # 3. 统一匹配（相对/绝对 pattern 语义一致，对齐 fd：起点自由、结尾锚定）
+    #    有静态前缀（如 src/*.c）→ 拆出静态目录，在其内用剩余 pattern 匹配：
+    #    src 下所有层的 .c 都能命中（AI 历史期望：LinksFPGA/*.{c,h} 想要 src 下文件）
+    #    无静态前缀（如 *.py、**/*.c）→ 在 root 内匹配
+    merged: dict[str, float] = {}   # 归一化路径(/分隔) → mtime
+    total = 0
+    missing_dirs: list[str] = []
+    root_patterns: list[str] = []
 
-    # 5. scandir 遍历 + 堆 top-K
-    results, total = _collect(root, regexes, ignore_dirs, max_results, skip_hidden_files)
+    for p in patterns:
+        static_dir, rest = _split_static_prefix(p)
+        if not rest:
+            # 无通配的路径：存在性检查（相对 root 解析），不必遍历全树
+            target = p if os.path.isabs(p) else os.path.join(root, p)
+            target = os.path.normpath(target)
+            try:
+                st = os.stat(target)
+            except OSError:
+                continue
+            if os.path.isdir(target) or os.path.isfile(target):
+                label = p if os.path.isabs(p) else os.path.relpath(target, root)
+                merged.setdefault(label.replace("\\", "/"), st.st_mtime)
+                total += 1
+            continue
+        if not static_dir:
+            # 无静态前缀 → 在 root 内匹配（合并为一次遍历）
+            root_patterns.append(p)
+            continue
+        # 静态目录解析：相对目录一律相对 root（path 参数）解析，绝对目录直接使用。
+        # 修复：此前相对目录先按 cwd 判断存在性，cwd 中存在同名目录（如 .git、..）
+        # 时会无视 path 参数去搜 cwd 的内容（搜索范围逃逸）。
+        if os.path.isabs(static_dir):
+            if not os.path.isdir(static_dir):
+                missing_dirs.append(static_dir)
+                continue
+            search_dir = static_dir
+        else:
+            joined = os.path.join(root, static_dir)
+            if not os.path.isdir(joined):
+                # 静态目录不存在 → 记录，最后报错帮 AI 一次定位（优于静默无匹配）
+                missing_dirs.append(static_dir)
+                continue
+            search_dir = joined
+        res, t = _collect(search_dir, [_compile_pattern(rest)], ignore_dirs,
+                          max_results, skip_hidden_files)
+        # 输出前缀保持 AI 写法（相对 path 的用相对、绝对用绝对；
+        # Windows 下大小写跟随 pattern 字面量，文件系统不区分大小写，路径仍有效）
+        prefix = static_dir.replace("\\", "/").rstrip("/") + "/"
+        for rel, mtime in res:
+            merged.setdefault(prefix + rel.replace("\\", "/"), mtime)
+        total += t
 
-    if not results:
+    if root_patterns:
+        res, t = _collect(root, [_compile_pattern(p) for p in root_patterns],
+                          ignore_dirs, max_results, skip_hidden_files)
+        for rel, mtime in res:
+            merged.setdefault(rel.replace("\\", "/"), mtime)
+        total += t
+
+    if not merged:
+        hint = _hidden_files_hint(skip_hidden_files)
+        if missing_dirs:
+            return f"[错误: 目录不存在: {missing_dirs[0]}（当前目录: {os.getcwd()}）]"
         # 带上实际搜索目录，帮 AI 一次定位（Shell cd 会改变当前目录，无匹配常因目录不对）
-        return f"[无匹配（搜索目录: {root}）]"
+        # 附隐藏文件提示：让静默的坑变成可见路标，AI 无需背规则
+        return f"[无匹配（搜索目录: {root}）]{hint}"
 
-    output = "\n".join(m[0] for m in results)
+    results = sorted(merged.items(), key=lambda kv: (-kv[1], kv[0]))
+    shown = [
+        p.replace("/", os.sep) if os.sep != "/" else p
+        for p, _ in results[:max_results]
+    ]
+    output = "\n".join(shown)
 
     if total > max_results:
         output += (

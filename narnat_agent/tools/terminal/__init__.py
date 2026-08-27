@@ -69,7 +69,7 @@ DEFINITION = {
                     "enum": ["connect", "exec", "input", "status", "close", "transfer"],
                     "description": "操作类型（默认exec）",
                 },
-                "host": {"type": "string", "description": "connect时填被控设备IP/域名（建立连接，连接成功后每个设备返回唯一dev编号）；exec/input/close时填dev编号（dev1..devn，也支持直接填已连接设备的IP）"},
+                "host": {"type": "string", "description": "connect时填被控设备IP/域名（建立连接，连接成功后每个设备返回唯一dev编号）；exec/input/close时填dev编号（dev1..devn）"},
                 "username": {"type": "string", "description": "SSH用户名（connect时使用）"},
                 "port": {"type": "integer", "description": "SSH端口（默认22）"},
                 "key_path": {"type": "string", "description": "SSH私钥路径（如~/.ssh/id_rsa）"},
