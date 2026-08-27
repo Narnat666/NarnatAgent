@@ -285,7 +285,7 @@ class _OpenAIBackend:
 
             while True:
                 try:
-                    chunk = chunk_queue.get(timeout=0.1)
+                    chunk = chunk_queue.get(timeout=0.05)
                 except queue.Empty:
                     if cancel_check and cancel_check():
                         return
@@ -562,7 +562,7 @@ class _AnthropicBackend:
 
             while True:
                 try:
-                    line = line_queue.get(timeout=0.1)
+                    line = line_queue.get(timeout=0.05)
                 except queue.Empty:
                     if cancel_check and cancel_check():
                         return

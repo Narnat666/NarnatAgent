@@ -131,7 +131,7 @@ class ToolDispatcher:
                             _kill_terminal_exec()
                             _kill_serial_exec()
                             break
-                        time.sleep(0.2)
+                        time.sleep(0.05)
                     if stream.cancelled:
                         break
                     try:
@@ -153,7 +153,7 @@ class ToolDispatcher:
                         _kill_terminal_exec()
                         _kill_serial_exec()
                         break
-                    done, remaining = wait(remaining, timeout=0.2, return_when=FIRST_COMPLETED)
+                    done, remaining = wait(remaining, timeout=0.05, return_when=FIRST_COMPLETED)
                     for fut in done:
                         try:
                             fut.result()
@@ -176,7 +176,7 @@ class ToolDispatcher:
                         _kill_terminal_exec()
                         _kill_serial_exec()
                         break
-                    time.sleep(0.2)
+                    time.sleep(0.05)
                 if stream.cancelled:
                     break
                 try:
@@ -226,7 +226,7 @@ class ToolDispatcher:
                         _kill_terminal_exec()
                         _kill_serial_exec()
                         break
-                    time.sleep(0.2)
+                    time.sleep(0.05)
                 if stream.cancelled:
                     return
                 try:
@@ -249,7 +249,7 @@ class ToolDispatcher:
                 _kill_terminal_exec()
                 _kill_serial_exec()
                 break
-            done, remaining = wait(remaining, timeout=0.2, return_when=FIRST_COMPLETED)
+            done, remaining = wait(remaining, timeout=0.05, return_when=FIRST_COMPLETED)
             for fut in done:
                 idx, tc_id, name = futures[fut]
                 try:

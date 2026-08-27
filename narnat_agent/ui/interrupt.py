@@ -22,6 +22,31 @@ def _try_restore_term(fd: int, settings) -> None:
         pass
 
 
+def _on_esc_detected(ctrl: "InterruptController") -> None:
+    """ESC按下后的立即动作（轮询线程内执行，全部非阻塞，像硬件中断一样）。
+
+    切断大动脉三步：set中断事件 + 关LLM HTTP连接 + 杀全部活跃子进程。
+    之后主线程无论走到哪个检查点都会立刻发现中断并返还输入界面。
+
+    三个kill函数均幂等（后台杀树/发Ctrl+C/设标志），且各自在
+    新一局execute入口清零标志，重复调用不会误伤下一局。
+    延迟导入避免 ui↔tools 模块循环依赖。
+    """
+    ctrl._interrupt.set()
+    try:
+        from ..core.interrupt import abort_request
+        from ..tools.bash import kill_active
+        from ..tools.terminal import kill_active_exec as _kill_term
+        from ..tools.serial import kill_active_exec as _kill_serial
+        abort_request()
+        kill_active()
+        _kill_term()
+        _kill_serial()
+    except Exception:
+        # 中断路径不允许异常打断流程：kill失败由主线程检查点的kill兜底
+        pass
+
+
 class InterruptController:
     """
     线程安全的 ESC/SIGINT 中断管理。
@@ -45,7 +70,8 @@ class InterruptController:
     def enter_input_mode(self) -> None:
         self._stop_poll.set()
         if self._poll_thread is not None and self._poll_thread.is_alive():
-            self._poll_thread.join(timeout=1.0)
+            # 轮询线程最慢30ms一轮；不等它同步退出，避免阻塞输入界面回归
+            self._poll_thread.join(timeout=0.2)
         self._poll_thread = None
         self._interrupt.clear()
         # signal.signal只能在主线程调用
@@ -65,7 +91,7 @@ class InterruptController:
         # 先停旧轮询线程，防止多个并行轮询线程竞争同一 _interrupt Event
         self._stop_poll.set()
         if self._poll_thread is not None and self._poll_thread.is_alive():
-            self._poll_thread.join(timeout=1.0)
+            self._poll_thread.join(timeout=0.2)
         # 每个轮询线程用自己独立的stop event，避免旧线程被新线程的clear唤醒
         self._stop_poll = threading.Event()
         self._poll_thread = threading.Thread(target=self._poll_esc,
@@ -100,10 +126,9 @@ class InterruptController:
             mode = ctypes.c_ulong()
             if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                 # 原生控制台: 使用msvcrt
-                # 清空残留输入：prompt_toolkit退出后msvcrt缓冲区可能有残留的转义序列字节
-                time.sleep(0.05)
-                while msvcrt.kbhit():
-                    msvcrt.getch()
+                # 不清空输入缓冲："回车后立即按ESC"的ESC若被清掉将无法打断。
+                # prompt_toolkit退出后的残留转义序列由轮询线程按
+                # "ESC vs 转义序列"识别逻辑自然消费（单ESC→打断，序列→吞掉）。
                 self._poll_esc_windows_native(stop, msvcrt)
             else:
                 # 非原生控制台(Windows Terminal等): 使用ReadConsoleInput
@@ -120,13 +145,19 @@ class InterruptController:
                     if ch == b'\x1b':
                         time.sleep(0.02)
                         if not msvcrt.kbhit():
-                            self._interrupt.set()
-                            from ..core.interrupt import abort_request
-                            abort_request()
+                            _on_esc_detected(self)
                             break
-                        # 转义序列，消费掉后续字符
-                        while msvcrt.kbhit():
-                            msvcrt.getch()
+                        # 转义序列，消费掉后续字符（最长CSI序列约5字节，
+                        # 限制消费上限，防止连按ESC后用户新输入被当作序列尾巴吞掉）
+                        consumed = []
+                        for _ in range(5):
+                            if not msvcrt.kbhit():
+                                break
+                            consumed.append(msvcrt.getch())
+                        if b'\x1b' in consumed:
+                            # 窗口内出现第二个ESC：用户连按ESC，立即打断
+                            _on_esc_detected(self)
+                            break
             except OSError:
                 break
             stop.wait(0.03)
@@ -177,9 +208,7 @@ class InterruptController:
                         buf[offset+10:offset+12], byteorder='little', signed=False
                     )
                     if vk_code == VK_ESCAPE:
-                        self._interrupt.set()
-                        from ..core.interrupt import abort_request
-                        abort_request()
+                        _on_esc_detected(self)
                         return
             except (OSError, ValueError):
                 break
@@ -219,17 +248,21 @@ class InterruptController:
                             time.sleep(0.02)
                             ready2, _, _ = select.select([sys.stdin], [], [], 0.01)
                             if not ready2:
-                                self._interrupt.set()
-                                from ..core.interrupt import abort_request
-                                abort_request()
+                                _on_esc_detected(self)
                                 break
-                            # 转义序列，消费掉后续字符
-                            while True:
+                            # 转义序列，消费掉后续字符（最长CSI序列约5字节，
+                            # 限制消费上限，防止用户新输入被当作序列尾巴吞掉）
+                            consumed = []
+                            for _ in range(5):
                                 ready3, _, _ = select.select(
                                     [sys.stdin], [], [], 0.005)
                                 if not ready3:
                                     break
-                                os.read(fd, 1)
+                                consumed.append(os.read(fd, 1))
+                            if b'\x1b' in consumed:
+                                # 窗口内出现第二个ESC：用户连按ESC，立即打断
+                                _on_esc_detected(self)
+                                break
                 except (OSError, ValueError):
                     break
         finally:
