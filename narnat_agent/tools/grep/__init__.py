@@ -1,12 +1,19 @@
-"""Grep工具 —— 按内容搜索代码，定位关键行"""
+"""Grep工具 —— 按内容搜索代码，定位关键行
+
+新版设计（以AI为本，零调度负担）：
+- 无 output_mode/n 参数：默认返回「文件表头(含计数) + 带行号的匹配行」，
+  与 ripgrep 的 heading 输出形态一致（AI 训练数据中最熟悉的格式）。
+- head_limit 默认 30（AI 显式传值的历史众数）。
+- 预算按文件边界生效：当前展开的文件完整输出，之后文件降级为清单
+  「文件名 (N处)」，AI 既能拿重点详情也能拿全局地图，无孤儿行。
+- path 支持数组：文件/目录可混填，按给定顺序输出，部分缺失仅警告。
+"""
 
 import fnmatch
-import io
 import os
 import re
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
 
 from ..param_utils import to_bool
 from ..glob import _expand_braces, _unescape_braces
@@ -22,7 +29,7 @@ _MAX_PATTERN_LENGTH = 4096
 # ── 单文件最大大小（100MB），超出跳过 ──
 _MAX_FILE_SIZE = 100 * 1024 * 1024
 
-# ── 超长行上限（1MB），leftover 超过此值视为二进制跳过 ──
+# ── 超长行上限（1MB），leftover 超过此值视为异常文件提前结束 ──
 _MAX_LINE_LENGTH = 1 * 1024 * 1024
 
 # ── 正则元字符集，用于判断 pattern 是否为纯文本 ──
@@ -31,6 +38,12 @@ _RE_META_CHARS = set(r".*+?[]{}()\|^$")
 # ── 二进制检测：首块中 NUL 字节阈值 ──
 _BINARY_NUL_THRESHOLD = 1
 
+# ── head_limit 默认值：AI 显式传值的历史众数（514次中132次传30）──
+_DEFAULT_HEAD_LIMIT = 30
+
+# ── 并行阈值：目录内文件数 >= 此值时启用线程池 ──
+_PARALLEL_MIN_FILES = 10
+
 DEFINITION = {
     "type": "function",
     "function": {
@@ -38,8 +51,10 @@ DEFINITION = {
         "description": (
             "正则搜索文件内容（仅支持本机文件，不支持远程设备文件）。"
             "默认跳过.git/node_modules等忽略目录。"
-            "path 支持目录或单个文件路径（直接填文件路径即只搜该文件）。"
+            "path 支持目录、单个文件，或多个路径的数组（文件/目录可混合，按给定顺序输出）。"
             "glob 支持花括号多模式（与Glob工具语法一致），如 *.{c,h}、src/**/*.{py,md}。"
+            "默认返回每个命中文件的分组结果：文件表头（含匹配计数）+ 带行号的匹配行；"
+            "匹配行累计达到head_limit后，剩余文件仅列文件表头（含计数）。"
         ),
         "parameters": {
             "type": "object",
@@ -49,25 +64,19 @@ DEFINITION = {
                     "description": "正则表达式",
                 },
                 "path": {
-                    "type": "string",
-                    "description": "搜索路径（默认当前目录）；也可直接填单个文件路径（如 D:\\work\\src\\main.c），此时只搜该文件",
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
+                    "description": "搜索路径（默认当前目录）；可填目录、单个文件，或多个路径的数组，如 [\"src/a.c\", \"include\"]",
                 },
                 "glob": {
                     "type": "string",
                     "description": "文件过滤，如*.py、src/*.c、**/*.c、*.{c,h}（花括号多模式，默认空）",
                 },
-                "output_mode": {
-                    "type": "string",
-                    "enum": ["files_with_matches", "content", "count"],
-                    "description": "输出格式（默认files_with_matches）",
-                },
                 "i": {
                     "type": "boolean",
                     "description": "是否忽略大小写（默认否）",
-                },
-                "n": {
-                    "type": "boolean",
-                    "description": "是否显示行号（content模式专用，默认是）",
                 },
                 "A": {
                     "type": "integer",
@@ -83,7 +92,7 @@ DEFINITION = {
                 },
                 "head_limit": {
                     "type": "integer",
-                    "description": "最大返回结果数（正整数，默认100）；files_with_matches/count按文件计数，content按行计数",
+                    "description": "最大返回匹配行数（正整数，默认30）；达到后剩余文件仅列文件名（含计数），增大可展开更多匹配行",
                 },
             },
             "required": ["pattern"],
@@ -114,33 +123,28 @@ def _detect_text_encoding(head: bytes) -> str:
 
 def execute(
     pattern: str,
-    path: str = "",
+    path="",
     glob: str = "",
-    output_mode: str = "files_with_matches",
     i: bool = False,
-    n: bool = True,
     A: int = 0,
     B: int = 0,
     C: int = 0,
-    head_limit: int = 100,
+    head_limit: int = _DEFAULT_HEAD_LIMIT,
     _tool_context=None,
     **kwargs,
 ) -> str:
-    # ── CLI风格参数别名兼容: -C/-B/-A/-n/-i/-head_limit → C/B/A/n/i/head_limit ──
-    # LLM训练数据中grep/ripgrep的CLI用法极常见，模型本能地传-C/-n等带横杠参数。
+    # ── CLI风格参数别名兼容: -C/-B/-A/-i/-head_limit → C/B/A/i/head_limit ──
+    # LLM训练数据中grep/ripgrep的CLI用法极常见，模型本能地传-C/-i等带横杠参数。
     # 未知的横杠参数保留原名，走下方TypeError提示有效参数，不静默吞掉错字。
     aliases = {}
     for key in list(kwargs):
-        if key.startswith("-") and key[1:] in ("i", "n", "A", "B", "C", "head_limit"):
+        if key.startswith("-") and key[1:] in ("i", "A", "B", "C", "head_limit"):
             aliases[key[1:]] = kwargs.pop(key)
     if kwargs:
         raise TypeError(f"got an unexpected keyword argument '{next(iter(kwargs))}'")
-    # 显式传参优先，别名仅补默认值（head_limit默认100无法区分"未传"与"传100"，直接覆盖）
+    # 显式传参优先，别名仅补默认值（head_limit无法区分"未传"与"传默认值"，直接覆盖）
     if "i" in aliases and not i:
         i = aliases["i"]
-    # n默认已改为True，别名必须无条件覆盖（AI传"-n": false 要能关掉行号）
-    if "n" in aliases:
-        n = aliases["n"]
     if "A" in aliases and not A:
         A = aliases["A"]
     if "B" in aliases and not B:
@@ -155,7 +159,7 @@ def execute(
         A = int(A) if A is not None else 0
         B = int(B) if B is not None else 0
         C = int(C) if C is not None else 0
-        head_limit = int(head_limit) if head_limit is not None else 100
+        head_limit = int(head_limit) if head_limit is not None else None
     except (TypeError, ValueError):
         return "[错误: A/B/C/head_limit需为整数]"
 
@@ -163,16 +167,7 @@ def execute(
     if len(pattern) > _MAX_PATTERN_LENGTH:
         return f"[错误: 正则表达式过长（>{_MAX_PATTERN_LENGTH}字符），拒绝执行以防ReDoS]"
 
-    # ── output_mode 运行时校验 ──
-    if output_mode not in ("files_with_matches", "content", "count"):
-        return f"[错误: 无效的 output_mode: {output_mode}]"
-
-    flags = 0
-    # 归一化布尔参数: LLM 偶发传 "false"/"true" 字符串
-    if to_bool(i):
-        flags |= re.IGNORECASE
-    n = to_bool(n)
-
+    flags = re.IGNORECASE if to_bool(i) else 0
     try:
         regex = re.compile(pattern, flags)
     except re.error as e:
@@ -185,54 +180,78 @@ def execute(
     if head_limit is not None and head_limit <= 0:
         return "[错误: head_limit需为正整数]"
 
-    root = path or os.getcwd()
-    if os.path.isfile(root):
-        return _search_single_file(root, regex, output_mode, n, A, B, head_limit)
-    if not os.path.isdir(root):
-        # 相对路径解析依赖当前目录（Shell cd会改变它），报错时带上cwd帮AI一次定位
-        return f"[错误: 路径不存在: {root}（当前目录: {os.getcwd()}）]"
+    fast_searcher = _make_fast_searcher(regex.pattern, bool(flags & re.IGNORECASE))
 
-    # ignore_dirs 合并而非覆盖
+    # ── path 归一化为列表（单值/数组均可），保持 AI 给定的顺序 ──
+    paths = path if isinstance(path, (list, tuple)) else [path]
+    if not paths or all(p is None for p in paths):
+        paths = [""]
+
     ignore_dirs = _DEFAULT_IGNORE_DIRS.copy()
     if _tool_context and _tool_context.ignore_dirs:
         ignore_dirs |= set(_tool_context.ignore_dirs)
 
-    file_matches, limit_hit = _search_files(root, regex, glob, output_mode, n, A, B, head_limit, ignore_dirs)
-    return _format_results(file_matches, output_mode, head_limit, limit_hit, root)
+    # ── 收集搜索目标 (target, label, is_file)：去重、缺失警告但不中断 ──
+    warnings = []
+    entries = []
+    seen = set()
+    cwd = os.getcwd()
+    for raw in paths:
+        if raw is None:
+            continue
+        p = str(raw).strip()
+        if not p:
+            p = cwd
+        if os.path.isfile(p):
+            key = os.path.normcase(os.path.abspath(p))
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append((p, p, True))
+        elif os.path.isdir(p):
+            key = os.path.normcase(os.path.abspath(p))
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append((p, p, False))
+        else:
+            warnings.append(p)
 
+    if not entries:
+        msg = "[无匹配]"
+        if warnings:
+            head = "、".join(warnings[:5]) + ("等" if len(warnings) > 5 else "")
+            msg = f"路径不存在，已跳过: {head}\n{msg}"
+        return msg
 
-def _format_results(file_matches, output_mode, head_limit, limit_hit=False, search_dir=""):
-    """格式化输出结果。limit_hit=True表示引擎因head_limit提前停止，
-    content模式也需提示截断，避免AI把部分结果当作全部结果。
-    search_dir: 无匹配时附带搜索目录（Shell cd会改变当前目录，
-    与Glob/Read的报错风格对齐，帮AI一次定位"搜了哪里"）。"""
+    # ── 全局预算上下文（跨所有 path 项共享）──
+    ctx = {"expanded": 0, "limit_hit": False, "seen_files": set()}
     results = []
-    truncated = False
-    no_match = f"[无匹配（搜索目录: {search_dir}）]" if search_dir else "[无匹配]"
+    for target, label, is_file in entries:
+        _search_target(target, label, is_file, regex, fast_searcher,
+                       glob, A, B, head_limit, ignore_dirs, results, ctx)
 
-    if output_mode == "files_with_matches":
-        for rel_path in file_matches:
-            results.append(rel_path)
-            if head_limit is not None and len(results) >= head_limit:
-                truncated = True
-                break
-    elif output_mode == "count":
-        for rel_path, count in file_matches:
-            results.append(f"{rel_path}:{count}")
-            if head_limit is not None and len(results) >= head_limit:
-                truncated = True
-                break
-    else:
-        # content 模式：streaming 引擎保证匹配行数 ≤ head_limit，
-        # 但命中上限时须显式提示（此前静默丢弃其余匹配，AI会误以为只有这些结果）
-        output = "\n".join(file_matches) if file_matches else no_match
-        if limit_hit:
-            output += f"\n...[已截断: 达到head_limit({head_limit})，可能还有更多匹配。增大head_limit可获取完整结果]"
-        return output
+    # ── 无匹配：带搜索范围帮 AI 定位（Shell cd 会改变 cwd）──
+    if not results:
+        if len(entries) == 1:
+            target_label, is_file = entries[0][1], entries[0][2]
+            no_match = "[无匹配]" if is_file else f"[无匹配（搜索目录: {target_label}）]"
+        else:
+            names = "、".join(e[1] for e in entries[:3])
+            if len(entries) > 3:
+                names += "等"
+            no_match = f"[无匹配（搜索范围: {names}）]"
+        if warnings:
+            head = "、".join(warnings[:5]) + ("等" if len(warnings) > 5 else "")
+            return f"路径不存在，已跳过: {head}\n{no_match}"
+        return no_match
 
-    output = "\n".join(results) if results else no_match
-    if truncated or limit_hit:
-        output += f"\n...[已截断: 超出head_limit({head_limit})限制]"
+    output = "\n".join(results)
+    if ctx["limit_hit"]:
+        output += f"\n...[已截断: 达到head_limit({head_limit})，剩余文件仅列文件名（含计数）。增大head_limit可展开更多匹配行]"
+    if warnings:
+        head = "、".join(warnings[:5]) + ("等" if len(warnings) > 5 else "")
+        output = f"路径不存在，已跳过: {head}\n{output}"
     return output
 
 
@@ -273,7 +292,7 @@ def _make_fast_searcher(pattern: str, ignore_case: bool):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 二进制检测（内联在 streaming 中，避免双重 I/O）
+# 二进制检测（内联在扫描中，避免双重 I/O）
 # ═══════════════════════════════════════════════════════════════
 
 def _check_binary_first_chunk(first_chunk: bytes) -> bool:
@@ -282,108 +301,57 @@ def _check_binary_first_chunk(first_chunk: bytes) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 滚动缓冲流式搜索（核心引擎）
+# 滚动缓冲流式扫描（核心引擎）
 # ═══════════════════════════════════════════════════════════════
 
-def _search_file_streaming(
-    file_path: str,
-    path_label: str,
-    regex,
-    fast_searcher,
-    output_mode: str,
-    show_n: bool,
-    A: int,
-    B: int,
-    head_limit,
-    counter: dict,
-    lock,
-):
+def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
+    """全扫单个文件，返回 (count, blocks, in_file_trunc) 或 None（跳过）。
+
+    - count: 该文件全部匹配数（准确计数，供表头显示）
+    - blocks: [ [before_lines, match_line, after_lines] ]，行元素为 (line_num, text)
+    - in_file_trunc: 该文件还有未收集进 blocks 的匹配（collect_budget 受限）
+    - collect_budget: 最多收集多少个匹配块（None=无限）；超过预算的匹配仅计数
+
+    二进制/超100MB/超长行异常的文件提前结束（与旧版语义一致）。
     """
-    使用 64KB 滚动缓冲区搜索单个文件，内存 O(1)。
-
-    二进制检测、文件大小检查均整合在此函数中，避免双重 I/O。
-
-    参数:
-        file_path:   文件绝对路径
-        path_label:  输出用的路径标签
-        regex:       编译后的正则对象
-        fast_searcher: 纯文本快速搜索函数，或 None
-        output_mode: "files_with_matches" | "count" | "content"
-        show_n:      是否显示行号
-        A:           after_context 行数
-        B:           before_context 行数
-        head_limit:  最大结果数（None=无限制，0=无结果）
-        counter:     共享计数器 {"count": int}
-        lock:        线程锁（并行模式），单线程时为 None
-
-    返回:
-        (results, match_count)
-    """
-    # ── 入口截断检查 ──
-    if head_limit is not None:
-        if lock:
-            with lock:
-                if counter["count"] >= head_limit:
-                    return [], 0
-        elif counter["count"] >= head_limit:
-            return [], 0
-
     # ── 单次 I/O：rb 打开，检查二进制，文件大小 ──
     try:
         raw_f = open(file_path, "rb")
     except (PermissionError, OSError):
-        return [], 0
+        return None
 
     try:
-        # 文件大小检查
         raw_f.seek(0, 2)  # SEEK_END
-        file_size = raw_f.tell()
-        if file_size > _MAX_FILE_SIZE:
-            return [], 0
+        if raw_f.tell() > _MAX_FILE_SIZE:
+            return None
         raw_f.seek(0)
 
-        # 二进制检测（首块）
         first_chunk = raw_f.read(_BUFFER_SIZE)
         if _check_binary_first_chunk(first_chunk):
-            return [], 0
-
-        # 编码探测（GBK回退）：GBK文件按utf-8+replace读会把中文替换为U+FFFD，
-        # 任何中文pattern都无法命中。用首块判定编码，文本打开时按正确编码解码。
+            return None
         encoding = _detect_text_encoding(first_chunk)
-
-        # 包装为文本流（从已读取的首块继续）
-        f = io.TextIOWrapper(
-            raw_f,
-            encoding="utf-8-sig",
-            errors="replace",
-            newline="",          # 不自动转换行尾，由我们手动处理 CRLF
-        )
-        # TextIOWrapper 的缓冲区需要手动喂入首块
-        # 简化方案：直接用 raw_f 的剩余数据，首块用文本方式重新解析
-        # 最稳妥的做法：关闭，重新以文本打开（首块开销可接受）
-        f.close()
-        raw_f = None
     except (PermissionError, OSError):
-        if raw_f:
-            raw_f.close()
-        return [], 0
+        return None
+    finally:
+        raw_f.close()
 
-    # 重新以文本模式打开（确保 TextIOWrapper 状态干净）
-    # 二进制首块已判定非二进制，第二次打开 I/O 可接受
-    # encoding 由首块探测得出：GBK 文件按正确编码解码，中文pattern才能命中
+    # 重新以文本模式打开（首块已判定非二进制；编码由首块探测得出，
+    # GBK 文件按正确编码解码，中文 pattern 才能命中）
     try:
         f = open(file_path, "r", encoding=encoding, errors="replace", newline="")
     except (PermissionError, OSError):
-        return [], 0
+        return None
 
-    results = []
     count = 0
-    leftover = ""                       # 跨缓冲区边界的不完整行
+    blocks = []
+    leftover = ""
     line_num = 0
-    before_window = deque()             # (line_text, line_num)，用于 before_context
-    pending_after = 0                   # 还需输出的 after_context 行数
-    last_output_line = 0                # 最后输出行号（用于 -- 分组分隔符）
+    before_window = deque()   # (line_num, line_text)，用于 before_context
+    pending = None            # 收集中的块: [before[], (match_num, match_text), after[]]
+    pending_after = 0
+    budget = collect_budget   # None = 无限
 
+    aborted = False
     try:
         while True:
             chunk = f.read(_BUFFER_SIZE)
@@ -397,9 +365,10 @@ def _search_file_streaming(
             lines = data.split("\n")
             leftover = lines.pop()
 
-            # ── 超长行防护 ──
+            # ── 超长行防护：视为异常文件，提前结束 ──
             if len(leftover) > _MAX_LINE_LENGTH:
-                return results, count
+                aborted = True
+                break
 
             for line in lines:
                 # 剥离行尾残留 \r（缓冲区恰好在 \r|\n 分裂时）
@@ -412,83 +381,37 @@ def _search_file_streaming(
                 else:
                     matched = bool(regex.search(line))
 
-                # ── files_with_matches: 找到即返回 ──
-                if output_mode == "files_with_matches":
-                    if matched:
-                        return [path_label], 1
-
-                # ── count: 仅计数 ──
-                elif output_mode == "count":
-                    if matched:
-                        count += 1
-
-                # ── content: 完整输出（含上下文）──
-                else:
-                    if matched:
-                        # ── head_limit 先检查再追加（防竞态）──
-                        if head_limit is not None:
-                            if lock:
-                                with lock:
-                                    if counter["count"] >= head_limit:
-                                        return results, count
-                                    counter["count"] += 1
-                            else:
-                                if counter["count"] >= head_limit:
-                                    return results, count
-                                counter["count"] += 1
-
-                        # ── 组分隔符 ──
-                        if last_output_line > 0:
-                            first_line = (
-                                before_window[0][1]
-                                if before_window
-                                else line_num
-                            )
-                            if last_output_line + 1 < first_line:
-                                results.append("--")
-
-                        # 输出 before_context
-                        for bline, bline_num in before_window:
-                            if show_n:
-                                results.append(
-                                    f"{path_label}-{bline_num}-{bline}"
-                                )
-                            else:
-                                results.append(f"{path_label}-{bline}")
-                            last_output_line = bline_num
+                if matched:
+                    count += 1
+                    # 新匹配打断尚未收满 after 的块
+                    if pending is not None:
+                        blocks.append(pending)
+                        pending = None
+                        pending_after = 0
+                    if budget is None or len(blocks) < budget:
+                        pending = [list(before_window), (line_num, line), []]
                         before_window.clear()
-
-                        # 输出匹配行
-                        if show_n:
-                            results.append(
-                                f"{path_label}:{line_num}:{line}"
-                            )
-                        else:
-                            results.append(f"{path_label}:{line}")
-
-                        count += 1
-                        last_output_line = line_num
                         pending_after = A
-
-                    elif pending_after > 0:
-                        # after_context 行
-                        if show_n:
-                            results.append(
-                                f"{path_label}-{line_num}-{line}"
-                            )
-                        else:
-                            results.append(f"{path_label}-{line}")
-                        last_output_line = line_num
-                        pending_after -= 1
                     else:
-                        # 维护 before_context 滑动窗口
-                        if B > 0:
-                            before_window.append((line, line_num))
-                            if len(before_window) > B:
-                                before_window.popleft()
+                        # 预算耗尽，仅计数
+                        before_window.clear()
+                        pending_after = 0
+                elif pending_after > 0:
+                    # after_context 行
+                    pending[2].append((line_num, line))
+                    pending_after -= 1
+                    if pending_after == 0:
+                        blocks.append(pending)
+                        pending = None
+                else:
+                    # 维护 before_context 滑动窗口（仅在收集中）
+                    if B > 0 and (budget is None or len(blocks) < budget):
+                        before_window.append((line_num, line))
+                        if len(before_window) > B:
+                            before_window.popleft()
 
         # ── 处理文件末尾的不完整行 ──
-        if leftover and len(leftover) < _MAX_LINE_LENGTH:
+        if leftover and not aborted and len(leftover) < _MAX_LINE_LENGTH:
             leftover = leftover.rstrip("\r")
             line_num += 1
             if fast_searcher:
@@ -496,90 +419,155 @@ def _search_file_streaming(
             else:
                 matched = bool(regex.search(leftover))
             if matched:
-                if output_mode == "files_with_matches":
-                    return [path_label], 1
-                elif output_mode == "count":
-                    count += 1
-                else:  # content
-                    if head_limit is not None:
-                        if lock:
-                            with lock:
-                                if counter["count"] >= head_limit:
-                                    return results, count
-                                counter["count"] += 1
-                        else:
-                            if counter["count"] >= head_limit:
-                                return results, count
-                            counter["count"] += 1
+                count += 1
+                if pending is not None:
+                    blocks.append(pending)
+                    pending = None
+                if budget is None or len(blocks) < budget:
+                    blocks.append([list(before_window), (line_num, leftover), []])
 
-                    if last_output_line > 0:
-                        first_line = (
-                            before_window[0][1]
-                            if before_window
-                            else line_num
-                        )
-                        if last_output_line + 1 < first_line:
-                            results.append("--")
-
-                    for bline, bline_num in before_window:
-                        if show_n:
-                            results.append(
-                                f"{path_label}-{bline_num}-{bline}"
-                            )
-                        else:
-                            results.append(f"{path_label}-{bline}")
-                    if show_n:
-                        results.append(
-                            f"{path_label}:{line_num}:{leftover}"
-                        )
-                    else:
-                        results.append(f"{path_label}:{leftover}")
-                    count += 1
-
+        # 收尾：after 未收满的块照常入列（文件末尾 after 行数不足是正常现象）
+        if pending is not None:
+            blocks.append(pending)
+            pending = None
     finally:
         f.close()
 
-    return results, count
+    return count, blocks, count > len(blocks)
 
 
 # ═══════════════════════════════════════════════════════════════
-# 单文件搜索（委托给流式引擎）
+# 结果输出 — ripgrep heading 形态 + 预算文件边界降级
 # ═══════════════════════════════════════════════════════════════
 
-def _search_single_file(file_path, regex, output_mode, show_n, A, B, head_limit):
-    """在单个文件内执行搜索（流式读取，内存 O(1)）。"""
-    fast_searcher = _make_fast_searcher(
-        regex.pattern, bool(regex.flags & re.IGNORECASE)
-    )
-    counter = {"count": 0}
-    results, count = _search_file_streaming(
-        file_path, file_path, regex, fast_searcher,
-        output_mode, show_n, A, B, head_limit,
-        counter, None,
-    )
+def _emit_file(label, count, blocks, in_file_trunc, head_limit, results, ctx):
+    """按预算把单个文件的结果追加到 results（共享顺序/预算上下文）。
 
-    if output_mode == "files_with_matches":
-        return results[0] if results else "[无匹配]"
-    elif output_mode == "count":
-        return f"{file_path}:{count}" if count else "[无匹配]"
+    规则：
+    - 预算已耗尽 → 该文件仅输出清单行「label (N处)」（表头计数准确，来自全扫）
+    - 否则展开：表头 + 全部匹配块（含上下文）；当前文件一旦展开即完整，
+      文件边界生效，不产生无主行号
+    """
+    if count == 0:
+        return
+
+    budget = head_limit
+    if budget is not None and ctx["expanded"] >= budget:
+        # 清单行紧凑排列（类 files_with_matches 形态），不空行分隔
+        results.append(f"{label} ({count}处)")
+        ctx["limit_hit"] = True
+        return
+
+    if results:
+        results.append("")   # 展开组间空行分隔（rg heading 风格）
+
+    results.append(f"{label} ({count}处):")
+    last_line = 0
+    for before, (mnum, mtext), after in blocks:
+        first_line = before[0][0] if before else mnum
+        if last_line > 0 and last_line + 1 < first_line:
+            results.append("--")
+        for bnum, btext in before:
+            results.append(f"{bnum}-{btext}")
+            last_line = bnum
+        results.append(f"{mnum}:{mtext}")
+        last_line = mnum
+        for anum, atext in after:
+            results.append(f"{anum}-{atext}")
+            last_line = anum
+        ctx["expanded"] += 1
+
+    if in_file_trunc:
+        remaining = count - len(blocks)
+        results.append(f"...[该文件其余{remaining}处匹配未展开: 已达head_limit({budget})。增大head_limit或缩小搜索范围查看其余]")
+
+
+# ═══════════════════════════════════════════════════════════════
+# 目标搜索 — 文件/目录统一入口
+# ═══════════════════════════════════════════════════════════════
+
+def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
+                   A, B, head_limit, ignore_dirs, results, ctx):
+    """搜索一个目标（文件或目录），结果按预算追加到 results。
+
+    目录内文件按相对路径排序（确定性输出）；文件数 >= 10 并行扫描。
+    """
+    if is_file:
+        file_items = [(target, label)]
     else:
-        output = "\n".join(results) if results else "[无匹配]"
-        if head_limit is not None and counter["count"] >= head_limit and results:
-            output += f"\n...[已截断: 达到head_limit({head_limit})，可能还有更多匹配。增大head_limit可获取完整结果]"
-        return output
+        file_items = []
+        for dirpath, dirnames, filenames in os.walk(target):
+            dirnames[:] = [d for d in dirnames if d not in ignore_dirs]
+            for fname in filenames:
+                full = os.path.join(dirpath, fname)
+                rel = os.path.relpath(full, target)
+                if glob_filter and not _match_glob(fname, rel, glob_filter):
+                    continue
+                file_items.append((full, rel))
+        file_items.sort(key=lambda t: t[1])
+
+    if not file_items:
+        return
+
+    use_parallel = len(file_items) >= _PARALLEL_MIN_FILES
+
+    if use_parallel:
+        # 并行下无法预知每个文件轮到时的剩余预算，统一按 head_limit 收集，
+        # 输出阶段按顺序消费预算（收集超量部分丢弃，代价可控）
+        per_file_budget = head_limit
+        collected = {}
+        worker_count = min(os.cpu_count() or 4, 12)
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {}
+            for full, rel in file_items:
+                key = os.path.normcase(os.path.abspath(full))
+                if key in ctx["seen_files"]:
+                    continue
+                ctx["seen_files"].add(key)
+                fut = executor.submit(_scan_file, full, regex, fast_searcher, A, B, per_file_budget)
+                futures[fut] = rel
+            for fut in as_completed(futures):
+                rel = futures[fut]
+                try:
+                    collected[rel] = fut.result()
+                except Exception:
+                    collected[rel] = None
+        for full, rel in file_items:
+            item = collected.get(rel)
+            if item is None:
+                continue
+            count, blocks, in_file_trunc = item
+            _emit_file(rel, count, blocks, in_file_trunc, head_limit, results, ctx)
+    else:
+        for full, rel in file_items:
+            key = os.path.normcase(os.path.abspath(full))
+            if key in ctx["seen_files"]:
+                continue
+            ctx["seen_files"].add(key)
+            item = _scan_file(full, regex, fast_searcher, A, B,
+                              _remaining_budget(head_limit, ctx))
+            if item is None:
+                continue
+            count, blocks, in_file_trunc = item
+            _emit_file(rel, count, blocks, in_file_trunc, head_limit, results, ctx)
+
+
+def _remaining_budget(head_limit, ctx):
+    """当前剩余可展开的匹配行数（None = 无限）。"""
+    if head_limit is None:
+        return None
+    return head_limit - ctx["expanded"]
 
 
 # ═══════════════════════════════════════════════════════════════
-# 并行文件遍历 + 流式搜索
+# glob 过滤 — 与 Glob 工具语义对齐
 # ═══════════════════════════════════════════════════════════════
 
 def _match_glob(fname: str, rel: str, glob_filter: str) -> bool:
     """glob 过滤：支持纯文件名或相对路径（含通配符），与 Glob 工具语义对齐。
 
     - 匹配对象为相对路径或纯文件名，二者任一命中即通过；
-    - 花括号展开与 Glob 工具一致（复用 _expand_braces/_unescape_braces）：
-      AI 在 Glob 学到的写法（如 {a,b}/x.py）在 Grep 中同样有效，
-      否则同一 glob 语法在两个工具间行为分裂，Grep 静默"[无匹配]"会误导 AI；
+    - 花括号展开与 Glob 工具一致（复用 _expand_braces/_unescape_braces）；
     - Windows 下正反斜杠等价（glob 与 rel 均归一化为 /），且大小写不敏感
       （fnmatch 内部经 normcase，与 Windows 文件系统语义一致；POSIX 下 normcase 恒等）；
     - **/ 前缀可匹配零层目录（即根目录下的文件）。
@@ -598,124 +586,3 @@ def _match_glob(fname: str, rel: str, glob_filter: str) -> bool:
         fnmatch.fnmatch(fname, p) or fnmatch.fnmatch(rel, p)
         for p in patterns
     )
-
-
-def _search_files(root, regex, glob_filter, output_mode, show_n, A, B, head_limit, ignore_dirs):
-    """遍历文件执行搜索（并行 + 流式读取）。"""
-    # ── 收集 + 排序（保证遍历顺序确定）──
-    file_list = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in ignore_dirs]
-        for fname in filenames:
-            full = os.path.join(dirpath, fname)
-            rel = os.path.relpath(full, root)
-            if glob_filter and not _match_glob(fname, rel, glob_filter):
-                continue
-            file_list.append((full, rel))
-
-    if not file_list:
-        return [], False
-
-    # 文件名排序，保证遍历顺序确定
-    file_list.sort(key=lambda t: t[1])
-
-    # ── 预构建快速搜索函数 ──
-    fast_searcher = _make_fast_searcher(
-        regex.pattern, bool(regex.flags & re.IGNORECASE)
-    )
-
-    # ── 文件数 >= 10 时启用并行 ──
-    worker_count = min(os.cpu_count() or 4, 12)
-    use_parallel = len(file_list) >= 10
-
-    results = []
-    counter = {"count": 0}
-    lock = Lock() if use_parallel else None
-
-    if use_parallel:
-        file_index = {rel_path: i for i, (_, rel_path) in enumerate(file_list)}
-
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = {}
-            for full_path, rel_path in file_list:
-                if head_limit is not None and counter["count"] >= head_limit:
-                    break
-                fut = executor.submit(
-                    _search_file_streaming,
-                    full_path, rel_path, regex, fast_searcher,
-                    output_mode, show_n, A, B, head_limit,
-                    counter, lock,
-                )
-                futures[fut] = rel_path
-
-            if output_mode == "content":
-                # 收集 (file_index, file_results) → 排序 → flatten
-                per_file = []
-                for fut in as_completed(futures):
-                    try:
-                        file_results, _match_count = fut.result()
-                    except Exception:
-                        continue
-                    if file_results:
-                        rel_path = futures[fut]
-                        idx = file_index.get(rel_path, 10 ** 9)
-                        per_file.append((idx, file_results))
-                per_file.sort(key=lambda t: t[0])
-                for _idx, file_results in per_file:
-                    results.extend(file_results)
-            else:
-                for fut in as_completed(futures):
-                    rel_path = futures[fut]
-                    try:
-                        file_results, match_count = fut.result()
-                    except Exception:
-                        continue
-
-                    if output_mode == "files_with_matches":
-                        if file_results:
-                            results.append(rel_path)
-                            if head_limit is not None:
-                                counter["count"] += 1
-                                if counter["count"] >= head_limit:
-                                    for f in futures:
-                                        f.cancel()
-                                    break
-                    elif output_mode == "count":
-                        if match_count:
-                            results.append((rel_path, match_count))
-                            if head_limit is not None:
-                                counter["count"] += 1
-                                if counter["count"] >= head_limit:
-                                    for f in futures:
-                                        f.cancel()
-                                    break
-
-            # 非 content 模式也需要排序
-            if output_mode == "files_with_matches":
-                results.sort(key=lambda p: file_index.get(p, 10 ** 9))
-            elif output_mode == "count":
-                results.sort(key=lambda t: file_index.get(t[0], 10 ** 9))
-    else:
-        for full_path, rel_path in file_list:
-            if head_limit is not None and counter["count"] >= head_limit:
-                break
-            file_results, match_count = _search_file_streaming(
-                full_path, rel_path, regex, fast_searcher,
-                output_mode, show_n, A, B, head_limit,
-                counter, None,
-            )
-            if output_mode == "files_with_matches":
-                if file_results:
-                    results.append(rel_path)
-                    if head_limit is not None:
-                        counter["count"] += 1
-            elif output_mode == "count":
-                if match_count:
-                    results.append((rel_path, match_count))
-                    if head_limit is not None:
-                        counter["count"] += 1
-            else:
-                results.extend(file_results)
-
-    limit_hit = head_limit is not None and counter["count"] >= head_limit
-    return results, limit_hit
