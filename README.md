@@ -2,6 +2,60 @@
 
 终端 AI 代码智能体。自主调用工具（读文件、改代码、执行命令、SSH/串口、联网搜索），支持会话探索分支、目标模式自动续跑、多模型热切换。
 
+## 快速上手
+
+### 1. 编译
+
+从源码编译为单文件二进制。
+
+**Windows**
+
+| 组件 | 版本 |
+|------|------|
+| Nuitka | 4.1.2 |
+| Python | 3.12.9 |
+| C 编译器 | MSVC cl 14.3 |
+
+```bash
+pip install nuitka==4.1.2 httpx openai paramiko prompt_toolkit zstandard
+python -m nuitka --onefile --output-dir=output --output-filename=narnat.exe \
+  --jobs=16 --lto=yes --python-flag=no_docstrings --follow-imports \
+  --include-module=openai \
+  --nofollow-import-to=tkinter --nofollow-import-to=unittest --nofollow-import-to=unittest.mock \
+  --nofollow-import-to=invoke --nofollow-import-to=test --nofollow-import-to=tests \
+  --nofollow-import-to=setuptools --nofollow-import-to=pip --nofollow-import-to=distutils \
+  main.py
+```
+
+产物 `output/narnat.exe`，约 30MB。
+
+**Ubuntu**
+
+| 组件 | 版本 |
+|------|------|
+| Nuitka | 4.1.2 |
+| Python | 3.12.9 |
+| C 编译器 | gcc 11.4.0 |
+
+```bash
+# 系统依赖
+sudo apt install -y gcc patchelf build-essential libssl-dev zlib1g-dev \
+  libbz2-dev libreadline-dev libsqlite3-dev libncursesw5-dev libgdbm-dev \
+  liblzma-dev tk-dev libffi-dev
+
+# Python 3.12.9（源码编译，不覆盖系统版本）
+cd /tmp
+wget https://npmmirror.com/mirrors/python/3.12.9/Python-3.12.9.tgz
+tar xzf Python-3.12.9.tgz && cd Python-3.12.9
+./configure --prefix=/usr/local/python3.12
+make -j$(nproc) && sudo make install
+
+# Nuitka + 依赖
+/usr/local/python3.12/bin/pip3.12 install nuitka==4.1.2 httpx openai paramiko prompt_toolkit zstandard
+```
+
+编译命令与 Windows 相同（将 `python` 替换为 `/usr/local/python3.12/bin/python3.12`），耗时约 28 分钟。产物约 35MB，仅依赖 glibc ≥ 2.35。
+
 ## 界面预览
 
 ![启动](img/登录界面.png)
