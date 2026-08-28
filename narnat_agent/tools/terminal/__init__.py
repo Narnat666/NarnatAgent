@@ -72,9 +72,7 @@ DEFINITION = {
                 "host": {"type": "string", "description": "connect时填被控设备IP/域名（建立连接，连接成功后每个设备返回唯一dev编号）；exec/input/close时填dev编号（dev1..devn）"},
                 "username": {"type": "string", "description": "SSH用户名（connect时使用）"},
                 "port": {"type": "integer", "description": "SSH端口（默认22）"},
-                "key_path": {"type": "string", "description": "SSH私钥路径（如~/.ssh/id_rsa）"},
-                "password": {"type": "string", "description": "SSH密码（不填则自动尝试密钥认证）"},
-                "sudo_password": {"type": "string", "description": "sudo密码（connect时设置，后续exec遇sudo自动注入）"},
+                "password": {"type": "string", "description": "认证凭据（connect时使用）：登录密码或私钥路径（如~/.ssh/id_rsa），不填则自动尝试默认密钥。填密码时sudo密码自动用同登录密码注入"},
                 "command": {"type": "string", "description": "执行的命令（需先设action=exec）"},
                 "input": {"type": "string", "description": "交互输入内容（需先设action=input，如sudo密码、y/n确认）。仅当有命令在等待输入时有效（通常是上个命令超时仍在后台运行）；发送 ^C 可中断仍在运行的命令；空闲终端发送会被拒绝"},
                 "timeout": {"type": "integer", "description": "命令超时秒数（正整数）。exec/input默认120，超时后命令继续后台运行，可用input应答其交互提示或^C中断；connect默认15，连不上时快速报错"},
@@ -405,13 +403,24 @@ def _connect(host: str, username: str, port: int = 22,
                 return f"[错误: 已达最大会话数({MAX_SESSIONS})，当前已连接: {active}，请先close释放]"
 
     try:
+        # password 三合一：私钥路径（~或路径分隔符开头/包含 + 文件存在）→ 密钥认证；
+        # 否则视为密码；空 → 由 paramiko 自动尝试默认密钥（look_for_keys/agent）
+        resolved_key_path = key_path or ""
+        resolved_password = password or ""
+        looks_like_path = False
+        if not resolved_key_path and resolved_password:
+            looks_like_path = resolved_password.startswith(("~", "/", "\\", ".")) or "/" in resolved_password or "\\" in resolved_password
+            if looks_like_path and os.path.isfile(os.path.expanduser(resolved_password)):
+                resolved_key_path = resolved_password
+                resolved_password = ""
+
         kwargs = {"host": host, "username": username, "port": port}
-        if key_path:
-            kwargs["key_path"] = key_path
-        if password:
-            kwargs["password"] = password
-        if sudo_password:
-            kwargs["sudo_password"] = sudo_password
+        if resolved_key_path:
+            kwargs["key_path"] = resolved_key_path
+        if resolved_password:
+            kwargs["password"] = resolved_password
+        # sudo密码默认与登录密码相同；显式传入的sudo_password优先（隐藏兼容参数）
+        kwargs["sudo_password"] = sudo_password or resolved_password
 
         kwargs["timeout"] = timeout
         session = SSHSession(**kwargs)
@@ -464,8 +473,10 @@ def _connect(host: str, username: str, port: int = 22,
     except paramiko.AuthenticationException:
         hint = ""
         if not password and not key_path:
-            hint = "。未提供password或key_path，大多数设备需要password认证，请提供password参数后重试"
-        return f"[错误: 认证失败({username}@{host})，请检查key_path或password{hint}]"
+            hint = "。未提供password，大多数设备需要密码认证，请在password参数填登录密码后重试"
+        elif looks_like_path and not os.path.isfile(os.path.expanduser(password)):
+            hint = "。password疑似私钥路径但本地文件不存在，请确认路径或改填登录密码"
+        return f"[错误: 认证失败({username}@{host})，请检查password{hint}]"
     except paramiko.SSHException as e:
         return f"[错误: SSH连接失败({username}@{host}): {e}]"
     except Exception as e:

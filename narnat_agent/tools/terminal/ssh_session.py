@@ -44,6 +44,18 @@ _RE_PASSWORD_PROMPT = re.compile(
     re.IGNORECASE,
 )
 
+# sudo 密码被拒绝的判别（覆盖主流sudo/busybox sudo文案）
+_RE_SUDO_REJECT = re.compile(
+    r"sorry.{0,30}try\s+again"
+    r"|incorrect\s+password"
+    r"|bad\s+password",
+    re.IGNORECASE,
+)
+
+# 单次读循环内自动注入尝试上限：超过后视为无法自动完成，转交AI input
+# （覆盖：多连sudo、以及不输出拒绝文案的sudo变体反复要密码的场景）
+_MAX_SUDO_INJECT_ATTEMPTS = 3
+
 # ANSI转义序列（模块级复用: _clean_output清洗 + _strip_echo判断续行）
 _ANSI_RE = re.compile(
     r'\x1b\[\??[0-9;]*[a-zA-Z]'
@@ -91,6 +103,9 @@ class SSHSession:
         self.port = port
         self._cwd = "~"
         self._sudo_password = sudo_password  # 用于自动注入sudo密码
+        # 自动注入失败后置位：本会话后续不再自动注入（sudo密码与登录密码不同时，
+        # 自动注入会反复失败并卡住命令；置位后密码提示一律转交AI用input注入）
+        self._sudo_mismatch = False
 
         # 提前创建中断标志：connect 阻塞期间 ESC 打断（kill_active_exec）会访问
         # session._interrupt，若迟至 connect 之后才创建会抛 AttributeError
@@ -529,6 +544,10 @@ class SSHSession:
         DRAIN_CONSECUTIVE_TIMEOUTS = 3
         # sudo密码注入状态: 是否已注入过(防止重复注入)
         sudo_injected = False
+        # 本次读循环内累计注入次数（限次：防反复注入卡死，超限转交AI）
+        inject_attempts = 0
+        # 最近一次注入时的输出长度：注入后无新数据时不重复评估同一旧提示
+        inject_mark_len = 0
         # 密码提示疑似时间戳: 0.0=无疑似。提示出现后需观察宽容期，避免命令自身输出含
         # "Password:"字样（如 echo "Password: x"）时被误判为真实密码提示
         prompt_suspect_ts = 0.0
@@ -593,7 +612,7 @@ class SSHSession:
             except Exception:
                 break
 
-            # sudo密码提示检测与自动注入
+            # sudo密码提示检测与自动注入（三态状态机）
             # 在try/except外每次迭代都评估：真实提示出现后通道静默，宽容期计时
             # 必须靠超时轮空迭代推进（不能只在收到新数据时评估）。
             # 真实密码提示的判别条件（三重）:
@@ -602,27 +621,60 @@ class SSHSession:
             #    命令自身输出"Password:"字样（如 echo "Password: x"）以换行结尾
             # 3. 宽容期1.5秒内哨兵未到达 —— 误报时哨兵会紧随其后出现
             # 误判会误导AI输入密码、或把已完成的命令误标为busy。
-            if not found and not sudo_injected:
+            # 注入状态机:
+            # - 未注入且未mismatch且有密码 → 自动注入
+            # - 已注入后又出提示 → 有拒绝文案则判mismatch转交AI；
+            #   无拒绝文案视为命令链中的下一个sudo，继续注入（限次）
+            # - mismatch或未设密码 → 转交AI input
+            if not found:
                 # 仅清洗尾部窗口做提示检测：全量清洗在每chunk上重复执行是O(n²)，
                 # 大输出命令（如cat大文件）会CPU飙升拖慢读取。密码提示总是出现在
                 # 输出末尾（无尾随换行），尾部窗口足够判定
                 if (not output.endswith(("\n", "\r"))
                         and _RE_PASSWORD_PROMPT.search(self._clean_output(output[-2048:]))):
-                    if prompt_suspect_ts == 0.0:
+                    # 注入后通道仍静默（无新数据）：是同一份旧提示的重复评估，跳过。
+                    # 否则sudo接受密码后命令静默运行期间，旧提示会被反复误判为新提示
+                    # 导致重复注入（密码正确场景实测会连注两次）
+                    if sudo_injected and len(output) <= inject_mark_len:
+                        pass
+                    elif prompt_suspect_ts == 0.0:
                         prompt_suspect_ts = time.time()
                     elif time.time() - prompt_suspect_ts >= 1.5:
-                        if self._sudo_password:
+                        if not sudo_injected and not self._sudo_mismatch and self._sudo_password:
                             # 自动注入: 通过channel直接写入，不经过shell命令行
                             self._channel.send(self._sudo_password + "\n")
                             sudo_injected = True
+                            inject_attempts += 1
+                            inject_mark_len = len(output)
+                            prompt_suspect_ts = 0.0
+                        elif sudo_injected:
+                            rejected = _RE_SUDO_REJECT.search(
+                                self._clean_output(output[-4096:])
+                            )
+                            if rejected or inject_attempts >= _MAX_SUDO_INJECT_ATTEMPTS:
+                                # 判失败：本会话停用自动注入，密码提示一律转交AI input
+                                self._sudo_mismatch = True
+                                self._busy = True
+                                self._start_busy_watcher(marker, pwd_marker)
+                                reason = (
+                                    "自动注入的登录密码被sudo拒绝"
+                                    if rejected else "多次注入后仍在等待密码"
+                                )
+                                return (f"{self._clean_output(self._strip_echo(output))}\n"
+                                        f"[{reason}：sudo密码与登录密码不同。"
+                                        f"请向用户询问sudo密码，然后用input输入；"
+                                        f"本会话后续不再自动注入]")
+                            # 无拒绝文案: 命令链中的下一个sudo，继续注入
+                            self._channel.send(self._sudo_password + "\n")
+                            inject_attempts += 1
+                            inject_mark_len = len(output)
                             prompt_suspect_ts = 0.0
                         else:
-                            # 未设置sudo_password，告知AI。
-                            # 命令仍在等待密码，终端标记为忙，AI可用input应答。
+                            # mismatch 或未设置密码 → 告知AI，命令等待input
                             self._busy = True
                             self._start_busy_watcher(marker, pwd_marker)
                             return (f"{self._clean_output(self._strip_echo(output))}\n"
-                                    f"[检测到密码提示，请用input action输入密码，或在connect时设置sudo_password]")
+                                    f"[检测到密码提示，请用input action输入密码]")
                 else:
                     prompt_suspect_ts = 0.0
 
