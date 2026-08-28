@@ -56,11 +56,11 @@ DEFINITION = {
                 "action": {
                     "type": "string",
                     "enum": ["scan", "connect", "exec", "raw_exec", "input", "status", "close"],
-                    "description": "操作类型（默认status）",
+                    "description": "操作类型（默认exec）",
                 },
                 "port": {
                     "type": "string",
-                    "description": "串口设备名，如COM1、/dev/ttyUSB0（connect时必填）",
+                    "description": "串口设备名，如COM1、/dev/ttyUSB0（connect时必填）；exec/input/close时也可用port直接引用已连接的串口",
                 },
                 "baudrate": {
                     "type": "integer",
@@ -96,7 +96,7 @@ DEFINITION = {
                 },
                 "input": {
                     "type": "string",
-                    "description": "交互输入内容（action=input时使用）",
+                    "description": "交互输入内容（action=input时使用，如密码、y/n确认）；发送 ^C 可中断设备上仍在运行的命令",
                 },
                 "timeout": {
                     "type": "integer",
@@ -104,11 +104,11 @@ DEFINITION = {
                 },
                 "session_id": {
                     "type": "integer",
-                    "description": "终端ID 0-4（默认自动分配）",
+                    "description": "终端ID 0-4（默认自动分配；0=第一个串口终端）",
                 },
                 "max_output_chars": {
                     "type": "integer",
-                    "description": "最大输出字符数（正整数，默认4000）",
+                    "description": "最大输出字符数（正整数，默认8000）",
                 },
             },
             "required": [],
@@ -131,7 +131,7 @@ def kill_active_exec():
 # ── 公开接口 ──
 
 def execute(
-    action: str = "status",
+    action: str = "exec",
     port: str = "",
     baudrate: int = 115200,
     databits: int = 8,
@@ -144,7 +144,7 @@ def execute(
     input: str = "",  # 参数名 "input" 与 DEFINITION 对齐，不可改名（LLM 通过 **arguments 传参）
     timeout: int = 120,
     session_id: int = -1,
-    max_output_chars: int = 4000,
+    max_output_chars: int = 8000,
     _tool_context=None,
 ) -> str:
     """
@@ -153,10 +153,10 @@ def execute(
     action:
       scan     - 扫描本机可用串口
       connect  - 打开串口连接，自动分配或使用指定 session_id
-      exec     - 在指定会话中发送命令，等待提示符或超时返回
+      exec     - 在指定会话中发送命令，等待提示符或超时返回（默认action，与Terminal一致）
       raw_exec - 在指定会话中发送命令，纯超时返回（不检测提示符，适合裸机/AT固件等无标准提示符设备）
-      input    - 向串口发送交互输入（如密码、确认等）
-      status   - 查看当前所有串口会话状态（默认 action）
+      input    - 向串口发送交互输入（如密码、确认等）；"^C"/"\\x03" 发送原始Ctrl+C中断
+      status   - 查看当前所有串口会话状态
       close    - 关闭指定会话
     """
     if action == "scan":
@@ -164,15 +164,15 @@ def execute(
     elif action == "connect":
         return _connect(port, baudrate, databits, parity, stopbits, flow_control, line_ending, prompt_pattern, session_id)
     elif action == "exec":
-        return _exec(session_id, command, timeout, max_output_chars, _tool_context)
+        return _exec(session_id, port, command, timeout, max_output_chars, _tool_context)
     elif action == "raw_exec":
-        return _raw_exec(session_id, command, timeout, max_output_chars, _tool_context)
+        return _raw_exec(session_id, port, command, timeout, max_output_chars, _tool_context)
     elif action == "input":
-        return _input(session_id, input, timeout, max_output_chars, _tool_context)
+        return _input(session_id, port, input, timeout, max_output_chars, _tool_context)
     elif action == "status":
         return _status()
     elif action == "close":
-        return _close(session_id)
+        return _close(session_id, port)
     else:
         return f"[错误: 未知action '{action}'，可选: scan/connect/exec/raw_exec/input/status/close]"
 
@@ -277,7 +277,7 @@ def _connect(port: str, baudrate: int = 115200, databits: int = 8,
     return "\n".join(parts)
 
 
-def _check_delete_safety(command: str, session_id: int, timeout: int,
+def _check_delete_safety(command: str, session_id: int, port: str, timeout: int,
                          max_output_chars: int, action_name: str,
                          _tool_context) -> Optional[str]:
     """删除命令安全确认。返回 None 表示放行，返回 str 表示被拦截的提示。"""
@@ -297,6 +297,7 @@ def _check_delete_safety(command: str, session_id: int, timeout: int,
     _tool_context.pending_delete = ("Serial", {
         "action": action_name,
         "session_id": session_id,
+        "port": port,
         "command": command,
         "timeout": timeout,
         "max_output_chars": max_output_chars,
@@ -304,8 +305,8 @@ def _check_delete_safety(command: str, session_id: int, timeout: int,
     return AWAIT_CONFIRM
 
 
-def _exec(session_id: int, command: str, timeout: int = 120,
-          max_output_chars: int = 4000, _tool_context=None) -> str:
+def _exec(session_id: int, port: str, command: str, timeout: int = 120,
+          max_output_chars: int = 8000, _tool_context=None) -> str:
     """在指定会话中发送命令"""
     if not command:
         return "[错误: exec 需要提供 command]"
@@ -315,13 +316,13 @@ def _exec(session_id: int, command: str, timeout: int = 120,
     if _tool_context and _tool_context.max_timeout_seconds > 0:
         timeout = min(timeout, _tool_context.max_timeout_seconds)
 
-    blocked = _check_delete_safety(command, session_id, timeout,
+    blocked = _check_delete_safety(command, session_id, port, timeout,
                                    max_output_chars, "exec", _tool_context)
     if blocked is not None:
         return blocked
 
     try:
-        sid, session = _resolve_session_id(session_id)
+        sid, session = _resolve_session_id(session_id, port)
     except ValueError as e:
         return f"[错误: {e}]"
 
@@ -343,8 +344,8 @@ def _exec(session_id: int, command: str, timeout: int = 120,
         return f"[错误: 终端{sid}命令执行失败: {e}]"
 
 
-def _raw_exec(session_id: int, command: str, timeout: int = 120,
-              max_output_chars: int = 4000, _tool_context=None) -> str:
+def _raw_exec(session_id: int, port: str, command: str, timeout: int = 120,
+              max_output_chars: int = 8000, _tool_context=None) -> str:
     """在指定会话中发送命令，纯超时返回，不检测提示符。
 
     适用场景:
@@ -360,13 +361,13 @@ def _raw_exec(session_id: int, command: str, timeout: int = 120,
         timeout = min(timeout, _tool_context.max_timeout_seconds)
 
     # 安全检查（与 _exec 保持一致）
-    blocked = _check_delete_safety(command, session_id, timeout,
+    blocked = _check_delete_safety(command, session_id, port, timeout,
                                    max_output_chars, "raw_exec", _tool_context)
     if blocked is not None:
         return blocked
 
     try:
-        sid, session = _resolve_session_id(session_id)
+        sid, session = _resolve_session_id(session_id, port)
     except ValueError as e:
         return f"[错误: {e}]"
 
@@ -388,9 +389,9 @@ def _raw_exec(session_id: int, command: str, timeout: int = 120,
         return f"[错误: 终端{sid}命令执行失败: {e}]"
 
 
-def _input(session_id: int, text: str, timeout: int = 120,
-           max_output_chars: int = 4000, _tool_context=None) -> str:
-    """向串口发送交互输入"""
+def _input(session_id: int, port: str, text: str, timeout: int = 120,
+           max_output_chars: int = 8000, _tool_context=None) -> str:
+    """向串口发送交互输入（密码、y/n 确认、^C 中断等）"""
     if not text:
         return "[错误: input 需要提供 input 内容]"
     if timeout <= 0:
@@ -399,13 +400,13 @@ def _input(session_id: int, text: str, timeout: int = 120,
     if _tool_context and _tool_context.max_timeout_seconds > 0:
         timeout = min(timeout, _tool_context.max_timeout_seconds)
 
-    blocked = _check_delete_safety(text, session_id, timeout,
+    blocked = _check_delete_safety(text, session_id, port, timeout,
                                    max_output_chars, "input", _tool_context)
     if blocked is not None:
         return blocked
 
     try:
-        sid, session = _resolve_session_id(session_id)
+        sid, session = _resolve_session_id(session_id, port)
     except ValueError as e:
         return f"[错误: {e}]"
 
@@ -448,10 +449,10 @@ def _status() -> str:
         return "[串口会话]\n" + "\n".join(lines)
 
 
-def _close(session_id: int) -> str:
-    """关闭会话。session_id=-1 关闭全部"""
+def _close(session_id: int, port: str = "") -> str:
+    """关闭会话。session_id=-1 且无 port 关闭全部；port 可直引已连接的串口"""
     with _sessions_lock:
-        if session_id < 0:
+        if session_id < 0 and not port:
             count = len(_sessions)
             for sid, session in list(_sessions.items()):
                 if session is not None:
@@ -460,6 +461,19 @@ def _close(session_id: int) -> str:
             with _active_exec_lock:
                 _active_exec_sids.clear()
             return f"[已关闭{count}个串口会话]"
+
+        if session_id < 0 and port:
+            # 按端口名匹配（Windows 大小写不敏感）
+            port_key = port.strip().upper() if sys.platform == "win32" else port.strip()
+            matched = [
+                sid for sid, s in _sessions.items()
+                if s is not None and (
+                    (s.port.upper() if sys.platform == "win32" else s.port) == port_key
+                )
+            ]
+            if not matched:
+                return f"[错误: 端口 {port} 未连接]"
+            session_id = matched[0]
 
         if session_id not in _sessions:
             return f"[终端{session_id}未连接]"
@@ -506,8 +520,15 @@ def _allocate_session_id() -> int:
     return -1
 
 
-def _resolve_session_id(session_id: int) -> tuple[int, "SerialSession"]:
-    """解析 session_id，返回 (sid, session) 或抛出 ValueError"""
+def _resolve_session_id(session_id: int, port: str = "") -> tuple[int, "SerialSession"]:
+    """解析 session_id，返回 (sid, session) 或抛出 ValueError。
+
+    解析顺序（与 Terminal 的 _resolve_session_id 宽松引用对齐）:
+    1. session_id >= 0: 直接查找
+    2. session_id < 0 且指定 port: 按端口名匹配（Windows 大小写不敏感），
+       减少 AI 回查终端编号的往返（连的哪个口它最清楚）
+    3. session_id < 0 且无 port: 只有一个会话时自动选择，多个时报清单
+    """
     with _sessions_lock:
         if session_id >= 0:
             if session_id not in _sessions:
@@ -516,6 +537,19 @@ def _resolve_session_id(session_id: int) -> tuple[int, "SerialSession"]:
             if session is None:
                 raise ValueError(f"终端{session_id}正在连接中，请稍候")
             return session_id, session
+
+        if port:
+            port_key = port.strip().upper() if sys.platform == "win32" else port.strip()
+            matched = [
+                sid for sid, s in _sessions.items()
+                if s is not None and (
+                    (s.port.upper() if sys.platform == "win32" else s.port) == port_key
+                )
+            ]
+            if matched:
+                sid = matched[0]
+                return sid, _sessions[sid]
+            raise ValueError(f"端口 {port} 未连接，请先 connect 或 status 查看已连接的串口")
 
         # 自动选择：跳过 None 预留 slot
         active = {k: v for k, v in _sessions.items() if v is not None}
@@ -527,6 +561,6 @@ def _resolve_session_id(session_id: int) -> tuple[int, "SerialSession"]:
         else:
             summaries = [f"终端{k}: {v.prompt_info}" for k, v in sorted(active.items())]
             raise ValueError(
-                f"有{len(active)}个会话，请指定 session_id。\n"
+                f"有{len(active)}个会话，请指定 session_id 或 port（如 port=COM3）。\n"
                 + "\n".join(summaries)
             )

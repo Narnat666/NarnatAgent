@@ -170,7 +170,7 @@ class SerialSession:
         return None
 
     def execute(self, command: str, timeout: int = 120,
-                max_output_chars: int = 4000) -> str:
+                max_output_chars: int = 8000) -> str:
         """发送命令，等待提示符或超时，返回输出"""
         err = self._ensure_ready()
         if err:
@@ -183,12 +183,26 @@ class SerialSession:
             self._busy = False
 
     def send_input(self, text: str, timeout: int = 120,
-                   max_output_chars: int = 4000) -> str:
-        """发送交互输入（密码、y/n 等），等待提示符或超时——等同于 execute"""
+                   max_output_chars: int = 8000) -> str:
+        """发送交互输入（密码、y/n 等），等待提示符或超时。
+
+        语义（与 Terminal 的 input 对齐）:
+        - text = "^C" 或 "\\x03" → 发送原始 Ctrl+C 字节，中断设备上仍在运行的命令
+        - 其他文本 → 追加行结束符发送，等同于 execute
+        """
+        if text == "^C" or text == "\x03":
+            err = self._ensure_ready()
+            if err:
+                return err
+            self._busy = True
+            try:
+                return self._send_ctrl_c(timeout, max_output_chars)
+            finally:
+                self._busy = False
         return self.execute(text, timeout, max_output_chars)
 
     def raw_execute(self, command: str, timeout: int = 120,
-                    max_output_chars: int = 4000) -> str:
+                    max_output_chars: int = 8000) -> str:
         """发送命令，纯超时返回，不做提示符检测。
 
         适用场景:
@@ -365,6 +379,34 @@ class SerialSession:
         cleaned = self._clean_output(output)
         result = f"{cleaned}\n{tag}" if cleaned else tag
         return _truncate_output(result, max_output_chars)
+
+    def _send_ctrl_c(self, timeout: int, max_output_chars: int) -> str:
+        """发送原始 Ctrl+C 字节（不追加行结束符），等待设备回到提示符或超时。
+
+        与 Terminal 的 input=^C 语义对齐：AI 的习惯是在命令超时后用 ^C
+        中断设备上仍在运行的命令。发送后等待提示符重新出现。
+        """
+        self._interrupt.clear()
+
+        # 排空残留（Ctrl+C 前的旧输出不混入结果）
+        with self._lock:
+            self._buffer = ""
+
+        try:
+            self._ser.write(b"\x03")
+            self._ser.flush()
+        except serial.SerialException as e:
+            self._dead = True
+            return f"[错误: 串口写入失败: {e}]"
+
+        output, found = self._wait_for_prompt(timeout)
+        if found:
+            return _truncate_output(self._clean_output(output), max_output_chars)
+
+        cleaned = self._clean_output(output)
+        if cleaned:
+            return _truncate_output(f"{cleaned}\n[已发送Ctrl+C]", max_output_chars)
+        return "[已发送Ctrl+C]"
 
     def _wait_for_prompt(self, timeout: int) -> tuple:
         """等待提示符出现, 返回 (output, found)
