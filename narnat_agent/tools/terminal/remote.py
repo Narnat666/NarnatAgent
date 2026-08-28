@@ -184,7 +184,6 @@ def remote_write(file_path: str, content: str, host: str = "", _tool_context=Non
 
 def remote_edit(file_path: str, old_string: str = "", new_string: str = "",
                 replace_all: bool = False,
-                line_start: int = 0, line_end: int = 0,
                 host: str = "", _tool_context=None) -> tuple:
     """通过SFTP修改远程文件"""
     session = get_session(host=host)
@@ -213,14 +212,9 @@ def remote_edit(file_path: str, old_string: str = "", new_string: str = "",
         return (f"[错误: 远程文件非UTF-8编码，为防止内容损坏已拒绝编辑: {file_path}。"
                 f"请用Terminal exec处理（如iconv转码后再编辑）]", "")
 
-    # 行号模式
-    if line_start > 0:
-        return _remote_edit_by_lines(content, file_path, line_start, line_end,
-                                     new_string, session, _tool_context, host)
-
     # 字符串模式
     if not old_string:
-        return ("[错误: old_string不能为空（或使用line_start行号模式）]", "")
+        return ("[错误: old_string不能为空]", "")
 
     # 换行符归一化（与本地Edit行为一致）：远程文件为CRLF（如Windows上传）时，
     # AI传\n风格old_string也能匹配，避免"明明内容存在却匹配失败"
@@ -251,48 +245,8 @@ def remote_edit(file_path: str, old_string: str = "", new_string: str = "",
                                   _tool_context=_tool_context, host=host)
 
 
-def _remote_edit_by_lines(content: str, file_path: str,
-                          line_start: int, line_end: int, new_string: str,
-                          session: SSHSession, _tool_context=None,
-                          host: str = "") -> tuple:
-    """远程行号范围替换"""
-    lines = content.splitlines(keepends=True)
-    total = len(lines)
-
-    if line_end <= 0:
-        line_end = line_start
-
-    if line_start < 1 or line_start > total:
-        return (f"[错误: line_start={line_start} 超出范围（1-{total}）]", "")
-    if line_end < line_start:
-        return (f"[错误: line_end={line_end} < line_start={line_start}]", "")
-    if line_end > total:
-        return (f"[错误: line_end={line_end} 超出范围（1-{total}）]", "")
-
-    # 按文件换行符风格归一化 new_string（与本地Edit行号模式一致）
-    line_ending = "\r\n" if "\r\n" in content else "\n"
-    if line_ending == "\r\n":
-        new_string_normalized = new_string.replace('\r\n', '\x00').replace('\n', '\r\n').replace('\x00', '\r\n')
-    else:
-        new_string_normalized = new_string.replace('\r\n', '\n').replace('\r', '\n')
-
-    new_lines = new_string_normalized.splitlines(keepends=True)
-    if new_lines and not new_string_normalized.endswith("\n"):
-        new_lines[-1] = new_lines[-1] + line_ending
-
-    new_content_lines = lines[:line_start - 1] + new_lines + lines[line_end:]
-    new_content = "".join(new_content_lines)
-
-    replaced_count = line_end - line_start + 1
-    return _remote_write_and_diff(content, new_content, file_path,
-                                  session, replaced_count,
-                                  f"行{line_start}-{line_end}",
-                                  _tool_context=_tool_context, host=host)
-
-
 def _remote_write_and_diff(old_content: str, new_content: str, file_path: str,
-                           session: SSHSession, count: int,
-                           range_desc: str = "", _tool_context=None,
+                           session: SSHSession, count: int, _tool_context=None,
                            host: str = "") -> tuple:
     """写回远程文件并生成diff"""
     try:
@@ -310,10 +264,7 @@ def _remote_write_and_diff(old_content: str, new_content: str, file_path: str,
 
     diff = _make_diff(old_content, new_content, file_path)
     dev_tag = f"[{host}] " if host else ""
-    if range_desc:
-        llm_result = f"{dev_tag}[已替换{range_desc}（{count}行）]\n{diff}"
-    else:
-        llm_result = f"{dev_tag}[已替换{count}处]\n{diff}"
+    llm_result = f"{dev_tag}[已替换{count}处]\n{diff}"
 
     color_diff = colorize_diff(diff)
     return (llm_result, color_diff)
