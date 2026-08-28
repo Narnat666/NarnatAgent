@@ -7,7 +7,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "TodoWrite",
-        "description": "创建并管理任务列表（同时刻最多1个in_progress）。做任务前，优先使用此工具与用户同步计划。",
+        "description": "创建并管理任务列表（同时刻最多1个in_progress，多余会自动调整为待处理）。做任务前，优先使用此工具与用户同步计划。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -64,10 +64,18 @@ def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
         if not todo.get("activeForm"):
             todo["activeForm"] = todo["content"]
 
-    # 校验in_progress数量：允许0个（初始状态）或1个，禁止多个
-    in_progress_count = sum(1 for t in todos if t["status"] == "in_progress")
-    if in_progress_count > 1:
-        return f"[错误: 最多1个in_progress任务，当前有{in_progress_count}个]"
+    # in_progress 自动容错：保留第一个，其余降级为 pending。
+    # （AI 偶发传多个 in_progress，硬报错会导致计划整体丢失、AI 不再同步；
+    #   框架语义是"同时刻最多1个"，自动降级与之一致，且返回值附提示兜底）
+    demoted = 0
+    first_active_seen = False
+    for todo in todos:
+        if todo["status"] == "in_progress":
+            if first_active_seen:
+                todo["status"] = "pending"
+                demoted += 1
+            else:
+                first_active_seen = True
 
     # 通知UI更新
     if _tool_context and _tool_context.ui_callback:
@@ -78,14 +86,18 @@ def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
         _tool_context.current_todos = list(todos)
 
     # ── 构建返回给 LLM 的状态提示 ──
+    fix_note = ""
+    if demoted:
+        fix_note = f"[已自动修正: 检测到多个in_progress，保留第一个，其余{demoted}项调整为待处理]\n"
+
     unfinished = [t for t in todos if t["status"] != "completed"]
 
     if not unfinished:
-        return "[任务全部完成]"
+        return fix_note + "[任务全部完成]"
 
     lines = ["[你有未完成的任务，请继续:]", ""]
     for i, t in enumerate(unfinished, 1):
         status_label = "进行中" if t["status"] == "in_progress" else "待处理"
         lines.append(f"{i}. [{status_label}] {t['content']}")
 
-    return "\n".join(lines)
+    return fix_note + "\n".join(lines)

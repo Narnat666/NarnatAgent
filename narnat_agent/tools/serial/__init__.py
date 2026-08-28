@@ -60,7 +60,7 @@ DEFINITION = {
                 },
                 "port": {
                     "type": "string",
-                    "description": "串口设备名，如COM1、/dev/ttyUSB0（connect时必填）；exec/input/close时也可用port直接引用已连接的串口",
+                    "description": "串口设备名，如COM1、/dev/ttyUSB0（connect时必填）",
                 },
                 "baudrate": {
                     "type": "integer",
