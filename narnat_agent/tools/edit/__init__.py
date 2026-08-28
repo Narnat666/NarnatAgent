@@ -33,7 +33,7 @@ DEFINITION = {
                 "replace_all": {"type": "boolean", "description": "是否替换全部匹配（默认否，即只替换唯一匹配处）"},
                 "device": {"type": "string", "description": "设备dev编号：默认dev0（可省略）编辑本机文件，设置dev1..devn则编辑被控设备文件（需先Terminal connect被控设备获取dev编号）"},
             },
-            "required": ["file_path"],
+            "required": ["file_path", "old_string"],
         },
     },
 }
