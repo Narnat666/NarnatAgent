@@ -143,6 +143,11 @@ def execute(query: str, num: int = 5, _tool_context=None) -> str:
     Returns:
         格式化的搜索结果，每条含标题、URL、描述
     """
+    # AI可能传字符串类型的数值参数，统一转int（与Grep/Read容错风格一致）
+    try:
+        num = int(num) if num is not None else 5
+    except (TypeError, ValueError):
+        return "[错误: num需为正整数]"
     if num <= 0:
         return "[错误: num需为正整数]"
     # 上限20：结果逐条灌给LLM，超大num既拖慢响应又浪费配额，且全局截断会砍掉尾部

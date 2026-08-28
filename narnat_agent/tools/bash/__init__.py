@@ -402,6 +402,12 @@ def execute(
         stdout + stderr + 退出码
     """
     global _interrupted  # 函数内多分支读写该标志，统一在函数级声明
+    # AI可能传字符串类型的数值参数，统一转int（与Grep/Read容错风格一致）
+    try:
+        timeout = int(timeout) if timeout is not None else 120
+        max_output_chars = int(max_output_chars) if max_output_chars is not None else 4000
+    except (TypeError, ValueError):
+        return "[错误: timeout/max_output_chars需为整数]"
     # ── 安全检查：删除命令和git命令根据配置决定是否需要确认 ──
     need_confirm = False
     tc = _tool_context

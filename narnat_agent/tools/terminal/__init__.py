@@ -170,6 +170,15 @@ def execute(
       target_host  - 传输目标设备，dev0=本机(可省略)，dev1..devn=被控设备
       target_path  - 目标文件在目标设备上的绝对路径
     """
+    # AI可能传字符串类型的数值参数，统一转int（与Grep/Read容错风格一致）
+    try:
+        port = int(port) if port is not None else 22
+        timeout = int(timeout) if timeout is not None else None
+        session_id = int(session_id) if session_id is not None else -1
+        max_output_chars = int(max_output_chars) if max_output_chars is not None else 8000
+    except (TypeError, ValueError):
+        return "[错误: port/timeout/session_id/max_output_chars需为整数]"
+
     if action == "connect":
         # connect默认超时15秒（exec/input默认120秒）：连错IP/黑洞IP时快速失败，
         # 避免OS默认TCP重试阻塞数十秒。同时受全局超时上限约束

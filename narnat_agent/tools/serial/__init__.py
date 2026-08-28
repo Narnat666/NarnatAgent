@@ -159,6 +159,17 @@ def execute(
       status   - 查看当前所有串口会话状态
       close    - 关闭指定会话
     """
+    # AI可能传字符串类型的数值参数，统一转int/float（与Grep/Read容错风格一致）
+    try:
+        baudrate = int(baudrate) if baudrate is not None else 115200
+        databits = int(databits) if databits is not None else 8
+        stopbits = float(stopbits) if stopbits is not None else 1
+        timeout = int(timeout) if timeout is not None else 120
+        session_id = int(session_id) if session_id is not None else -1
+        max_output_chars = int(max_output_chars) if max_output_chars is not None else 8000
+    except (TypeError, ValueError):
+        return "[错误: baudrate/databits/stopbits/timeout/session_id/max_output_chars需为数值]"
+
     if action == "scan":
         return _scan()
     elif action == "connect":
