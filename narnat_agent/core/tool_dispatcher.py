@@ -14,7 +14,7 @@ from ..tools.terminal import kill_active_exec as _kill_terminal_exec
 from ..tools.terminal import resolve_dev_display as _dev_display
 from ..tools.serial import kill_active_exec as _kill_serial_exec
 from ..tools.tool_context import ToolContext
-from ..output import write as _stdout_write, D, E, R, Y, G, B, C
+from ..output import write as _stdout_write, D, E, R, Y, G, B, C, X
 
 
 def _local_hostname() -> str:
@@ -208,6 +208,9 @@ class ToolDispatcher:
         # 展示着色diff
         if color_diff:
             self._show_diff(color_diff)
+        elif name in ("Edit", "Write") and isinstance(llm_result, str) and llm_result.startswith("[错误"):
+            # 写入类工具失败：终端仅显示一行失败提示，具体原因只进AI上下文
+            self._show_tool_failed(name)
 
         stream.resume_spinner()
         return llm_result
@@ -299,6 +302,16 @@ class ToolDispatcher:
             f"[计划优先模式已开启: 请先使用TodoWrite制定计划（至少1项in_progress），"
             f"再执行其他工具。当前尝试调用的工具: {', '.join(non_todo_names)}]"
         )
+        # 被拦的Edit/Write：终端显示 [编辑]/[写入] 文件 + 失败提示（具体原因只进AI上下文）
+        for tc in tool_calls:
+            name = tc["function"]["name"]
+            if name in ("Edit", "Write"):
+                try:
+                    args = json.loads(tc["function"].get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                self._show_tool_call(name, args)
+                self._show_tool_failed(name)
         results = []
         for i, tc_id in enumerate(non_todo_ids):
             results.append((tc_id, hint if i == 0 else "[计划优先拦截，详见上方]"))
@@ -403,4 +416,11 @@ class ToolDispatcher:
     def _show_diff(self, color_diff: str):
         """在终端展示着色diff"""
         buf = "\n".join(f"  {line}" for line in color_diff.split("\n"))
-        _stdout_write(buf + "\n\n")
+        # 空编辑的"[无差异]"是单行提示，其后不再加空行，直接接后续输出
+        tail = "\n" if "\n" not in color_diff and "[无差异]" in color_diff else "\n\n"
+        _stdout_write(buf + tail)
+
+    def _show_tool_failed(self, name: str):
+        """写入类工具失败：终端显示一行红色失败提示，具体原因只进AI上下文"""
+        label = _TOOL_LABELS.get(name, name)
+        _stdout_write(f"  {X}[{label}失败]{R}\n")

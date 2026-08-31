@@ -102,6 +102,10 @@ def execute(file_path: str, content: str,
     if _tool_context:
         _tool_context.mark_read(abs_path)
 
+    if diff == "[无差异]":
+        # 覆写内容与现有内容相同：文件已照常写盘，但明确告知AI本次无实质修改
+        # （此前返回"[已写入...]\n[无差异]"，首行误导AI以为写入成功）
+        return ("[提示: 新旧内容相同，文件无实质修改。请确认content是否漏写]", color_diff)
     if diff:
         return (f"[已写入: {file_path} ({byte_count}字节)]\n{diff}", color_diff)
     return (f"[已写入: {file_path} ({byte_count}字节)]", color_diff)

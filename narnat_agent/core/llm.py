@@ -41,15 +41,16 @@ _STREAM_END = object()
 
 # 重试参数
 _MAX_NETWORK_RETRIES = 3   # 网络/服务端错误（可通过set_retry_count修改）
-_MAX_RATE_RETRIES = 5      # 429 速率限制
+_MAX_RATE_RETRIES = 5      # 429 速率限制（与网络重试统一，由set_retry_count设置）
 RETRY_BACKOFF_BASE = [1, 2, 4, 8, 8]  # 指数退避基数（秒）
 _STREAM_STALL_SECONDS = 180.0  # 流式输出静默超过该时长视为挂死，主动断开触发上层重试
 
 
 def set_retry_count(n: int) -> None:
-    """设置LLM网络重试次数（由Agent初始化时从配置读取）"""
-    global _MAX_NETWORK_RETRIES
+    """设置LLM重试次数（由Agent初始化/每轮从配置读取），网络与429统一控制"""
+    global _MAX_NETWORK_RETRIES, _MAX_RATE_RETRIES
     _MAX_NETWORK_RETRIES = max(1, min(n, 10))  # 限制1-10
+    _MAX_RATE_RETRIES = max(1, min(n, 10))     # 429 与网络重试同源同值
 
 
 def retry_sleep(attempt: int, cancel_check=None) -> bool:
@@ -63,6 +64,20 @@ def retry_sleep(attempt: int, cancel_check=None) -> bool:
             return False
         time.sleep(min(0.2, deadline - time.time()))
     return True
+
+
+def _retry_notice(attempt: int, max_retries: int, reason: str = "网络连接失败") -> Dict[str, str]:
+    """重试的用户提示事件（与响应流中断重试提示风格一致）。
+
+    由 agent_loop 渲染到输出流，不计入 AI 回复内容与消息历史。
+    """
+    base = RETRY_BACKOFF_BASE[min(attempt - 1, len(RETRY_BACKOFF_BASE) - 1)]
+    return {
+        "retry_notice": (
+            f"\n⚠ {reason}，约{base}s后自动重试"
+            f"（第{attempt}/{max_retries}次）…\n"
+        )
+    }
 
 
 def _classify_stream_error(e: Exception) -> Dict[str, str]:
@@ -255,6 +270,7 @@ class _OpenAIBackend:
                     rate_retries += 1
                     if self._logger:
                         self._logger.warning("core.llm", f"API返回429(第{rate_retries}次重试)...")
+                    yield _retry_notice(rate_retries, _MAX_RATE_RETRIES, "请求被限流(429)")
                     if not retry_sleep(rate_retries - 1, cancel_check):
                         return
                     continue
@@ -262,6 +278,7 @@ class _OpenAIBackend:
                     network_retries += 1
                     if self._logger:
                         self._logger.warning("core.llm", f"API返回{status}(第{network_retries}次重试)...")
+                    yield _retry_notice(network_retries, _MAX_NETWORK_RETRIES, f"服务端错误({status})")
                     if not retry_sleep(network_retries - 1, cancel_check):
                         return
                     continue
@@ -278,6 +295,7 @@ class _OpenAIBackend:
                     network_retries += 1
                     if self._logger:
                         self._logger.warning("core.llm", f"网络错误(第{network_retries}次重试): {e}")
+                    yield _retry_notice(network_retries, _MAX_NETWORK_RETRIES)
                     if not retry_sleep(network_retries - 1, cancel_check):
                         return
                     continue
@@ -512,6 +530,7 @@ class _AnthropicBackend:
                         rate_retries += 1
                         if self._logger:
                             self._logger.warning("core.llm", f"API返回429(第{rate_retries}次重试)...")
+                        yield _retry_notice(rate_retries, _MAX_RATE_RETRIES, "请求被限流(429)")
                         if not retry_sleep(rate_retries - 1, cancel_check):
                             _active_llm_response = None
                             return
@@ -528,6 +547,7 @@ class _AnthropicBackend:
                         network_retries += 1
                         if self._logger:
                             self._logger.warning("core.llm", f"API返回{status}(第{network_retries}次重试)...")
+                        yield _retry_notice(network_retries, _MAX_NETWORK_RETRIES, f"服务端错误({status})")
                         if not retry_sleep(network_retries - 1, cancel_check):
                             _active_llm_response = None
                             return
@@ -559,6 +579,7 @@ class _AnthropicBackend:
                     network_retries += 1
                     if self._logger:
                         self._logger.warning("core.llm", f"网络错误(第{network_retries}次重试): {e}")
+                    yield _retry_notice(network_retries, _MAX_NETWORK_RETRIES)
                     if not retry_sleep(network_retries - 1, cancel_check):
                         return
                     continue

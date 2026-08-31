@@ -180,6 +180,11 @@ def _write_and_diff(old_content: str, new_content: str, file_path: str,
     if _tool_context:
         _tool_context.mark_read(file_path)
 
+    if old_content == new_content:
+        # 空编辑提醒：文件已照常写盘，但明确告知AI本次无实质修改
+        # （此前返回"[已替换1处]\n[无差异]"，首行误导AI以为编辑成功）
+        return ("[提示: 新旧内容相同，文件无实质修改。请确认new_string是否漏写]", _make_color_diff("[无差异]"))
+
     diff = _make_diff(old_content, new_content, file_path)
     llm_result = f"[已替换{count}处]\n{diff}"
 
