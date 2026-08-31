@@ -42,7 +42,8 @@ _STREAM_END = object()
 # 重试参数
 _MAX_NETWORK_RETRIES = 3   # 网络/服务端错误（可通过set_retry_count修改）
 _MAX_RATE_RETRIES = 5      # 429 速率限制
-_RETRY_BACKOFF_BASE = [1, 2, 4, 8, 8]
+RETRY_BACKOFF_BASE = [1, 2, 4, 8, 8]  # 指数退避基数（秒）
+_STREAM_STALL_SECONDS = 180.0  # 流式输出静默超过该时长视为挂死，主动断开触发上层重试
 
 
 def set_retry_count(n: int) -> None:
@@ -51,9 +52,9 @@ def set_retry_count(n: int) -> None:
     _MAX_NETWORK_RETRIES = max(1, min(n, 10))  # 限制1-10
 
 
-def _retry_sleep(attempt: int, cancel_check=None) -> bool:
+def retry_sleep(attempt: int, cancel_check=None) -> bool:
     """指数退避休眠，带 jitter 和中断检查。返回 False 表示用户取消。"""
-    base = _RETRY_BACKOFF_BASE[min(attempt, len(_RETRY_BACKOFF_BASE) - 1)]
+    base = RETRY_BACKOFF_BASE[min(attempt, len(RETRY_BACKOFF_BASE) - 1)]
     jitter = base * 0.25 * (random.random() * 2 - 1)
     sleep_time = max(0, base + jitter)
     deadline = time.time() + sleep_time
@@ -62,6 +63,27 @@ def _retry_sleep(attempt: int, cancel_check=None) -> bool:
             return False
         time.sleep(min(0.2, deadline - time.time()))
     return True
+
+
+def _classify_stream_error(e: Exception) -> Dict[str, str]:
+    """把流读取异常归类为上层可识别的中断信息。"""
+    if isinstance(e, httpx.TimeoutException):
+        kind = "timeout"
+    elif isinstance(e, httpx.TransportError):
+        kind = "network"
+    else:
+        # OpenAI SDK 用自身异常类型包装底层连接错误（APITimeoutError 是 APIConnectionError 子类）
+        try:
+            from openai import APIConnectionError, APITimeoutError
+        except ImportError:
+            APIConnectionError = APITimeoutError = ()
+        if isinstance(e, APITimeoutError):
+            kind = "timeout"
+        elif isinstance(e, APIConnectionError):
+            kind = "network"
+        else:
+            kind = "unknown"
+    return {"kind": kind, "detail": str(e)[:200]}
 
 
 def _is_retryable_http(status: int) -> bool:
@@ -82,17 +104,21 @@ def abort_active_llm_request():
 register_abort(abort_active_llm_request)
 
 
-def _iter_to_queue(iterator, q, err_box=None):
+def _iter_to_queue(iterator, q, err_box=None, data_ts=None):
     """后台线程：将迭代器的元素逐个放入队列，最后放入_STREAM_END。
 
     迭代异常（如服务端中途断开）记录到 err_box，供主线程判断流是否被中断；
     不再静默吞掉，避免把截断响应当作正常完成。
+    data_ts: 最近收到数据的时间戳（单元素列表，看门狗用）。
+    err_box 已有内容（看门狗已记录）时不再重复追加。
     """
     try:
         for item in iterator:
+            if data_ts is not None:
+                data_ts[0] = time.time()
             q.put(item)
     except Exception as e:
-        if err_box is not None:
+        if err_box is not None and not err_box:
             err_box.append(e)
     finally:
         q.put(_STREAM_END)
@@ -198,8 +224,9 @@ class _OpenAIBackend:
                     messages=messages,
                     stream=True,
                     stream_options={"include_usage": True},
-                    # read 放宽到 120s：thinking 模式下思考期可能长时间无字节输出
-                    timeout=httpx.Timeout(connect=5.0, read=120.0, write=30.0, pool=30.0),
+                    # read 放宽到 300s：思考期可能长时间无字节输出，大上下文 prefill
+                    # 也会挤占读超时；已开始输出后的流中静默由看门狗负责检测
+                    timeout=httpx.Timeout(connect=5.0, read=300.0, write=60.0, pool=30.0),
                 )
                 kwargs.update(think_body_top)
                 if think_extra:
@@ -220,7 +247,7 @@ class _OpenAIBackend:
                 if status in (400, 401, 403, 404, 422):
                     if self._logger:
                         self._logger.error("core.llm", f"API调用失败(不可重试): {e}")
-                    yield {"content": f"[错误: API调用失败: {e}]", "finish_reason": "error"}
+                    yield {"content": f"[错误: API调用失败({type(e).__name__}): {e}]", "finish_reason": "error"}
                     return
                 if cancel_check and cancel_check():
                     return
@@ -228,19 +255,19 @@ class _OpenAIBackend:
                     rate_retries += 1
                     if self._logger:
                         self._logger.warning("core.llm", f"API返回429(第{rate_retries}次重试)...")
-                    if not _retry_sleep(rate_retries - 1, cancel_check):
+                    if not retry_sleep(rate_retries - 1, cancel_check):
                         return
                     continue
                 if _is_retryable_http(status) and network_retries < _MAX_NETWORK_RETRIES:
                     network_retries += 1
                     if self._logger:
                         self._logger.warning("core.llm", f"API返回{status}(第{network_retries}次重试)...")
-                    if not _retry_sleep(network_retries - 1, cancel_check):
+                    if not retry_sleep(network_retries - 1, cancel_check):
                         return
                     continue
                 if self._logger:
                     self._logger.error("core.llm", f"API调用失败(重试耗尽): {e}")
-                yield {"content": f"[错误: API调用失败: {e}]", "finish_reason": "error"}
+                yield {"content": f"[错误: API调用失败({type(e).__name__}，重试{network_retries}次): {e}]", "finish_reason": "error"}
                 return
 
             except (APIConnectionError, APITimeoutError) as e:
@@ -251,12 +278,12 @@ class _OpenAIBackend:
                     network_retries += 1
                     if self._logger:
                         self._logger.warning("core.llm", f"网络错误(第{network_retries}次重试): {e}")
-                    if not _retry_sleep(network_retries - 1, cancel_check):
+                    if not retry_sleep(network_retries - 1, cancel_check):
                         return
                     continue
                 if self._logger:
                     self._logger.error("core.llm", f"网络错误(重试耗尽): {e}")
-                yield {"content": f"[错误: API调用失败: {e}]", "finish_reason": "error"}
+                yield {"content": f"[错误: API调用失败({type(e).__name__}，重试{network_retries}次): {e}]", "finish_reason": "error"}
                 return
 
             except Exception as e:
@@ -265,7 +292,7 @@ class _OpenAIBackend:
                     return
                 if self._logger:
                     self._logger.error("core.llm", f"API调用失败: {e}")
-                yield {"content": f"[错误: API调用失败: {e}]", "finish_reason": "error"}
+                yield {"content": f"[错误: API调用失败({type(e).__name__}): {e}]", "finish_reason": "error"}
                 return
 
         _active_llm_response = stream
@@ -279,8 +306,11 @@ class _OpenAIBackend:
             chunk_queue = queue.Queue()
             stream_err = []   # 流迭代异常（服务端中途断开）
             received_finish = False
+            last_data_ts = [None]  # 最近收到数据的时间戳（看门狗用；收到首个chunk后才有值）
             reader = threading.Thread(
-                target=_iter_to_queue, args=(iter(stream), chunk_queue, stream_err), daemon=True)
+                target=_iter_to_queue,
+                args=(iter(stream), chunk_queue, stream_err, last_data_ts),
+                daemon=True)
             reader.start()
 
             while True:
@@ -289,6 +319,16 @@ class _OpenAIBackend:
                 except queue.Empty:
                     if cancel_check and cancel_check():
                         return
+                    # 看门狗：已开始输出后静默超过阈值视为挂死，主动断连触发上层重试；
+                    # 首字节前（prefill/思考期）静默由 read 超时兜底，不在此误断
+                    if (not stream_err and last_data_ts[0] is not None
+                            and time.time() - last_data_ts[0] > _STREAM_STALL_SECONDS):
+                        stream_err.append(httpx.ReadTimeout(
+                            f"流式输出静默超过{_STREAM_STALL_SECONDS:.0f}s"))
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
                     continue
                 if chunk is _STREAM_END:
                     break
@@ -360,10 +400,11 @@ class _OpenAIBackend:
                         self._logger.info("core.llm", f"响应完成, content_len={total_out}")
 
             # ── 流中断检测：迭代器异常退出且未收到完成标记 ──
-            # 不 yield 虚假完成标记，由上层（agent_loop）决定整轮重试
+            # 不 yield 虚假完成标记；上报中断信息，由上层（agent_loop）决定整轮重试
             if stream_err and not received_finish:
                 if self._logger:
                     self._logger.warning("core.llm", f"响应流中断: {stream_err[0]}")
+                yield {"stream_interrupted": _classify_stream_error(stream_err[0])}
         finally:
             _active_llm_response = None
 
@@ -442,7 +483,9 @@ class _AnthropicBackend:
         rate_retries = 0
 
         while True:
-            client = httpx.Client(timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=30.0))
+            # read 放宽到 300s：思考期可能长时间无字节输出，大上下文 prefill 也会挤占读超时；
+            # 流中静默挂死由看门狗（_STREAM_STALL_SECONDS）主动断连触发重试
+            client = httpx.Client(timeout=httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=30.0))
             _active_llm_response = client
             try:
                 # 使用 stream 模式发送请求，先拿到 status_code 再决定是否读取流
@@ -469,7 +512,7 @@ class _AnthropicBackend:
                         rate_retries += 1
                         if self._logger:
                             self._logger.warning("core.llm", f"API返回429(第{rate_retries}次重试)...")
-                        if not _retry_sleep(rate_retries - 1, cancel_check):
+                        if not retry_sleep(rate_retries - 1, cancel_check):
                             _active_llm_response = None
                             return
                         continue
@@ -485,7 +528,7 @@ class _AnthropicBackend:
                         network_retries += 1
                         if self._logger:
                             self._logger.warning("core.llm", f"API返回{status}(第{network_retries}次重试)...")
-                        if not _retry_sleep(network_retries - 1, cancel_check):
+                        if not retry_sleep(network_retries - 1, cancel_check):
                             _active_llm_response = None
                             return
                         continue
@@ -516,12 +559,12 @@ class _AnthropicBackend:
                     network_retries += 1
                     if self._logger:
                         self._logger.warning("core.llm", f"网络错误(第{network_retries}次重试): {e}")
-                    if not _retry_sleep(network_retries - 1, cancel_check):
+                    if not retry_sleep(network_retries - 1, cancel_check):
                         return
                     continue
                 if self._logger:
                     self._logger.error("core.llm", f"网络错误(重试耗尽): {e}")
-                yield {"content": f"[错误: API调用失败: {e}]", "finish_reason": "error"}
+                yield {"content": f"[错误: API调用失败({type(e).__name__}，重试{network_retries}次): {e}]", "finish_reason": "error"}
                 return
 
             except Exception as e:
@@ -531,7 +574,7 @@ class _AnthropicBackend:
                     return
                 if self._logger:
                     self._logger.error("core.llm", f"API调用失败: {e}")
-                yield {"content": f"[错误: API调用失败: {e}]", "finish_reason": "error"}
+                yield {"content": f"[错误: API调用失败({type(e).__name__}): {e}]", "finish_reason": "error"}
                 return
 
         # 解析 Anthropic SSE 流（resp 已是 stream=True 模式）
@@ -545,15 +588,19 @@ class _AnthropicBackend:
             _start_usage = None     # message_start 中的初始 usage，兜底时补用
 
             line_queue = queue.Queue()
-            stream_err = []  # 流读取异常（服务端中途断开）
+            stream_err = []          # 流读取异常（服务端中途断开）
+            last_data_ts = [None]    # 最近收到数据的时间戳（看门狗用；收到首个事件后才有值）
 
             def _read_lines():
                 """后台线程：从 httpx 流式响应中逐行读取 SSE"""
                 try:
                     for line in resp.iter_lines():
+                        last_data_ts[0] = time.time()
                         line_queue.put(line)
                 except Exception as e:
-                    stream_err.append(e)
+                    # 看门狗已记录错误时不再重复追加
+                    if not stream_err:
+                        stream_err.append(e)
                 finally:
                     line_queue.put(_STREAM_END)
 
@@ -566,6 +613,16 @@ class _AnthropicBackend:
                 except queue.Empty:
                     if cancel_check and cancel_check():
                         return
+                    # 看门狗：已开始输出后静默超过阈值视为挂死，主动断连触发上层重试；
+                    # 首字节前（prefill/思考期）静默由 read 超时兜底，不在此误断
+                    if (not stream_err and last_data_ts[0] is not None
+                            and time.time() - last_data_ts[0] > _STREAM_STALL_SECONDS):
+                        stream_err.append(httpx.ReadTimeout(
+                            f"流式输出静默超过{_STREAM_STALL_SECONDS:.0f}s"))
+                        try:
+                            resp.close()
+                        except Exception:
+                            pass
                     continue
                 if line is _STREAM_END:
                     break
@@ -692,10 +749,11 @@ class _AnthropicBackend:
                     return
 
             # ── 流中断：服务端中途断开且未收到完成标记 ──
-            # 不 yield 虚假完成标记，由上层（agent_loop）决定整轮重试
+            # 不 yield 虚假完成标记；上报中断信息，由上层（agent_loop）决定整轮重试
             if stream_err and not _msg_delta_seen:
                 if self._logger:
                     self._logger.warning("core.llm", f"响应流中断: {stream_err[0]}")
+                yield {"stream_interrupted": _classify_stream_error(stream_err[0])}
 
             # ── 兜底：流正常结束但未收到 message_delta（DeepSeek 偶发漏发）──
             # 此时缓冲区可能已有完整内容，直接使用

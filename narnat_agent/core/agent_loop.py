@@ -9,7 +9,7 @@ import os
 import time
 from typing import List, Dict, Any, Optional
 
-from .llm import LLMClient
+from .llm import LLMClient, retry_sleep, RETRY_BACKOFF_BASE
 from .message_manager import MessageManager
 from .tool_dispatcher import ToolDispatcher
 from ..tools.tool_context import ToolContext, AWAIT_CONFIRM
@@ -48,7 +48,13 @@ class AgentLoop:
         # 本轮是否正常完成（无tool_call纯文本输出结束）。目标模式续跑据此判断，
         # 出错/中断/空回复等非正常结束不触发自动续跑。
         self._last_round_ok = False
-        stream_interrupted_retried = False  # 响应流中断（无完成标记）的自动重试只做一次
+        stream_interrupted_retries = 0  # 响应流中断（无完成标记）的自动重试计数
+        # 流中断重试上限 = 配置的"LLM重试次数"（每轮独立：收到正常完成标记后重置，
+        # 与连接层重试语义一致，仅累计同一次中断后的连续重试）
+        try:
+            stream_retry_max = max(1, min(int(self._config.ai.retry_count), 10))
+        except (TypeError, ValueError, AttributeError):
+            stream_retry_max = 3
         while True:
             # a. 修复messages
             self._msg_manager.repair()
@@ -59,6 +65,7 @@ class AgentLoop:
             tool_calls_result = []
             call_usage = None
             parsed_finish_reason = None
+            stream_interrupted_info = None  # LLM层上报的流中断信息（kind/detail）
 
             for chunk in self._llm.chat_stream(self._msg_manager.view.to_list(), cancel_check=lambda: stream.cancelled):
                 # b. 检查中断
@@ -82,13 +89,21 @@ class AgentLoop:
                 if "usage" in chunk:
                     call_usage = chunk["usage"]
 
-                # f. 处理结束
+                # f. 流中断上报（LLM层流读取异常，无完成标记）
+                if "stream_interrupted" in chunk:
+                    stream_interrupted_info = chunk["stream_interrupted"]
+                    continue
+
+                # g. 处理结束
                 if "finish_reason" in chunk:
                     parsed_finish_reason = chunk["finish_reason"]
                     if parsed_finish_reason == "error":
                         stream.finish(
                             self._stats.input_tokens,
                             self._stats.output_tokens,
+                            cache_ratio=self._stats.cache_hit_ratio,
+                            cost=self._stats.cost,
+                            balance=self._stats.balance,
                             thinking_effort=self._thinking_label,
                         )
                         return
@@ -98,6 +113,10 @@ class AgentLoop:
                 stream.abort()
                 self._ui.on_interrupted()
                 return
+
+            # 本轮收到正常完成标记（含工具轮）→ 重置流中断重试预算（每轮独立）
+            if parsed_finish_reason is not None:
+                stream_interrupted_retries = 0
 
             # 有tool_call → 执行工具 → 继续内循环
             if tool_calls_result:
@@ -144,22 +163,40 @@ class AgentLoop:
 
                 continue
 
-            # ── 响应流中断（无完成标记）→ 整轮重试一次 ──
+            # ── 响应流中断（无完成标记）→ 整轮重试（指数退避）──
             # 正常完成必有finish_reason；None表示服务端在响应中途断开。
             # 此时assistant消息尚未写入历史（部分内容/不完整tool_calls被丢弃），
-            # 重发幂等无副作用。
+            # 重发幂等无副作用。重试上限=配置的LLM重试次数，网络波动时可连续自救。
             if parsed_finish_reason is None:
-                if not stream_interrupted_retried:
-                    stream_interrupted_retried = True
+                if stream_interrupted_retries < stream_retry_max:
+                    stream_interrupted_retries += 1
+                    kind = (stream_interrupted_info or {}).get("kind", "unknown")
+                    base = RETRY_BACKOFF_BASE[
+                        min(stream_interrupted_retries - 1, len(RETRY_BACKOFF_BASE) - 1)
+                    ]
                     if self._logger:
-                        self._logger.warning("agent_loop", "响应流中断(无finish_reason)，自动重试一次")
+                        self._logger.warning(
+                            "agent_loop",
+                            f"响应流中断({kind})，{base}s后自动重试"
+                            f"(第{stream_interrupted_retries}/{stream_retry_max}次)",
+                        )
                     # 清空渲染器缓冲：重试流会从开头重播，上一轮残留的半行文字/
                     # 表格行/代码块若不清除，会与重播内容拼接重复或错乱。
                     stream.reset_renderer()
-                    stream.feed("\n⚠ 服务端响应流中断，正在自动重试…\n")
+                    stream.feed(
+                        f"\n⚠ 服务端响应流中断，约{base}s后自动重试"
+                        f"（第{stream_interrupted_retries}/{stream_retry_max}次）…\n"
+                    )
+                    # 退避等待期间用户可ESC取消
+                    if not retry_sleep(stream_interrupted_retries - 1, lambda: stream.cancelled):
+                        stream.abort()
+                        self._ui.on_interrupted()
+                        return
                     continue
-                # 重试后仍中断 → 报错结束（截断内容不写入历史，避免污染上下文）
-                stream.feed("\n\n⚠ 服务端响应流中断，请稍后重试。\n")
+                # 重试耗尽 → 报错结束（截断内容不写入历史，避免污染上下文）
+                stream.feed(
+                    f"\n\n⚠ 服务端响应流中断，已自动重试{stream_retry_max}次仍失败，请稍后重试。\n"
+                )
                 stream.finish(
                     self._stats.input_tokens,
                     self._stats.output_tokens,
