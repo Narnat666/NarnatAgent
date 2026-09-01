@@ -159,12 +159,12 @@ def execute(query: str, num: int = 5, _tool_context=None) -> str:
         _ANYSEARCH_URL = _tool_context.api_keys.get("websearch_url", _ANYSEARCH_URL)
 
     if not _ANYSEARCH_API_KEY:
-        return "[搜索失败: 未配置 WebSearch API Key]"
+        return "[错误: 搜索失败，未配置 WebSearch API Key]"
 
     try:
         results = _search_anysearch(query, num)
     except Exception as e:
-        return f"[搜索失败: {e}]"
+        return f"[错误: 搜索失败: {e}]"
 
     if not results:
         return "[无搜索结果]"

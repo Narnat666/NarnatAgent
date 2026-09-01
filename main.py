@@ -6,7 +6,7 @@ import argparse
 import sys
 import os
 
-__version__ = "15.7.6"
+__version__ = "15.7.7"
 
 
 def main():

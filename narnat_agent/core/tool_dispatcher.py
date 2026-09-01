@@ -4,6 +4,7 @@
 """
 
 import json
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from typing import List, Dict, Any, Tuple, Optional
@@ -24,6 +25,25 @@ def _local_hostname() -> str:
         return socket.gethostname()
     except Exception:
         return "localhost"
+
+
+def _command_exec_failed(result: str) -> bool:
+    """Shell/Terminal命令级失败判定：超时、整体退出码非0、或段启动失败。
+
+    取最后一个 [exit code: N] 作为整体退出码：多段命令总退出码在末尾，
+    'a || b' 短路后整体成功（末尾0）不算失败；超时无退出码单独判定。
+    用户中断/确认取消属正常交互，不算失败（Terminal被打断时exit code
+    常为130(SIGINT)，需先排除）。
+    """
+    if "[用户中断]" in result or "[操作已取消" in result:
+        return False
+    if "[超时" in result:
+        return True
+    codes = re.findall(r"\[exit code: (\d+)\]", result)
+    if codes and int(codes[-1]) != 0:
+        return True
+    # 多段命令某段启动失败（如命令行含NUL字符）：错误标记在结果中间且无总退出码
+    return "[错误" in result
 
 
 # ── 工具分类 ──
@@ -139,6 +159,7 @@ class ToolDispatcher:
                         results[idx] = (tc_id, result)
                     except Exception as e:
                         results[idx] = (tc_id, f"[错误: 工具执行失败: {e}]")
+                        self._show_tool_failed(name)
             else:
                 futures = {}
                 for group in file_groups:
@@ -158,7 +179,10 @@ class ToolDispatcher:
                         try:
                             fut.result()
                         except Exception:
-                            pass
+                            # 组内某工具执行时崩溃：未执行到的工具补失败提示（结果语义不变）
+                            for _idx, _tc_id, _name, _args in futures[fut]:
+                                if _idx not in results:
+                                    self._show_tool_failed(_name)
 
         if stream.cancelled:
             return [results[i] for i in range(len(parsed)) if i in results]
@@ -184,6 +208,7 @@ class ToolDispatcher:
                     results[idx] = (tc_id, result)
                 except Exception as e:
                     results[idx] = (tc_id, f"[错误: 工具执行失败: {e}]")
+                    self._show_tool_failed(name)
 
         return [results[i] for i in range(len(parsed)) if i in results]
 
@@ -208,8 +233,11 @@ class ToolDispatcher:
         # 展示着色diff
         if color_diff:
             self._show_diff(color_diff)
-        elif name in ("Edit", "Write") and isinstance(llm_result, str) and llm_result.startswith("[错误"):
-            # 写入类工具失败：终端仅显示一行失败提示，具体原因只进AI上下文
+        elif isinstance(llm_result, str) and llm_result.startswith("[错误"):
+            # 工具执行失败：终端仅显示一行失败提示，具体原因只进AI上下文
+            self._show_tool_failed(name)
+        elif name in ("Shell", "Terminal") and isinstance(llm_result, str) and _command_exec_failed(llm_result):
+            # Shell/Terminal命令级失败（退出码非0/超时）：终端补一行失败提示，原因只进AI上下文
             self._show_tool_failed(name)
 
         stream.resume_spinner()
@@ -237,6 +265,7 @@ class ToolDispatcher:
                     results[idx] = (tc_id, result)
                 except Exception as e:
                     results[idx] = (tc_id, f"[错误: 工具执行失败({name}): {e}]")
+                    self._show_tool_failed(name)
             return
 
         futures = {}
@@ -260,6 +289,7 @@ class ToolDispatcher:
                     results[idx] = (tc_id, result)
                 except Exception as e:
                     results[idx] = (tc_id, f"[错误: 工具执行失败({name}): {e}]")
+                    self._show_tool_failed(name)
 
     def _run_sequential_group(self, group, results, stream) -> None:
         """串行执行同一文件组的写入工具"""
@@ -302,16 +332,17 @@ class ToolDispatcher:
             f"[计划优先模式已开启: 请先使用TodoWrite制定计划（至少1项in_progress），"
             f"再执行其他工具。当前尝试调用的工具: {', '.join(non_todo_names)}]"
         )
-        # 被拦的Edit/Write：终端显示 [编辑]/[写入] 文件 + 失败提示（具体原因只进AI上下文）
+        # 被拦的工具：终端显示 [标签] 摘要 + 失败提示（具体原因只进AI上下文）
         for tc in tool_calls:
             name = tc["function"]["name"]
-            if name in ("Edit", "Write"):
-                try:
-                    args = json.loads(tc["function"].get("arguments") or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                self._show_tool_call(name, args)
-                self._show_tool_failed(name)
+            if name == "TodoWrite":
+                continue
+            try:
+                args = json.loads(tc["function"].get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            self._show_tool_call(name, args)
+            self._show_tool_failed(name)
         results = []
         for i, tc_id in enumerate(non_todo_ids):
             results.append((tc_id, hint if i == 0 else "[计划优先拦截，详见上方]"))
@@ -421,6 +452,6 @@ class ToolDispatcher:
         _stdout_write(buf + tail)
 
     def _show_tool_failed(self, name: str):
-        """写入类工具失败：终端显示一行红色失败提示，具体原因只进AI上下文"""
+        """工具执行失败：终端显示一行红色失败提示，具体原因只进AI上下文"""
         label = _TOOL_LABELS.get(name, name)
         _stdout_write(f"  {X}[{label}失败]{R}\n")
