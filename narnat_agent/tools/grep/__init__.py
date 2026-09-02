@@ -18,8 +18,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..param_utils import to_bool
 from ..glob import _expand_braces, _unescape_braces
 
-_DEFAULT_IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache"}
-
 # ── 滚动缓冲区大小（64KB，与 ripgrep 的 DEFAULT_BUFFER_CAPACITY 一致）──
 _BUFFER_SIZE = 64 * 1024
 
@@ -50,7 +48,6 @@ DEFINITION = {
         "name": "Grep",
         "description": (
             "正则搜索文件内容（仅支持本机文件，不支持远程设备文件）。"
-            "默认跳过.git/node_modules等忽略目录。"
             "path 支持目录、单个文件，或多个路径的数组（文件/目录可混合，按给定顺序输出）。"
             "glob 支持花括号多模式（与Glob工具语法一致），如 *.{c,h}、src/**/*.{py,md}。"
             "默认返回每个命中文件的分组结果：文件表头（含匹配计数）+ 带行号的匹配行；"
@@ -187,9 +184,7 @@ def execute(
     if not paths or all(p is None for p in paths):
         paths = [""]
 
-    ignore_dirs = _DEFAULT_IGNORE_DIRS.copy()
-    if _tool_context and _tool_context.ignore_dirs:
-        ignore_dirs |= set(_tool_context.ignore_dirs)
+    ignore_dirs = set(_tool_context.ignore_dirs) if _tool_context and _tool_context.ignore_dirs else set()
 
     # ── 收集搜索目标 (target, label, is_file)：去重、缺失警告但不中断 ──
     warnings = []

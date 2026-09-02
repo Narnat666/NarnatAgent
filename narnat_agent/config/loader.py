@@ -26,8 +26,10 @@ from .defaults import (
 )
 
 
-# ── 默认忽略目录 ──
-_DEFAULT_IGNORE_DIRS = [".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache"]
+# ── 忽略目录种子列表 ──
+# 仅用于首次生成 narnat.json 时写入"忽略目录"键（把常见噪音目录作为可见建议写入文件，用户可自行删改）。
+# 运行时以 narnat.json 为准：键缺失或为空 → 不忽略任何目录。
+_DEFAULT_IGNORE_DIRS = [".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", ".idea", ".vscode", ".tox", ".nox"]
 
 
 @dataclass
@@ -69,7 +71,7 @@ class ToolConfig:
     max_transfer_mb: int = 100                          # 文件传输上限(MB)
     max_output_chars: int = DEFAULT_MAX_TOOL_OUTPUT_KB * 1024  # 工具输出上限(字符数)
     max_timeout_seconds: int = DEFAULT_MAX_TIMEOUT_SECONDS     # 工具超时上限(秒)，0=不限制
-    ignore_dirs: tuple = ()                             # 忽略目录（tuple保证不可变）
+    ignore_dirs: tuple = ()                             # 忽略目录（唯一来源narnat.json"忽略目录"键，空=不忽略）
 
 
 @dataclass(frozen=True)
@@ -647,7 +649,7 @@ def load_config(project_root: Optional[str] = None) -> Config:
             max_transfer_mb=int(data.get("工具", {}).get("最大传输文件MB", 100)),
             max_output_chars=max_output_chars,
             max_timeout_seconds=int(data.get("工具", {}).get("超时上限秒", DEFAULT_MAX_TIMEOUT_SECONDS)),
-            ignore_dirs=tuple(data.get("忽略目录", list(_DEFAULT_IGNORE_DIRS))),
+            ignore_dirs=tuple(data.get("忽略目录") or []),
         ),
         safety=SafetyConfig(
             git_skip_confirm=bool(data.get("工具", {}).get("git免确认", DEFAULT_GIT_SKIP)),

@@ -15,11 +15,6 @@ import os
 import re
 from functools import lru_cache
 
-_DEFAULT_IGNORE_DIRS: set[str] = {
-    ".git", "__pycache__", "node_modules", ".svn", ".hg",
-    "venv", ".venv", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-    ".cache", ".idea", ".vscode", ".tox", ".nox",
-}
 _MAX_BRACE_EXPANSIONS = 100
 _MAX_HARD_LIMIT = 50_000
 
@@ -439,7 +434,7 @@ DEFINITION = {
             '"dir/*.ext" 递归匹配 dir 下所有层的.ext（含子目录）。'
             '例："**/*.h"、"src/**/*.cpp"、"*.{docx,pdf}"。返回匹配路径，按修改时间倒序。'
             'pattern 支持绝对路径（如 "D:\\work\\**\\*.py"），绝对与相对写法语义一致。'
-            '默认跳过隐藏文件与.git/node_modules等忽略目录；pattern含以.开头的路径组件时匹配隐藏文件（".*"匹配点开头的项）。'
+            '默认跳过隐藏文件；pattern含以.开头的路径组件时匹配隐藏文件（".*"匹配点开头的项）。'
             '（仅支持本机文件，不支持远程设备文件）'
         ),
         "parameters": {
@@ -478,12 +473,9 @@ def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=N
     # 硬上限防止 OOM（对齐 fd 设计）
     max_results = min(max_results, _MAX_HARD_LIMIT)
 
-    # 合并 ignore_dirs
-    ignore_dirs = _DEFAULT_IGNORE_DIRS.copy()
-    if _tool_context is not None:
-        extra = getattr(_tool_context, "ignore_dirs", None)
-        if extra:
-            ignore_dirs |= set(extra)
+    # 忽略目录统一来自 narnat.json 配置（经 ToolContext 注入），工具内不再写死
+    extra = getattr(_tool_context, "ignore_dirs", None) if _tool_context is not None else None
+    ignore_dirs = set(extra) if extra else set()
 
     # 1. 展开花括号 + 去转义
     raw_patterns = _expand_braces(pattern)
