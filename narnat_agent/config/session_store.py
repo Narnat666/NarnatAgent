@@ -18,9 +18,7 @@ def _strip_surrogates(obj):
         return [_strip_surrogates(v) for v in obj]
     return obj
 
-from .defaults import DATA_SUBDIR
-
-_SESSIONS_SUBDIR = "sessions"
+from .defaults import DATA_SUBDIR, SESSIONS_SUBDIR
 
 
 def _safe_filename(name: str) -> str:
@@ -34,7 +32,7 @@ def _safe_filename(name: str) -> str:
 
 
 def _sessions_dir(narnat_dir: str) -> str:
-    d = os.path.join(narnat_dir, DATA_SUBDIR, _SESSIONS_SUBDIR)
+    d = os.path.join(narnat_dir, DATA_SUBDIR, SESSIONS_SUBDIR)
     os.makedirs(d, exist_ok=True)
     return d
 

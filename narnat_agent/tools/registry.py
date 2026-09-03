@@ -63,6 +63,10 @@ TOOL_DEFINITIONS: List[Dict] = [
 # 公开接口
 # ═══════════════════════════════════════════════════════════════
 
+# 需要tool_context的工具：执行时注入 _tool_context 参数
+_CONTEXT_TOOLS = {"Shell", "Terminal", "TodoWrite", "WebSearch", "Write", "Read", "Glob", "Grep", "Edit", "Serial", "GoalComplete"}
+
+
 def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolContext] = None) -> tuple:
     """
     执行指定工具。
@@ -80,9 +84,6 @@ def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolCon
     impl = _TOOL_IMPLEMENTATIONS.get(name)
     if impl is None:
         return (f"[错误: 未知工具: {name}]", "")
-
-    # 需要tool_context的工具：注入上下文参数
-    _CONTEXT_TOOLS = {"Shell", "Terminal", "TodoWrite", "WebSearch", "Write", "Read", "Glob", "Grep", "Edit", "Serial", "GoalComplete"}
 
     try:
         if tool_context and name in _CONTEXT_TOOLS:

@@ -55,6 +55,12 @@ NARNAT_DIR = ".narnat"
 CONFIG_SUBDIR = "config"       # 配置层：静态、用户可编辑
 DATA_SUBDIR = "data"           # 数据层：运行时持久化
 LOGS_SUBDIR = "logs"           # 日志层：可清理
+SESSIONS_SUBDIR = "sessions"   # 会话存档（相对 data/）
+
+# ── 忽略目录种子列表 ──
+# 仅用于首次生成 narnat.json 时写入"忽略目录"键（把常见噪音目录作为可见建议写入文件，用户可自行删改）。
+# 运行时以 narnat.json 为准：键缺失或为空 → 不忽略任何目录。
+DEFAULT_IGNORE_DIRS = [".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", ".idea", ".vscode", ".tox", ".nox"]
 
 # ── 配置文件名（相对于 config/ 子目录） ──
 NARNAT_JSON = "narnat.json"

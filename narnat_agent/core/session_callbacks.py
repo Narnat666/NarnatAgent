@@ -21,8 +21,6 @@ from ..config.session_store import (
 from ..config.skill_store import load_skill, list_skill_names
 from .message_list import MessageList
 
-BOUNDARY_MARKER_PREFIX = "━━━ 探索分支开始"
-
 
 def _format_messages_text(messages: list) -> str:
     lines = []
@@ -41,42 +39,6 @@ def _format_messages_text(messages: list) -> str:
         elif role == "system":
             lines.append(f"系统：{content}")
     return "\n".join(lines)
-
-
-SUMMARY_TASK_TEMPLATE = """# 任务：探索分支增量合并
-
-你是一个负责上下文管理的“增量提取专家”。你的任务是将“子分支”的探索过程压缩，只将**有价值的增量信息**合并回“主分支”，以保持主会话的简洁和高性能。
-
-## 1. 主分支当前状态
-这是主分支已知的上下文，视为“基准真理”。
-{memory}
-
-## 2. 子分支探索日志
-这是在子分支中进行的调试、验证、试错过程。
-{target}
-
-## 3. 处理逻辑
-请严格按照以下步骤进行合并判定：
-
-1.  **去重**：如果子分支的内容只是重复了主分支已知的信息，**直接忽略**。
-2.  **判定增量**：
-    *   **情况 A（无新增）**：如果探索最终没有得出任何新结论，或只是确认了旧结论，输出标记 `[无实质性更新]`。
-    *   **情况 B（新增/优化）**：如果对主分支的模块进行了修改、优化，或发现了新知识，**只描述最终状态**。
-3.  **负面过滤**：对于失败的尝试，**一句话带过**（例如：“排除了方案A，因为...”），不要记录过程细节。
-
-## 4. 输出格式
-如果情况为 A，仅输出：`[无实质性更新]`。
-
-如果情况为 B，请按以下极简格式输出（不要超过 1000 字）：
-
-**更新对象**: (模块名称/功能点)
-**最终状态**: (描述合并后的最新逻辑或代码结构，直接覆盖旧认知)
-**关键变更**: (简述做了什么修改，例如“从同步改为异步”，“增加了异常捕获”)
-**避坑提示**: (可选，一句话简述被排除的错误方案)
-
----
-*原则：宁可少写，不可废话。*
-"""
 
 
 class SessionState:
@@ -368,6 +330,43 @@ class RootSession(SessionState):
 class ChildSession(SessionState):
     """子会话 —— 可合并结论回父会话"""
 
+    # ── 探索分支合并常量（原模块级常量收敛于此，仅本类 done() 使用）──
+    BOUNDARY_MARKER_PREFIX = "━━━ 探索分支开始"
+    SUMMARY_TASK_TEMPLATE = """# 任务：探索分支增量合并
+
+你是一个负责上下文管理的“增量提取专家”。你的任务是将“子分支”的探索过程压缩，只将**有价值的增量信息**合并回“主分支”，以保持主会话的简洁和高性能。
+
+## 1. 主分支当前状态
+这是主分支已知的上下文，视为“基准真理”。
+{memory}
+
+## 2. 子分支探索日志
+这是在子分支中进行的调试、验证、试错过程。
+{target}
+
+## 3. 处理逻辑
+请严格按照以下步骤进行合并判定：
+
+1.  **去重**：如果子分支的内容只是重复了主分支已知的信息，**直接忽略**。
+2.  **判定增量**：
+    *   **情况 A（无新增）**：如果探索最终没有得出任何新结论，或只是确认了旧结论，输出标记 `[无实质性更新]`。
+    *   **情况 B（新增/优化）**：如果对主分支的模块进行了修改、优化，或发现了新知识，**只描述最终状态**。
+3.  **负面过滤**：对于失败的尝试，**一句话带过**（例如：“排除了方案A，因为...”），不要记录过程细节。
+
+## 4. 输出格式
+如果情况为 A，仅输出：`[无实质性更新]`。
+
+如果情况为 B，请按以下极简格式输出（不要超过 1000 字）：
+
+**更新对象**: (模块名称/功能点)
+**最终状态**: (描述合并后的最新逻辑或代码结构，直接覆盖旧认知)
+**关键变更**: (简述做了什么修改，例如“从同步改为异步”，“增加了异常捕获”)
+**避坑提示**: (可选，一句话简述被排除的错误方案)
+
+---
+*原则：宁可少写，不可废话。*
+"""
+
     def __init__(self, mgr: 'SessionManager', name: str, parent: str):
         self._mgr = mgr
         self._name = name
@@ -448,7 +447,7 @@ class ChildSession(SessionState):
         parent_msg_count = self._parent_msg_count
         if parent_msg_count == 0:
             for i, m in enumerate(msgs):
-                if m.get("role") == "system" and BOUNDARY_MARKER_PREFIX in m.get("content", ""):
+                if m.get("role") == "system" and ChildSession.BOUNDARY_MARKER_PREFIX in m.get("content", ""):
                     parent_msg_count = i
                     break
 
@@ -464,7 +463,7 @@ class ChildSession(SessionState):
 
         memory_text = _format_messages_text(memory)
         target_text = _format_messages_text(target)
-        task_content = SUMMARY_TASK_TEMPLATE.format(memory=memory_text, target=target_text)
+        task_content = ChildSession.SUMMARY_TASK_TEMPLATE.format(memory=memory_text, target=target_text)
         summary_msgs = [{"role": "user", "content": task_content}]
 
         if self._mgr.summary_anim_start:

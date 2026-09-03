@@ -33,29 +33,15 @@ def _strip_surrogates(obj):
         return [_strip_surrogates(v) for v in obj]
     return obj
 
-# ESC中断：持有当前活跃的LLM HTTP连接
-_active_llm_response = None
-
-# 队列哨兵值
-_STREAM_END = object()
-
-# 重试参数
-_MAX_NETWORK_RETRIES = 3   # 网络/服务端错误（可通过set_retry_count修改）
-_MAX_RATE_RETRIES = 5      # 429 速率限制（与网络重试统一，由set_retry_count设置）
-RETRY_BACKOFF_BASE = [1, 2, 4, 8, 8]  # 指数退避基数（秒）
-_STREAM_STALL_SECONDS = 180.0  # 流式输出静默超过该时长视为挂死，主动断开触发上层重试
-
-
-def set_retry_count(n: int) -> None:
-    """设置LLM重试次数（由Agent初始化/每轮从配置读取），网络与429统一控制"""
-    global _MAX_NETWORK_RETRIES, _MAX_RATE_RETRIES
-    _MAX_NETWORK_RETRIES = max(1, min(n, 10))  # 限制1-10
-    _MAX_RATE_RETRIES = max(1, min(n, 10))     # 429 与网络重试同源同值
+# ── 共享状态与重试参数已收敛为 LLMClient 类成员（见 LLMClient 类体）──
+# - 中断句柄: LLMClient._active_response
+# - 流队列哨兵: LLMClient._STREAM_END
+# - 重试次数: LLMClient._max_network_retries / _max_rate_retries（set_retry_count 同步）
 
 
 def retry_sleep(attempt: int, cancel_check=None) -> bool:
     """指数退避休眠，带 jitter 和中断检查。返回 False 表示用户取消。"""
-    base = RETRY_BACKOFF_BASE[min(attempt, len(RETRY_BACKOFF_BASE) - 1)]
+    base = LLMClient.RETRY_BACKOFF_BASE[min(attempt, len(LLMClient.RETRY_BACKOFF_BASE) - 1)]
     jitter = base * 0.25 * (random.random() * 2 - 1)
     sleep_time = max(0, base + jitter)
     deadline = time.time() + sleep_time
@@ -71,7 +57,7 @@ def _retry_notice(attempt: int, max_retries: int, reason: str = "网络连接失
 
     由 agent_loop 渲染到输出流，不计入 AI 回复内容与消息历史。
     """
-    base = RETRY_BACKOFF_BASE[min(attempt - 1, len(RETRY_BACKOFF_BASE) - 1)]
+    base = LLMClient.RETRY_BACKOFF_BASE[min(attempt - 1, len(LLMClient.RETRY_BACKOFF_BASE) - 1)]
     return {
         "retry_notice": (
             f"\n⚠ {reason}，约{base}s后自动重试"
@@ -107,8 +93,7 @@ def _is_retryable_http(status: int) -> bool:
 
 def abort_active_llm_request():
     """关闭当前LLM请求的HTTP连接。"""
-    global _active_llm_response
-    resp = _active_llm_response
+    resp = LLMClient._active_response
     if resp is not None:
         try:
             resp.close()
@@ -120,7 +105,7 @@ register_abort(abort_active_llm_request)
 
 
 def _iter_to_queue(iterator, q, err_box=None, data_ts=None):
-    """后台线程：将迭代器的元素逐个放入队列，最后放入_STREAM_END。
+    """后台线程：将迭代器的元素逐个放入队列，最后放入LLMClient._STREAM_END。
 
     迭代异常（如服务端中途断开）记录到 err_box，供主线程判断流是否被中断；
     不再静默吞掉，避免把截断响应当作正常完成。
@@ -136,7 +121,7 @@ def _iter_to_queue(iterator, q, err_box=None, data_ts=None):
         if err_box is not None and not err_box:
             err_box.append(e)
     finally:
-        q.put(_STREAM_END)
+        q.put(LLMClient._STREAM_END)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -146,6 +131,20 @@ def _iter_to_queue(iterator, q, err_box=None, data_ts=None):
 class LLMClient:
     """LLM客户端，通过 config.protocol 选择 OpenAI 或 Anthropic 协议。"""
 
+    # ── 类级共享状态与参数（进程内唯一客户端，两个后端共用）──
+    _active_response = None                    # ESC中断句柄：当前活跃的HTTP连接/流
+    _STREAM_END = object()                     # 流队列哨兵
+    RETRY_BACKOFF_BASE = [1, 2, 4, 8, 8]       # 指数退避基数（秒）
+    _STREAM_STALL_SECONDS = 180.0              # 流式静默超此值视为挂死，主动断连
+    _max_network_retries = 3                   # 网络/服务端错误重试上限
+    _max_rate_retries = 5                      # 429 限流重试上限（与网络重试同源同值）
+
+    @classmethod
+    def set_retry_count(cls, n: int) -> None:
+        """设置LLM重试次数（assembly 初始化 + agent_loop 每轮从配置同步），网络与429统一控制"""
+        cls._max_network_retries = max(1, min(n, 10))  # 限制1-10
+        cls._max_rate_retries = max(1, min(n, 10))     # 429 与网络重试同源同值
+
     def __init__(self, config: AIConfig, logger=None, max_output_tokens: int = 128000,
                  tool_definitions: list = None):
         self._config = config
@@ -153,6 +152,7 @@ class LLMClient:
         # 复制一份：set_goal_tool 动态增删 GoalComplete 时不影响调用方持有的原列表
         self._tool_defs = list(tool_definitions or [])
         self._max_output_tokens = max_output_tokens
+        self.set_retry_count(config.retry_count)
 
         # 协议由 config.protocol 显式指定
         protocol = config.protocol
@@ -218,7 +218,6 @@ class _OpenAIBackend:
         if self._logger:
             self._logger.info("core.llm", f"发送请求(OpenAI), messages={len(messages)}条")
 
-        global _active_llm_response
         from openai import APIStatusError, APIConnectionError, APITimeoutError
 
         network_retries = 0
@@ -226,7 +225,7 @@ class _OpenAIBackend:
         stream = None
 
         while True:
-            _active_llm_response = self._client
+            LLMClient._active_response = self._client
             try:
                 # 动态构造 thinking 参数（不再硬编码）
                 think_body_top, think_extra = resolve_thinking_params(
@@ -257,7 +256,7 @@ class _OpenAIBackend:
                 break
 
             except APIStatusError as e:
-                _active_llm_response = None
+                LLMClient._active_response = None
                 status = e.status_code
                 if status in (400, 401, 403, 404, 422):
                     if self._logger:
@@ -266,19 +265,19 @@ class _OpenAIBackend:
                     return
                 if cancel_check and cancel_check():
                     return
-                if status == 429 and rate_retries < _MAX_RATE_RETRIES:
+                if status == 429 and rate_retries < LLMClient._max_rate_retries:
                     rate_retries += 1
                     if self._logger:
                         self._logger.warning("core.llm", f"API返回429(第{rate_retries}次重试)...")
-                    yield _retry_notice(rate_retries, _MAX_RATE_RETRIES, "请求被限流(429)")
+                    yield _retry_notice(rate_retries, LLMClient._max_rate_retries, "请求被限流(429)")
                     if not retry_sleep(rate_retries - 1, cancel_check):
                         return
                     continue
-                if _is_retryable_http(status) and network_retries < _MAX_NETWORK_RETRIES:
+                if _is_retryable_http(status) and network_retries < LLMClient._max_network_retries:
                     network_retries += 1
                     if self._logger:
                         self._logger.warning("core.llm", f"API返回{status}(第{network_retries}次重试)...")
-                    yield _retry_notice(network_retries, _MAX_NETWORK_RETRIES, f"服务端错误({status})")
+                    yield _retry_notice(network_retries, LLMClient._max_network_retries, f"服务端错误({status})")
                     if not retry_sleep(network_retries - 1, cancel_check):
                         return
                     continue
@@ -288,14 +287,14 @@ class _OpenAIBackend:
                 return
 
             except (APIConnectionError, APITimeoutError) as e:
-                _active_llm_response = None
+                LLMClient._active_response = None
                 if cancel_check and cancel_check():
                     return
-                if network_retries < _MAX_NETWORK_RETRIES:
+                if network_retries < LLMClient._max_network_retries:
                     network_retries += 1
                     if self._logger:
                         self._logger.warning("core.llm", f"网络错误(第{network_retries}次重试): {e}")
-                    yield _retry_notice(network_retries, _MAX_NETWORK_RETRIES)
+                    yield _retry_notice(network_retries, LLMClient._max_network_retries)
                     if not retry_sleep(network_retries - 1, cancel_check):
                         return
                     continue
@@ -305,7 +304,7 @@ class _OpenAIBackend:
                 return
 
             except Exception as e:
-                _active_llm_response = None
+                LLMClient._active_response = None
                 if cancel_check and cancel_check():
                     return
                 if self._logger:
@@ -313,7 +312,7 @@ class _OpenAIBackend:
                 yield {"content": f"[错误: API调用失败({type(e).__name__}): {e}]", "finish_reason": "error"}
                 return
 
-        _active_llm_response = stream
+        LLMClient._active_response = stream
 
         try:
             tool_calls_buffer = {}
@@ -340,15 +339,15 @@ class _OpenAIBackend:
                     # 看门狗：已开始输出后静默超过阈值视为挂死，主动断连触发上层重试；
                     # 首字节前（prefill/思考期）静默由 read 超时兜底，不在此误断
                     if (not stream_err and last_data_ts[0] is not None
-                            and time.time() - last_data_ts[0] > _STREAM_STALL_SECONDS):
+                            and time.time() - last_data_ts[0] > LLMClient._STREAM_STALL_SECONDS):
                         stream_err.append(httpx.ReadTimeout(
-                            f"流式输出静默超过{_STREAM_STALL_SECONDS:.0f}s"))
+                            f"流式输出静默超过{LLMClient._STREAM_STALL_SECONDS:.0f}s"))
                         try:
                             stream.close()
                         except Exception:
                             pass
                     continue
-                if chunk is _STREAM_END:
+                if chunk is LLMClient._STREAM_END:
                     break
 
                 usage = getattr(chunk, 'usage', None)
@@ -424,7 +423,7 @@ class _OpenAIBackend:
                     self._logger.warning("core.llm", f"响应流中断: {stream_err[0]}")
                 yield {"stream_interrupted": _classify_stream_error(stream_err[0])}
         finally:
-            _active_llm_response = None
+            LLMClient._active_response = None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -496,15 +495,14 @@ class _AnthropicBackend:
             body["max_tokens"] = self._config.max_tokens
 
         # 发送请求（带重试，使用 httpx 流式）
-        global _active_llm_response
         network_retries = 0
         rate_retries = 0
 
         while True:
             # read 放宽到 300s：思考期可能长时间无字节输出，大上下文 prefill 也会挤占读超时；
-            # 流中静默挂死由看门狗（_STREAM_STALL_SECONDS）主动断连触发重试
+            # 流中静默挂死由看门狗（LLMClient._STREAM_STALL_SECONDS）主动断连触发重试
             client = httpx.Client(timeout=httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=30.0))
-            _active_llm_response = client
+            LLMClient._active_response = client
             try:
                 # 使用 stream 模式发送请求，先拿到 status_code 再决定是否读取流
                 req = client.build_request("POST", self._url, headers=self._headers, json=body)
@@ -516,7 +514,7 @@ class _AnthropicBackend:
                     err_text = resp.text
                     resp.close()
                     client.close()
-                    _active_llm_response = None
+                    LLMClient._active_response = None
                     if self._logger:
                         self._logger.error("core.llm", f"API调用失败(不可重试): {status} {err_text[:200]}")
                     yield {"content": f"[错误: API调用失败({status}): {err_text[:200]}]", "finish_reason": "error"}
@@ -526,34 +524,34 @@ class _AnthropicBackend:
                 if status == 429:
                     resp.close()
                     client.close()
-                    if rate_retries < _MAX_RATE_RETRIES:
+                    if rate_retries < LLMClient._max_rate_retries:
                         rate_retries += 1
                         if self._logger:
                             self._logger.warning("core.llm", f"API返回429(第{rate_retries}次重试)...")
-                        yield _retry_notice(rate_retries, _MAX_RATE_RETRIES, "请求被限流(429)")
+                        yield _retry_notice(rate_retries, LLMClient._max_rate_retries, "请求被限流(429)")
                         if not retry_sleep(rate_retries - 1, cancel_check):
-                            _active_llm_response = None
+                            LLMClient._active_response = None
                             return
                         continue
-                    _active_llm_response = None
-                    yield {"content": f"[错误: API返回429速率限制(已重试{_MAX_RATE_RETRIES}次)]", "finish_reason": "error"}
+                    LLMClient._active_response = None
+                    yield {"content": f"[错误: API返回429速率限制(已重试{LLMClient._max_rate_retries}次)]", "finish_reason": "error"}
                     return
 
                 # 可重试服务端错误
                 if _is_retryable_http(status):
                     resp.close()
                     client.close()
-                    if network_retries < _MAX_NETWORK_RETRIES:
+                    if network_retries < LLMClient._max_network_retries:
                         network_retries += 1
                         if self._logger:
                             self._logger.warning("core.llm", f"API返回{status}(第{network_retries}次重试)...")
-                        yield _retry_notice(network_retries, _MAX_NETWORK_RETRIES, f"服务端错误({status})")
+                        yield _retry_notice(network_retries, LLMClient._max_network_retries, f"服务端错误({status})")
                         if not retry_sleep(network_retries - 1, cancel_check):
-                            _active_llm_response = None
+                            LLMClient._active_response = None
                             return
                         continue
-                    _active_llm_response = None
-                    yield {"content": f"[错误: API返回{status}错误(已重试{_MAX_NETWORK_RETRIES}次)]", "finish_reason": "error"}
+                    LLMClient._active_response = None
+                    yield {"content": f"[错误: API返回{status}错误(已重试{LLMClient._max_network_retries}次)]", "finish_reason": "error"}
                     return
 
                 # 成功
@@ -561,7 +559,7 @@ class _AnthropicBackend:
                     err_text = resp.text
                     resp.close()
                     client.close()
-                    _active_llm_response = None
+                    LLMClient._active_response = None
                     if self._logger:
                         self._logger.error("core.llm", f"API调用失败: {status} {err_text[:200]}")
                     yield {"content": f"[错误: API调用失败({status}): {err_text[:200]}]", "finish_reason": "error"}
@@ -572,14 +570,14 @@ class _AnthropicBackend:
             # 包括 "Server disconnected without sending a response"（RemoteProtocolError）
             except (httpx.TransportError, httpx.TimeoutException) as e:
                 client.close()
-                _active_llm_response = None
+                LLMClient._active_response = None
                 if cancel_check and cancel_check():
                     return
-                if network_retries < _MAX_NETWORK_RETRIES:
+                if network_retries < LLMClient._max_network_retries:
                     network_retries += 1
                     if self._logger:
                         self._logger.warning("core.llm", f"网络错误(第{network_retries}次重试): {e}")
-                    yield _retry_notice(network_retries, _MAX_NETWORK_RETRIES)
+                    yield _retry_notice(network_retries, LLMClient._max_network_retries)
                     if not retry_sleep(network_retries - 1, cancel_check):
                         return
                     continue
@@ -590,7 +588,7 @@ class _AnthropicBackend:
 
             except Exception as e:
                 client.close()
-                _active_llm_response = None
+                LLMClient._active_response = None
                 if cancel_check and cancel_check():
                     return
                 if self._logger:
@@ -599,7 +597,7 @@ class _AnthropicBackend:
                 return
 
         # 解析 Anthropic SSE 流（resp 已是 stream=True 模式）
-        _active_llm_response = resp
+        LLMClient._active_response = resp
 
         try:
             content_buffer = []
@@ -623,7 +621,7 @@ class _AnthropicBackend:
                     if not stream_err:
                         stream_err.append(e)
                 finally:
-                    line_queue.put(_STREAM_END)
+                    line_queue.put(LLMClient._STREAM_END)
 
             reader = threading.Thread(target=_read_lines, daemon=True)
             reader.start()
@@ -637,15 +635,15 @@ class _AnthropicBackend:
                     # 看门狗：已开始输出后静默超过阈值视为挂死，主动断连触发上层重试；
                     # 首字节前（prefill/思考期）静默由 read 超时兜底，不在此误断
                     if (not stream_err and last_data_ts[0] is not None
-                            and time.time() - last_data_ts[0] > _STREAM_STALL_SECONDS):
+                            and time.time() - last_data_ts[0] > LLMClient._STREAM_STALL_SECONDS):
                         stream_err.append(httpx.ReadTimeout(
-                            f"流式输出静默超过{_STREAM_STALL_SECONDS:.0f}s"))
+                            f"流式输出静默超过{LLMClient._STREAM_STALL_SECONDS:.0f}s"))
                         try:
                             resp.close()
                         except Exception:
                             pass
                     continue
-                if line is _STREAM_END:
+                if line is LLMClient._STREAM_END:
                     break
 
                 line = (line or "").strip()
@@ -820,7 +818,7 @@ class _AnthropicBackend:
                         )
 
         finally:
-            _active_llm_response = None
+            LLMClient._active_response = None
             resp.close()
             client.close()
 

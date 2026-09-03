@@ -15,8 +15,10 @@ import os
 import re
 from functools import lru_cache
 
-_MAX_BRACE_EXPANSIONS = 100
-_MAX_HARD_LIMIT = 50_000
+class GlobLimits:
+    """Glob 工具边界参数（原模块级常量收敛为类成员）"""
+    MAX_BRACE_EXPANSIONS = 100
+    MAX_HARD_LIMIT = 50_000
 
 
 # ── 花括号展开 ────────────────────────────────────────────────
@@ -97,7 +99,7 @@ def _expand_braces(pattern: str) -> list[str]:
                 results: list[str] = []
                 for opt in options:
                     for exp in _expand_braces(head + opt + tail):
-                        if len(results) >= _MAX_BRACE_EXPANSIONS:
+                        if len(results) >= GlobLimits.MAX_BRACE_EXPANSIONS:
                             return results
                         results.append(exp)
                 return results
@@ -471,7 +473,7 @@ def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=N
         return "[错误: max_results需为正整数]"
 
     # 硬上限防止 OOM（对齐 fd 设计）
-    max_results = min(max_results, _MAX_HARD_LIMIT)
+    max_results = min(max_results, GlobLimits.MAX_HARD_LIMIT)
 
     # 忽略目录统一来自 narnat.json 配置（经 ToolContext 注入），工具内不再写死
     extra = getattr(_tool_context, "ignore_dirs", None) if _tool_context is not None else None

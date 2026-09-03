@@ -13,6 +13,7 @@ from .defaults import (
     BASE_PROMPT_TEMPLATE, COMPRESS_PROMPT,
     NARNAT_DIR, NARNAT_JSON, NARNAT_MD,
     CONFIG_SUBDIR, DATA_SUBDIR, LOGS_SUBDIR,
+    DEFAULT_IGNORE_DIRS,
     DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL,
     DEFAULT_PROTOCOL, DEFAULT_THINKING_ENABLED, DEFAULT_THINKING_EFFORT,
     DEFAULT_CONTEXT_WINDOW, DEFAULT_SHOW_RATIO, DEFAULT_WARN_RATIO, DEFAULT_COMPRESS_RATIO,
@@ -24,12 +25,6 @@ from .defaults import (
     DEFAULT_AUTO_SAVE_TOKENS,
     DEFAULT_GOAL_MAX_ROUNDS,
 )
-
-
-# ── 忽略目录种子列表 ──
-# 仅用于首次生成 narnat.json 时写入"忽略目录"键（把常见噪音目录作为可见建议写入文件，用户可自行删改）。
-# 运行时以 narnat.json 为准：键缺失或为空 → 不忽略任何目录。
-_DEFAULT_IGNORE_DIRS = [".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", ".idea", ".vscode", ".tox", ".nox"]
 
 
 @dataclass
@@ -587,7 +582,7 @@ def load_config(project_root: Optional[str] = None) -> Config:
                             "压缩": DEFAULT_COMPRESS_RATIO,
                         },
                         "计划": {},
-                        "忽略目录": _DEFAULT_IGNORE_DIRS,
+                        "忽略目录": DEFAULT_IGNORE_DIRS,
                     }, f, indent=2, ensure_ascii=False)
                 else:
                     f.write("")

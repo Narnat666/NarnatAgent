@@ -46,32 +46,31 @@ def _command_exec_failed(result: str) -> bool:
     return "[错误" in result
 
 
-# ── 工具分类 ──
-_READONLY_TOOLS = {"Read", "Glob", "Grep", "WebSearch"}
-_WRITE_TOOLS = {"Edit", "Write"}
-_SERIAL_TOOLS = {"Shell", "Terminal", "TodoWrite", "Serial", "GoalComplete"}
-
-# 工具名→简短描述映射
-_TOOL_LABELS = {
-    "Read": "读取",
-    "Glob": "搜索文件",
-    "Grep": "搜索内容",
-    "Edit": "编辑",
-    "Write": "写入",
-    "Shell": "执行命令",
-    "Terminal": "终端",
-    "WebSearch": "联网搜索",
-    "TodoWrite": "更新计划",
-    "Serial": "串口",
-    "GoalComplete": "声明完成",
-}
-
-# 工具摘要提取：文件类工具取file_path
-_FILE_PATH_TOOLS = {"Read", "Edit", "Write"}
-
-
 class ToolDispatcher:
     """工具调度器"""
+
+    # ── 工具分类（原模块级常量收敛为类属性）──
+    READONLY_TOOLS = {"Read", "Glob", "Grep", "WebSearch"}
+    WRITE_TOOLS = {"Edit", "Write"}
+    SERIAL_TOOLS = {"Shell", "Terminal", "TodoWrite", "Serial", "GoalComplete"}
+
+    # 工具名→简短描述映射
+    TOOL_LABELS = {
+        "Read": "读取",
+        "Glob": "搜索文件",
+        "Grep": "搜索内容",
+        "Edit": "编辑",
+        "Write": "写入",
+        "Shell": "执行命令",
+        "Terminal": "终端",
+        "WebSearch": "联网搜索",
+        "TodoWrite": "更新计划",
+        "Serial": "串口",
+        "GoalComplete": "声明完成",
+    }
+
+    # 工具摘要提取：文件类工具取file_path
+    FILE_PATH_TOOLS = {"Read", "Edit", "Write"}
 
     def __init__(self, tool_context: ToolContext, executor: ThreadPoolExecutor, logger=None):
         self._tool_context = tool_context
@@ -115,9 +114,9 @@ class ToolDispatcher:
         serial_group = []
 
         for idx, (tc_id, name, arguments) in enumerate(parsed):
-            if name in _READONLY_TOOLS:
+            if name in ToolDispatcher.READONLY_TOOLS:
                 readonly_group.append((idx, tc_id, name, arguments))
-            elif name in _WRITE_TOOLS:
+            elif name in ToolDispatcher.WRITE_TOOLS:
                 fp = arguments.get("file_path", "")
                 write_group.setdefault(fp, []).append((idx, tc_id, name, arguments))
             else:
@@ -362,9 +361,9 @@ class ToolDispatcher:
 
     def _show_tool_call(self, name: str, arguments: dict):
         """在终端显示工具调用摘要"""
-        label = _TOOL_LABELS.get(name, name)
+        label = ToolDispatcher.TOOL_LABELS.get(name, name)
         summary = ""
-        if name in _FILE_PATH_TOOLS:
+        if name in ToolDispatcher.FILE_PATH_TOOLS:
             dev_raw = arguments.get("device", "")
             # 只有远程设备(dev1..devn)才显示设备；dev0/省略=本机不显示
             dev = _dev_display(dev_raw) if dev_raw else ""
@@ -453,5 +452,5 @@ class ToolDispatcher:
 
     def _show_tool_failed(self, name: str):
         """工具执行失败：终端显示一行红色失败提示，具体原因只进AI上下文"""
-        label = _TOOL_LABELS.get(name, name)
+        label = ToolDispatcher.TOOL_LABELS.get(name, name)
         _stdout_write(f"  {X}[{label}失败]{R}\n")

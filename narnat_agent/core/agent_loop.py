@@ -9,7 +9,7 @@ import os
 import time
 from typing import List, Dict, Any, Optional
 
-from .llm import LLMClient, retry_sleep, set_retry_count, RETRY_BACKOFF_BASE
+from .llm import LLMClient, retry_sleep
 from .message_manager import MessageManager
 from .tool_dispatcher import ToolDispatcher
 from ..tools.tool_context import ToolContext, AWAIT_CONFIRM
@@ -56,7 +56,7 @@ class AgentLoop:
         except (TypeError, ValueError, AttributeError):
             stream_retry_max = 3
         # 同步LLM层重试次数：网络/5xx/429 与流中断重试统一由同一配置值控制
-        set_retry_count(stream_retry_max)
+        self._llm.set_retry_count(stream_retry_max)
         while True:
             # a. 修复messages
             self._msg_manager.repair()
@@ -178,8 +178,8 @@ class AgentLoop:
                 if stream_interrupted_retries < stream_retry_max:
                     stream_interrupted_retries += 1
                     kind = (stream_interrupted_info or {}).get("kind", "unknown")
-                    base = RETRY_BACKOFF_BASE[
-                        min(stream_interrupted_retries - 1, len(RETRY_BACKOFF_BASE) - 1)
+                    base = LLMClient.RETRY_BACKOFF_BASE[
+                        min(stream_interrupted_retries - 1, len(LLMClient.RETRY_BACKOFF_BASE) - 1)
                     ]
                     if self._logger:
                         self._logger.warning(

@@ -14,26 +14,48 @@ import time
 from typing import Optional
 
 
-# 删除命令正则
-# 边界后跟空白或/：覆盖无空格变体（rd/s、del/f、rmdir/q）及erase/format；
-# \b边界防止误伤 delphi、3rd、formatting 等普通词
-_RE_DELETE = re.compile(
-    r"\b(?:rm|del|rd|rmdir|erase|format)\b[\s/]"
-    r"|\bRemove-Item\b",
-    re.IGNORECASE,
-)
+class BashRuntime:
+    """Shell 工具全部模块级状态与参数（原散落的模块级全局收敛于此）。
 
-# 匹配 git 命令的简单正则（出现 git 即命中）
-_RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
+    - active_proc/interrupted: 跨调用共享的可变状态（ESC 打断路径）
+    - utf8_env: 子进程环境（导入时构建一次）
+    - 正则/平台常量: 仅本模块使用
+    """
+    # 删除命令正则
+    # 边界后跟空白或/：覆盖无空格变体（rd/s、del/f、rmdir/q）及erase/format；
+    # \b边界防止误伤 delphi、3rd、formatting 等普通词
+    RE_DELETE = re.compile(
+        r"\b(?:rm|del|rd|rmdir|erase|format)\b[\s/]"
+        r"|\bRemove-Item\b",
+        re.IGNORECASE,
+    )
 
-# 识别 `python -c "code"` 形态（py/python3/pythonw及全路径），用于绕过cmd直执行。
-# exe: 解释器名或路径（可带盘符/空格，不可带引号）；flags: -c 前的真实旗标
-# （排除 -c/-m 自身及引号开头项）；tail: -c 后的整段载荷（re.S 允许多行）。
-_RE_PY_C_DIRECT = re.compile(
-    r"^(?i:(?P<exe>(?:[A-Za-z]:)?[\w.\\/ -]*?py(?:thon)?\d*(?:w)?(?:\.exe)?))"
-    r"(?P<flags>(?:\s+(?:-(?!c\b|m\b)\S+|[^\s\"-]\S+))*)\s+-c\s+(?P<tail>.+)$",
-    re.S,
-)
+    # 匹配 git 命令的简单正则（出现 git 即命中）
+    RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
+
+    # 识别 `python -c "code"` 形态（py/python3/pythonw及全路径），用于绕过cmd直执行。
+    # exe: 解释器名或路径（可带盘符/空格，不可带引号）；flags: -c 前的真实旗标
+    # （排除 -c/-m 自身及引号开头项）；tail: -c 后的整段载荷（re.S 允许多行）。
+    RE_PY_C_DIRECT = re.compile(
+        r"^(?i:(?P<exe>(?:[A-Za-z]:)?[\w.\\/ -]*?py(?:thon)?\d*(?:w)?(?:\.exe)?))"
+        r"(?P<flags>(?:\s+(?:-(?!c\b|m\b)\S+|[^\s\"-]\S+))*)\s+-c\s+(?P<tail>.+)$",
+        re.S,
+    )
+
+    # 子进程环境变量：强制 UTF-8 编码，解决 Windows 下 Python print emoji 等
+    # Unicode 字符在 GBK 代码页下报 UnicodeEncodeError 的问题
+    utf8_env = os.environ.copy()
+    utf8_env["PYTHONIOENCODING"] = "utf-8"
+    utf8_env["PYTHONUTF8"] = "1"
+
+    # 当前运行的前台进程（agent层ESC打断后可调用kill_active杀掉）
+    active_proc: Optional[subprocess.Popen] = None
+    active_proc_lock = threading.Lock()
+
+    # ESC打断标记，kill_active()设置，execute()检查后清除
+    interrupted = False
+
+    PLATFORM_LABEL = "Windows(cmd)" if sys.platform == "win32" else "Linux/macOS(bash)"
 
 
 def _scan_code_suffix(tail: str):
@@ -110,7 +132,7 @@ def _try_extract_py_code(seg: str):
 
     尾随 ` 2>&1` 剥离：工具本就合并展示 stdout+stderr，语义等价。
     """
-    m = _RE_PY_C_DIRECT.match(seg)
+    m = BashRuntime.RE_PY_C_DIRECT.match(seg)
     if not m:
         return None
     exe, flags, tail = m.group("exe"), m.group("flags"), m.group("tail")
@@ -139,26 +161,13 @@ def _try_extract_py_code(seg: str):
         return None  # .bat垫片等 → 交给cmd处理
     return exe, flags, code_tail, spec
 
-# 子进程环境变量：强制 UTF-8 编码，解决 Windows 下 Python print emoji 等
-# Unicode 字符在 GBK 代码页下报 UnicodeEncodeError 的问题
-_utf8_env = os.environ.copy()
-_utf8_env["PYTHONIOENCODING"] = "utf-8"
-_utf8_env["PYTHONUTF8"] = "1"
-
-# 当前运行的前台进程（agent层ESC打断后可调用kill_active杀掉）
-_active_proc: Optional[subprocess.Popen] = None
-_active_proc_lock = threading.Lock()
-
-# ESC打断标记，kill_active()设置，execute()检查后清除
-_interrupted = False
-
-_PLATFORM_LABEL = "Windows(cmd)" if sys.platform == "win32" else "Linux/macOS(bash)"
+# （以上模块级状态已收敛为 BashRuntime 类成员）
 
 DEFINITION = {
     "type": "function",
     "function": {
         "name": "Shell",
-        "description": f"本地Shell — 在{_PLATFORM_LABEL}执行命令。",
+        "description": f"本地Shell — 在{BashRuntime.PLATFORM_LABEL}执行命令。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -177,12 +186,11 @@ def kill_active():
 
     杀进程树改在后台线程执行：ESC打断后主线程立即返回，
     输入界面马上还给用户；杀树期间用户输入新命令不受影响
-    （新命令是新Popen，会覆盖_active_proc，后台线程持有旧proc引用）。
+    （新命令是新Popen，会覆盖BashRuntime.active_proc，后台线程持有旧proc引用）。
     """
-    global _interrupted
-    _interrupted = True
-    with _active_proc_lock:
-        proc = _active_proc
+    BashRuntime.interrupted = True
+    with BashRuntime.active_proc_lock:
+        proc = BashRuntime.active_proc
     if proc is not None and proc.poll() is None:
         threading.Thread(target=_kill_proc_tree, args=(proc,), daemon=True).start()
 
@@ -401,7 +409,7 @@ def execute(
     Returns:
         stdout + stderr + 退出码
     """
-    global _interrupted  # 函数内多分支读写该标志，统一在函数级声明
+    # 函数内多分支读写该标志（BashRuntime.interrupted）
     # AI可能传字符串类型的数值参数，统一转int（与Grep/Read容错风格一致）
     try:
         timeout = int(timeout) if timeout is not None else 120
@@ -411,9 +419,9 @@ def execute(
     # ── 安全检查：删除命令和git命令根据配置决定是否需要确认 ──
     need_confirm = False
     tc = _tool_context
-    if tc and not tc.rm_skip_confirm and _RE_DELETE.search(command):
+    if tc and not tc.rm_skip_confirm and BashRuntime.RE_DELETE.search(command):
         need_confirm = True
-    elif tc and not tc.git_skip_confirm and _RE_GIT.search(command):
+    elif tc and not tc.git_skip_confirm and BashRuntime.RE_GIT.search(command):
         need_confirm = True
 
     if need_confirm:
@@ -443,7 +451,7 @@ def execute(
     # ═════════════════════════════════════════════════════════════
     if sys.platform == "win32":
         # 入口清零：上轮残留的ESC中断标志不污染本轮（覆盖单段/多段全部子路径）
-        _interrupted = False
+        BashRuntime.interrupted = False
 
         # cd 命令：同步更新 Python 进程的 CWD（供 Read/Glob 等工具使用）
         if _is_cd_command(command):
@@ -524,7 +532,7 @@ def execute(
             stderr=subprocess.PIPE,
             cwd=os.getcwd(),
             start_new_session=True,
-            env=_utf8_env,
+            env=BashRuntime.utf8_env,
         )
     except FileNotFoundError as e:
         return f"[错误: Shell未找到: {e}]"
@@ -532,9 +540,8 @@ def execute(
         # ValueError: 命令含NUL等非法字符时 Popen 拒绝启动
         return f"[错误: 启动失败: {e}]"
 
-    with _active_proc_lock:
-        global _active_proc
-        _active_proc = proc
+    with BashRuntime.active_proc_lock:
+        BashRuntime.active_proc = proc
 
     try:
         stdout_chunks = []
@@ -559,7 +566,7 @@ def execute(
         for t in (t_out, t_err):
             t.start()
 
-        _interrupted = False  # 入口清零：上轮残留的中断标志不污染本轮
+        BashRuntime.interrupted = False  # 入口清零：上轮残留的中断标志不污染本轮
         deadline = time.time() + timeout
         timed_out = False
         was_interrupted = False
@@ -568,9 +575,9 @@ def execute(
             if time.time() >= deadline:
                 timed_out = True
                 break
-            if _interrupted:
+            if BashRuntime.interrupted:
                 was_interrupted = True
-                _interrupted = False
+                BashRuntime.interrupted = False
                 break
             time.sleep(0.05)
 
@@ -618,8 +625,8 @@ def execute(
             parts.append(f"[stderr]\n{err.strip()}")
         return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
     finally:
-        with _active_proc_lock:
-            _active_proc = None
+        with BashRuntime.active_proc_lock:
+            BashRuntime.active_proc = None
 
 
 def _collect_proc_output(proc: subprocess.Popen, timeout: int, max_output_chars: int):
@@ -628,10 +635,8 @@ def _collect_proc_output(proc: subprocess.Popen, timeout: int, max_output_chars:
     返回 (returncode, stdout_text, stderr_text, status)，
     status: 'ok' | 'timeout' | 'interrupt'（超时/中断时已杀进程树）。
     """
-    global _active_proc, _interrupted
-
-    with _active_proc_lock:
-        _active_proc = proc
+    with BashRuntime.active_proc_lock:
+        BashRuntime.active_proc = proc
 
     try:
         stdout_chunks = []
@@ -664,9 +669,9 @@ def _collect_proc_output(proc: subprocess.Popen, timeout: int, max_output_chars:
             if time.time() >= deadline:
                 timed_out = True
                 break
-            if _interrupted:
+            if BashRuntime.interrupted:
                 was_interrupted = True
-                _interrupted = False
+                BashRuntime.interrupted = False
                 break
             time.sleep(0.05)
 
@@ -687,8 +692,8 @@ def _collect_proc_output(proc: subprocess.Popen, timeout: int, max_output_chars:
             return proc.returncode, out, err, "timeout"
         return proc.returncode, out, err, "ok"
     finally:
-        with _active_proc_lock:
-            _active_proc = None
+        with BashRuntime.active_proc_lock:
+            BashRuntime.active_proc = None
 
 
 def _format_result(rc: int, out: str, err: str, status: str,
@@ -727,7 +732,7 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=os.getcwd(),
-            env=_utf8_env,
+            env=BashRuntime.utf8_env,
         )
     except FileNotFoundError as e:
         return f"[错误: cmd.exe未找到: {e}]"
@@ -754,7 +759,7 @@ def _execute_py_direct(exe: str, flags: str, tail: str,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=os.getcwd(),
-            env=_utf8_env,
+            env=BashRuntime.utf8_env,
         )
     except (OSError, ValueError) as e:
         # ValueError: 载荷含NUL等非法字符时 Popen 拒绝启动
@@ -811,7 +816,7 @@ def _execute_py_pipe(exe: str, flags: str, tail: str, pipe_cmd: str,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=os.getcwd(),
-            env=_utf8_env,
+            env=BashRuntime.utf8_env,
         )
     except (OSError, ValueError) as e:
         return (1, out_py, f"{err_py}\n[管道启动失败: {e}]".strip(), "ok")
@@ -843,8 +848,7 @@ def _execute_segments(segments: list, timeout: int,
     2. ESC 可在段内/段间打断
     3. cd 命令作用到 os.chdir() 而非子进程
     """
-    global _interrupted, _active_proc
-    _interrupted = False  # 入口清零：上轮残留的中断标志不污染本轮
+    BashRuntime.interrupted = False  # 入口清零：上轮残留的中断标志不污染本轮
     all_parts = []
     prev_rc = 0
     remaining_timeout = timeout
@@ -927,7 +931,7 @@ def _execute_segments(segments: list, timeout: int,
                 stderr=subprocess.PIPE,
                 cwd=os.getcwd(),
                 start_new_session=True,
-                env=_utf8_env,
+                env=BashRuntime.utf8_env,
             )
         except (OSError, ValueError) as e:
             # ValueError: 段含NUL等非法字符时 Popen 拒绝启动
@@ -935,8 +939,8 @@ def _execute_segments(segments: list, timeout: int,
             prev_rc = -1
             break
 
-        with _active_proc_lock:
-            _active_proc = proc
+        with BashRuntime.active_proc_lock:
+            BashRuntime.active_proc = proc
 
         try:
             stdout_chunks = []
@@ -964,8 +968,8 @@ def _execute_segments(segments: list, timeout: int,
                 if time.time() >= deadline:
                     timed_out = True
                     break
-                if _interrupted:
-                    _interrupted = False
+                if BashRuntime.interrupted:
+                    BashRuntime.interrupted = False
                     was_interrupted = True
                     break
                 time.sleep(0.05)
@@ -1011,8 +1015,8 @@ def _execute_segments(segments: list, timeout: int,
                 all_parts.append("\n".join(parts))
             prev_rc = proc.returncode
         finally:
-            with _active_proc_lock:
-                _active_proc = None
+            with BashRuntime.active_proc_lock:
+                BashRuntime.active_proc = None
 
     if was_interrupted:
         all_parts.append("[用户中断]")

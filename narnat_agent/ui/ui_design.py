@@ -128,11 +128,11 @@ def show_stats(input_tokens: int, output_tokens: int,
                thinking_effort: str = "高") -> None:
     # 动态从 output 模块读取，确保 apply_style 修改后生效
     from .. import output as _output
-    _show_cost = _output.SHOW_COST
-    _show_balance = _output.SHOW_BALANCE
-    _max_tokens = _output.MAX_TOKENS
-    _show_ratio = _output.SHOW_RATIO
-    _context_window = _output.CONTEXT_WINDOW
+    _show_cost = _output.DisplayState.show_cost
+    _show_balance = _output.DisplayState.show_balance
+    _max_tokens = _output.DisplayState.max_tokens
+    _show_ratio = _output.DisplayState.show_ratio
+    _context_window = _output.DisplayState.context_window
 
     si = f"{input_tokens / 1000:.1f}k" if input_tokens >= 1000 else str(input_tokens)
     so = f"{output_tokens / 1000:.1f}k" if output_tokens >= 1000 else str(output_tokens)

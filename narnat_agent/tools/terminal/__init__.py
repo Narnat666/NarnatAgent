@@ -2,7 +2,7 @@
 Terminal工具 ── 多终端可持续SSH + 文件传输
 
 核心设计:
-- 支持最多MAX_SESSIONS(5)个并发SSH会话，内部用session_id(0-4)标识
+- 支持最多max_sessions(5)个并发SSH会话，内部用session_id(0-4)标识
 - AI通过dev编号引用设备: dev0=本机，dev1..devn=被控设备(终端N-1)
 - 会话持久化，多次调用复用同一连接
 - timeout默认120秒，超时告知AI命令仍在运行（AI可去其他终端继续工作）
@@ -20,41 +20,47 @@ import paramiko
 
 from .ssh_session import SSHSession, _truncate_output
 
-__all__ = ["execute", "DEFINITION", "get_session", "SSHSession", "kill_active_exec", "cleanup", "set_max_sessions", "resolve_dev_display"]
+__all__ = ["execute", "DEFINITION", "get_session", "SSHSession", "kill_active_exec", "cleanup", "TerminalRuntime", "resolve_dev_display"]
 
 
-# 删除命令正则
-# 边界后跟空白或/：覆盖无空格变体（rd/s、del/f、rmdir/q）及erase/format；
-# \b边界防止误伤 delphi、3rd、formatting 等普通词
-_RE_DELETE = re.compile(
-    r"\b(?:rm|del|rd|rmdir|erase|format)\b[\s/]"
-    r"|\bRemove-Item\b",
-    re.IGNORECASE,
-)
+class TerminalRuntime:
+    """Terminal 工具全部模块级状态与参数（原散落的模块级全局收敛于此）。
 
-# dev编号正则: dev0=本机(当前设备), devN(N>=1)=第N台被控设备(终端N-1)
-_RE_DEV = re.compile(r"^dev(\d+)$", re.IGNORECASE)
+    - sessions/active_exec_session: 跨调用共享的可变状态
+    - max_sessions: assembly 启动时按配置写入（set_max_sessions）
+    - 正则/缓冲常量: 仅本模块使用
+    """
+    # 删除命令正则
+    # 边界后跟空白或/：覆盖无空格变体（rd/s、del/f、rmdir/q）及erase/format；
+    # \b边界防止误伤 delphi、3rd、formatting 等普通词
+    RE_DELETE = re.compile(
+        r"\b(?:rm|del|rd|rmdir|erase|format)\b[\s/]"
+        r"|\bRemove-Item\b",
+        re.IGNORECASE,
+    )
 
-# 匹配 git 命令的简单正则（出现 git 即命中）
-_RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
+    # dev编号正则: dev0=本机(当前设备), devN(N>=1)=第N台被控设备(终端N-1)
+    RE_DEV = re.compile(r"^dev(\d+)$", re.IGNORECASE)
 
-MAX_SESSIONS = 5  # 默认5个并发SSH会话，可通过set_max_sessions修改
+    # 匹配 git 命令的简单正则（出现 git 即命中）
+    RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
 
-_TRANSFER_BUFFER_SIZE = 65536  # 64KB 流式传输buffer
+    max_sessions = 5  # 默认5个并发SSH会话，assembly 启动时按配置覆盖
 
+    TRANSFER_BUFFER_SIZE = 65536  # 64KB 流式传输buffer
 
-def set_max_sessions(n: int) -> None:
-    """设置最大SSH会话数（由Agent初始化时从配置读取）"""
-    global MAX_SESSIONS
-    MAX_SESSIONS = max(1, min(n, 10))  # 限制1-10
+    # session_id(0-4) → SSHSession
+    sessions: dict = {}
+    sessions_lock = threading.Lock()
 
-# session_id(0-4) → SSHSession
-_sessions: dict[int, "SSHSession"] = {}
-_sessions_lock = threading.Lock()
+    # 当前正在执行命令的SSH会话（agent层ESC打断后调用kill_active_exec杀死远程进程）
+    active_exec_session = None
+    active_exec_lock = threading.Lock()
 
-# 当前正在执行命令的SSH会话（agent层ESC打断后调用kill_active_exec杀死远程进程）
-_active_exec_session: Optional["SSHSession"] = None
-_active_exec_lock = threading.Lock()
+    @classmethod
+    def set_max_sessions(cls, n: int) -> None:
+        """设置最大SSH会话数（由 assembly 初始化时从配置读取），限制1-10"""
+        cls.max_sessions = max(1, min(n, 10))
 
 DEFINITION = {
     "type": "function",
@@ -94,8 +100,8 @@ def kill_active_exec():
     同时覆盖后台运行中的命令（超时后仍在运行的busy会话），
     使ESC能自愈busy状态：watcher检测到中断标志后退出并清除busy。
     """
-    with _active_exec_lock:
-        session = _active_exec_session
+    with TerminalRuntime.active_exec_lock:
+        session = TerminalRuntime.active_exec_session
     if session is not None:
         session._interrupt.set()
         try:
@@ -104,9 +110,9 @@ def kill_active_exec():
             pass
 
     # 后台运行中的busy会话（无活跃exec时也打断）
-    with _sessions_lock:
+    with TerminalRuntime.sessions_lock:
         busy_sessions = [
-            s for s in _sessions.values()
+            s for s in TerminalRuntime.sessions.values()
             if s is not None and s._busy and s is not session
         ]
     for s in busy_sessions:
@@ -205,15 +211,15 @@ def _allocate_session_id() -> int:
 
     死会话（channel已关闭，如网络断开）自动回收槽位：
     否则连接意外断开后槽位被死会话占用，AI重连时报"已达最大会话数"却无法释放。
-    调用者需持有_sessions_lock。
+    调用者需持有TerminalRuntime.sessions_lock。
     """
-    for i in range(MAX_SESSIONS):
-        session = _sessions.get(i)
+    for i in range(TerminalRuntime.max_sessions):
+        session = TerminalRuntime.sessions.get(i)
         if session is None:
             return i
         if session._channel.closed:
             session.close()
-            del _sessions[i]
+            del TerminalRuntime.sessions[i]
             return i
     return -1
 
@@ -223,7 +229,7 @@ def _normalize_device(host: str) -> str:
     if not host:
         return ""
     h = host.strip()
-    m = _RE_DEV.match(h)
+    m = TerminalRuntime.RE_DEV.match(h)
     return "" if m and int(m.group(1)) == 0 else h
 
 
@@ -232,7 +238,7 @@ def _normalize_device_for_tools(device: str) -> Optional[str]:
     if not device:
         return ""
     h = device.strip()
-    m = _RE_DEV.match(h)
+    m = TerminalRuntime.RE_DEV.match(h)
     if not m:
         return None
     return "" if int(m.group(1)) == 0 else h
@@ -252,9 +258,9 @@ def _device_error(host: str) -> Optional[str]:
     """校验设备标识是否合法devN（dev0~devN），非法返回错误信息，合法返回None"""
     if not host:
         return None
-    if _RE_DEV.match(host.strip()):
+    if TerminalRuntime.RE_DEV.match(host.strip()):
         return None
-    with _sessions_lock:
+    with TerminalRuntime.sessions_lock:
         return f"[错误: {_dev_hint_locked()}]"
 
 
@@ -264,14 +270,14 @@ def _dev_label(sid: int) -> str:
 
 
 def _list_devices_locked() -> str:
-    """当前已连接设备的dev清单（调用者需持有_sessions_lock）"""
-    devs = [f"dev{sid + 1}({s.username}@{s.host})" for sid, s in sorted(_sessions.items())]
+    """当前已连接设备的dev清单（调用者需持有TerminalRuntime.sessions_lock）"""
+    devs = [f"dev{sid + 1}({s.username}@{s.host})" for sid, s in sorted(TerminalRuntime.sessions.items())]
     return "、".join(devs) if devs else "(无)"
 
 
 def _list_devices() -> str:
     """当前已连接设备的dev清单（用于报错提示）"""
-    with _sessions_lock:
+    with TerminalRuntime.sessions_lock:
         return _list_devices_locked()
 
 
@@ -294,22 +300,22 @@ def resolve_dev_display(dev: str) -> str:
     if not dev:
         return _local_host()
     h = dev.strip()
-    m = _RE_DEV.match(h)
+    m = TerminalRuntime.RE_DEV.match(h)
     if not m:
         return h
     d = int(m.group(1))
     if d == 0:
         return _local_host()
     sid = d - 1
-    with _sessions_lock:
-        session = _sessions.get(sid)
+    with TerminalRuntime.sessions_lock:
+        session = TerminalRuntime.sessions.get(sid)
         if session is not None and not session._channel.closed:
             return session.host
     return h
 
 
 def _dev_hint_locked() -> str:
-    """设备标识错误时的统一指导：说明devN用法 + 列出当前可用设备（调用者需持有_sessions_lock）"""
+    """设备标识错误时的统一指导：说明devN用法 + 列出当前可用设备（调用者需持有TerminalRuntime.sessions_lock）"""
     devs = _list_devices_locked()
     if devs == "(无)":
         return "设备标识使用devN编号(dev0=本机, dev1..devn=被控设备)。当前无已连接设备，请先connect"
@@ -324,48 +330,48 @@ def _resolve_session_id(session_id: int, host: str = "") -> tuple[int, "SSHSessi
     2. session_id == -1 且指定host: 按host模糊匹配
     3. session_id == -1 且无host: 只有一个会话时自动选择
     """
-    with _sessions_lock:
+    with TerminalRuntime.sessions_lock:
         # 指定了session_id
         if session_id >= 0:
-            if session_id not in _sessions:
+            if session_id not in TerminalRuntime.sessions:
                 raise ValueError(f"{_dev_label(session_id)}未连接，请先connect。当前已连接: {_list_devices_locked()}")
-            return session_id, _sessions[session_id]
+            return session_id, TerminalRuntime.sessions[session_id]
 
         # 未指定session_id，按host匹配（优先devN，其次IP/用户名@IP宽松匹配）
         if host:
             h = host.strip()
-            m = _RE_DEV.match(h)
+            m = TerminalRuntime.RE_DEV.match(h)
             if not m:
                 # 宽松匹配: 允许直接用IP或用户名@IP引用已连接设备，
                 # 减少AI回查dev编号的往返（如 exec host=192.168.1.213）
                 matched = [
-                    sid for sid, s in _sessions.items()
+                    sid for sid, s in TerminalRuntime.sessions.items()
                     if s is not None and (s.host == h or f"{s.username}@{s.host}" == h)
                 ]
                 if len(matched) == 1:
-                    return matched[0], _sessions[matched[0]]
+                    return matched[0], TerminalRuntime.sessions[matched[0]]
                 if len(matched) > 1:
                     raise ValueError(
                         f"多个会话匹配 '{h}'，请用dev编号区分: "
-                        f"{'、'.join(f'dev{s + 1}({_sessions[s].username}@{_sessions[s].host})' for s in matched)}"
+                        f"{'、'.join(f'dev{s + 1}({TerminalRuntime.sessions[s].username}@{TerminalRuntime.sessions[s].host})' for s in matched)}"
                     )
                 raise ValueError(_dev_hint_locked())
             d = int(m.group(1))
             if d == 0:
                 raise ValueError("dev0是当前设备(本机)，无SSH会话，仅transfer可用")
             sid = d - 1
-            if sid >= MAX_SESSIONS or sid not in _sessions:
+            if sid >= TerminalRuntime.max_sessions or sid not in TerminalRuntime.sessions:
                 raise ValueError(f"dev{d}未连接，请先connect。当前已连接: {_list_devices_locked()}")
-            return sid, _sessions[sid]
+            return sid, TerminalRuntime.sessions[sid]
 
         # 未指定session_id和host，自动选择唯一会话
-        if len(_sessions) == 1:
-            sid = list(_sessions.keys())[0]
-            return sid, _sessions[sid]
-        elif len(_sessions) == 0:
+        if len(TerminalRuntime.sessions) == 1:
+            sid = list(TerminalRuntime.sessions.keys())[0]
+            return sid, TerminalRuntime.sessions[sid]
+        elif len(TerminalRuntime.sessions) == 0:
             raise ValueError("无活跃会话，请先connect")
         else:
-            keys = [f"dev{s + 1}({_sessions[s].username}@{_sessions[s].host})" for s in sorted(_sessions.keys())]
+            keys = [f"dev{s + 1}({TerminalRuntime.sessions[s].username}@{TerminalRuntime.sessions[s].host})" for s in sorted(TerminalRuntime.sessions.keys())]
             raise ValueError(f"有多个会话，请指定host=dev编号，当前已连接: {'、'.join(keys)}")
 
 
@@ -382,25 +388,25 @@ def _connect(host: str, username: str, port: int = 22,
     if not timeout or timeout <= 0:
         timeout = 15
 
-    with _sessions_lock:
+    with TerminalRuntime.sessions_lock:
         # 指定了session_id
         if session_id >= 0:
-            if session_id >= MAX_SESSIONS:
-                return f"[错误: session_id范围0-{MAX_SESSIONS - 1}]"
-            if session_id in _sessions:
-                session = _sessions[session_id]
+            if session_id >= TerminalRuntime.max_sessions:
+                return f"[错误: session_id范围0-{TerminalRuntime.max_sessions - 1}]"
+            if session_id in TerminalRuntime.sessions:
+                session = TerminalRuntime.sessions[session_id]
                 if not session._channel.closed:
                     return f"[{_dev_label(session_id)}已连接: {session.username}@{session.host}]\n{session.prompt}"
                 else:
                     session.close()
-                    del _sessions[session_id]
+                    del TerminalRuntime.sessions[session_id]
             alloc_id = session_id
         else:
             # 自动分配
             alloc_id = _allocate_session_id()
             if alloc_id < 0:
-                active = [_dev_label(s) for s in sorted(_sessions.keys())]
-                return f"[错误: 已达最大会话数({MAX_SESSIONS})，当前已连接: {active}，请先close释放]"
+                active = [_dev_label(s) for s in sorted(TerminalRuntime.sessions.keys())]
+                return f"[错误: 已达最大会话数({TerminalRuntime.max_sessions})，当前已连接: {active}，请先close释放]"
 
     try:
         # password 三合一：私钥路径（~或路径分隔符开头/包含 + 文件存在）→ 密钥认证；
@@ -426,24 +432,23 @@ def _connect(host: str, username: str, port: int = 22,
         session = SSHSession(**kwargs)
 
         # 注册活跃会话，让 ESC 能在 connect 的阻塞初始化阶段打断
-        with _active_exec_lock:
-            global _active_exec_session
-            _active_exec_session = session
+        with TerminalRuntime.active_exec_lock:
+            TerminalRuntime.active_exec_session = session
         try:
             session._initialize()
         finally:
-            with _active_exec_lock:
-                _active_exec_session = None
+            with TerminalRuntime.active_exec_lock:
+                TerminalRuntime.active_exec_session = None
 
-        with _sessions_lock:
-            _sessions[alloc_id] = session
+        with TerminalRuntime.sessions_lock:
+            TerminalRuntime.sessions[alloc_id] = session
 
         # 重复连接提示: 相同设备已有会话时提醒AI直接用现有dev编号，
         # 避免无谓地多开会话占用槽位、造成多终端选择歧义
         # 示例引用用纯devN（AI可照抄host参数），展示名devN(终端N)括号含内部槽位号，照抄会报错
-        with _sessions_lock:
+        with TerminalRuntime.sessions_lock:
             dup_sids = [
-                sid for sid, s in _sessions.items()
+                sid for sid, s in TerminalRuntime.sessions.items()
                 if s is not None and sid != alloc_id
                 and not s._channel.closed
                 and s.host == host and s.username == username
@@ -496,9 +501,9 @@ def _exec(session_id: int, host: str, command: str, timeout: int = 120, max_outp
     # 安全检查：删除命令和git命令根据配置决定是否需要确认
     need_confirm = False
     tc = _tool_context
-    if tc and not tc.rm_skip_confirm and _RE_DELETE.search(command):
+    if tc and not tc.rm_skip_confirm and TerminalRuntime.RE_DELETE.search(command):
         need_confirm = True
-    elif tc and not tc.git_skip_confirm and _RE_GIT.search(command):
+    elif tc and not tc.git_skip_confirm and TerminalRuntime.RE_GIT.search(command):
         need_confirm = True
 
     if need_confirm:
@@ -530,21 +535,20 @@ def _exec(session_id: int, host: str, command: str, timeout: int = 120, max_outp
         return f"[错误: {e}]"
 
     if session._channel.closed:
-        with _sessions_lock:
-            _sessions.pop(sid, None)
+        with TerminalRuntime.sessions_lock:
+            TerminalRuntime.sessions.pop(sid, None)
         session.close()
         return f"[错误: {_dev_label(sid)}会话已断开，请重新connect]"
 
     try:
         # 注册活跃会话，agent层ESC打断后可通过kill_active_exec发送Ctrl+C
-        with _active_exec_lock:
-            global _active_exec_session
-            _active_exec_session = session
+        with TerminalRuntime.active_exec_lock:
+            TerminalRuntime.active_exec_session = session
         try:
             result = session.execute(command, timeout=timeout, max_output_chars=max_output_chars)
         finally:
-            with _active_exec_lock:
-                _active_exec_session = None
+            with TerminalRuntime.active_exec_lock:
+                TerminalRuntime.active_exec_session = None
         # 在结果前标注dev编号
         return f"[{_dev_label(sid)}] {result}"
     except Exception as e:
@@ -564,9 +568,9 @@ def _input(session_id: int, host: str, input: str, timeout: int = 120, max_outpu
     # 安全检查：input内容与exec一致走删除/git确认（防止通过input绕过安全确认）
     need_confirm = False
     tc = _tool_context
-    if tc and not tc.rm_skip_confirm and _RE_DELETE.search(input):
+    if tc and not tc.rm_skip_confirm and TerminalRuntime.RE_DELETE.search(input):
         need_confirm = True
-    elif tc and not tc.git_skip_confirm and _RE_GIT.search(input):
+    elif tc and not tc.git_skip_confirm and TerminalRuntime.RE_GIT.search(input):
         need_confirm = True
 
     if need_confirm:
@@ -594,21 +598,20 @@ def _input(session_id: int, host: str, input: str, timeout: int = 120, max_outpu
         return f"[错误: {e}]"
 
     if session._channel.closed:
-        with _sessions_lock:
-            _sessions.pop(sid, None)
+        with TerminalRuntime.sessions_lock:
+            TerminalRuntime.sessions.pop(sid, None)
         session.close()
         return f"[错误: {_dev_label(sid)}会话已断开，请重新connect]"
 
     try:
         # 注册活跃会话，agent层ESC打断后可通过kill_active_exec发送Ctrl+C
-        with _active_exec_lock:
-            global _active_exec_session
-            _active_exec_session = session
+        with TerminalRuntime.active_exec_lock:
+            TerminalRuntime.active_exec_session = session
         try:
             result = session.send_input(input, timeout=timeout, max_output_chars=max_output_chars)
         finally:
-            with _active_exec_lock:
-                _active_exec_session = None
+            with TerminalRuntime.active_exec_lock:
+                TerminalRuntime.active_exec_session = None
         return f"[{_dev_label(sid)}] {result}"
     except Exception as e:
         return f"[错误: {_dev_label(sid)}输入发送失败: {e}]"
@@ -616,54 +619,54 @@ def _input(session_id: int, host: str, input: str, timeout: int = 120, max_outpu
 
 def _status() -> str:
     """查看所有会话状态"""
-    with _sessions_lock:
+    with TerminalRuntime.sessions_lock:
         lines = ["dev0: 本机(当前设备)"]
-        for sid in range(MAX_SESSIONS):
-            if sid in _sessions:
-                session = _sessions[sid]
+        for sid in range(TerminalRuntime.max_sessions):
+            if sid in TerminalRuntime.sessions:
+                session = TerminalRuntime.sessions[sid]
                 alive = "活跃" if not session._channel.closed else "已断开"
                 busy = "忙" if session._busy else "闲"
                 # 只显示cwd（prompt会重复user@host，纯噪音；cwd才是AI关心的状态信息）
                 lines.append(f"  {_dev_label(sid)}: {session.username}@{session.host} [{alive}|{busy}] 目录:{session._cwd}")
             else:
                 lines.append(f"  {_dev_label(sid)}: [未连接]")
-        if len(_sessions) == 0:
-            return "[SSH会话]\n" + "\n".join(lines) + f"\n(无已连接设备，最多支持{MAX_SESSIONS}个并发终端)"
+        if len(TerminalRuntime.sessions) == 0:
+            return "[SSH会话]\n" + "\n".join(lines) + f"\n(无已连接设备，最多支持{TerminalRuntime.max_sessions}个并发终端)"
         return "[SSH会话]\n" + "\n".join(lines)
 
 
 def _close(session_id: int, host: str) -> str:
     """关闭会话"""
-    with _sessions_lock:
+    with TerminalRuntime.sessions_lock:
         if session_id < 0 and not host:
             # 关闭所有
-            for session in _sessions.values():
+            for session in TerminalRuntime.sessions.values():
                 session.close()
-            count = len(_sessions)
-            _sessions.clear()
+            count = len(TerminalRuntime.sessions)
+            TerminalRuntime.sessions.clear()
             return f"[已关闭{count}个会话]"
 
         # 指定了session_id
         if session_id >= 0:
-            if session_id not in _sessions:
+            if session_id not in TerminalRuntime.sessions:
                 return f"[{_dev_label(session_id)}未连接]"
-            _sessions[session_id].close()
-            del _sessions[session_id]
+            TerminalRuntime.sessions[session_id].close()
+            del TerminalRuntime.sessions[session_id]
             return f"[已关闭 {_dev_label(session_id)}]"
 
         # 按host匹配（只认devN）
         if host:
-            m = _RE_DEV.match(host.strip())
+            m = TerminalRuntime.RE_DEV.match(host.strip())
             if not m:
                 return f"[错误: {_dev_hint_locked()}]"
             d = int(m.group(1))
             if d == 0:
                 return "[dev0是当前设备(本机)，无需关闭]"
             sid = d - 1
-            if sid >= MAX_SESSIONS or sid not in _sessions:
+            if sid >= TerminalRuntime.max_sessions or sid not in TerminalRuntime.sessions:
                 return f"[dev{d}未连接]"
-            _sessions[sid].close()
-            del _sessions[sid]
+            TerminalRuntime.sessions[sid].close()
+            del TerminalRuntime.sessions[sid]
             return f"[已关闭 {_dev_label(sid)}]"
 
         return "[错误: close需要指定dev编号(如host=dev1)或session_id]"
@@ -671,10 +674,10 @@ def _close(session_id: int, host: str) -> str:
 
 def cleanup():
     """程序退出时清理所有会话。channel立即关闭，transport后台回收。"""
-    with _sessions_lock:
-        for session in _sessions.values():
+    with TerminalRuntime.sessions_lock:
+        for session in TerminalRuntime.sessions.values():
             session.close()
-        _sessions.clear()
+        TerminalRuntime.sessions.clear()
 
 
 def get_session(session_id: int = -1, host: str = "") -> Optional["SSHSession"]:
@@ -853,7 +856,7 @@ def _transfer_remote_to_remote(source_host: str, source_path: str, target_host: 
             tgt_file = tgt_sftp.open(target_path, "wb")
             try:
                 while True:
-                    chunk = src_file.read(_TRANSFER_BUFFER_SIZE)
+                    chunk = src_file.read(TerminalRuntime.TRANSFER_BUFFER_SIZE)
                     if not chunk:
                         break
                     tgt_file.write(chunk)

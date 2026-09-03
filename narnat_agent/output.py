@@ -366,8 +366,6 @@ def apply_style(ui_config: dict) -> None:
 
     传入的 dict 即 UIConfig.raw，结构见 config/loader.py。
     """
-    global SHOW_COST, SHOW_BALANCE, MAX_TOKENS
-    global SHOW_RATIO, CONTEXT_WINDOW
     global PTK_PROMPT_SYMBOL, PTK_PROMPT_TEXT, PTK_PROMPT_CUSTOM
 
     # 1. 基础色板（"颜色" 分区：纯调色板，只注册 hex 值。跳过 _ 开头的元数据 key）
@@ -452,19 +450,25 @@ def apply_style(ui_config: dict) -> None:
     if "custom" in p: PTK_PROMPT_CUSTOM = _resolve_ptk_style(p["custom"])
 
     # 4. 显示开关
-    SHOW_COST    = bool(ui_config.get("show_cost", False))
-    SHOW_BALANCE = bool(ui_config.get("show_balance", False))
-    MAX_TOKENS   = int(ui_config.get("max_output_tokens", 128000))
-    SHOW_RATIO   = bool(ui_config.get("show_ratio", False))
-    CONTEXT_WINDOW = int(ui_config.get("context_window", DEFAULT_CONTEXT_WINDOW))
+    DisplayState.show_cost    = bool(ui_config.get("show_cost", False))
+    DisplayState.show_balance = bool(ui_config.get("show_balance", False))
+    DisplayState.max_tokens   = int(ui_config.get("max_output_tokens", 128000))
+    DisplayState.show_ratio   = bool(ui_config.get("show_ratio", False))
+    DisplayState.context_window = int(ui_config.get("context_window", DEFAULT_CONTEXT_WINDOW))
 
 
 # ═══════════════════════════════════════════════════════════════
-# 显示开关默认值
+# 显示开关状态 —— 唯一可变点
 # ═══════════════════════════════════════════════════════════════
 
-SHOW_COST = False
-SHOW_BALANCE = False
-MAX_TOKENS = 128000
-SHOW_RATIO = False
-CONTEXT_WINDOW = DEFAULT_CONTEXT_WINDOW
+class DisplayState:
+    """显示开关运行时状态（apply_style 写入，渲染层读取）。
+
+    数据来源是 config.ui（assembly 补全 raw 后传入 apply_style），
+    不再维护散落的模块级全局副本。
+    """
+    show_cost = False
+    show_balance = False
+    max_tokens = 128000
+    show_ratio = False
+    context_window = DEFAULT_CONTEXT_WINDOW

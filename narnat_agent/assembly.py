@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from .config.loader import Config, load_config
-from .core.llm import LLMClient, set_retry_count
+from .core.llm import LLMClient
 from .core.context import ContextManager
 from .core.compressor import Compressor
 from .core.tool_dispatcher import ToolDispatcher
@@ -23,7 +23,7 @@ from .core.summarizer import Summarizer
 from .core.auto_save_manager import AutoSaveManager
 from .core.compression_coordinator import CompressionCoordinator
 from .tools.tool_context import ToolContext
-from .tools.terminal import set_max_sessions, cleanup as _terminal_cleanup
+from .tools.terminal import TerminalRuntime, cleanup as _terminal_cleanup
 from .ui.ui_design import UIInterface, apply_style
 from .ui.interrupt import _interrupt_ctrl
 from .logger import AgentLogger
@@ -47,9 +47,8 @@ class Assembly:
         config.ui.raw["context_window"] = config.ai.context_window
         apply_style(config.ui.raw)
 
-        # 3. 全局工具配置（过渡期保留全局 setter，Phase 5 消除）
-        set_max_sessions(config.tools.max_sessions)
-        set_retry_count(config.ai.retry_count)
+        # 3. 全局工具配置（写入各工具模块的状态类；LLM 重试次数由 LLMClient 构造时读取）
+        TerminalRuntime.set_max_sessions(config.tools.max_sessions)
 
         # 4. 日志
         logger = AgentLogger(config.paths.logs_dir)

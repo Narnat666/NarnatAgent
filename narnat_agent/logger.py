@@ -10,29 +10,6 @@ import time
 from typing import Optional
 
 
-# 敏感信息脱敏：匹配 sk-xxx / api_key=xxx / key=xxx 等
-_RE_SECRET = re.compile(
-    r'(api_key["\s:=]+["\s]*)([^\s",\}]{4,})([^\s",\}]*?)'
-    r'|((?:sk-|key-|token-)([a-zA-Z0-9]{4})[a-zA-Z0-9]*)',
-    re.IGNORECASE,
-)
-
-
-def _redact(text: str) -> str:
-    """脱敏：保留前4位，其余用***替代"""
-    def _replace(m):
-        full = m.group(0)
-        # sk-xxxx... 格式
-        if m.group(5):
-            prefix = m.group(4)[:len(m.group(4)) - len(m.group(5)) + 4]
-            return prefix + "***"
-        # api_key=xxx 格式
-        if m.group(2):
-            return m.group(1) + m.group(2)[:4] + "***"
-        return full
-    return _RE_SECRET.sub(_replace, text)
-
-
 class AgentLogger:
     """
     Agent统一日志器。
@@ -41,6 +18,28 @@ class AgentLogger:
     - 四级：DEBUG / INFO / WARNING / ERROR
     - 自动脱敏
     """
+
+    # 敏感信息脱敏：匹配 sk-xxx / api_key=xxx / key=xxx 等
+    RE_SECRET = re.compile(
+        r'(api_key["\s:=]+["\s]*)([^\s",\}]{4,})([^\s",\}]*?)'
+        r'|((?:sk-|key-|token-)([a-zA-Z0-9]{4})[a-zA-Z0-9]*)',
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _redact(text: str) -> str:
+        """脱敏：保留前4位，其余用***替代"""
+        def _replace(m):
+            full = m.group(0)
+            # sk-xxxx... 格式
+            if m.group(5):
+                prefix = m.group(4)[:len(m.group(4)) - len(m.group(5)) + 4]
+                return prefix + "***"
+            # api_key=xxx 格式
+            if m.group(2):
+                return m.group(1) + m.group(2)[:4] + "***"
+            return full
+        return AgentLogger.RE_SECRET.sub(_replace, text)
 
     def __init__(self, logs_dir: str = ""):
         self._logger: Optional[logging.Logger] = None
@@ -87,7 +86,7 @@ class AgentLogger:
     def _log(self, level: int, module: str, msg: str):
         if not self._logger:
             return
-        safe_msg = _redact(msg)
+        safe_msg = AgentLogger._redact(msg)
         self._logger.log(level, f"[{module}] {safe_msg}")
 
     def debug(self, module: str, msg: str):

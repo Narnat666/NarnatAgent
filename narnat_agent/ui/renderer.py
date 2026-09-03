@@ -36,13 +36,49 @@ from .colors import (
 
 
 # ═══════════════════════════════════════════════════════════════
-# 终端宽度与显示宽度
+# 渲染参数 —— 原散落的模块级常量收敛为类成员
 # ═══════════════════════════════════════════════════════════════
 
-_MAX_TERMINAL_WIDTH = 160
+class RenderConfig:
+    """渲染器全部模块级参数（宽度上限、表格缓冲、语言配色、正则）。"""
 
-# 表格行缓冲上限：超长表格时立即落定，避免长时间无输出（"整体收集"的固有代价防御）
-_MAX_TABLE_BUFFER = 60
+    MAX_TERMINAL_WIDTH = 160
+
+    # 表格行缓冲上限：超长表格时立即落定，避免长时间无输出（"整体收集"的固有代价防御）
+    MAX_TABLE_BUFFER = 60
+
+    # ANSI 转义序列（宽度计算时剔除）
+    re_ansi = re.compile(r"\x1b\[[0-9;]*m")
+
+    # 语言→颜色映射表（数据驱动，O(1) 查找）
+    LANG_GROUPS = [
+        ("cyan",    ["python", "py", "pyi", "go", "dart", "r", "rstats", "diff", "patch"]),
+        ("yellow",  ["javascript", "js", "mjs", "typescript", "ts", "tsx", "jsx",
+                     "java", "kt", "scala", "kotlin"]),
+        ("green",   ["bash", "sh", "zsh", "shell", "fish", "cpp", "c", "h", "hpp",
+                     "cc", "dockerfile", "docker", "makefile", "cmake"]),
+        ("magenta", ["json", "jsonc", "toml", "yaml", "yml", "sql", "mysql",
+                     "pgsql", "php", "lua", "perl", "pl", "ini", "cfg", "conf"]),
+        ("red",     ["html", "htm", "xml", "svg", "rust", "rs", "ruby", "rb", "swift"]),
+        ("blue",    ["css", "scss", "sass", "less"]),
+        ("gray",    ["markdown", "md", "text", "txt", "log"]),
+    ]
+    COLOR_MAP = {"cyan": CB_LANG_CYAN, "yellow": CB_LANG_YELLOW, "green": CB_LANG_GREEN,
+                 "blue": CB_LANG_BLUE, "magenta": CB_LANG_MAGENTA, "red": CB_LANG_RED, "gray": CB_LANG_GRAY}
+    LANG_COLORS = {lang: grp for grp, langs in LANG_GROUPS for lang in langs}
+
+    # 表格识别与拆分
+    RE_TABLE_SEP = re.compile(r"^[-:]+$")
+
+    # 表格单元格拆分：| 前面不是反斜杠的 | 才是列分隔符（支持转义竖线 \| 作为单元格内容）
+    RE_CELL_SPLIT = re.compile(r"(?<!\\)\|")
+
+    # 块级 Markdown 匹配
+    re_head = re.compile(r"^(#{1,6})\s+(.+)")
+    re_hr = re.compile(r"^[-*_]{3,}\s*$")
+    re_task = re.compile(r"^[-*+]\s+\[([ xX])\]\s*(.*)")
+    re_ul = re.compile(r"^[-*+]\s")
+    re_ol = re.compile(r"^(\d+)[.)]\s")
 
 
 def _windows_console_window_cols() -> int:
@@ -113,7 +149,7 @@ def _terminal_width() -> int:
     # 手动兜底：极端环境下终端宽度检测不可靠时，可用环境变量强制指定
     forced = os.environ.get("NARNAT_TERM_WIDTH", "").strip()
     if forced.isdigit():
-        return max(min(int(forced), _MAX_TERMINAL_WIDTH), 20)
+        return max(min(int(forced), RenderConfig.MAX_TERMINAL_WIDTH), 20)
     # 传统 conhost（有真实可见窗口）：以可见窗口宽度为准，防止按缓冲区宽度渲染导致折行
     win_cols = _windows_console_window_cols()
     if win_cols:
@@ -124,7 +160,7 @@ def _terminal_width() -> int:
             cols = shutil.get_terminal_size().columns
         except Exception:
             cols = 120
-    return max(min(cols, _MAX_TERMINAL_WIDTH), 20)
+    return max(min(cols, RenderConfig.MAX_TERMINAL_WIDTH), 20)
 
 
 def _srwindow_cols() -> int:
@@ -157,9 +193,6 @@ def _srwindow_cols() -> int:
     return 0
 
 
-_re_ansi = re.compile(r"\x1b\[[0-9;]*m")
-
-
 def _char_width(ch: str) -> int:
     """单字符的终端显示宽度（CJK/全角=2，其余=1）。
 
@@ -173,7 +206,7 @@ def _char_width(ch: str) -> int:
 
 def _display_width(text: str) -> int:
     """终端显示宽度：CJK字符=2列，跳过ANSI转义序列。"""
-    text = _re_ansi.sub("", text)
+    text = RenderConfig.re_ansi.sub("", text)
     return sum(_char_width(ch) for ch in text)
 
 
@@ -291,30 +324,6 @@ def _sep() -> None:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 语言→颜色映射表  (数据驱动，O(1) 查找)
-# ═══════════════════════════════════════════════════════════════
-
-_LANG_COLOR_MAP: dict = {}
-_LANG_GROUPS = [
-    ("cyan",    ["python", "py", "pyi", "go", "dart", "r", "rstats", "diff", "patch"]),
-    ("yellow",  ["javascript", "js", "mjs", "typescript", "ts", "tsx", "jsx",
-                 "java", "kt", "scala", "kotlin"]),
-    ("green",   ["bash", "sh", "zsh", "shell", "fish", "cpp", "c", "h", "hpp",
-                 "cc", "dockerfile", "docker", "makefile", "cmake"]),
-    ("magenta", ["json", "jsonc", "toml", "yaml", "yml", "sql", "mysql",
-                 "pgsql", "php", "lua", "perl", "pl", "ini", "cfg", "conf"]),
-    ("red",     ["html", "htm", "xml", "svg", "rust", "rs", "ruby", "rb", "swift"]),
-    ("blue",    ["css", "scss", "sass", "less"]),
-    ("gray",    ["markdown", "md", "text", "txt", "log"]),
-]
-_COLOR_MAP = {"cyan": CB_LANG_CYAN, "yellow": CB_LANG_YELLOW, "green": CB_LANG_GREEN,
-              "blue": CB_LANG_BLUE, "magenta": CB_LANG_MAGENTA, "red": CB_LANG_RED, "gray": CB_LANG_GRAY}
-for _grp_color, _grp_langs in _LANG_GROUPS:
-    for _lang in _grp_langs:
-        _LANG_COLOR_MAP[_lang] = _grp_color
-
-
-# ═══════════════════════════════════════════════════════════════
 # 行内 Markdown 解析器 ── 正则替换流水线
 # ═══════════════════════════════════════════════════════════════
 
@@ -414,15 +423,9 @@ def _render_paragraph(_line: str, _m: Match) -> str:
     return f"  {C_PRIMARY}{InlineRules.render(_line)}{R}"
 
 
-_RE_TABLE_SEP = re.compile(r"^[-:]+$")
-
-# 表格单元格拆分：| 前面不是反斜杠的 | 才是列分隔符（支持转义竖线 \| 作为单元格内容）
-_RE_CELL_SPLIT = re.compile(r"(?<!\\)\|")
-
-
 def _split_cells(raw: str) -> List[str]:
     """按列分隔符拆分表格行，转义竖线（反斜杠+竖线）作为单元格内容保留。"""
-    return [c.strip().replace("\\|", "|") for c in _RE_CELL_SPLIT.split(raw.strip("|"))]
+    return [c.strip().replace("\\|", "|") for c in RenderConfig.RE_CELL_SPLIT.split(raw.strip("|"))]
 
 
 def _fit_widths(natural: List[int], avail: int, min_col: int = 2) -> List[int]:
@@ -455,21 +458,15 @@ def _fit_widths(natural: List[int], avail: int, min_col: int = 2) -> List[int]:
 def _is_table_separator(cells: List[str]) -> bool:
     if not any(c for c in cells):
         return False
-    return all(_RE_TABLE_SEP.match(c) for c in cells if c)
+    return all(RenderConfig.RE_TABLE_SEP.match(c) for c in cells if c)
 
-
-_re_head = re.compile(r"^(#{1,6})\s+(.+)")
-_re_hr = re.compile(r"^[-*_]{3,}\s*$")
-_re_task = re.compile(r"^[-*+]\s+\[([ xX])\]\s*(.*)")
-_re_ul = re.compile(r"^[-*+]\s")
-_re_ol = re.compile(r"^(\d+)[.)]\s")
 
 BLOCK_RULES: List[BlockRule] = sorted([
-    BlockRule(10, "heading",     lambda s: _re_head.match(s),   _render_heading),
-    BlockRule(20, "hr",          lambda s: _re_hr.match(s),     _render_hr),
-    BlockRule(30, "task",        lambda s: _re_task.match(s),   _render_task),
-    BlockRule(40, "ul",          lambda s: _re_ul.match(s),     _render_ul),
-    BlockRule(50, "ol",          lambda s: _re_ol.match(s),     _render_ol),
+    BlockRule(10, "heading",     lambda s: RenderConfig.re_head.match(s),   _render_heading),
+    BlockRule(20, "hr",          lambda s: RenderConfig.re_hr.match(s),     _render_hr),
+    BlockRule(30, "task",        lambda s: RenderConfig.re_task.match(s),   _render_task),
+    BlockRule(40, "ul",          lambda s: RenderConfig.re_ul.match(s),     _render_ul),
+    BlockRule(50, "ol",          lambda s: RenderConfig.re_ol.match(s),     _render_ol),
     BlockRule(60, "blockquote",  lambda s: s.startswith(">"),   _render_blockquote),
     BlockRule(70, "table",       lambda s: s.startswith("|") and s.endswith("|") and s.count("|") >= 2, _render_table_row),
     BlockRule(100, "paragraph",  lambda s: True,                _render_paragraph),
@@ -496,8 +493,8 @@ class CodeBlockRenderer:
 
     @staticmethod
     def render(lang: str, body: str, width: int) -> str:
-        color = _COLOR_MAP.get(
-            _LANG_COLOR_MAP.get(lang.strip().lower(), "gray"), CB_LANG_GRAY)
+        color = RenderConfig.COLOR_MAP.get(
+            RenderConfig.LANG_COLORS.get(lang.strip().lower(), "gray"), CB_LANG_GRAY)
         lines = []
         for i, raw in enumerate(body.split("\n"), 1):
             stripped = raw.rstrip()
@@ -597,7 +594,7 @@ class StreamingRenderer:
             self._table_rows.append(stripped)
             # 超长表格防御：整体收集有"长表格期间无输出"的固有代价，
             # 缓冲达到上限即落定（完整表格渲染/不完整段落化），保证输出持续可见。
-            if len(self._table_rows) >= _MAX_TABLE_BUFFER:
+            if len(self._table_rows) >= RenderConfig.MAX_TABLE_BUFFER:
                 self._flush_table()
             return False
         # 非竖线行：先刷出缓冲；若缓冲为空则清标志位防跨表格污染

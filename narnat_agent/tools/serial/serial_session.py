@@ -16,40 +16,6 @@ from typing import Optional
 import serial
 
 
-# ── 常量 ──
-
-# 稳定性采样: 连续 N 次 buffer 不变 → 确认在提示符
-# 最小执行时间: 命令执行至少等待此时间后才开始稳定性检查，避免
-# 输出中偶然出现的提示符字符在设备输出短暂停顿时触发误判
-_MIN_EXEC_TIME = 0.5  # 500ms
-_STABILITY_SAMPLES = 3
-_STABILITY_INTERVAL = 0.1  # 100ms
-
-# 轮询参数: 自适应增长, 避免 CPU 空转
-_POLL_INITIAL = 0.05
-_POLL_MAX = 0.3
-_POLL_MULTIPLIER = 1.2
-
-# ANSI 清洗正则
-_ANSI_RE = re.compile(
-    r"\x1b\[\??[0-9;]*[a-zA-Z]"
-    r"|\x1b\].*?(?:\x07|\x1b\\)"
-    r"|\x1b[()][A-Za-z0-9]"
-    r"|\x1b[0-9:;<=>?@[A-Z\[\]^_`]"
-)
-
-# 提示符检测: 以提示符字符结尾, 后跟可选空白
-_PROMPT_RE = re.compile(r"[\])$#%>:❯=@~]\s*$")
-
-# 串口读取超时 (reader 线程阻塞上限)
-_READ_TIMEOUT = 0.1
-
-# buffer 上限: 超出后丢弃最早一半, 防止设备失控导致 OOM
-_BUFFER_MAX_CHARS = 1_000_000  # 1MB
-
-
-# ── 工具函数 ──
-
 def _merge_cr_line(line: str) -> str:
     """合并单行内的 \r 覆盖：后段覆盖前段（模拟终端行为）"""
     if "\r" not in line:
@@ -86,6 +52,36 @@ def _truncate_output(text: str, max_chars: int) -> str:
 class SerialSession:
     """一个串口交互式会话"""
 
+    # ── 会话参数常量（原模块级常量收敛于此）──
+    # 稳定性采样: 连续 N 次 buffer 不变 → 确认在提示符
+    # 最小执行时间: 命令执行至少等待此时间后才开始稳定性检查，避免
+    # 输出中偶然出现的提示符字符在设备输出短暂停顿时触发误判
+    MIN_EXEC_TIME = 0.5  # 500ms
+    STABILITY_SAMPLES = 3
+    STABILITY_INTERVAL = 0.1  # 100ms
+
+    # 轮询参数: 自适应增长, 避免 CPU 空转
+    POLL_INITIAL = 0.05
+    POLL_MAX = 0.3
+    POLL_MULTIPLIER = 1.2
+
+    # ANSI 清洗正则
+    ANSI_RE = re.compile(
+        r"\x1b\[\??[0-9;]*[a-zA-Z]"
+        r"|\x1b\].*?(?:\x07|\x1b\\)"
+        r"|\x1b[()][A-Za-z0-9]"
+        r"|\x1b[0-9:;<=>?@[A-Z\[\]^_`]"
+    )
+
+    # 提示符检测: 以提示符字符结尾, 后跟可选空白
+    PROMPT_RE = re.compile(r"[\])$#%>:❯=@~]\s*$")
+
+    # 串口读取超时 (reader 线程阻塞上限)
+    READ_TIMEOUT = 0.1
+
+    # buffer 上限: 超出后丢弃最早一半, 防止设备失控导致 OOM
+    BUFFER_MAX_CHARS = 1_000_000  # 1MB
+
     def __init__(self, port: str, baudrate: int = 115200,
                  databits: int = 8, parity: str = "N",
                  stopbits: float = 1, flow_control: str = "none",
@@ -95,7 +91,7 @@ class SerialSession:
         self.line_ending = line_ending
 
         # 提示符正则: 自定义覆盖内置
-        self._prompt_re = _PROMPT_RE
+        self._prompt_re = SerialSession.PROMPT_RE
         if prompt_pattern:
             try:
                 self._prompt_re = re.compile(prompt_pattern)
@@ -119,7 +115,7 @@ class SerialSession:
         self._ser.stopbits = _stopbits_map.get(stopbits, serial.STOPBITS_ONE)
         self._ser.xonxoff = (flow_control == "software")
         self._ser.rtscts = (flow_control == "hardware")
-        self._ser.timeout = _READ_TIMEOUT
+        self._ser.timeout = SerialSession.READ_TIMEOUT
 
         self._ser.open()
 
@@ -260,8 +256,8 @@ class SerialSession:
                     with self._cond:
                         self._buffer += text
                         # 背压: buffer 超限时丢弃最早一半
-                        if len(self._buffer) > _BUFFER_MAX_CHARS:
-                            keep = _BUFFER_MAX_CHARS // 2
+                        if len(self._buffer) > SerialSession.BUFFER_MAX_CHARS:
+                            keep = SerialSession.BUFFER_MAX_CHARS // 2
                             self._buffer = (
                                 f"...[背压截断: 丢弃前{len(self._buffer) - keep}字符]\n"
                                 + self._buffer[-keep:]
@@ -411,11 +407,11 @@ class SerialSession:
     def _wait_for_prompt(self, timeout: int) -> tuple:
         """等待提示符出现, 返回 (output, found)
 
-        稳定性检查仅在命令发送后至少 _MIN_EXEC_TIME 秒才开始，
+        稳定性检查仅在命令发送后至少 SerialSession.MIN_EXEC_TIME 秒才开始，
         避免输出中偶然出现的提示符字符在短暂停顿时触发误判。
         """
         start = time.time()
-        poll_interval = _POLL_INITIAL
+        poll_interval = SerialSession.POLL_INITIAL
 
         while True:
             elapsed = time.time() - start
@@ -428,7 +424,7 @@ class SerialSession:
                 current = self._buffer
 
             # 提示符检测 + 稳定性校验（需满足最小执行时间）
-            if elapsed >= _MIN_EXEC_TIME and self._is_at_prompt(current):
+            if elapsed >= SerialSession.MIN_EXEC_TIME and self._is_at_prompt(current):
                 if self._check_stability():
                     with self._lock:
                         result = self._buffer
@@ -438,7 +434,7 @@ class SerialSession:
             with self._cond:
                 self._cond.wait(timeout=min(poll_interval, remaining))
 
-            poll_interval = min(poll_interval * _POLL_MULTIPLIER, _POLL_MAX)
+            poll_interval = min(poll_interval * SerialSession.POLL_MULTIPLIER, SerialSession.POLL_MAX)
 
         with self._lock:
             result = self._buffer
@@ -448,7 +444,7 @@ class SerialSession:
         """检查最后一行是否匹配提示符"""
         if not text:
             return False
-        cleaned = _ANSI_RE.sub("", text)
+        cleaned = SerialSession.ANSI_RE.sub("", text)
         # 取最后一行，合并 \r 覆盖（与 _clean_output 一致）
         lines = cleaned.split("\n")
         if not lines:
@@ -464,8 +460,8 @@ class SerialSession:
         """
         with self._cond:
             prev = self._buffer
-            for _ in range(_STABILITY_SAMPLES - 1):
-                self._cond.wait(timeout=_STABILITY_INTERVAL)
+            for _ in range(SerialSession.STABILITY_SAMPLES - 1):
+                self._cond.wait(timeout=SerialSession.STABILITY_INTERVAL)
                 curr = self._buffer
                 if curr != prev:
                     return False
@@ -475,7 +471,7 @@ class SerialSession:
     @staticmethod
     def _clean_output(raw: str) -> str:
         """清洗 ANSI 转义码、\\r 覆盖、多余空行"""
-        cleaned = _ANSI_RE.sub("", raw)
+        cleaned = SerialSession.ANSI_RE.sub("", raw)
         # 先归一化 \\r\\n → \\n（CRLF 是行结束符，非覆盖符）
         cleaned = cleaned.replace("\r\n", "\n")
         merged = [_merge_cr_line(line) for line in cleaned.split("\n")]

@@ -12,12 +12,16 @@ import urllib.request
 from typing import List, Dict
 
 
-# ── 常量 ──
+# ── 搜索配置（原模块级全局收敛为类成员）──
 
-_DEFAULT_SEARCH_URL = "https://api.anysearch.com/mcp"
-_ANYSEARCH_API_KEY = ""
-_ANYSEARCH_URL = ""
-_ANYSEARCH_TIMEOUT = 15
+class SearchConfig:
+    """WebSearch 工具参数。
+
+    api_key/api_url 属运行时配置：由 execute() 每次调用时从 tool_context.api_keys 读取，
+    不再缓存到模块级全局（避免跨调用残留脏状态）。
+    """
+    default_url = "https://api.anysearch.com/mcp"
+    timeout = 15
 
 DEFINITION = {
     "type": "function",
@@ -105,9 +109,8 @@ def _parse_anysearch_markdown(text: str) -> List[Dict]:
     return results
 
 
-def _search_anysearch(query: str, max_results: int) -> List[Dict]:
+def _search_anysearch(query: str, max_results: int, api_key: str, url: str) -> List[Dict]:
     """调用MCP搜索API"""
-    url = _ANYSEARCH_URL or _DEFAULT_SEARCH_URL
     data = json.dumps({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": "search", "arguments": {
@@ -115,10 +118,10 @@ def _search_anysearch(query: str, max_results: int) -> List[Dict]:
         }}
     }).encode("utf-8")
     headers = {"Content-Type": "application/json"}
-    if _ANYSEARCH_API_KEY:
-        headers["X-API-Key"] = _ANYSEARCH_API_KEY
+    if api_key:
+        headers["X-API-Key"] = api_key
     req = urllib.request.Request(url, data=data, headers=headers)
-    resp = urllib.request.urlopen(req, timeout=_ANYSEARCH_TIMEOUT)
+    resp = urllib.request.urlopen(req, timeout=SearchConfig.timeout)
     raw = json.loads(resp.read())
     # 提取所有 text 内容块
     texts = []
@@ -152,17 +155,19 @@ def execute(query: str, num: int = 5, _tool_context=None) -> str:
         return "[错误: num需为正整数]"
     # 上限20：结果逐条灌给LLM，超大num既拖慢响应又浪费配额，且全局截断会砍掉尾部
     num = min(num, 20)
-    # 从tool_context注入API Key和URL
-    global _ANYSEARCH_API_KEY, _ANYSEARCH_URL
-    if _tool_context and _tool_context.api_keys:
-        _ANYSEARCH_API_KEY = _tool_context.api_keys.get("websearch", _ANYSEARCH_API_KEY)
-        _ANYSEARCH_URL = _tool_context.api_keys.get("websearch_url", _ANYSEARCH_URL)
+    # 每次调用从 tool_context 读取密钥和URL（不缓存到全局，避免跨调用残留）
+    api_keys = _tool_context.api_keys if _tool_context else None
+    api_key = ""
+    api_url = SearchConfig.default_url
+    if api_keys:
+        api_key = api_keys.get("websearch", "")
+        api_url = api_keys.get("websearch_url", SearchConfig.default_url)
 
-    if not _ANYSEARCH_API_KEY:
+    if not api_key:
         return "[错误: 搜索失败]"
 
     try:
-        results = _search_anysearch(query, num)
+        results = _search_anysearch(query, num, api_key, api_url)
     except Exception as e:
         return f"[错误: 搜索失败: {e}]"
 

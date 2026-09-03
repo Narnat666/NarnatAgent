@@ -152,6 +152,39 @@ llm = LLMClient(..., tool_definitions=get_tool_definitions())
 
 **结论:** 保留原样。中断系统涉及多线程竞争（poll线程 + 主线程 + 后台线程），任何时序变化都可能导致中断失效。当前稳定实现不改动。
 
+### Phase 6 — 模块级变量归类（2026-08）
+
+**原则:** 可归并的归并到一处（defaults.py / 所属类），归并不了的收进类作为类成员，模块不再散落可变全局。
+
+**归类规则（三条）：**
+
+1. **用户可配置项的默认值** → `config/defaults.py`（唯一默认值中心）
+2. **跨调用可变状态 / 有自然归属类的参数** → 收进所属类，作为类成员
+3. **数据契约**（`DEFINITION`、注册表、颜色体系）→ 保持模块级（模块即其容器）
+
+**本次收敛清单：**
+
+| 原位置 | 新归属 |
+|--------|--------|
+| `output.py` SHOW_COST/SHOW_BALANCE/MAX_TOKENS/SHOW_RATIO/CONTEXT_WINDOW | `DisplayState` 类（apply_style 写入，渲染层读取） |
+| `llm.py` _active_llm_response/_STREAM_END/重试次数/退避基数/挂死阈值 | `LLMClient` 类属性（`set_retry_count` 改为类方法） |
+| `terminal` MAX_SESSIONS/_sessions/_active_exec_session | `TerminalRuntime` 类 |
+| `serial` MAX_SESSIONS/_sessions/_active_exec_sids | `SerialRuntime` 类 |
+| `bash` _active_proc/_interrupted/_utf8_env/正则 | `BashRuntime` 类 |
+| `web_search` _ANYSEARCH_API_KEY/URL | 删除全局缓存，改为每次从 tool_context 读取；常量进 `SearchConfig` |
+| `tool_dispatcher` 工具分类/标签表 | `ToolDispatcher` 类属性 |
+| `ssh_session` / `serial_session` 会话参数 | `SSHSession` / `SerialSession` 类属性 |
+| `session_callbacks` 探索分支常量 | `ChildSession` 类属性 |
+| `logger` _RE_SECRET/_redact | `AgentLogger` 类属性/静态方法 |
+| `renderer` 宽度/表格/语言配色/正则 | `RenderConfig` 类 |
+| `grep` / `glob` 边界参数 | `GrepLimits` / `GlobLimits` 类 |
+| `loader._DEFAULT_IGNORE_DIRS`、`session_store._SESSIONS_SUBDIR` | 归并到 `defaults.py` |
+
+**保留模块级（理由）：**
+- `output.py` 颜色体系：跨 ~20 文件消费的模块产品，已集中一处
+- 各工具 `DEFINITION`、`registry` 注册表、`AWAIT_CONFIRM`：LLM/工具数据契约
+- 中断系统（`_interrupt_ctrl`/`_abort_callback`）：Phase 5 结论，不改时序
+
 ---
 
 ## 四、完整流程图

@@ -1,7 +1,7 @@
 """Serial 工具 —— 多会话串口终端
 
 核心设计:
-- 支持最多 MAX_SESSIONS(5) 个并发串口会话，每个会话有唯一 session_id(0-4)
+- 支持最多 max_sessions(5) 个并发串口会话，每个会话有唯一 session_id(0-4)
 - AI 通过 session_id 指定在哪个串口操作
 - 提示符检测: 字符集匹配 + 稳定性采样
 - 超时默认 60s，超时返回已收集数据
@@ -15,34 +15,40 @@ from typing import Optional
 from .serial_session import SerialSession
 from ..tool_context import AWAIT_CONFIRM
 
-__all__ = ["execute", "DEFINITION", "kill_active_exec", "cleanup", "set_max_sessions"]
+__all__ = ["execute", "DEFINITION", "kill_active_exec", "cleanup", "SerialRuntime"]
 
 
-MAX_SESSIONS = 5
+class SerialRuntime:
+    """Serial 工具全部模块级状态与参数（原散落的模块级全局收敛于此）。
 
-# 删除命令正则（串口设备误删更危险）
-# 边界后跟空白或/：覆盖无空格变体（rd/s、del/f、rmdir/q）及erase/format；
-# \b边界防止误伤 delphi、3rd、formatting 等普通词
-_RE_DELETE = re.compile(
-    r"\b(?:rm|del|rd|rmdir|erase|format)\b[\s/]"
-    r"|\bRemove-Item\b",
-    re.IGNORECASE,
-)
+    - sessions/active_exec_sids: 跨调用共享的可变状态
+    - max_sessions: assembly 启动时按配置写入（set_max_sessions）
+    - 正则常量: 仅本模块使用
+    """
+    max_sessions = 5  # 默认5个并发串口会话，assembly 启动时按配置覆盖
 
-# session_id(0-4) → SerialSession
-_sessions: dict[int, "SerialSession"] = {}
-_sessions_lock = threading.Lock()
+    # 删除命令正则（串口设备误删更危险）
+    # 边界后跟空白或/：覆盖无空格变体（rd/s、del/f、rmdir/q）及erase/format；
+    # \b边界防止误伤 delphi、3rd、formatting 等普通词
+    RE_DELETE = re.compile(
+        r"\b(?:rm|del|rd|rmdir|erase|format)\b[\s/]"
+        r"|\bRemove-Item\b",
+        re.IGNORECASE,
+    )
 
-# 当前正在执行命令的串口会话 ID 集合（ESC 打断时遍历）
-# 使用集合而非单变量，避免多会话并发 exec 时后者覆盖前者导致 ESC 打错会话
-_active_exec_sids: set[int] = set()
-_active_exec_lock = threading.Lock()
+    # session_id(0-4) → SerialSession
+    sessions: dict = {}
+    sessions_lock = threading.Lock()
 
+    # 当前正在执行命令的串口会话 ID 集合（ESC 打断时遍历）
+    # 使用集合而非单变量，避免多会话并发 exec 时后者覆盖前者导致 ESC 打错会话
+    active_exec_sids: set = set()
+    active_exec_lock = threading.Lock()
 
-def set_max_sessions(n: int) -> None:
-    """设置最大串口会话数"""
-    global MAX_SESSIONS
-    MAX_SESSIONS = max(1, min(n, 10))
+    @classmethod
+    def set_max_sessions(cls, n: int) -> None:
+        """设置最大串口会话数（由 assembly 初始化时从配置读取），限制1-10"""
+        cls.max_sessions = max(1, min(n, 10))
 
 
 DEFINITION = {
@@ -119,11 +125,11 @@ DEFINITION = {
 
 def kill_active_exec():
     """ESC 打断：设置中断标志让所有活跃读取线程退出"""
-    with _active_exec_lock:
-        sids = list(_active_exec_sids)
+    with SerialRuntime.active_exec_lock:
+        sids = list(SerialRuntime.active_exec_sids)
     for sid in sids:
-        with _sessions_lock:
-            session = _sessions.get(sid)
+        with SerialRuntime.sessions_lock:
+            session = SerialRuntime.sessions.get(sid)
         if session is not None:
             session.kill_active()
 
@@ -233,9 +239,9 @@ def _connect(port: str, baudrate: int = 115200, databits: int = 8,
     port_key = port.upper() if sys.platform == "win32" else port
 
     # ── 阶段1: 锁内分配 slot（避免 TOCTOU）──
-    with _sessions_lock:
+    with SerialRuntime.sessions_lock:
         # 同端口防重复：串口被独占，同一端口不能开两个会话
-        for sid, s in _sessions.items():
+        for sid, s in SerialRuntime.sessions.items():
             if s is None:
                 continue
             existing_port = s.port.upper() if sys.platform == "win32" else s.port
@@ -244,25 +250,25 @@ def _connect(port: str, baudrate: int = 115200, databits: int = 8,
 
 
         if session_id >= 0:
-            if session_id >= MAX_SESSIONS:
-                return f"[错误: session_id 范围 0-{MAX_SESSIONS - 1}]"
-            if session_id in _sessions:
-                old = _sessions[session_id]
+            if session_id >= SerialRuntime.max_sessions:
+                return f"[错误: session_id 范围 0-{SerialRuntime.max_sessions - 1}]"
+            if session_id in SerialRuntime.sessions:
+                old = SerialRuntime.sessions[session_id]
                 if old is not None and old.is_alive:
                     return f"[串口终端{session_id}已连接: {old.prompt_info}]"
                 else:
                     if old is not None:
                         old.close()
-                    del _sessions[session_id]
+                    del SerialRuntime.sessions[session_id]
             alloc_id = session_id
         else:
             alloc_id = _allocate_session_id()
             if alloc_id < 0:
-                active = list(_sessions.keys())
-                return f"[错误: 已达最大会话数({MAX_SESSIONS})，当前终端: {active}，请先 close 释放]"
+                active = list(SerialRuntime.sessions.keys())
+                return f"[错误: 已达最大会话数({SerialRuntime.max_sessions})，当前终端: {active}，请先 close 释放]"
 
         # 预留 slot（置 None），防止锁外构造期间其他线程抢占同一 alloc_id
-        _sessions[alloc_id] = None
+        SerialRuntime.sessions[alloc_id] = None
 
     # ── 阶段2: 锁外构造 SerialSession（串口 open 可能阻塞，不持锁）──
     try:
@@ -273,14 +279,14 @@ def _connect(port: str, baudrate: int = 115200, databits: int = 8,
         )
     except Exception as e:
         # 构造失败 → 释放预留 slot
-        with _sessions_lock:
-            if _sessions.get(alloc_id) is None:
-                del _sessions[alloc_id]
+        with SerialRuntime.sessions_lock:
+            if SerialRuntime.sessions.get(alloc_id) is None:
+                del SerialRuntime.sessions[alloc_id]
         return f"[错误: 无法打开串口 {port}: {e}]"
 
     # ── 阶段3: 锁内存储正式 session ──
-    with _sessions_lock:
-        _sessions[alloc_id] = session
+    with SerialRuntime.sessions_lock:
+        SerialRuntime.sessions[alloc_id] = session
 
     parts = [f"[已连接终端{alloc_id}: {session.prompt_info}]"]
     if session.initial_output:
@@ -292,7 +298,7 @@ def _check_delete_safety(command: str, session_id: int, port: str, timeout: int,
                          max_output_chars: int, action_name: str,
                          _tool_context) -> Optional[str]:
     """删除命令安全确认。返回 None 表示放行，返回 str 表示被拦截的提示。"""
-    if not (_tool_context and not _tool_context.rm_skip_confirm and _RE_DELETE.search(command)):
+    if not (_tool_context and not _tool_context.rm_skip_confirm and SerialRuntime.RE_DELETE.search(command)):
         return None
 
     if sys.platform == "win32":
@@ -338,18 +344,18 @@ def _exec(session_id: int, port: str, command: str, timeout: int = 120,
         return f"[错误: {e}]"
 
     if not session.is_alive:
-        with _sessions_lock:
-            _sessions.pop(sid, None)
+        with SerialRuntime.sessions_lock:
+            SerialRuntime.sessions.pop(sid, None)
         return f"[错误: 终端{sid}串口已断开，请重新 connect]"
 
     try:
-        with _active_exec_lock:
-            _active_exec_sids.add(sid)
+        with SerialRuntime.active_exec_lock:
+            SerialRuntime.active_exec_sids.add(sid)
         try:
             result = session.execute(command, timeout=timeout, max_output_chars=max_output_chars)
         finally:
-            with _active_exec_lock:
-                _active_exec_sids.discard(sid)
+            with SerialRuntime.active_exec_lock:
+                SerialRuntime.active_exec_sids.discard(sid)
         return f"[终端{sid}] {result}"
     except Exception as e:
         return f"[错误: 终端{sid}命令执行失败: {e}]"
@@ -383,18 +389,18 @@ def _raw_exec(session_id: int, port: str, command: str, timeout: int = 120,
         return f"[错误: {e}]"
 
     if not session.is_alive:
-        with _sessions_lock:
-            _sessions.pop(sid, None)
+        with SerialRuntime.sessions_lock:
+            SerialRuntime.sessions.pop(sid, None)
         return f"[错误: 终端{sid}串口已断开，请重新 connect]"
 
     try:
-        with _active_exec_lock:
-            _active_exec_sids.add(sid)
+        with SerialRuntime.active_exec_lock:
+            SerialRuntime.active_exec_sids.add(sid)
         try:
             result = session.raw_execute(command, timeout=timeout, max_output_chars=max_output_chars)
         finally:
-            with _active_exec_lock:
-                _active_exec_sids.discard(sid)
+            with SerialRuntime.active_exec_lock:
+                SerialRuntime.active_exec_sids.discard(sid)
         return f"[终端{sid}] {result}"
     except Exception as e:
         return f"[错误: 终端{sid}命令执行失败: {e}]"
@@ -422,18 +428,18 @@ def _input(session_id: int, port: str, text: str, timeout: int = 120,
         return f"[错误: {e}]"
 
     if not session.is_alive:
-        with _sessions_lock:
-            _sessions.pop(sid, None)
+        with SerialRuntime.sessions_lock:
+            SerialRuntime.sessions.pop(sid, None)
         return f"[错误: 终端{sid}串口已断开，请重新 connect]"
 
     try:
-        with _active_exec_lock:
-            _active_exec_sids.add(sid)
+        with SerialRuntime.active_exec_lock:
+            SerialRuntime.active_exec_sids.add(sid)
         try:
             result = session.send_input(text, timeout=timeout, max_output_chars=max_output_chars)
         finally:
-            with _active_exec_lock:
-                _active_exec_sids.discard(sid)
+            with SerialRuntime.active_exec_lock:
+                SerialRuntime.active_exec_sids.discard(sid)
         return f"[终端{sid}] {result}"
     except Exception as e:
         return f"[错误: 终端{sid}输入发送失败: {e}]"
@@ -441,20 +447,20 @@ def _input(session_id: int, port: str, text: str, timeout: int = 120,
 
 def _status() -> str:
     """查看所有会话状态"""
-    with _sessions_lock:
-        if not _sessions:
-            return f"[无活跃串口会话，最多支持{MAX_SESSIONS}个并发终端]"
+    with SerialRuntime.sessions_lock:
+        if not SerialRuntime.sessions:
+            return f"[无活跃串口会话，最多支持{SerialRuntime.max_sessions}个并发终端]"
 
         lines = []
-        for sid in sorted(_sessions.keys()):
-            session = _sessions[sid]
+        for sid in sorted(SerialRuntime.sessions.keys()):
+            session = SerialRuntime.sessions[sid]
             if session is None:
                 lines.append(f"  终端{sid}: [连接中...]")
                 continue
             alive = "活跃" if session.is_alive else "已断开"
             busy = "忙" if session.busy else "闲"
             lines.append(f"  终端{sid}: {session.prompt_info} [{alive}|{busy}]")
-        free = MAX_SESSIONS - len(_sessions)
+        free = SerialRuntime.max_sessions - len(SerialRuntime.sessions)
         if free > 0:
             lines.append(f"  [{free}个空闲]")
         return "[串口会话]\n" + "\n".join(lines)
@@ -462,22 +468,22 @@ def _status() -> str:
 
 def _close(session_id: int, port: str = "") -> str:
     """关闭会话。session_id=-1 且无 port 关闭全部；port 可直引已连接的串口"""
-    with _sessions_lock:
+    with SerialRuntime.sessions_lock:
         if session_id < 0 and not port:
-            count = len(_sessions)
-            for sid, session in list(_sessions.items()):
+            count = len(SerialRuntime.sessions)
+            for sid, session in list(SerialRuntime.sessions.items()):
                 if session is not None:
                     session.close()
-            _sessions.clear()
-            with _active_exec_lock:
-                _active_exec_sids.clear()
+            SerialRuntime.sessions.clear()
+            with SerialRuntime.active_exec_lock:
+                SerialRuntime.active_exec_sids.clear()
             return f"[已关闭{count}个串口会话]"
 
         if session_id < 0 and port:
             # 按端口名匹配（Windows 大小写不敏感）
             port_key = port.strip().upper() if sys.platform == "win32" else port.strip()
             matched = [
-                sid for sid, s in _sessions.items()
+                sid for sid, s in SerialRuntime.sessions.items()
                 if s is not None and (
                     (s.port.upper() if sys.platform == "win32" else s.port) == port_key
                 )
@@ -486,30 +492,30 @@ def _close(session_id: int, port: str = "") -> str:
                 return f"[错误: 端口 {port} 未连接]"
             session_id = matched[0]
 
-        if session_id not in _sessions:
+        if session_id not in SerialRuntime.sessions:
             return f"[终端{session_id}未连接]"
 
-        session = _sessions[session_id]
+        session = SerialRuntime.sessions[session_id]
         if session is None:
-            del _sessions[session_id]
+            del SerialRuntime.sessions[session_id]
             return f"[终端{session_id}连接中，已取消]"
 
         session.close()
-        del _sessions[session_id]
-        with _active_exec_lock:
-            _active_exec_sids.discard(session_id)
+        del SerialRuntime.sessions[session_id]
+        with SerialRuntime.active_exec_lock:
+            SerialRuntime.active_exec_sids.discard(session_id)
         return f"[已关闭终端{session_id}]"
 
 
 def cleanup():
     """程序退出时清理所有串口会话"""
-    with _active_exec_lock:
-        _active_exec_sids.clear()
-    with _sessions_lock:
-        for session in _sessions.values():
+    with SerialRuntime.active_exec_lock:
+        SerialRuntime.active_exec_sids.clear()
+    with SerialRuntime.sessions_lock:
+        for session in SerialRuntime.sessions.values():
             if session is not None:
                 session.close()
-        _sessions.clear()
+        SerialRuntime.sessions.clear()
 
 
 def _allocate_session_id() -> int:
@@ -517,16 +523,16 @@ def _allocate_session_id() -> int:
 
     死会话（is_alive=False，如串口被拔出）自动回收槽位：
     否则设备断开后槽位被死会话占用，AI重连时报"已达最大会话数"却无法释放。
-    调用者需持有_sessions_lock。
+    调用者需持有SerialRuntime.sessions_lock。
     """
-    for i in range(MAX_SESSIONS):
-        if i not in _sessions:
+    for i in range(SerialRuntime.max_sessions):
+        if i not in SerialRuntime.sessions:
             return i
-        session = _sessions[i]
+        session = SerialRuntime.sessions[i]
         # None=正在连接中的占位槽，不可抢占；只回收已断开的死会话
         if session is not None and not session.is_alive:
             session.close()
-            del _sessions[i]
+            del SerialRuntime.sessions[i]
             return i
     return -1
 
@@ -540,11 +546,11 @@ def _resolve_session_id(session_id: int, port: str = "") -> tuple[int, "SerialSe
        减少 AI 回查终端编号的往返（连的哪个口它最清楚）
     3. session_id < 0 且无 port: 只有一个会话时自动选择，多个时报清单
     """
-    with _sessions_lock:
+    with SerialRuntime.sessions_lock:
         if session_id >= 0:
-            if session_id not in _sessions:
+            if session_id not in SerialRuntime.sessions:
                 raise ValueError(f"终端{session_id}未连接，请先 connect")
-            session = _sessions[session_id]
+            session = SerialRuntime.sessions[session_id]
             if session is None:
                 raise ValueError(f"终端{session_id}正在连接中，请稍候")
             return session_id, session
@@ -552,18 +558,18 @@ def _resolve_session_id(session_id: int, port: str = "") -> tuple[int, "SerialSe
         if port:
             port_key = port.strip().upper() if sys.platform == "win32" else port.strip()
             matched = [
-                sid for sid, s in _sessions.items()
+                sid for sid, s in SerialRuntime.sessions.items()
                 if s is not None and (
                     (s.port.upper() if sys.platform == "win32" else s.port) == port_key
                 )
             ]
             if matched:
                 sid = matched[0]
-                return sid, _sessions[sid]
+                return sid, SerialRuntime.sessions[sid]
             raise ValueError(f"端口 {port} 未连接，请先 connect 或 status 查看已连接的串口")
 
         # 自动选择：跳过 None 预留 slot
-        active = {k: v for k, v in _sessions.items() if v is not None}
+        active = {k: v for k, v in SerialRuntime.sessions.items() if v is not None}
         if len(active) == 1:
             sid = list(active.keys())[0]
             return sid, active[sid]

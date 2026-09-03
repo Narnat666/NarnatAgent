@@ -18,29 +18,31 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..param_utils import to_bool
 from ..glob import _expand_braces, _unescape_braces
 
-# ── 滚动缓冲区大小（64KB，与 ripgrep 的 DEFAULT_BUFFER_CAPACITY 一致）──
-_BUFFER_SIZE = 64 * 1024
+class GrepLimits:
+    """Grep 工具边界参数（原模块级常量收敛为类成员）"""
+    # ── 滚动缓冲区大小（64KB，与 ripgrep 的 DEFAULT_BUFFER_CAPACITY 一致）──
+    BUFFER_SIZE = 64 * 1024
 
-# ── ReDoS 防护：正则最大长度 ──
-_MAX_PATTERN_LENGTH = 4096
+    # ── ReDoS 防护：正则最大长度 ──
+    MAX_PATTERN_LENGTH = 4096
 
-# ── 单文件最大大小（100MB），超出跳过 ──
-_MAX_FILE_SIZE = 100 * 1024 * 1024
+    # ── 单文件最大大小（100MB），超出跳过 ──
+    MAX_FILE_SIZE = 100 * 1024 * 1024
 
-# ── 超长行上限（1MB），leftover 超过此值视为异常文件提前结束 ──
-_MAX_LINE_LENGTH = 1 * 1024 * 1024
+    # ── 超长行上限（1MB），leftover 超过此值视为异常文件提前结束 ──
+    MAX_LINE_LENGTH = 1 * 1024 * 1024
 
-# ── 正则元字符集，用于判断 pattern 是否为纯文本 ──
-_RE_META_CHARS = set(r".*+?[]{}()\|^$")
+    # ── 正则元字符集，用于判断 pattern 是否为纯文本 ──
+    RE_META_CHARS = set(r".*+?[]{}()\|^$")
 
-# ── 二进制检测：首块中 NUL 字节阈值 ──
-_BINARY_NUL_THRESHOLD = 1
+    # ── 二进制检测：首块中 NUL 字节阈值 ──
+    BINARY_NUL_THRESHOLD = 1
 
-# ── head_limit 默认值：AI 显式传值的历史众数（514次中132次传30）──
-_DEFAULT_HEAD_LIMIT = 30
+    # ── head_limit 默认值：AI 显式传值的历史众数（514次中132次传30）──
+    DEFAULT_HEAD_LIMIT = 30
 
-# ── 并行阈值：目录内文件数 >= 此值时启用线程池 ──
-_PARALLEL_MIN_FILES = 10
+    # ── 并行阈值：目录内文件数 >= 此值时启用线程池 ──
+    PARALLEL_MIN_FILES = 10
 
 DEFINITION = {
     "type": "function",
@@ -126,7 +128,7 @@ def execute(
     A: int = 0,
     B: int = 0,
     C: int = 0,
-    head_limit: int = _DEFAULT_HEAD_LIMIT,
+    head_limit: int = GrepLimits.DEFAULT_HEAD_LIMIT,
     _tool_context=None,
     **kwargs,
 ) -> str:
@@ -161,8 +163,8 @@ def execute(
         return "[错误: A/B/C/head_limit需为整数]"
 
     # ── ReDoS 防护 ──
-    if len(pattern) > _MAX_PATTERN_LENGTH:
-        return f"[错误: 正则表达式过长（>{_MAX_PATTERN_LENGTH}字符），拒绝执行以防ReDoS]"
+    if len(pattern) > GrepLimits.MAX_PATTERN_LENGTH:
+        return f"[错误: 正则表达式过长（>{GrepLimits.MAX_PATTERN_LENGTH}字符），拒绝执行以防ReDoS]"
 
     flags = re.IGNORECASE if to_bool(i) else 0
     try:
@@ -264,7 +266,7 @@ def _has_re_meta(pattern: str) -> bool:
         ch = pattern[i]
         if ch == '\\':
             return True   # 任何转义 = 正则语法，不走纯文本快路径
-        if ch in _RE_META_CHARS:
+        if ch in GrepLimits.RE_META_CHARS:
             return True
         i += 1
     return False
@@ -292,7 +294,7 @@ def _make_fast_searcher(pattern: str, ignore_case: bool):
 
 def _check_binary_first_chunk(first_chunk: bytes) -> bool:
     """检查首块中是否含 NUL 字节。"""
-    return first_chunk.count(0) >= _BINARY_NUL_THRESHOLD
+    return first_chunk.count(0) >= GrepLimits.BINARY_NUL_THRESHOLD
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -317,11 +319,11 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
 
     try:
         raw_f.seek(0, 2)  # SEEK_END
-        if raw_f.tell() > _MAX_FILE_SIZE:
+        if raw_f.tell() > GrepLimits.MAX_FILE_SIZE:
             return None
         raw_f.seek(0)
 
-        first_chunk = raw_f.read(_BUFFER_SIZE)
+        first_chunk = raw_f.read(GrepLimits.BUFFER_SIZE)
         if _check_binary_first_chunk(first_chunk):
             return None
         encoding = _detect_text_encoding(first_chunk)
@@ -349,7 +351,7 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
     aborted = False
     try:
         while True:
-            chunk = f.read(_BUFFER_SIZE)
+            chunk = f.read(GrepLimits.BUFFER_SIZE)
             if not chunk:
                 break
 
@@ -361,7 +363,7 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
             leftover = lines.pop()
 
             # ── 超长行防护：视为异常文件，提前结束 ──
-            if len(leftover) > _MAX_LINE_LENGTH:
+            if len(leftover) > GrepLimits.MAX_LINE_LENGTH:
                 aborted = True
                 break
 
@@ -406,7 +408,7 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
                             before_window.popleft()
 
         # ── 处理文件末尾的不完整行 ──
-        if leftover and not aborted and len(leftover) < _MAX_LINE_LENGTH:
+        if leftover and not aborted and len(leftover) < GrepLimits.MAX_LINE_LENGTH:
             leftover = leftover.rstrip("\r")
             line_num += 1
             if fast_searcher:
@@ -504,7 +506,7 @@ def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
     if not file_items:
         return
 
-    use_parallel = len(file_items) >= _PARALLEL_MIN_FILES
+    use_parallel = len(file_items) >= GrepLimits.PARALLEL_MIN_FILES
 
     if use_parallel:
         # 并行下无法预知每个文件轮到时的剩余预算，统一按 head_limit 收集，

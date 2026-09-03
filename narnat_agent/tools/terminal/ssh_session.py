@@ -35,46 +35,9 @@ import paramiko
 import socket
 
 
-# sudo/密码提示检测正则（用于自动注入sudo_password）
-_RE_PASSWORD_PROMPT = re.compile(
-    r"\[sudo\].*password"
-    r"|Password\s*[:：]"
-    r"|密码\s*[:：]"
-    r"|passphrase\s*for\s+key",
-    re.IGNORECASE,
-)
-
-# sudo 密码被拒绝的判别（覆盖主流sudo/busybox sudo文案）
-_RE_SUDO_REJECT = re.compile(
-    r"sorry.{0,30}try\s+again"
-    r"|incorrect\s+password"
-    r"|bad\s+password",
-    re.IGNORECASE,
-)
-
-# 单次读循环内自动注入尝试上限：超过后视为无法自动完成，转交AI input
-# （覆盖：多连sudo、以及不输出拒绝文案的sudo变体反复要密码的场景）
-_MAX_SUDO_INJECT_ATTEMPTS = 3
-
-# ANSI转义序列（模块级复用: _clean_output清洗 + _strip_echo判断续行）
-_ANSI_RE = re.compile(
-    r'\x1b\[\??[0-9;]*[a-zA-Z]'
-    r'|\x1b\].*?(?:\x07|\x1b\\)'
-    r'|\x1b[()][A-Za-z0-9]'
-    r'|\x1b[0-9:;<=>?@[A-Z\[\]^_`]'  # DEC私有序列: ESC 7(保存光标), ESC 8(恢复光标)等
-)
-
-# 真实shell提示符行（user@host:path$ 形态），用于剥离恢复路径中重复的提示符
-_PROMPT_LINE_RE = re.compile(r"^[^@]+@[^:]+:[^\n]*[#$>]\s*$")
-
-# 哨兵检测尾部窗口：哨兵永远出现在输出末尾（marker行+pwd输出+pwd_marker+prompt
-# 共数百字节），仅扫描尾部8KB即可判定，避免对全量输出做O(n²)切片搜索
-_MARKER_TAIL_WINDOW = 8192
-
-
 def _ansi_sub(text: str) -> str:
     """剥离ANSI转义序列"""
-    return _ANSI_RE.sub('', text)
+    return SSHSession.ANSI_RE.sub('', text)
 
 
 def _truncate_output(text: str, max_chars: int) -> str:
@@ -94,6 +57,43 @@ def _truncate_output(text: str, max_chars: int) -> str:
 
 class SSHSession:
     """一个SSH交互式会话"""
+
+    # ── 会话参数常量（原模块级常量收敛于此）──
+    # sudo/密码提示检测正则（用于自动注入sudo_password）
+    RE_PASSWORD_PROMPT = re.compile(
+        r"\[sudo\].*password"
+        r"|Password\s*[:：]"
+        r"|密码\s*[:：]"
+        r"|passphrase\s*for\s+key",
+        re.IGNORECASE,
+    )
+
+    # sudo 密码被拒绝的判别（覆盖主流sudo/busybox sudo文案）
+    RE_SUDO_REJECT = re.compile(
+        r"sorry.{0,30}try\s+again"
+        r"|incorrect\s+password"
+        r"|bad\s+password",
+        re.IGNORECASE,
+    )
+
+    # 单次读循环内自动注入尝试上限：超过后视为无法自动完成，转交AI input
+    # （覆盖：多连sudo、以及不输出拒绝文案的sudo变体反复要密码的场景）
+    MAX_SUDO_INJECT_ATTEMPTS = 3
+
+    # ANSI转义序列（_clean_output清洗 + _strip_echo判断续行复用）
+    ANSI_RE = re.compile(
+        r'\x1b\[\??[0-9;]*[a-zA-Z]'
+        r'|\x1b\].*?(?:\x07|\x1b\\)'
+        r'|\x1b[()][A-Za-z0-9]'
+        r'|\x1b[0-9:;<=>?@[A-Z\[\]^_`]'  # DEC私有序列: ESC 7(保存光标), ESC 8(恢复光标)等
+    )
+
+    # 真实shell提示符行（user@host:path$ 形态），用于剥离恢复路径中重复的提示符
+    PROMPT_LINE_RE = re.compile(r"^[^@]+@[^:]+:[^\n]*[#$>]\s*$")
+
+    # 哨兵检测尾部窗口：哨兵永远出现在输出末尾（marker行+pwd输出+pwd_marker+prompt
+    # 共数百字节），仅扫描尾部8KB即可判定，避免对全量输出做O(n²)切片搜索
+    MARKER_TAIL_WINDOW = 8192
 
     def __init__(self, host: str, username: str, port: int = 22,
                  key_path: Optional[str] = None, password: Optional[str] = None,
@@ -153,7 +153,7 @@ class SSHSession:
         self._backlog_lock = threading.Lock()
 
     def _initialize(self):
-        """阻塞初始化：读初始输出、更新cwd。必须在 connect 中注册 _active_exec_session 之后调用，
+        """阻塞初始化：读初始输出、更新cwd。必须在 connect 中注册活跃执行会话之后调用，
         这样 ESC 打断 connect 时能通过 kill_active_exec() 关闭此会话。"""
         self._initial_output = self._read_until_prompt(timeout=5)
         self._update_cwd()
@@ -570,7 +570,7 @@ class SSHSession:
                 if not found:
                     first_newline = output.find('\n')
                     if first_newline >= 0:
-                        tail = output[max(first_newline + 1, len(output) - _MARKER_TAIL_WINDOW):]
+                        tail = output[max(first_newline + 1, len(output) - SSHSession.MARKER_TAIL_WINDOW):]
                         found = pwd_marker in tail
                         if found:
                             # 继续读取，等待prompt出现或连续超时
@@ -631,7 +631,7 @@ class SSHSession:
                 # 大输出命令（如cat大文件）会CPU飙升拖慢读取。密码提示总是出现在
                 # 输出末尾（无尾随换行），尾部窗口足够判定
                 if (not output.endswith(("\n", "\r"))
-                        and _RE_PASSWORD_PROMPT.search(self._clean_output(output[-2048:]))):
+                        and SSHSession.RE_PASSWORD_PROMPT.search(self._clean_output(output[-2048:]))):
                     # 注入后通道仍静默（无新数据）：是同一份旧提示的重复评估，跳过。
                     # 否则sudo接受密码后命令静默运行期间，旧提示会被反复误判为新提示
                     # 导致重复注入（密码正确场景实测会连注两次）
@@ -648,10 +648,10 @@ class SSHSession:
                             inject_mark_len = len(output)
                             prompt_suspect_ts = 0.0
                         elif sudo_injected:
-                            rejected = _RE_SUDO_REJECT.search(
+                            rejected = SSHSession.RE_SUDO_REJECT.search(
                                 self._clean_output(output[-4096:])
                             )
-                            if rejected or inject_attempts >= _MAX_SUDO_INJECT_ATTEMPTS:
+                            if rejected or inject_attempts >= SSHSession.MAX_SUDO_INJECT_ATTEMPTS:
                                 # 判失败：本会话停用自动注入，密码提示一律转交AI input
                                 self._sudo_mismatch = True
                                 self._busy = True
@@ -877,7 +877,7 @@ class SSHSession:
         if not text:
             return text
         lines = text.split("\n")
-        while lines and _PROMPT_LINE_RE.match(lines[-1]):
+        while lines and SSHSession.PROMPT_LINE_RE.match(lines[-1]):
             lines.pop()
         return "\n".join(lines)
 
