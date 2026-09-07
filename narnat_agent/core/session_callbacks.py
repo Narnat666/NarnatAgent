@@ -18,7 +18,7 @@ from ..config.session_store import (
     format_session_list, list_sessions_tree, format_session_tree,
     format_session_summary, load_session_meta,
 )
-from ..config.skill_store import load_skill, list_skill_names
+from ..config.skill_store import load_skill, list_skill_tree
 from .message_list import MessageList
 
 
@@ -544,7 +544,9 @@ class SessionManager:
                  name_func: Callable[[List[Dict[str, Any]]], str] = None,
                  on_switch_state: Callable[[], None] = None,
                  goal_tool_setter: Callable[[bool], None] = None,
-                 goal_max_rounds: int = 0):
+                 goal_max_rounds: int = 0,
+                 project_skill_roots=None,
+                 skill_ignore_dirs: tuple = ()):
         self.narnat_dir = narnat_dir
         self._messages = messages
         self._config_dir = config_dir
@@ -561,6 +563,10 @@ class SessionManager:
         self.name_func = name_func
         self._on_switch_state = on_switch_state
         self._set_goal_tool = goal_tool_setter
+        # 项目技能根目录: None=自动发现（扫描所有名为 skills 的目录）；空元组=关闭；非空=显式
+        self._project_skill_roots = project_skill_roots
+        # 自动发现时跳过的目录名（narnat.json "忽略目录"，默认含 node_modules/.git 等）
+        self._skill_ignore_dirs = tuple(skill_ignore_dirs or ())
         self._auto_save_done: bool = False
         self._pending_auto_save_name: Optional[str] = None
         self.pending_deletes: Set[Tuple[str, Optional[str]]] = set()
@@ -682,7 +688,9 @@ class SessionManager:
         self._state.auto_save()
 
     def on_skill(self, name: str) -> str:
-        content, err = load_skill(self.narnat_dir, name)
+        content, err = load_skill(self.narnat_dir, name,
+                                  project_roots=self._project_skill_roots,
+                                  ignore_dirs=self._skill_ignore_dirs)
         if err:
             return err
         self._messages.append_system(content)
@@ -783,8 +791,11 @@ class SessionManager:
                             if (child["name"], current_name) not in self.pending_deletes]
         return []
 
-    def on_list_skill_names(self) -> list:
-        return list_skill_names(self.narnat_dir)
+    def on_list_skill_tree(self) -> list:
+        """技能树（供 /skill 按层级 Tab 补全）。"""
+        return list_skill_tree(self.narnat_dir,
+                               project_roots=self._project_skill_roots,
+                               ignore_dirs=self._skill_ignore_dirs)
 
     def is_child_session(self) -> bool:
         return self._state.is_child()

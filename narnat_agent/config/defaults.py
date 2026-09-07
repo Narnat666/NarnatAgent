@@ -48,6 +48,14 @@ COMPRESS_PROMPT = """直接输出本轮对话核心经验总结，作为下一�
 5. 核心技术细节（文件路径、关键代码段）
 6. 遇到的错误及解决方案"""
 
+# ── 项目技能扫描默认值 ──
+# /skill 除系统技能（.narnat/config/skills/）外，还会自动扫描当前工作目录下所有名为
+# skills 的目录作为项目技能根（如 .agents/skills、.kimi-code/skills、顶层 skills 等），
+# 无需写死目录列表。
+# 可在 narnat.json 的 "技能"."项目技能目录" 显式指定目录列表（覆盖自动发现）；
+# 写 [] 表示关闭项目技能扫描。
+DEFAULT_SKILL_SCAN_DEPTH = 4  # 自动发现 skills 目录的最大递归深度（根目录算第1层）
+
 # ── .narnat 目录名 ──
 NARNAT_DIR = ".narnat"
 

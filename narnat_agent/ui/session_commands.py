@@ -39,7 +39,6 @@ class _CommandCompleter(Completer):
     _NAME_COMMANDS = {
         "/cd":       "on_list_names_tree",
         "/rm":       "on_list_rm_names",
-        "/skill":    "on_list_skill_names",
         "/thinking": "on_list_thinking_options",
         "/mode":     "on_list_model_names",
     }
@@ -73,6 +72,9 @@ class _CommandCompleter(Completer):
 
         if num_parts >= 1:
             cmd = parts[0].lower()
+            if cmd == "/skill" and cmd in commands:
+                yield from self._skill_completions(text[len(parts[0]):].lstrip())
+                return
             if cmd in self._NAME_COMMANDS:
                 names = getattr(self._mgr, self._NAME_COMMANDS[cmd])()
                 if num_parts == 1 and text.endswith(" "):
@@ -102,6 +104,49 @@ class _CommandCompleter(Completer):
             elif num_parts == 1 and text.endswith(" "):
                 for opt in self._STATIC_OPTIONS.get(cmd, []):
                     yield Completion(opt, start_position=0)
+
+    def _skill_completions(self, word: str):
+        """技能层级补全：目录逐层进入（显示为 目录/ ），叶子（.md 文件或单技能目录）裸名显示。
+
+        word: /skill 后面的参数部分（可能为空或含空格）。层级用 / 分隔（兼容 \\）。
+        补全顺序：按当前层级逐步给出，而非一次性列出全部技能。
+        """
+        tree = self._mgr.on_list_skill_tree()
+        word = word.replace("\\", "/")
+        segs = word.split("/")
+        if segs and segs[-1] == "":
+            prefix = ""
+            segs = segs[:-1]
+        else:
+            prefix = segs[-1] if segs else ""
+            segs = segs[:-1] if segs else []
+        nodes = tree
+        for seg in segs:
+            nxt = None
+            for node in nodes:
+                if node.get("type") == "dir" and node["name"] == seg:
+                    nxt = node["children"]
+                    break
+            if nxt is None:
+                return
+            nodes = nxt
+        for node in nodes:
+            name = node["name"]
+            if not name.startswith(prefix):
+                continue
+            if name == prefix:
+                # 名字已完整输入：目录 → 补 "/" 进入下一层（单技能目录也允许进入查看）；
+                # 文件 → 无更多层级，不产出空补全（避免 Tab 后无任何可见反馈）
+                if node.get("type") == "dir":
+                    yield Completion("/", start_position=0, display_meta="进入目录")
+                continue
+            if node.get("type") == "dir" and not node.get("single"):
+                yield Completion(name[len(prefix):] + "/", start_position=0,
+                                 display_meta="目录")
+            else:
+                meta = "系统技能" if node.get("origin") == "system" else "项目技能"
+                yield Completion(name[len(prefix):], start_position=0,
+                                 display_meta=meta)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -246,7 +291,7 @@ def _cmd_cd(args: str, mgr) -> CommandResult:
 
 @_register("skill")
 def _cmd_skill(args: str, mgr) -> CommandResult:
-    if _require_args(args, "用法: /skill <名称>"):
+    if _require_args(args, "用法: /skill <名称 | 项目目录/文件.md>"):
         return CommandResult.HANDLED
     result = mgr.on_skill(args)
     if result:

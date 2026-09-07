@@ -94,6 +94,14 @@ class SessionConfig:
 
 
 @dataclass(frozen=True)
+class SkillConfig:
+    """技能配置（只读）"""
+    # 项目技能根目录: None=自动发现（扫描工作目录下所有名为 skills 的目录）；
+    # 空元组=关闭项目技能扫描；非空元组=仅扫描显式指定目录（相对工作目录，支持绝对路径）
+    project_roots: Optional[tuple] = None
+
+
+@dataclass(frozen=True)
 class PricingConfig:
     """定价配置（只读）"""
     # 用户自定义定价（中文key映射到英文key）
@@ -149,6 +157,7 @@ class Config:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     plan: PlanConfig = field(default_factory=PlanConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
+    skills: SkillConfig = field(default_factory=SkillConfig)
     pricing: PricingConfig = field(default_factory=PricingConfig)
     balance: BalanceConfig = field(default_factory=BalanceConfig)
     ui: UIConfig = field(default_factory=UIConfig)
@@ -226,6 +235,18 @@ def _coerce(v, target_type):
         return target_type(v)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_project_skill_roots(data: dict) -> Optional[tuple]:
+    """解析 narnat.json 的 "技能"."项目技能目录"。
+
+    - 键缺失或非列表 → None（自动发现：扫描工作目录下所有名为 skills 的目录）
+    - 列表（可为空，空列表 = 关闭项目技能扫描）→ 取其中非空字符串项作显式目录
+    """
+    raw = data.get("技能", {}).get("项目技能目录")
+    if isinstance(raw, list):
+        return tuple(r for r in raw if isinstance(r, str) and r.strip())
+    return None
 
 
 def _parse_token_amount(v, default: int = 0) -> int:
@@ -662,6 +683,7 @@ def load_config(project_root: Optional[str] = None) -> Config:
             warn_ratio=_coerce(data.get("压缩", {}).get("告警"), int) or DEFAULT_WARN_RATIO,
             compress_ratio=_coerce(data.get("压缩", {}).get("压缩"), int) or DEFAULT_COMPRESS_RATIO,
         ),
+        skills=SkillConfig(project_roots=_parse_project_skill_roots(data)),
         pricing=pricing_config,
         balance=balance_config,
         ui=ui_config,

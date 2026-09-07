@@ -119,6 +119,8 @@ class Assembly:
             on_switch_state=tool_context.clear_read_files,
             goal_tool_setter=llm.set_goal_tool,
             goal_max_rounds=config.ai.goal_max_rounds,
+            project_skill_roots=config.skills.project_roots,
+            skill_ignore_dirs=config.tools.ignore_dirs,
         )
 
         # 11. UI
