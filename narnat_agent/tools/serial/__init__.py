@@ -98,7 +98,7 @@ DEFINITION = {
                 },
                 "command": {
                     "type": "string",
-                    "description": "发送的命令（action=exec/raw_exec时使用）",
+                    "description": "发送的命令（action=exec/raw_exec时使用）；raw_exec时为空则纯监听：不发送，仅在timeout内收集设备主动输出",
                 },
                 "input": {
                     "type": "string",
@@ -368,20 +368,21 @@ def _raw_exec(session_id: int, port: str, command: str, timeout: int = 120,
     适用场景:
     - 设备无标准提示符（裸机串口、AT 固件、bootloader 启动日志）
     - 输出中含大量提示符字符导致 exec 误判
+    - command 为空 → 纯监听模式：不发送任何内容，仅在 timeout 内收集
+      设备主动输出（boot日志、登录提示、刷屏日志等）
     """
-    if not command:
-        return "[错误: raw_exec 需要提供 command]"
     if timeout <= 0:
         return "[错误: timeout 需为正整数（秒）]"
 
     if _tool_context and _tool_context.max_timeout_seconds > 0:
         timeout = min(timeout, _tool_context.max_timeout_seconds)
 
-    # 安全检查（与 _exec 保持一致）
-    blocked = _check_delete_safety(command, session_id, port, timeout,
-                                   max_output_chars, "raw_exec", _tool_context)
-    if blocked is not None:
-        return blocked
+    # 安全检查（与 _exec 保持一致）：空命令（纯监听）无内容可查，直接跳过
+    if command:
+        blocked = _check_delete_safety(command, session_id, port, timeout,
+                                       max_output_chars, "raw_exec", _tool_context)
+        if blocked is not None:
+            return blocked
 
     try:
         sid, session = _resolve_session_id(session_id, port)

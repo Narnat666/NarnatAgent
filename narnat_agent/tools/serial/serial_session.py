@@ -8,6 +8,7 @@
 """
 
 import codecs
+import difflib
 import re
 import time
 import threading
@@ -328,32 +329,36 @@ class SerialSession:
 
         if found:
             return _truncate_output(
-                self._clean_output(output), max_output_chars
+                self._polish_output(output, text), max_output_chars
             )
 
         # 超时/中断
         interrupted = self._interrupt.is_set()
         tag = "[用户中断]" if interrupted else f"[超时: 命令执行超过{timeout}秒]"
-        cleaned = self._clean_output(output)
+        cleaned = self._polish_output(output, text)
         if cleaned:
             return _truncate_output(f"{cleaned}\n{tag}", max_output_chars)
         return tag
 
     def _do_raw_send(self, text: str, timeout: int,
                      max_output_chars: int) -> str:
-        """核心: 发送文本, 纯超时等待, 不做提示符检测"""
+        """核心: 发送文本, 纯超时等待, 不做提示符检测。
+
+        text 为空 → 纯监听模式: 跳过发送，仅在 timeout 内被动收集设备输出。
+        """
         self._interrupt.clear()
 
         with self._lock:
             self._buffer = ""
 
-        try:
-            payload = text + self.line_ending
-            self._ser.write(payload.encode("utf-8", errors="replace"))
-            self._ser.flush()
-        except serial.SerialException as e:
-            self._dead = True
-            return f"[错误: 串口写入失败: {e}]"
+        if text:
+            try:
+                payload = text + self.line_ending
+                self._ser.write(payload.encode("utf-8", errors="replace"))
+                self._ser.flush()
+            except serial.SerialException as e:
+                self._dead = True
+                return f"[错误: 串口写入失败: {e}]"
 
         # 纯超时等待
         start = time.time()
@@ -371,8 +376,17 @@ class SerialSession:
             output = self._buffer
 
         interrupted = self._interrupt.is_set()
-        tag = "[用户中断]" if interrupted else f"[超时: 命令执行超过{timeout}秒]"
-        cleaned = self._clean_output(output)
+        cleaned = self._polish_output(output, text)
+        if text:
+            tag = "[用户中断]" if interrupted else f"[超时: 命令执行超过{timeout}秒]"
+        else:
+            # 纯监听模式：区分有无数据，避免"有输出却说无输出"的矛盾文案
+            if interrupted:
+                tag = "[用户中断]"
+            elif cleaned:
+                tag = f"[监听结束: 已达{timeout}秒]"
+            else:
+                tag = f"[监听结束: {timeout}秒内无输出]"
         result = f"{cleaned}\n{tag}" if cleaned else tag
         return _truncate_output(result, max_output_chars)
 
@@ -478,3 +492,58 @@ class SerialSession:
         cleaned = "\n".join(merged)
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
         return cleaned.strip()
+
+    def _polish_output(self, raw: str, sent_text: str) -> str:
+        """返回给AI前的统一打磨: 清洗ANSI + 剥离命令回显 + 提示符去重。
+
+        命令回显: 串口设备几乎总回显输入，exec返回首行常是AI刚发的命令
+        （零信息量）。错位回显（被设备输出覆盖/与上条命令交错）与命令仍有
+        大量重合片段，用相似度而非精确匹配识别。
+        - 相似/前缀匹配 → 剥掉首行
+        - 不相似 → 保留（设备不回显时首行是真实输出，误删会丢数据）
+        """
+        cleaned = self._clean_output(raw)
+        if not cleaned:
+            return cleaned
+        cleaned = self._strip_command_echo(cleaned, sent_text)
+        cleaned = self._dedup_prompt_lines(cleaned)
+        return cleaned.strip()
+
+    @staticmethod
+    def _strip_command_echo(output: str, command: str) -> str:
+        """剥离输出首行的命令回显。"""
+        if not output or not command:
+            return output
+        lines = output.split("\n")
+        first = lines[0].rstrip()
+        if not first:
+            return output
+        cmd = command.strip()
+        if not cmd:
+            return output
+        # 相似度: 错位回显（中间片段被覆盖）仍有高重合
+        ratio = difflib.SequenceMatcher(None, first, cmd).ratio()
+        # 长命令部分回显（行宽截断）用公共前缀判定
+        prefix_match = (len(cmd) > 20 and first.startswith(cmd[:20]))
+        if ratio >= 0.6 or prefix_match:
+            # 剥离后若为空则返回空串（仅回显、无真实输出）
+            rest = "\n".join(lines[1:]).strip()
+            return rest
+        return output
+
+    def _dedup_prompt_lines(self, output: str) -> str:
+        """相邻重复的提示符行去重一行。
+
+        串口raw模式常见: 设备提示符被返回两次（回显+真实），对AI纯噪音。
+        仅对提示符行去重（普通输出重复可能是有意义的）。
+        """
+        if not output or "\n" not in output:
+            return output
+        lines = output.split("\n")
+        result = [lines[0]]
+        for line in lines[1:]:
+            # rstrip 比较: 串口提示符行尾常有空格差异（回显带空格、真实无）
+            if line.rstrip() == result[-1].rstrip() and self._prompt_re.search(line.rstrip()):
+                continue
+            result.append(line)
+        return "\n".join(result)
