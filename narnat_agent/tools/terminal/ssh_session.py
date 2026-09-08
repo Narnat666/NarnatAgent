@@ -209,7 +209,12 @@ class SSHSession:
         # printf '\n' 保证哨兵行独立成行：命令输出无尾随换行时（cat 无换行文件、printf 等），
         # 若不加换行，`echo MARKER<rc>` 会粘在输出尾部 → marker行startswith检测失败，
         # 连锁导致退出码污染输出、pwd泄漏、cwd不更新（prompt显示旧目录）
-        full_cmd = f"{command}; rc=$?; printf '\\n'; echo {marker}$rc; pwd -P; echo {pwd_marker}\n"
+        # 哨兵必须独立成行，绝不能与命令拼接为 `{command}; rc=$?...`：
+        # - heredoc: 定界符行（如 EOF）被 `; rc=$?` 污染 → 定界符永不匹配 → 命令必超时
+        #   （AI 反馈"终端状态乱了（之前超时命令残留）"的根因）
+        # - 行尾注释: `echo hi # c; rc=$?` 整行被注释 → 哨兵静默失效 → 必超时
+        # - 末尾 & 后台: `cmd &; rc=$?` 是语法错误
+        full_cmd = f"{command.rstrip(chr(10) + chr(13))}\nrc=$?; printf '\\n'; echo {marker}$rc; pwd -P; echo {pwd_marker}\n"
         self._last_command = command  # 供_parse_output剥离多行命令首行回显
         self._channel.send(full_cmd)
 
@@ -416,7 +421,9 @@ class SSHSession:
                 if not chunk:
                     break
                 output += chunk
-                if marker in output:
+                # 仅匹配「以marker开头的独立行」：回显行 "echo __NARNAT_CWD_x__"
+                # 先于真实输出行到达，子串匹配会误判（cwd解析拿到的是回显文本）
+                if SSHSession._sentinel_line_present(output, marker):
                     break
             except socket.timeout:
                 if self._interrupt.is_set():
@@ -426,12 +433,17 @@ class SSHSession:
                 break
 
         # 解析: ... /actual/path\n __MARKER__\n prompt
-        # marker所在行之前的一行就是pwd输出
-        if marker in output:
-            before_marker = output.split(marker)[0]
-            lines = before_marker.strip().split("\n")
-            # 取最后一个非空行作为pwd
-            for line in reversed(lines):
+        # marker所在行之前的一行就是pwd输出。
+        # 按行索引定位marker行（split(marker)会停在回显行"echo __NARNAT_CWD_x__"
+        # 的第一次出现处，漏掉真实的pwd输出行）
+        lines_all = output.split("\n")
+        marker_idx = None
+        for i, line in enumerate(lines_all):
+            if _ansi_sub(line).replace("\r", "").strip().startswith(marker):
+                marker_idx = i
+                break
+        if marker_idx is not None:
+            for line in reversed(lines_all[:marker_idx]):
                 cleaned = self._clean_output(line).strip()
                 # 修复运算符优先级: and 优先于 or，需要括号
                 if cleaned and (not cleaned.startswith("echo ")) and (("/" in cleaned) or (cleaned == "/")):
@@ -465,7 +477,9 @@ class SSHSession:
                     if not chunk:
                         break  # channel关闭/EOF
                     output += chunk
-                    if pwd_marker in output:
+                    # 哨兵行永远在输出末尾，仅扫描尾部窗口：全量逐行正则清洗
+                    # 在大输出后台命令（如make几十MB）下是O(n²) CPU开销
+                    if SSHSession._sentinel_line_present(output[-SSHSession.MARKER_TAIL_WINDOW:], pwd_marker):
                         finished = True
                         break
             finally:
@@ -501,23 +515,26 @@ class SSHSession:
             self._backlog = (self._backlog + "\n" + text) if self._backlog else text
 
     def _extract_cwd(self, output: str, marker: str, pwd_marker: str) -> Optional[str]:
-        """从输出中提取pwd（marker行与pwd_marker行之间的路径行），失败返回None"""
+        """从输出中提取pwd（marker行与pwd_marker行之间的路径行），失败返回None
+
+        两个哨兵行均按「行首匹配」定位：回显行含 "echo __NARNAT_PWD_x__" 文本
+        （子串匹配会误停），且回显先于真实输出到达，必须从marker行之后找pwd_marker行。
+        """
         lines = output.split("\n")
         marker_idx = None
-        pwd_idx = None
         for i, line in enumerate(lines):
-            stripped = _ansi_sub(line).replace("\r", "").strip()
-            if marker_idx is None and stripped.startswith(marker):
+            if _ansi_sub(line).replace("\r", "").strip().startswith(marker):
                 marker_idx = i
-            if pwd_marker in line:
-                pwd_idx = i
                 break
-        if marker_idx is None or pwd_idx is None:
+        if marker_idx is None:
             return None
-        for i in range(marker_idx + 1, pwd_idx):
-            cleaned = self._clean_output(lines[i]).strip()
-            if cleaned and (cleaned.startswith("/") or cleaned == "/"):
-                return cleaned
+        for i in range(marker_idx + 1, len(lines)):
+            if _ansi_sub(lines[i]).replace("\r", "").strip().startswith(pwd_marker):
+                for j in range(marker_idx + 1, i):
+                    cleaned = self._clean_output(lines[j]).strip()
+                    if cleaned and (cleaned.startswith("/") or cleaned == "/"):
+                        return cleaned
+                break
         return None
 
     def _read_until_marker(self, marker: str, pwd_marker: str, timeout: int = 0) -> str:
@@ -567,11 +584,14 @@ class SSHSession:
                 # 检测哨兵：跳过回显行（PTY会回显完整命令，含marker，不能误匹配）
                 # 回显是output的第一行。哨兵永远出现在输出末尾，仅扫描尾部窗口
                 # （此前对全量output做切片+搜索，大输出时O(n²)浪费CPU）
+                # 仅匹配「以pwd_marker开头的独立行」：heredoc等多行命令场景，
+                # 哨兵行的回显（echo __NARNAT_PWD_x__）先于真实输出行到达，
+                # 子串匹配会误命中回显 → 提前判完成 → 真实哨兵输出还没读齐。
                 if not found:
                     first_newline = output.find('\n')
                     if first_newline >= 0:
                         tail = output[max(first_newline + 1, len(output) - SSHSession.MARKER_TAIL_WINDOW):]
-                        found = pwd_marker in tail
+                        found = SSHSession._sentinel_line_present(tail, pwd_marker)
                         if found:
                             # 继续读取，等待prompt出现或连续超时
                             # prompt格式: user@host:path$ (可能含~缩写)
@@ -690,10 +710,10 @@ class SSHSession:
                 residual = self._try_read_residual(duration=3.0)
                 if residual:
                     output += residual
-                    # 跳过回显行检测哨兵
+                    # 跳过回显行检测哨兵（行首匹配，回显行"echo __NARNAT_PWD_x__"不会误命中）
                     first_nl = output.find('\n')
                     check_region = output[first_nl + 1:] if first_nl >= 0 else ""
-                    if pwd_marker in check_region:
+                    if SSHSession._sentinel_line_present(check_region, pwd_marker):
                         found = True
 
                 # Ctrl+C后哨兵出现了 → 走正常解析(远程进程已被终止)
@@ -795,7 +815,20 @@ class SSHSession:
         for l in before_marker.split("\n"):
             ansi_clean = _ansi_sub(l).replace("\r", "").strip()
             if f"echo {marker}" in l:
-                continue  # 哨兵命令行（exec回显或input路径的行首echo形态），含marker
+                # 哨兵命令行（exec回显或input路径的行首echo形态），含marker。
+                # 特殊形态: 命令输出无尾随换行时（printf、cat无换行文件等），bash把
+                # prompt直接粘在输出后，哨兵命令行回显又粘在prompt后，整行形如:
+                #   \x1b[?2004l\r真实输出\x1b[?2004h\x1b]0;标题\x07...$ rc=$?; ...; echo MARKER
+                # 此时真实输出在prompt起点(\x1b[?2004h / \x1b]0; OSC标题)之前，
+                # 裁剪保留；纯回显行裁剪后为空，整行丢弃（原行为）。
+                idx = l.rfind("\x1b[?2004h")
+                if idx < 0:
+                    idx = l.rfind("\x1b]0;")
+                if idx >= 0:
+                    real_part = l[:idx]
+                    if _ansi_sub(real_part).replace("\r", "").strip():
+                        filtered.append(real_part)
+                continue
             # 续行回显: PTY续行提示特征为 "\x1b[?2004h> "（开启序列后紧跟"> "提示符）。
             # 输出行是 "\x1b[?2004l\r内容"（关闭序列+内容，"> "是内容本身），不受影响
             if "\x1b[?2004h> " in l or "\x1b[?2004h>" in l:
@@ -855,6 +888,21 @@ class SSHSession:
             except Exception:
                 break
         return self._clean_output(output)
+
+    @staticmethod
+    def _sentinel_line_present(text: str, pwd_marker: str) -> bool:
+        """检测哨兵真实输出行是否存在（排除回显行误命中）。
+
+        哨兵真实输出行 = 以 __NARNAT_PWD_x__ 开头的独立行。
+        回显行含 "echo __NARNAT_PWD_x__" 文本（或 heredoc 场景中哨兵行
+        被当作heredoc内容回显），必须以「行首匹配」排除。
+        heredoc等多行命令场景下，哨兵行回显先于真实输出行到达，
+        子串匹配会误判命令已完成，导致真实哨兵输出未读齐。
+        """
+        for line in text.split("\n"):
+            if _ansi_sub(line).replace("\r", "").strip().startswith(pwd_marker):
+                return True
+        return False
 
     @staticmethod
     def _strip_caret_echo(text: str) -> str:
@@ -934,4 +982,6 @@ class SSHSession:
         # 此处不再按行首"> "删——否则会误删真实输出中以"> "开头的行（如 echo '> quote'）
 
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
-        return cleaned.strip()
+        # 只剥首尾空行与行尾空白，保留行首空格：
+        # echo '  leading-space' 等输出行首空格是真实数据，strip()会误删
+        return cleaned.strip("\n").rstrip()
