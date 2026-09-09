@@ -76,6 +76,11 @@ class Agent:
                 # 每次用户新输入都复位目标模式完成标记：防止普通模式下AI调用过
                 # GoalComplete（或收尾轮调用）后残留，导致下个任务首轮被误判完成
                 self._parts.tool_context.goal_complete = False
+                # 收尾软提醒标志同步复位：新任务允许再次提醒一次
+                self._parts.tool_context.todo_reminded = False
+                # 新任务翻篇：清空上一任务的计划状态。旧计划未勾选项属于已结案任务
+                # （AI已向用户说明无法完成/跳过原因），不清空会在新任务收尾时误触发提醒
+                self._parts.tool_context.current_todos = []
                 compress_ok = False
                 if self._context.need_compress():
                     compress_ok = self._compression.compress(stripped)
@@ -104,8 +109,8 @@ class Agent:
                     stream = self._ui.create_stream()
 
                     try:
-                        # 6. 工具调度内循环
-                        self._agent_loop.run(stream)
+                        # 6. 工具调度内循环（目标模式传入goal_mode：中间轮不显示统计栏）
+                        self._agent_loop.run(stream, goal_mode=goal_enabled)
                     except KeyboardInterrupt:
                         self._ui.on_interrupted()
                         stream.abort()
@@ -141,7 +146,8 @@ class Agent:
                             "请向用户总结当前进度、已完成工作和未完成原因，无需继续执行新任务。"
                         )
                         stream = self._ui.create_stream()
-                        self._agent_loop.run(stream)
+                        # 强制收尾轮：无论AI是否声明完成，正常结束时都显示统计栏
+                        self._agent_loop.run(stream, goal_mode=goal_enabled, force_final=True)
                         if not stream.aborted:
                             self._mgr.on_auto_save()
                             self._auto_save.try_save()

@@ -43,8 +43,16 @@ class AgentLoop:
             self._config.ai.thinking_effort, self._config.ai.thinking_effort
         )
 
-    def run(self, stream):
-        """工具调度内循环"""
+    def run(self, stream, goal_mode: bool = False, force_final: bool = False):
+        """工具调度内循环
+
+        Args:
+            stream: 当前流式输出会话
+            goal_mode: 是否目标模式。目标模式下中间轮纯文本结束时不显示统计栏，
+                只有AI声明完成（GoalComplete已置位）或强制收尾轮（force_final）才显示，
+                使统计栏成为"结案信号"。
+            force_final: 强制收尾轮（轮数上限注入收尾指令的那一轮），正常完成时显示统计栏。
+        """
         # 本轮是否正常完成（无tool_call纯文本输出结束）。目标模式续跑据此判断，
         # 出错/中断/空回复等非正常结束不触发自动续跑。
         self._last_round_ok = False
@@ -245,7 +253,35 @@ class AgentLoop:
             if call_usage:
                 self._stats.update(call_usage)
 
+            # ── 收尾软提醒：计划未全部勾选时提醒一次，仅一次 ──
+            # AI漏勾选就输出总结时，注入一条提醒让它补勾；无论下一轮结果如何
+            # 都放行（todo_reminded置True后不再触发），不循环、不复读。
+            # 提醒仅注入AI上下文，终端不展示（内部纠偏，用户无需感知）。
+            unfinished = [
+                t for t in self._tool_context.current_todos
+                if t.get("status") != "completed"
+            ]
+            if unfinished and not self._tool_context.todo_reminded:
+                self._tool_context.todo_reminded = True
+                names = "、".join(t.get("content", "") for t in unfinished[:5])
+                tail = f"等共{len(unfinished)}项" if len(unfinished) > 5 else ""
+                self._msg_manager.append_user(
+                    f"[系统提醒] 你的计划仍有未勾选完成的项: {names}{tail}。"
+                    "若这些任务实际已完成，请先调用TodoWrite勾选它们（并把仍需继续的项标记为进行中）"
+                    "再输出最终总结；若确实未完成或刻意跳过，请在最终总结中向用户说明原因；"
+                    "若你有需要用户澄清的困惑或依赖用户决策，可直接向用户提问，无需强行收尾。"
+                )
+                # 复用同一stream继续内循环：先把上一轮文字落定到屏幕，
+                # 再重启"思考中"spinner，避免LLM等待期界面无动画静默卡住
+                stream.flush_renderer()
+                stream.begin()
+                continue
+
             self._last_round_ok = True  # 正常完成：无tool_call纯文本输出
+            # 统计栏 = 结案信号：普通模式每轮结束都显示；
+            # 目标模式只有AI声明完成（goal_complete已置位）或强制收尾轮才显示，
+            # 中间轮静默结束（AI文字照常显示，仅不打印统计栏）。
+            show_stats = (not goal_mode) or self._tool_context.goal_complete or force_final
             stream.finish(
                 self._stats.input_tokens,
                 self._stats.output_tokens,
@@ -253,6 +289,7 @@ class AgentLoop:
                 cost=self._stats.cost,
                 balance=self._stats.balance,
                 thinking_effort=self._thinking_label,
+                with_stats=show_stats,
             )
             break
 

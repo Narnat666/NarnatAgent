@@ -63,6 +63,10 @@ class ToolContext:
     # 目标模式完成标记：GoalComplete工具调用时置True，主循环据此停止自动续跑
     goal_complete: bool = field(default=False, repr=False)
 
+    # 收尾软提醒标志：任务收尾时计划未全部勾选会提醒一次，置True后放行不再提醒。
+    # 每次用户新输入时由agent.py复位（与goal_complete一致）
+    todo_reminded: bool = field(default=False, repr=False)
+
     def confirm_delete(self, command: str) -> bool:
         """调用删除确认回调（仅Windows使用）"""
         if self.confirm_callback:
