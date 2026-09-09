@@ -120,6 +120,20 @@ class BalanceConfig:
 
 
 @dataclass(frozen=True)
+class CostLogConfig:
+    """费用日志配置（只读）：开启后每次LLM请求追加一行到CSV
+
+    双文件轮转：活动文件（path）达到 max_bytes 后改名为「主名_bak.扩展名」
+    （旧的 _bak 被删除），再新建活动文件从表头开始写。
+    磁盘上始终只有 1 个活动文件 + 1 个备份文件。
+    max_bytes = 0 表示不限制（单文件无限追加）。
+    """
+    enabled: bool = False
+    path: str = ""                   # CSV输出路径，空=默认 .narnat/data/cost_log.csv
+    max_bytes: int = 50 * 1024 * 1024  # 活动文件容量上限（默认50MB），0=不限制
+
+
+@dataclass(frozen=True)
 class UIConfig:
     """UI配置（只读）
 
@@ -160,6 +174,7 @@ class Config:
     skills: SkillConfig = field(default_factory=SkillConfig)
     pricing: PricingConfig = field(default_factory=PricingConfig)
     balance: BalanceConfig = field(default_factory=BalanceConfig)
+    cost_log: CostLogConfig = field(default_factory=CostLogConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     api_keys: dict = field(default_factory=dict)
     system_prompt: str = ""
@@ -509,6 +524,25 @@ def _build_balance_config(data: dict) -> BalanceConfig:
     )
 
 
+def _build_cost_log_config(data: dict, data_dir: str) -> CostLogConfig:
+    """从narnat.json的"费用日志"分组构建CostLogConfig"""
+    cfg = data.get("费用日志", {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    enabled = bool(cfg.get("启用", False))
+    path = cfg.get("输出文件") or os.path.join(data_dir, "cost_log.csv")
+    # 最大容量MB：缺失/非法 → 50MB；显式 ≤0 → 不限制（不轮转）
+    max_mb = cfg.get("最大容量MB")
+    try:
+        max_mb = int(max_mb)
+    except (TypeError, ValueError):
+        max_mb = 50
+    if max_mb < 0:
+        max_mb = 0
+    max_bytes = max_mb * 1024 * 1024 if max_mb > 0 else 0
+    return CostLogConfig(enabled=enabled, path=path, max_bytes=max_bytes)
+
+
 def _load_user_md(config_dir: str) -> str:
     """读取 narnat.md 用户自定义指令，不存在或为空返回空串"""
     path = os.path.join(config_dir, NARNAT_MD)
@@ -590,6 +624,7 @@ def load_config(project_root: Optional[str] = None) -> Config:
                         },
                         "接口密钥组": {"websearch": "", "websearch_url": "https://api.anysearch.com/mcp"},
                         "定价": {"模型": {}},
+                        "费用日志": {"启用": False, "输出文件": "", "最大容量MB": 50},
                         "界面": {
                             "show_cost": False,
                             "show_balance": False,
@@ -616,6 +651,7 @@ def load_config(project_root: Optional[str] = None) -> Config:
     api_keys = data.get("接口密钥组", {})
     pricing_config = _build_pricing_config(data)
     balance_config = _build_balance_config(data)
+    cost_log_config = _build_cost_log_config(data, data_dir)
     ui_config = _build_ui_config(data, ai_config.max_tokens or 128000)
 
     # 读取用户自定义指令
@@ -686,6 +722,7 @@ def load_config(project_root: Optional[str] = None) -> Config:
         skills=SkillConfig(project_roots=_parse_project_skill_roots(data)),
         pricing=pricing_config,
         balance=balance_config,
+        cost_log=cost_log_config,
         ui=ui_config,
         api_keys=api_keys,
         system_prompt=system_prompt,

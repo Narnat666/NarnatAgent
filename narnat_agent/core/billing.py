@@ -23,15 +23,16 @@ def get_pricing(model: str, user_pricing: Optional[Dict[str, Dict[str, float]]] 
     return None
 
 
-def calculate_cost(
+def cost_breakdown(
     model: str,
     prompt_tokens: int,
     completion_tokens: int,
     cached_tokens: int,
     user_pricing: Optional[Dict[str, Dict[str, float]]] = None,
-) -> float:
-    """计算本轮费用（元）。未配置定价则返回0。
+) -> tuple:
+    """计算本轮费用分项（元）。未配置定价则返回 (0.0, 0.0, 0.0)。
 
+    返回: (输入费用, 缓存费用, 输出费用)
     prompt_tokens 包含缓存部分，实际计费:
       - (prompt_tokens - cached_tokens) * input_price
       - cached_tokens * cache_hit_price
@@ -39,13 +40,26 @@ def calculate_cost(
     """
     p = get_pricing(model, user_pricing)
     if p is None:
-        return 0.0
+        return (0.0, 0.0, 0.0)
     uncached = prompt_tokens - cached_tokens
     return (
-        uncached * p["input"] +
-        cached_tokens * p["cache_hit"] +
-        completion_tokens * p["output"]
-    ) / 1_000_000
+        uncached * p["input"] / 1_000_000,
+        cached_tokens * p["cache_hit"] / 1_000_000,
+        completion_tokens * p["output"] / 1_000_000,
+    )
+
+
+def calculate_cost(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cached_tokens: int,
+    user_pricing: Optional[Dict[str, Dict[str, float]]] = None,
+) -> float:
+    """计算本轮费用（元）。未配置定价则返回0。"""
+    return sum(cost_breakdown(
+        model, prompt_tokens, completion_tokens, cached_tokens, user_pricing
+    ))
 
 
 def _resolve_jsonpath(data: Any, path: str) -> Any:

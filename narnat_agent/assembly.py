@@ -142,6 +142,7 @@ class Assembly:
             config.ai.model,
             config.pricing.user_pricing,
             config.balance,
+            config.cost_log,
         )
 
         # 模型切换需同步 stats 持有的模型名（费用计算按模型定价查表），stats 创建后才可接线
