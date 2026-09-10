@@ -47,12 +47,6 @@ class ToolContext:
     # 当前todo状态（由TodoWrite工具更新）
     current_todos: list = field(default_factory=list)
 
-    # 已Read过的本地文件集合（write使用）
-    read_files: set = field(default_factory=set)
-
-    # 已Read过的远程文件集合（remote使用）
-    read_remote_files: set = field(default_factory=set)
-
     # 暂存的删除命令（Linux/macOS下，用户确认后由agent主循环重新执行）
     # 格式: (tool_name, arguments_dict) 或 None
     pending_delete: Optional[Tuple[str, dict]] = None
@@ -81,27 +75,3 @@ class ToolContext:
     def get_api_key(self, name: str) -> str:
         """获取指定服务的API密钥"""
         return self.api_keys.get(name, "")
-
-    def mark_read(self, file_path: str):
-        """标记本地文件已被Read"""
-        import os
-        self.read_files.add(os.path.abspath(file_path))
-
-    def is_read(self, file_path: str) -> bool:
-        """检查本地文件是否已被Read"""
-        import os
-        return os.path.abspath(file_path) in self.read_files
-
-    def clear_read_files(self):
-        """清空已读文件记录"""
-        self.read_files.clear()
-
-    def mark_remote_read(self, file_path: str, host: str = ""):
-        """标记远程文件已被Read"""
-        key = f"{host}:{file_path}" if host else file_path
-        self.read_remote_files.add(key)
-
-    def is_remote_read(self, file_path: str, host: str = "") -> bool:
-        """检查远程文件是否已被Read"""
-        key = f"{host}:{file_path}" if host else file_path
-        return key in self.read_remote_files

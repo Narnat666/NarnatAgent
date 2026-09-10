@@ -4,7 +4,6 @@
 """
 
 import json
-import re
 import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from typing import List, Dict, Any, Tuple, Optional
@@ -15,7 +14,8 @@ from ..tools.terminal import kill_active_exec as _kill_terminal_exec
 from ..tools.terminal import resolve_dev_display as _dev_display
 from ..tools.serial import kill_active_exec as _kill_serial_exec
 from ..tools.tool_context import ToolContext
-from ..output import write as _stdout_write, D, E, R, Y, G, B, C, X
+from ..tools.exec_signal import has_error, strip_tags
+from ..output import write as _stdout_write, D, R, X
 
 
 def _local_hostname() -> str:
@@ -25,25 +25,6 @@ def _local_hostname() -> str:
         return socket.gethostname()
     except Exception:
         return "localhost"
-
-
-def _command_exec_failed(result: str) -> bool:
-    """Shell/Terminal命令级失败判定：超时、整体退出码非0、或段启动失败。
-
-    取最后一个 [exit code: N] 作为整体退出码：多段命令总退出码在末尾，
-    'a || b' 短路后整体成功（末尾0）不算失败；超时无退出码单独判定。
-    用户中断/确认取消属正常交互，不算失败（Terminal被打断时exit code
-    常为130(SIGINT)，需先排除）。
-    """
-    if "[用户中断]" in result or "[操作已取消" in result:
-        return False
-    if "[超时" in result:
-        return True
-    codes = re.findall(r"\[exit code: (\d+)\]", result)
-    if codes and int(codes[-1]) != 0:
-        return True
-    # 多段命令某段启动失败（如命令行含NUL字符）：错误标记在结果中间且无总退出码
-    return "[错误" in result
 
 
 class ToolDispatcher:
@@ -220,6 +201,25 @@ class ToolDispatcher:
 
         # 执行工具
         llm_result, color_diff = tool_execute(name, arguments, self._tool_context)
+        # ── UI失败显示判定（从根上杜绝误判）──
+        # 命令类工具(Shell/Terminal): 只认框架错误标签(has_error)。
+        #   标签是进程级随机值，只有框架自身生成的错误消息携带，命令输出
+        #   无法伪造 → 100%确定才显示失败。
+        #   - 非零退出码: 不显示（grep无匹配/diff有差异/测试脚本exit 1等
+        #     都是合法命令结果，退出码信息本身已进AI上下文）
+        #   - 输出文本含"[错误"/"[超时"字样: 不显示（那是数据不是框架错误）
+        #   - Shell超时杀进程/工具层错误(连接失败/参数非法): 带标签 → 显示
+        #   - Terminal设计内超时(仍在后台运行)/密码提示/繁忙提示: 不带标签 → 不显示
+        # 其他工具(Read/Edit/Write/Serial等): 结果纯框架文本、绝无命令输出，
+        #   startswith("[错误")即100%确定，沿用。
+        # 框架标签只服务于判定，不给AI看（strip_tags剥离后AI看到的内容与无标签一致）
+        exec_failed = (
+            name in ("Shell", "Terminal")
+            and isinstance(llm_result, str)
+            and has_error(llm_result)
+        )
+        if isinstance(llm_result, str):
+            llm_result = strip_tags(llm_result)
         self._logger.info(
             f"tools.{name.lower()}",
             f"调用: {json.dumps(arguments, ensure_ascii=False)[:200]}",
@@ -232,11 +232,14 @@ class ToolDispatcher:
         # 展示着色diff
         if color_diff:
             self._show_diff(color_diff)
-        elif isinstance(llm_result, str) and llm_result.startswith("[错误"):
-            # 工具执行失败：终端仅显示一行失败提示，具体原因只进AI上下文
+        elif exec_failed:
+            # Shell/Terminal框架错误（带不可伪造标签）：终端补一行失败提示，原因只进AI上下文
             self._show_tool_failed(name)
-        elif name in ("Shell", "Terminal") and isinstance(llm_result, str) and _command_exec_failed(llm_result):
-            # Shell/Terminal命令级失败（退出码非0/超时）：终端补一行失败提示，原因只进AI上下文
+        elif (name not in ("Shell", "Terminal")
+              and isinstance(llm_result, str)
+              and llm_result.startswith("[错误")):
+            # 非命令类工具(Read/Edit/Write/Serial等)：结果纯框架文本、绝无命令输出，
+            # startswith("[错误")即100%确定的工具错误
             self._show_tool_failed(name)
 
         stream.resume_spinner()

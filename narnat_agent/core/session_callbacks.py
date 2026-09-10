@@ -14,8 +14,8 @@ import os
 from typing import Optional, List, Dict, Any, Callable, Set, Tuple
 
 from ..config.session_store import (
-    save_session, load_session, list_sessions, delete_session,
-    format_session_list, list_sessions_tree, format_session_tree,
+    save_session, load_session, delete_session,
+    list_sessions_tree, format_session_tree,
     format_session_summary, load_session_meta,
 )
 from ..config.skill_store import load_skill, list_skill_tree
@@ -542,7 +542,6 @@ class SessionManager:
                  summary_anim_stop: Callable[[], None] = None,
                  cancel_check: Callable[[], bool] = None,
                  name_func: Callable[[List[Dict[str, Any]]], str] = None,
-                 on_switch_state: Callable[[], None] = None,
                  goal_tool_setter: Callable[[bool], None] = None,
                  goal_max_rounds: int = 0,
                  project_skill_roots=None,
@@ -561,7 +560,6 @@ class SessionManager:
         self.summary_anim_stop = summary_anim_stop
         self.cancel_check = cancel_check or (lambda: False)
         self.name_func = name_func
-        self._on_switch_state = on_switch_state
         self._set_goal_tool = goal_tool_setter
         # 项目技能根目录: None=自动发现（扫描所有名为 skills 的目录）；空元组=关闭；非空=显式
         self._project_skill_roots = project_skill_roots
@@ -591,11 +589,6 @@ class SessionManager:
 
     def switch_state(self, new_state: SessionState):
         self._state = new_state
-        # 会话切换后AI的记忆（消息上下文）已整体更换，工具层的"已Read文件"等
-        # 运行时状态必须同步清空：否则AI在新会话中未读过文件却能直接Edit/Write，
-        # 绕过"先Read后写"的覆写保护（旧会话读过的文件状态泄漏到新会话）
-        if self._on_switch_state is not None:
-            self._on_switch_state()
 
     def create_root_state(self, name: str) -> RootSession:
         return RootSession(self, name)

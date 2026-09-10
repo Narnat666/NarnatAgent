@@ -4,8 +4,7 @@ MessageManager 负责消息的修复逻辑和压缩流程编排，
 实际的列表持有和修改委托给 MessageList（唯一所有者）。
 """
 
-import os
-from typing import List, Dict, Any, Optional
+from typing import Optional
 
 from .compressor import Compressor
 from .message_list import MessageList, MessageView

@@ -4,20 +4,17 @@
 AI通过 device 参数（dev1..devn）指定远程设备。
 """
 
-import io
-import os
 import difflib
-from typing import Optional
+import errno
 
 from . import get_session, SSHSession
-from ..diff_utils import colorize_diff
+from ..diff_utils import colorize_diff, describe_bytes_only_change
 
 
 def _no_session_msg(host: str = "") -> str:
     """无目标会话时的提示：区分「无任何会话」与「指定设备未连接」两种情况。
 
-    注意: 必须以"[错误"开头——Read工具靠startswith("[错误")判断失败读不标记已读，
-    若失败消息无此前缀，一次失败的Read会被误标为已读，绕过Write/Edit覆写保护。
+    注意: 必须以"[错误"开头，终端UI据此显示失败提示。
     """
     try:
         from . import _list_devices
@@ -59,11 +56,22 @@ def remote_read(file_path: str, offset: int = 0, limit: int = 2000,
     try:
         # "rb"模式: read/readline均返回bytes（"r"模式的readline会按UTF-8强解码，
         # 遇到GBK等非UTF-8文件直接抛UnicodeDecodeError）
+        import stat as _stat_mod
+        try:
+            info = sftp.stat(file_path)
+        except IOError:
+            info = None
+        # 目录路径: SFTP open 目录抛原始IOError被误报为"文件不存在"，
+        # 提前判定给出准确指引（与本地Read的目录提示对齐）
+        if info is not None and _stat_mod.S_ISDIR(info.st_mode):
+            return ("[错误: 远程路径是目录: "
+                    f"{file_path}，请用 Terminal exec 查看目录内容]")
+
         with sftp.open(file_path, "rb") as f:
             # 二进制检测: 仅读首块8KB（与本地Read检测策略一致）
             head = f.read(8192)
             if b"\x00" in head:
-                return "[错误: 检测到二进制文件（含NUL字节），Read仅支持纯文本。请使用Shell工具处理]"
+                return "[错误: 检测到二进制文件（含NUL字节），Read仅支持纯文本。请用 Terminal exec 处理]"
 
             # 编码探测（与本地Read一致）：GBK文件按utf-8+replace读是乱码
             from ..read import _detect_text_encoding
@@ -92,8 +100,14 @@ def remote_read(file_path: str, offset: int = 0, limit: int = 2000,
                 # for...else: 读完limit行后还有剩余内容
                 if f.readline():
                     truncated = True
-    except IOError:
-        return f"[错误: 远程文件不存在: {file_path}]"
+    except OSError as e:
+        # SFTP把EACCES(errno=13)也抛成IOError：一律报"不存在"会把排查方向
+        # 引向路径拼写，实际问题通常是权限（chmod/属主/父目录缺x位）
+        if e.errno == errno.ENOENT:
+            return f"[错误: 远程文件不存在: {file_path}]"
+        if e.errno == errno.EACCES:
+            return f"[错误: 远程文件权限不足（EACCES）: {file_path}]"
+        return f"[错误: 远程读取失败: {file_path} ({e})]"
     except Exception as e:
         return f"[错误: 远程读取失败: {e}]"
     finally:
@@ -118,13 +132,13 @@ def remote_read(file_path: str, offset: int = 0, limit: int = 2000,
 # ── 远程Write ──
 
 
-def remote_write(file_path: str, content: str, host: str = "", _tool_context=None) -> tuple:
+def remote_write(file_path: str, content: str, host: str = "") -> tuple:
     """通过SFTP写入远程文件"""
     session = get_session(host=host)
     if session is None:
         return (_no_session_msg(host), "")
 
-    # 覆写已有文件前检查是否Read过
+    # 探测目标是否存在（目录判定与diff生成共用）
     import stat as _stat_mod
     try:
         sftp = _get_sftp(session)
@@ -139,18 +153,15 @@ def remote_write(file_path: str, content: str, host: str = "", _tool_context=Non
             sftp.close()
             return (f"[错误: 远程路径是目录: {file_path}，请使用正确的文件路径]", "")
 
-        if file_exists and _tool_context and not _tool_context.is_remote_read(file_path, host):
-            sftp.close()
-            return ((f"[错误: 覆写已有远程文件前必须先Read确认当前内容。"
-                     f"请先Read {file_path}，再决定用Edit还是Write。"), "")
-
         # 读取旧内容生成diff
+        diff = ""
         color_diff = ""
+        old_bytes = None
         if file_exists:
             try:
                 with sftp.open(file_path, "r") as f:
-                    old_raw = f.read()
-                old_content = old_raw.decode("utf-8", errors="replace")
+                    old_bytes = f.read()  # paramiko无文本模式，read()返回原始字节
+                old_content = old_bytes.decode("utf-8", errors="replace")
                 diff = _make_diff(old_content, content, file_path)
                 color_diff = colorize_diff(diff)
             except Exception:
@@ -162,7 +173,8 @@ def remote_write(file_path: str, content: str, host: str = "", _tool_context=Non
             from . import _ensure_remote_dir
             if not _ensure_remote_dir(session, file_path):
                 sftp.close()
-                return (f"[错误: 无法创建远程目标目录: {file_path}]", "")
+                parent = file_path.rsplit("/", 1)[0] or "/"
+                return (f"[错误: 无法创建远程目标目录: {parent}（可能无写权限）]", "")
 
         # 写入
         data = content.encode("utf-8")
@@ -173,10 +185,19 @@ def remote_write(file_path: str, content: str, host: str = "", _tool_context=Non
     except Exception as e:
         return (f"[错误: 远程写入失败: {e}]", "")
 
-    if _tool_context:
-        _tool_context.mark_remote_read(file_path, host)
-    byte_count = len(content.encode("utf-8"))
+    new_bytes = content.encode("utf-8")
+    byte_count = len(new_bytes)
     dev_tag = f"[{host}] " if host else ""
+    # 变更判定基于字节比较：_make_diff的splitlines()会抹平行尾符与末尾换行差异，
+    # 据其报"无实质修改"会在文件已被改写（CRLF静默变LF）时给出假报告
+    if diff == "[无差异]" and old_bytes is not None:
+        if new_bytes == old_bytes:
+            return (f"{dev_tag}[提示: 新旧内容完全相同（字节级一致），文件无实质修改。请确认content是否漏写]", color_diff)
+        detail = describe_bytes_only_change(old_bytes, new_bytes)
+        return (f"{dev_tag}[提示: 文件已写入，正文内容相同，但字节层面有变化（{detail}）]",
+                colorize_diff(f"[正文相同，字节变化] {detail}"))
+    if diff:
+        return (f"{dev_tag}[已写入(远程): {file_path} ({byte_count}字节)]\n{diff}", color_diff)
     return (f"{dev_tag}[已写入(远程): {file_path} ({byte_count}字节)]", color_diff)
 
 
@@ -184,23 +205,25 @@ def remote_write(file_path: str, content: str, host: str = "", _tool_context=Non
 
 def remote_edit(file_path: str, old_string: str = "", new_string: str = "",
                 replace_all: bool = False,
-                host: str = "", _tool_context=None) -> tuple:
+                host: str = "") -> tuple:
     """通过SFTP修改远程文件"""
     session = get_session(host=host)
     if session is None:
         return (_no_session_msg(host), "")
-
-    # 编辑前必须Read（与本地Edit行为一致：防止AI盲改未确认的远程文件）
-    if _tool_context and not _tool_context.is_remote_read(file_path, host):
-        return (f"[错误: 编辑远程文件前必须先Read该文件: {file_path}]", "")
 
     try:
         sftp = _get_sftp(session)
         with sftp.open(file_path, "r") as f:
             raw = f.read()
         sftp.close()
-    except IOError:
-        return (f"[错误: 远程文件不存在: {file_path}，如需创建请用Write工具]", "")
+    except OSError as e:
+        # EACCES与ENOENT必须区分：文件存在但无权限时若提示"请用Write创建"，
+        # 会诱导AI覆盖一个真实存在的文件
+        if e.errno == errno.ENOENT:
+            return (f"[错误: 远程文件不存在: {file_path}，如需创建请用Write工具]", "")
+        if e.errno == errno.EACCES:
+            return (f"[错误: 远程文件权限不足（EACCES），未做任何修改: {file_path}]", "")
+        return (f"[错误: 远程文件无法读取: {file_path} ({e})]", "")
     except Exception as e:
         return (f"[错误: 远程读取失败: {e}]", "")
 
@@ -210,7 +233,7 @@ def remote_edit(file_path: str, old_string: str = "", new_string: str = "",
         # 非UTF-8文件（GBK/Latin-1等）拒绝编辑：decode失败时若降级errors="replace"，
         # 写回会把原文件字节永久替换为U+FFFD，造成静默数据损坏
         return (f"[错误: 远程文件非UTF-8编码，为防止内容损坏已拒绝编辑: {file_path}。"
-                f"请用Terminal exec处理（如iconv转码后再编辑）]", "")
+                f"请用Terminal exec处理（如转码为UTF-8后再编辑）]", "")
 
     # 字符串模式
     if not old_string:
@@ -241,12 +264,11 @@ def remote_edit(file_path: str, old_string: str = "", new_string: str = "",
         new_content = content.replace(old_string_normalized, new_string_normalized, 1)
 
     return _remote_write_and_diff(content, new_content, file_path,
-                                  session, count if replace_all else 1,
-                                  _tool_context=_tool_context, host=host)
+                                  session, count if replace_all else 1, host=host)
 
 
 def _remote_write_and_diff(old_content: str, new_content: str, file_path: str,
-                           session: SSHSession, count: int, _tool_context=None,
+                           session: SSHSession, count: int,
                            host: str = "") -> tuple:
     """写回远程文件并生成diff"""
     try:
@@ -258,12 +280,13 @@ def _remote_write_and_diff(old_content: str, new_content: str, file_path: str,
     except Exception as e:
         return (f"[错误: 远程写入失败: {e}]", "")
 
-    # 标记已读：连续编辑无需重复Read（与本地Edit的mark_read行为一致）
-    if _tool_context:
-        _tool_context.mark_remote_read(file_path, host)
-
     diff = _make_diff(old_content, new_content, file_path)
     dev_tag = f"[{host}] " if host else ""
+    if old_content == new_content:
+        # 空编辑提醒（与本地Edit行为一致）：此前返回"[已替换1处]\n[无差异]"，
+        # 首行误导AI以为编辑成功。文件已照常写盘，但明确告知本次无实质修改
+        return (f"{dev_tag}[提示: 新旧内容相同，文件无实质修改。请确认new_string是否漏写]",
+                colorize_diff("[无差异]"))
     llm_result = f"{dev_tag}[已替换{count}处]\n{diff}"
 
     color_diff = colorize_diff(diff)

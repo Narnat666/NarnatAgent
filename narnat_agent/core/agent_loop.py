@@ -7,7 +7,6 @@
 import json
 import os
 import time
-from typing import List, Dict, Any, Optional
 
 from .llm import LLMClient, retry_sleep
 from .message_manager import MessageManager
@@ -16,7 +15,8 @@ from ..tools.tool_context import ToolContext, AWAIT_CONFIRM
 from .stats import StatsTracker
 from ..ui.ui_design import UIInterface
 from ..config.loader import Config
-from ..output import write as _stdout_write, D, E, R, Y, G, B, C
+from ..output import write as _stdout_write
+from ..tools.exec_signal import strip_tags
 from ..logger import AgentLogger
 
 
@@ -336,6 +336,8 @@ class AgentLoop:
             self._tool_context._delete_confirmed = True
             from ..tools.registry import execute as tool_execute
             llm_result, color_diff = tool_execute(tool_name, arguments, self._tool_context)
+            # 框架退出码标签只服务于判定，不给AI看
+            llm_result = strip_tags(llm_result)
             self._msg_manager.append_tool_result(confirm_tc_id, llm_result)
             if color_diff:
                 _stdout_write("\n".join(f"  {line}" for line in color_diff.split("\n")) + "\n\n")

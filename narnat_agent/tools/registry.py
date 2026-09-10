@@ -5,10 +5,10 @@
 新增工具：新建目录 + 在此处加2行导入。
 """
 
-import json
 import re
 from typing import Dict, List, Any, Callable, Optional
 
+from .exec_signal import error_line
 from .tool_context import ToolContext
 
 # ── 显式导入各工具（Nuitka安全） ──
@@ -23,7 +23,7 @@ from .terminal import execute as terminal_execute, DEFINITION as TERMINAL_DEF
 from .web_search import execute as web_search_execute, DEFINITION as WEBSEARCH_DEF
 from .todo_write import execute as todo_write_execute, DEFINITION as TODOWRITE_DEF
 from .serial import execute as serial_execute, DEFINITION as SERIAL_DEF
-from .goal_complete import execute as goal_complete_execute, DEFINITION as GOALCOMPLETE_DEF
+from .goal_complete import execute as goal_complete_execute
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -64,7 +64,7 @@ TOOL_DEFINITIONS: List[Dict] = [
 # ═══════════════════════════════════════════════════════════════
 
 # 需要tool_context的工具：执行时注入 _tool_context 参数
-_CONTEXT_TOOLS = {"Shell", "Terminal", "TodoWrite", "WebSearch", "Write", "Read", "Glob", "Grep", "Edit", "Serial", "GoalComplete"}
+_CONTEXT_TOOLS = {"Shell", "Terminal", "TodoWrite", "WebSearch", "Read", "Glob", "Grep", "Serial", "GoalComplete"}
 
 
 def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolContext] = None) -> tuple:
@@ -83,7 +83,7 @@ def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolCon
     """
     impl = _TOOL_IMPLEMENTATIONS.get(name)
     if impl is None:
-        return (f"[错误: 未知工具: {name}]", "")
+        return (error_line(f"未知工具: {name}"), "")
 
     try:
         if tool_context and name in _CONTEXT_TOOLS:
@@ -112,9 +112,9 @@ def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolCon
 
         return (llm_result, color_diff)
     except TypeError as e:
-        return (f"[错误: 工具参数错误({name}): {_friendly_type_error(name, impl, e)}]", "")
+        return (error_line(f"工具参数错误({name}): {_friendly_type_error(name, impl, e)}"), "")
     except Exception as e:
-        return (f"[错误: 工具执行失败({name}): {e}]", "")
+        return (error_line(f"工具执行失败({name}): {e}"), "")
 
 
 def _friendly_type_error(name: str, impl: Callable, err: TypeError) -> str:

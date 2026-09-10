@@ -21,7 +21,7 @@ DEFINITION = {
         "name": "Edit",
         "description": (
             "编辑文件（字符串精确替换）。支持本地或远程编辑文件。"
-            "首次编辑某文件前必须先Read该文件（未Read直接报错）。"
+            "old_string 必须与文件内容精确匹配（匹配失败会给出相似行供定位）。"
             "自动识别并保持原编码（UTF-8/GBK），自动兼容CRLF/LF换行。"
         ),
         "parameters": {
@@ -69,8 +69,7 @@ def _read_for_edit(file_path: str) -> tuple:
 
 def execute(file_path: str, old_string: str = "", new_string: str = "",
             replace_all: bool = False,
-            device: str = "",
-            _tool_context=None) -> tuple:
+            device: str = "") -> tuple:
     """
     修改文件内容。
 
@@ -98,16 +97,10 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
 
     if device:
         from ..terminal.remote import remote_edit
-        return remote_edit(file_path, old_string, new_string, replace_all,
-                          device, _tool_context=_tool_context)
+        return remote_edit(file_path, old_string, new_string, replace_all, device)
 
     if not os.path.isfile(file_path):
         return (f"[错误: 文件不存在: {file_path}，如需创建请用Write工具]", "")
-
-    abs_path = os.path.abspath(file_path)
-    if _tool_context and not _tool_context.is_read(abs_path):
-        return (f"[错误: 编辑前必须先Read该文件: {file_path}。"
-                f"若Read已报错（如二进制文件），说明该文件无法用Edit编辑，请改用Shell工具处理]", "")
 
     try:
         content, write_encoding = _read_for_edit(file_path)
@@ -119,15 +112,15 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
         return ("[错误: 检测到二进制文件（含NUL字节），Edit仅支持文本文件。请使用Shell工具处理]", "")
     except UnicodeDecodeError:
         return ((f"[错误: 文件非UTF-8/GBK编码，为防止内容损坏已拒绝编辑: {file_path}。"
-                 f"请用Shell工具处理（如iconv转码后再编辑）]"), "")
+                 f"请用Shell工具处理（如转码为UTF-8后再编辑）]"), "")
 
     return _edit_by_string(content, old_string, new_string, replace_all, file_path,
-                           _tool_context, write_encoding)
+                           write_encoding)
 
 
 def _edit_by_string(content: str, old_string: str, new_string: str,
                     replace_all: bool, file_path: str,
-                    _tool_context=None, write_encoding: str = "utf-8") -> tuple:
+                    write_encoding: str = "utf-8") -> tuple:
     """字符串精确替换，自动兼容换行符"""
     if not old_string:
         return ("[错误: old_string不能为空]", "")
@@ -156,11 +149,11 @@ def _edit_by_string(content: str, old_string: str, new_string: str,
         new_content = content.replace(old_string_normalized, new_string_normalized, 1)
 
     return _write_and_diff(content, new_content, file_path, count if replace_all else 1,
-                           _tool_context=_tool_context, write_encoding=write_encoding)
+                           write_encoding=write_encoding)
 
 
 def _write_and_diff(old_content: str, new_content: str, file_path: str,
-                    count: int, _tool_context=None, write_encoding: str = "utf-8") -> tuple:
+                    count: int, write_encoding: str = "utf-8") -> tuple:
     """写回文件并生成diff。
 
     Returns:
@@ -176,9 +169,6 @@ def _write_and_diff(old_content: str, new_content: str, file_path: str,
     except UnicodeEncodeError:
         # 新内容含文件编码无法表示的字符（如 GBK 文件中写入 emoji）
         return (f"[错误: 新内容包含文件编码({write_encoding})无法表示的字符，写入失败: {file_path}]", "")
-
-    if _tool_context:
-        _tool_context.mark_read(file_path)
 
     if old_content == new_content:
         # 空编辑提醒：文件已照常写盘，但明确告知AI本次无实质修改

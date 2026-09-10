@@ -13,6 +13,8 @@ import threading
 import time
 from typing import Optional
 
+from ..exec_signal import rc_line, error_line, tag_error
+
 
 class BashRuntime:
     """Shell 工具全部模块级状态与参数（原散落的模块级全局收敛于此）。
@@ -361,7 +363,7 @@ def _kill_proc_tree(proc: subprocess.Popen):
 def _truncate_output(text: str, max_chars: int) -> str:
     """截断输出：保留头部和尾部（尾部含提示符，对AI判断shell状态至关重要），中段提示"""
     if max_chars <= 0:
-        return "[错误: max_output_chars需为正整数]"
+        return error_line("max_output_chars需为正整数")
     if len(text) <= max_chars:
         return text
     head = max_chars * 2 // 3
@@ -415,7 +417,7 @@ def execute(
         timeout = int(timeout) if timeout is not None else 120
         max_output_chars = int(max_output_chars) if max_output_chars is not None else 4000
     except (TypeError, ValueError):
-        return "[错误: timeout/max_output_chars需为整数]"
+        return error_line("timeout/max_output_chars需为整数")
     # ── 安全检查：删除命令和git命令根据配置决定是否需要确认 ──
     need_confirm = False
     tc = _tool_context
@@ -441,7 +443,7 @@ def execute(
                 return "__AWAIT_CONFIRM__"
 
     if timeout <= 0:
-        return "[错误: timeout需为正整数（秒）]"
+        return error_line("timeout需为正整数（秒）")
 
     if _tool_context and _tool_context.max_timeout_seconds > 0:
         timeout = min(timeout, _tool_context.max_timeout_seconds)
@@ -458,13 +460,13 @@ def execute(
             path = _extract_cd_path(command)
             if path is None:
                 # 无参数cd：仅显示当前目录（与cmd.exe行为一致）
-                return f"[exit code: 0]\n{_format_prompt()}"
+                return f"{rc_line(0)}\n{_format_prompt()}"
             try:
                 os.chdir(path)
             except OSError as e:
                 # 带上退出码标记：与普通命令失败形态一致，AI一眼识别失败
-                return f"cd: {e}\n[exit code: 1]\n{_format_prompt()}"
-            return f"[exit code: 0]\n{_format_prompt()}"
+                return f"cd: {e}\n{rc_line(1)}\n{_format_prompt()}"
+            return f"{rc_line(0)}\n{_format_prompt()}"
 
         # 多段命令(&&/||)由Python端拆分后逐段执行
         segments = _split_commands(command)
@@ -498,7 +500,7 @@ def execute(
     # ═════════════════════════════════════════════════════════════
     shell = _find_executable("bash", "sh")
     if shell is None:
-        return "[错误: 未找到shell，请安装bash或sh后重试]"
+        return error_line("未找到shell，请安装bash或sh后重试")
 
     # cd 命令：同步更新 Python 进程的 CWD（与 Windows 分支一致）。
     # 此前 cd 走 bash -c 子进程执行，目录切换不持久且无任何提示，
@@ -511,8 +513,8 @@ def execute(
         try:
             os.chdir(path)
         except OSError as e:
-            return f"cd: {e}\n[exit code: 1]\n{_format_prompt()}"
-        return f"[exit code: 0]\n{_format_prompt()}"
+            return f"cd: {e}\n{rc_line(1)}\n{_format_prompt()}"
+        return f"{rc_line(0)}\n{_format_prompt()}"
 
     # 多段命令(&&/||)由Python端拆分后逐段执行
     segments = _split_commands(command)
@@ -535,10 +537,10 @@ def execute(
             env=BashRuntime.utf8_env,
         )
     except FileNotFoundError as e:
-        return f"[错误: Shell未找到: {e}]"
+        return error_line(f"Shell未找到: {e}")
     except (OSError, ValueError) as e:
         # ValueError: 命令含NUL等非法字符时 Popen 拒绝启动
-        return f"[错误: 启动失败: {e}]"
+        return error_line(f"启动失败: {e}")
 
     with BashRuntime.active_proc_lock:
         BashRuntime.active_proc = proc
@@ -613,10 +615,10 @@ def execute(
             err = _decode_output(stderr)
             if err.strip():
                 parts.append(f"[stderr]\n{err.strip()}")
-            parts.append(f"[超时: 命令执行超过{timeout:.0f}秒，已终止]")
+            parts.append(tag_error(f"[超时: 命令执行超过{timeout:.0f}秒，已终止]"))
             return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
 
-        parts = [f"[exit code: {proc.returncode}]"]
+        parts = [rc_line(proc.returncode)]
         out = _decode_output(stdout)
         if out.strip():
             parts.append(out.strip())
@@ -712,9 +714,9 @@ def _format_result(rc: int, out: str, err: str, status: str,
             parts.append(out.strip())
         if err.strip():
             parts.append(f"[stderr]\n{err.strip()}")
-        parts.append(f"[超时: 命令执行超过{timeout:.0f}秒，已终止]")
+        parts.append(tag_error(f"[超时: 命令执行超过{timeout:.0f}秒，已终止]"))
     else:
-        parts = [f"[exit code: {rc}]"]
+        parts = [rc_line(rc)]
         if out.strip():
             parts.append(out.strip())
         if err.strip():
@@ -735,10 +737,10 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
             env=BashRuntime.utf8_env,
         )
     except FileNotFoundError as e:
-        return f"[错误: cmd.exe未找到: {e}]"
+        return error_line(f"cmd.exe未找到: {e}")
     except (OSError, ValueError) as e:
         # ValueError: 命令行含NUL等非法字符时 Popen 拒绝启动
-        return f"[错误: 启动失败: {e}]"
+        return error_line(f"启动失败: {e}")
 
     rc, out, err, status = _collect_proc_output(proc, timeout, max_output_chars)
     return _format_result(rc, out, err, status, timeout, max_output_chars)
@@ -899,7 +901,7 @@ def _execute_segments(segments: list, timeout: int,
                 was_interrupted = True
                 break
             if status == "timeout":
-                parts = [f"[超时: 命令执行超过{max(seg_elapsed, 1.0):.1f}秒，已终止]"]
+                parts = [tag_error(f"[超时: 命令执行超过{max(seg_elapsed, 1.0):.1f}秒，已终止]")]
                 if out.strip():
                     parts.append(out.strip())
                 if err.strip():
@@ -910,7 +912,7 @@ def _execute_segments(segments: list, timeout: int,
             # 与shell单段一致：成功段不输出[exit code: 0]，失败段保留退出码
             parts = []
             if rc != 0:
-                parts.append(f"[exit code: {rc}]")
+                parts.append(rc_line(rc))
             if out.strip():
                 parts.append(out.strip())
             if err.strip():
@@ -935,7 +937,7 @@ def _execute_segments(segments: list, timeout: int,
             )
         except (OSError, ValueError) as e:
             # ValueError: 段含NUL等非法字符时 Popen 拒绝启动
-            all_parts.append(f"[错误: 段{i}启动失败: {e}]")
+            all_parts.append(error_line(f"段{i}启动失败: {e}"))
             prev_rc = -1
             break
 
@@ -991,7 +993,7 @@ def _execute_segments(segments: list, timeout: int,
             if timed_out:
                 out = _decode_output(b"".join(stdout_chunks))
                 err = _decode_output(b"".join(stderr_chunks))
-                parts = [f"[超时: 命令执行超过{max(seg_elapsed, 1.0):.1f}秒，已终止]"]
+                parts = [tag_error(f"[超时: 命令执行超过{max(seg_elapsed, 1.0):.1f}秒，已终止]")]
                 if out.strip():
                     parts.append(out.strip())
                 if err.strip():
@@ -1006,7 +1008,7 @@ def _execute_segments(segments: list, timeout: int,
             # 失败段保留各自的退出码标注便于定位；总退出码统一在末尾输出
             parts = []
             if proc.returncode != 0:
-                parts.append(f"[exit code: {proc.returncode}]")
+                parts.append(rc_line(proc.returncode))
             if out.strip():
                 parts.append(out.strip())
             if err.strip():
@@ -1023,6 +1025,6 @@ def _execute_segments(segments: list, timeout: int,
 
     # 总退出码（最后执行段的退出码；超时/中断时不显示，避免误导AI）
     if prev_rc >= 0 and not was_interrupted:
-        all_parts.append(f"[exit code: {prev_rc}]")
+        all_parts.append(rc_line(prev_rc))
 
     return _truncate_output("\n".join(all_parts) + "\n" + _format_prompt(), max_output_chars)

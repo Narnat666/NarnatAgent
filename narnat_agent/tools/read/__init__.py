@@ -121,10 +121,6 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
     if device:
         from ..terminal.remote import remote_read
         result = remote_read(file_path, offset, limit, device)
-        # 仅错误结果不标记已读；不能用 "错误" in result 判断——文件内容本身
-        # 含"错误"字样时会导致已读文件被误判为未读，Write覆写保护误伤
-        if not result.startswith("[错误") and _tool_context:
-            _tool_context.mark_remote_read(file_path, device)
         # 成功内容结果加设备头：多设备并行Read时AI可区分结果归属
         # （本地Read不带头，与远程结果形态天然区分，避免张冠李戴）
         if result and not result.startswith("["):
@@ -137,9 +133,6 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
     if not os.path.isfile(file_path):
         # 相对路径解析依赖当前目录（Shell cd会改变它），报错时带上cwd帮AI一次定位
         return f"[错误: 文件不存在: {file_path}（当前目录: {os.getcwd()}）]"
-
-    # 统一转为绝对路径，供 _tool_context 标记和校验
-    abs_path = os.path.abspath(file_path)
 
     try:
         # 二进制检测：首块含NUL字节即视为二进制文件（与Grep检测策略一致）
@@ -191,12 +184,6 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
         return f"[错误: 权限不足: {file_path}]"
     except OSError as e:
         return f"[错误: 读取失败: {e}]"
-
-    # 标记文件已被Read（供Write检查）——读取成功后才标记。
-    # 二进制/权限错误路径在此之前已return：若提前标记，
-    # "Read报错但Write覆写保护被绕过"，AI未看到内容却能覆写文件
-    if _tool_context:
-        _tool_context.mark_read(abs_path)
 
     # 空结果提示（offset超出末尾 / 空文件）
     if not result:

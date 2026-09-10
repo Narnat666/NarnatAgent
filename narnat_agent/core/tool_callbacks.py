@@ -17,7 +17,7 @@ class SafetyCallbacks:
         if sys.platform != "win32":
             return False
         try:
-            response = input(f"  确认执行此命令? [y/N]: ")
+            response = input("  确认执行此命令? [y/N]: ")
             return response.strip().lower() in ("y", "yes")
         except (EOFError, KeyboardInterrupt):
             return False
@@ -31,14 +31,15 @@ class TodoCallbacks:
         for t in todos:
             status = t["status"]
             content = t.get("content", "")
-            active_form = t.get("activeForm", content)
 
             if status == "completed":
                 icon = f"{E}✓{R}"
                 line = f"  {icon} {D}{content}{R}"
             elif status == "in_progress":
                 icon = f"{Y}●{R}"
-                line = f"  {icon} {B}{active_form}{R}"
+                # AI 有时自己写了"正在"前缀；此时不再叠加，避免"正在正在…"
+                prefix = "" if content.startswith("正在") else "正在"
+                line = f"  {icon} {B}{prefix}{content}{R}"
             else:
                 icon = f"{G}○{R}"
                 line = f"  {icon} {D}{content}{R}"

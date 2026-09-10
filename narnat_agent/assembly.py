@@ -8,7 +8,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-from .config.loader import Config, load_config
+from .config.loader import load_config
 from .core.llm import LLMClient
 from .core.context import ContextManager
 from .core.compressor import Compressor
@@ -23,11 +23,10 @@ from .core.summarizer import Summarizer
 from .core.auto_save_manager import AutoSaveManager
 from .core.compression_coordinator import CompressionCoordinator
 from .tools.tool_context import ToolContext
-from .tools.terminal import TerminalRuntime, cleanup as _terminal_cleanup
+from .tools.terminal import TerminalRuntime
 from .ui.ui_design import UIInterface, apply_style
 from .ui.interrupt import _interrupt_ctrl
 from .logger import AgentLogger
-from .output import write as _stdout_write, D, E, R
 
 
 class Assembly:
@@ -85,7 +84,7 @@ class Assembly:
         # 9. 摘要器
         summarizer = Summarizer(llm, config, logger)
 
-        # 9.5 工具上下文（先于SessionManager创建：会话切换回调需引用它清空已读状态）
+        # 9.5 工具上下文
         tool_context = ToolContext(
             confirm_callback=SafetyCallbacks.confirm_delete if sys.platform == "win32" else None,
             ui_callback=TodoCallbacks.on_todo_update,
@@ -116,7 +115,6 @@ class Assembly:
             summary_anim_stop=None,
             cancel_check=lambda: _interrupt_ctrl.is_set,
             name_func=lambda msgs: summarizer.name_session(msgs),
-            on_switch_state=tool_context.clear_read_files,
             goal_tool_setter=llm.set_goal_tool,
             goal_max_rounds=config.ai.goal_max_rounds,
             project_skill_roots=config.skills.project_roots,
@@ -158,7 +156,7 @@ class Assembly:
 
         # 16. 压缩协调器
         compression_coordinator = CompressionCoordinator(
-            config, msg_manager, llm, context, tool_context, ui, logger,
+            config, msg_manager, llm, context, ui, logger,
         )
 
         # 17. AgentLoop

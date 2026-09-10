@@ -1,7 +1,6 @@
 """TodoWrite工具 —— 创建和管理结构化任务列表"""
 
-import json
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any
 
 DEFINITION = {
     "type": "function",
@@ -17,7 +16,6 @@ DEFINITION = {
                         "type": "object",
                         "properties": {
                             "content": {"type": "string", "description": "任务描述（祈使句，如'运行测试'）"},
-                            "activeForm": {"type": "string", "description": "执行时的进行时描述（如'正在运行测试'；可选，缺省用content）"},
                             "status": {
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "completed"],
@@ -41,7 +39,7 @@ def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
     创建/更新任务列表。
 
     Args:
-        todos: 任务列表，每项含content/activeForm/status
+        todos: 任务列表，每项含content/status
         _tool_context: 工具运行时上下文（内部参数，由registry注入）
 
     Returns:
@@ -60,9 +58,6 @@ def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
                 return f"[错误: 第{i+1}项缺少必填字段: {field}]"
         if todo["status"] not in ("pending", "in_progress", "completed"):
             return f"[错误: 第{i+1}项status非法: {todo['status']}]"
-        # activeForm可选：缺失时回退content（消费端tool_callbacks已按此兼容）
-        if not todo.get("activeForm"):
-            todo["activeForm"] = todo["content"]
 
     # in_progress 自动容错：保留第一个，其余降级为 pending。
     # （AI 偶发传多个 in_progress，硬报错会导致计划整体丢失、AI 不再同步；

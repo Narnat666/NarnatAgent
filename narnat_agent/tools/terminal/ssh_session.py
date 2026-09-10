@@ -27,12 +27,15 @@ sudo密码自动注入:
 
 import os
 import re
+import shlex
 import time
 import threading
 from typing import Optional
 
 import paramiko
 import socket
+
+from ..exec_signal import rc_line, error_line
 
 
 def _ansi_sub(text: str) -> str:
@@ -43,7 +46,7 @@ def _ansi_sub(text: str) -> str:
 def _truncate_output(text: str, max_chars: int) -> str:
     """截断输出：保留头部和尾部（尾部含提示符，对AI判断shell状态至关重要），中段提示"""
     if max_chars <= 0:
-        return "[错误: max_output_chars需为正整数]"
+        return error_line("max_output_chars需为正整数")
     if len(text) <= max_chars:
         return text
     head = max_chars * 2 // 3
@@ -91,6 +94,18 @@ class SSHSession:
     # 真实shell提示符行（user@host:path$ 形态），用于剥离恢复路径中重复的提示符
     PROMPT_LINE_RE = re.compile(r"^[^@]+@[^:]+:[^\n]*[#$>]\s*$")
 
+    # ── PS1(命令完成)检测 ──
+    # 严格形态: user@host:path$/# (bash真实提示符)。PS1与"无尾随换行的命令
+    # 输出"粘连时（printf 输出后bash直接把PS1拼在其后），以bash打印PS1前的
+    # OSC窗口标题序列 \x1b]0;...\x07 为界切分提取（见_ps1_candidate）。
+    PS1_STRICT_RE = re.compile(r'^[^\s@]+@[^\s:]+:[^\s]*[$#]\s*$')
+    # 宽形态: 无user@host前缀的短PS1（busybox sh 的 "# "、root 裸 "# " 等）
+    PS1_LOOSE_RE = re.compile(r'^.{0,32}?[$#]\s*$')
+    # PS1候选后的静默确认窗口: 连续N次recv超时（每次≈channel timeout 0.5s）无新数据
+    # 才确认"命令已完成"。输出流动中出现的伪提示符行（cat文件内容含 xxx@xxx:xx$ 等）
+    # 会被后续chunk推翻；真实PS1后通道必静默。误确认的代价仅是多等一个排队哨兵。
+    PS1_CONFIRM_TIMEOUTS = 2
+
     # 哨兵检测尾部窗口：哨兵永远出现在输出末尾（marker行+pwd输出+pwd_marker+prompt
     # 共数百字节），仅扫描尾部8KB即可判定，避免对全量输出做O(n²)切片搜索
     MARKER_TAIL_WINDOW = 8192
@@ -107,17 +122,56 @@ class SSHSession:
         # 自动注入会反复失败并卡住命令；置位后密码提示一律转交AI用input注入）
         self._sudo_mismatch = False
 
+        # 重连凭据
+        self._reconnect_params = dict(
+            host=host, username=username, port=port,
+            key_path=key_path, password=password, timeout=timeout)
+
+        # 重连互斥：并行文件操作（如两个Read同时打一台设备）可能同时发现断线，
+        # 无锁会并发替换 self._client，先进入者在认证途中client被换掉 → AttributeError
+        self._reconnect_lock = threading.Lock()
+
         # 提前创建中断标志：connect 阻塞期间 ESC 打断（kill_active_exec）会访问
         # session._interrupt，若迟至 connect 之后才创建会抛 AttributeError
         self._interrupt = threading.Event()
 
+        self._open_channel(key_path, password, timeout)
+
+        self._busy = False  # 通道是否被未完成的前台命令占用
+        self._last_command = ""  # 最近执行的命令，供_parse_output剥离命令回显
+        # tty 回显能力（由 _update_cwd 按实际输出判定）：
+        # echo off 的 tty 下"零输出"不再是断连证据，见 _read_until_marker
+        self._echo_enabled = True
+
+        # 待完成命令的哨兵（超时后input接管时复用）
+        self._pending_marker = ""
+        self._pending_pwd_marker = ""
+        # 哨兵延迟注入标志: 哨兵命令是否已写入PTY（execute读循环/watcher/input共享，
+        # 防重复发送）。False=等PS1出现后发送，True=已发送只等pwd_marker输出。
+        self._sentinel_sent = False
+
+        # 后台watcher控制 + 线程引用
+        self._watcher_stop = threading.Event()
+        self._watcher_thread: Optional[threading.Thread] = None
+        # watcher退出原因: True=命令已完成(哨兵齐)，False=被停止接管(input)
+        # input在join后据此区分"命令已完成"与"接管继续喂输入"，避免把
+        # 等待中的交互输入误判为已完成而拒绝发送
+        self._watcher_finished = False
+
+        # 后台命令完成输出缓存（下次exec/input时返回给AI）
+        self._backlog = ""
+        self._backlog_lock = threading.Lock()
+
+    def _open_channel(self, key_path: Optional[str], password: Optional[str],
+                      timeout: int):
+        """建立SSH client+交互channel"""
         self._client = paramiko.SSHClient()
         self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
         # timeout: TCP连接/SSH banner/认证的socket超时。黑洞IP无此参数会阻塞
         # 数十秒（OS默认TCP重试），AI连错IP时长时间无响应
         connect_kwargs = {
-            "hostname": host, "port": port, "username": username,
+            "hostname": self.host, "port": self.port, "username": self.username,
             "timeout": timeout, "banner_timeout": timeout, "auth_timeout": timeout,
         }
         if key_path:
@@ -137,20 +191,74 @@ class SSHSession:
         self._channel = self._client.invoke_shell(term="xterm", width=200, height=50)
         self._channel.settimeout(0.5)
 
-        self._busy = False  # 通道是否被未完成的前台命令占用
-        self._last_command = ""  # 最近执行的命令，供_parse_output剥离命令回显
+    def reconnect(self):
+        """断线重连：复用凭据，保留dev槽位与工作目录。失败抛异常由调用方处理。
 
-        # 待完成命令的哨兵（超时后input接管时复用）
-        self._pending_marker = ""
-        self._pending_pwd_marker = ""
+        重连是阻塞操作（TCP 连接最长等满 connect timeout），调用方已把本会话
+        注册为活跃会话，故 ESC(kill_active_exec) 能置位中断标志：标志在下面的
+        检查点生效，重连尽早放弃而不是卡满超时。
+        """
+        with self._reconnect_lock:
+            # 并发调用中已被其他线程重连成功，直接复用（避免重复建连互相破坏）
+            if not self._channel.closed:
+                return
 
-        # 后台watcher控制 + 线程引用
-        self._watcher_stop = threading.Event()
-        self._watcher_thread: Optional[threading.Thread] = None
+            # 先清残留标志（旧命令的中断不应影响新连接）；此后按下的 ESC 在检查点生效
+            self._interrupt.clear()
 
-        # 后台命令完成输出缓存（下次exec/input时返回给AI）
-        self._backlog = ""
-        self._backlog_lock = threading.Lock()
+            # _initialize 会刷新 _cwd，先取原值
+            old_cwd = self._cwd
+
+            # 旧watcher须先退出，否则与新通道竞争recv
+            self._watcher_stop.set()
+            try:
+                self._channel.close()
+            except Exception:
+                pass
+            if self._watcher_thread is not None and self._watcher_thread.is_alive():
+                self._watcher_thread.join(timeout=1.0)
+            try:
+                self._client.close()
+            except Exception:
+                pass
+
+            self._busy = False
+            self._last_command = ""
+            self._pending_marker = ""
+            self._pending_pwd_marker = ""
+            self._sentinel_sent = False
+            self._backlog = ""
+            self._watcher_thread = None
+            self._watcher_finished = False
+            self._watcher_stop = threading.Event()
+
+            p = self._reconnect_params
+            self._open_channel(p.get("key_path"), p.get("password"), p.get("timeout", 15))
+            self._initialize()
+            # TCP连接阻塞期间无法中断，返回后 _initialize 的读循环会因中断标志立即退出，
+            # 此处据此放弃本次重连（否则会继续恢复cwd，白等一段时间）
+            if self._interrupt.is_set():
+                self._abort_interrupted()
+
+            # 恢复原工作目录（目录不存在则退回home）。
+            # shlex.quote防路径含引号/空格/特殊字符时破坏shell语法
+            if old_cwd and old_cwd not in ("~", "/"):
+                try:
+                    self.execute(f"cd {shlex.quote(old_cwd)} 2>/dev/null", timeout=10)
+                except Exception:
+                    pass
+
+    def _abort_interrupted(self):
+        """ESC 打断重连：关闭半开通道并抛异常（调用方按重连失败处理）。
+
+        清掉中断标志：标志残留会让后续命令一发起就被判为"用户中断"。
+        """
+        self._interrupt.clear()
+        try:
+            self._channel.close()
+        except Exception:
+            pass
+        raise RuntimeError("重连被用户中断（ESC）")
 
     def _initialize(self):
         """阻塞初始化：读初始输出、更新cwd。必须在 connect 中注册活跃执行会话之后调用，
@@ -204,24 +312,30 @@ class SSHSession:
         marker = f"__NARNAT_MARKER_{time.time_ns()}__"
         pwd_marker = f"__NARNAT_PWD_{time.time_ns()}__"
 
-        # 先捕获退出码到变量：$? 必须紧跟用户命令取值，中间插入 printf 会导致 $? 恒为
-        # printf 的退出码(0) → 之前所有命令都报告 exit code: 0
-        # printf '\n' 保证哨兵行独立成行：命令输出无尾随换行时（cat 无换行文件、printf 等），
-        # 若不加换行，`echo MARKER<rc>` 会粘在输出尾部 → marker行startswith检测失败，
-        # 连锁导致退出码污染输出、pwd泄漏、cwd不更新（prompt显示旧目录）
-        # 哨兵必须独立成行，绝不能与命令拼接为 `{command}; rc=$?...`：
-        # - heredoc: 定界符行（如 EOF）被 `; rc=$?` 污染 → 定界符永不匹配 → 命令必超时
-        #   （AI 反馈"终端状态乱了（之前超时命令残留）"的根因）
-        # - 行尾注释: `echo hi # c; rc=$?` 整行被注释 → 哨兵静默失效 → 必超时
-        # - 末尾 & 后台: `cmd &; rc=$?` 是语法错误
-        full_cmd = f"{command.rstrip(chr(10) + chr(13))}\nrc=$?; printf '\\n'; echo {marker}$rc; pwd -P; echo {pwd_marker}\n"
+        # ── 哨兵延迟注入协议 ──
+        # 只发送用户命令本体，哨兵不再作为后续行预置进PTY输入流。
+        # 旧协议把哨兵行与命令一起发送，命令执行期间任何从stdin读取的程序
+        # （read内置/sudo/cat）会抢先消费哨兵行，造成连锁缺陷：
+        #   - read 拿到 "rc=$?;..." 文本 → 交互输入被污染（用户第一个read值恒为垃圾）
+        #   - sudo 把哨兵行当第一次密码 → "Sorry, try again"（工具误判注入失败）
+        #   - 哨兵被吃掉后永不作为命令执行 → 读循环永远等不到完成标记 → busy不收敛，
+        #     后续input文本被空闲shell当作命令执行
+        # 新协议: 命令完成后（检测到真实PS1提示符+静默确认窗口），再发送独立哨兵
+        # 命令 rc=$?; ... 捕获退出码与cwd（提示符出现后$?仍保持用户命令的退出码）。
+        # 哨兵此时才进入输入流，shell空闲，不可能被用户命令消费。
+        self._sentinel_sent = False
         self._last_command = command  # 供_parse_output剥离多行命令首行回显
-        self._channel.send(full_cmd)
+        self._channel.send(f"{command.rstrip(chr(10) + chr(13))}\n")
 
         result = self._read_until_marker(marker, pwd_marker, timeout=timeout)
 
         if backlog.strip():
-            result = f"[后台命令已完成，输出如下]\n{backlog.strip()}\n{'-' * 30}\n{result}"
+            if result.startswith("[错误"):
+                # 断线错误是当前命令的结果，置顶展示；后台完成输出附后。
+                # 反之错误跟在"[后台命令已完成]"之后会被误读为后台输出的一部分
+                result = f"{result}\n[后台命令已完成，输出如下]\n{backlog.strip()}"
+            else:
+                result = f"[后台命令已完成，输出如下]\n{backlog.strip()}\n{'-' * 30}\n{result}"
         return _truncate_output(result, max_output_chars)
 
     def send_input(self, text: str, timeout: int = 0, max_output_chars: int = 8000) -> str:
@@ -252,6 +366,18 @@ class SSHSession:
         if wt is not None and wt.is_alive():
             wt.join(timeout=2.0)
 
+        # join期间watcher可能已检测到命令完成（哨兵齐、busy已清）。此时再发送
+        # 输入文本会被空闲shell当作命令执行（明文泄露或误执行），必须拒绝。
+        # 注意区分"watcher因stop被停止"（接管场景，命令仍等待输入，必须继续发
+        # 送）：用_watcher_finished标志精确判别，不能用busy（被停止时也被清）。
+        if self._watcher_finished:
+            parts = []
+            backlog = self._drain_backlog()
+            if backlog.strip():
+                parts.append(f"[后台命令已完成，输出如下]\n{backlog.strip()}")
+            parts.append("[命令已完成，输入内容未发送（避免被当作命令执行）。如需执行命令请用 exec]")
+            return "\n".join(parts)
+
         # watcher已收集的输出先返回（输入前的输出）
         backlog = self._drain_backlog()
 
@@ -259,22 +385,19 @@ class SSHSession:
 
         if text == "^C" or text == "\x03":
             # ── 中断仍在运行的命令：发送原始Ctrl+C ──
-            # 注意: bash收到SIGINT后放弃整行剩余命令，exec追加的哨兵不会执行，
-            # 因此这里不能等哨兵，改为等待shell提示符重新出现。
+            # 注意: bash收到SIGINT后放弃整行剩余命令，等shell提示符重新出现。
             self._channel.send("\x03")
             raw = self._read_until_interrupt_prompt(timeout=timeout)
             self._interrupt.clear()
 
-            at_prompt = False
-            last_line = raw.rstrip().split("\n")[-1] if raw.strip() else ""
-            if last_line and re.search(r'[#$>]\s*$', _ansi_sub(last_line)):
-                at_prompt = True
+            at_prompt = self._ps1_candidate(raw)
 
             if at_prompt:
                 # 命令已被终止，shell回到提示符
                 self._busy = False
                 self._pending_marker = ""
                 self._pending_pwd_marker = ""
+                self._sentinel_sent = False
                 cleaned = self._clean_output(raw)
                 body = self._strip_caret_echo(self._strip_trailing_prompt(cleaned))
                 if backlog.strip():
@@ -308,19 +431,25 @@ class SSHSession:
         self._last_command = text  # 供_parse_output剥离输入回显
         self._channel.send(payload)
 
-        # 等待原命令完成（复用exec时发送的哨兵）
+        # 等待原命令完成（复用exec时发送的哨兵）。
+        # expect_echo=False: 密码输入场景 echo off，输入与其后命令都可能无输出，
+        # 零输出不能作为断连判据（否则存活连接被误报"连接已中断"并清busy）
         result = self._read_until_marker(
-            self._pending_marker, self._pending_pwd_marker, timeout=timeout
+            self._pending_marker, self._pending_pwd_marker, timeout=timeout,
+            expect_echo=False,
         )
         if backlog.strip():
-            result = f"[输入前输出]\n{backlog.strip()}\n{'-' * 30}\n{result}"
+            if result.startswith("[错误"):
+                # 与exec一致：断线错误置顶，输入前的输出附后
+                result = f"{result}\n[输入前输出]\n{backlog.strip()}"
+            else:
+                result = f"[输入前输出]\n{backlog.strip()}\n{'-' * 30}\n{result}"
         return _truncate_output(result, max_output_chars)
 
     def _read_until_interrupt_prompt(self, timeout: float) -> str:
         """发送Ctrl+C后读取，直到shell提示符重新出现或超时。返回原始输出。"""
         output = ""
         deadline = time.time() + timeout if timeout > 0 else time.time() + 120
-        prompt_pattern = re.compile(r'[#$>]\s*$')
         while time.time() < deadline:
             if self._interrupt.is_set():
                 break
@@ -333,8 +462,9 @@ class SSHSession:
             if not chunk:
                 break
             output += chunk
-            last_lines = output.rstrip().split("\n")
-            if last_lines and prompt_pattern.search(_ansi_sub(last_lines[-1])):
+            # 严格PS1检测：命令输出中以$/#结尾的行（如cat文件内容）不再误判
+            # 为"已回到提示符"，避免误报已中断。
+            if self._ps1_candidate(output):
                 break
         return output
 
@@ -432,6 +562,13 @@ class SSHSession:
             except Exception:
                 break
 
+        # tty 回显能力判定：存活连接的 PTY 会回显提交的命令行（_strip_echo 依赖此前提）。
+        # 有输出却不见"pwd -P"回显 → 该 tty 处于 echo off（静默登录脚本/stty -echo）。
+        # 仅在确实收到输出时更新，避免初始化无输出时误判
+        echo_probe = _ansi_sub(output)
+        if echo_probe.strip():
+            self._echo_enabled = "pwd -P" in echo_probe
+
         # 解析: ... /actual/path\n __MARKER__\n prompt
         # marker所在行之前的一行就是pwd输出。
         # 按行索引定位marker行（split(marker)会停在回显行"echo __NARNAT_CWD_x__"
@@ -450,19 +587,30 @@ class SSHSession:
                     self._cwd = cleaned
                     break
 
-    def _start_busy_watcher(self, marker: str, pwd_marker: str):
+    def _start_busy_watcher(self, marker: str, pwd_marker: str,
+                            initial_output: str = "", ps1_suspect: bool = False):
         """超时后启动后台线程，持续读channel，等命令完成后自动清除busy标记。
 
-        行为:
-        - 命令完成（读到pwd_marker）→ 更新cwd，完成输出存进backlog
+        行为（哨兵延迟协议）:
+        - 哨兵未发送: 等待PS1提示符（继承initial_output中的候选状态）→
+          静默确认窗口 → 发送独立哨兵命令 → 等pwd_marker输出
+        - 哨兵已发送: 直接等pwd_marker输出
+        - 命令完成 → 更新cwd，完成输出存进backlog
         - input接管（_watcher_stop置位）→ 停止读取，已收集输出存进backlog
         - ESC中断/通道断开 → 停止
         无论如何退出都清除busy（finally保证），使终端状态可恢复。
+
+        initial_output/ps1_suspect: 调用方（读循环）已读走的部分输出与PS1候选
+        状态。PS1可能已被读循环消费（超时前一刻命令恰好完成），watcher重新读
+        将永远等不到PS1；继承候选状态后，静默窗口计时即发哨兵。
         """
         self._watcher_stop.clear()
 
         def _watch():
-            output = ""
+            initial_len = len(initial_output or "")
+            output = initial_output or ""
+            suspect = ps1_suspect or (not self._sentinel_sent and self._ps1_candidate(output))
+            silent = 0
             finished = False
             try:
                 while not self._watcher_stop.is_set():
@@ -471,28 +619,72 @@ class SSHSession:
                     try:
                         chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
                     except socket.timeout:
+                        # PS1候选静默确认: 连续超时无新数据 → 确认完成 → 补发哨兵
+                        # （幂等：阶段2哨兵丢失时同样靠此重发自愈）
+                        if suspect:
+                            silent += 1
+                            if silent >= SSHSession.PS1_CONFIRM_TIMEOUTS:
+                                self._send_sentinel(marker, pwd_marker)
+                                silent = 0
                         continue
                     except Exception:
                         break
                     if not chunk:
                         break  # channel关闭/EOF
                     output += chunk
-                    # 哨兵行永远在输出末尾，仅扫描尾部窗口：全量逐行正则清洗
-                    # 在大输出后台命令（如make几十MB）下是O(n²) CPU开销
-                    if SSHSession._sentinel_line_present(output[-SSHSession.MARKER_TAIL_WINDOW:], pwd_marker):
-                        finished = True
-                        break
+                    if not self._sentinel_sent:
+                        # 阶段1: 等PS1。新数据推翻或维持候选
+                        if self._ps1_candidate(output):
+                            suspect = True
+                            silent = 0
+                        else:
+                            suspect = False
+                            silent = 0
+                    else:
+                        # 阶段2: 等pwd_marker。哨兵行永远在输出末尾，仅扫描尾部
+                        # 窗口：全量逐行正则清洗在大输出后台命令（如make几十MB）
+                        # 下是O(n²) CPU开销
+                        if SSHSession._sentinel_line_present(output[-SSHSession.MARKER_TAIL_WINDOW:], pwd_marker):
+                            finished = True
+                            break
+                        # 哨兵丢失自愈: shell又回到PS1但哨兵输出未出现 → 哨兵被
+                        # 交互程序（误确认场景下的read等）消费或丢失 → 静默确认后重发
+                        if self._ps1_candidate(output):
+                            suspect = True
+                            silent = 0
+                        else:
+                            suspect = False
+                            silent = 0
             finally:
+                self._watcher_finished = finished
+                # 只把initial_output之后的新输出入backlog：initial部分是调用方
+                # （execute读循环）已返回给AI的输出，重复入库会造成输出重复
+                def _incremental_body(raw: str, strip_sentinel_echo: bool) -> str:
+                    if len(raw) <= initial_len:
+                        return ""
+                    seg = raw[initial_len:]
+                    if strip_sentinel_echo:
+                        # 剥离哨兵命令回显行与尾部PS1行（协议噪声，不是命令输出）。
+                        # 哨兵回显行特征: 含 "rc=$?"（哨兵命令第一段）。不能只查
+                        # marker文本: split(marker,1)[0]已把回显行截断在marker处，
+                        # 截断后行内不再含marker文本。
+                        lines = [l for l in seg.split("\n")
+                                 if "rc=$?" not in l
+                                 and marker not in l and pwd_marker not in l]
+                        seg = self._strip_trailing_prompt("\n".join(lines))
+                    return self._clean_output(seg).strip()
+
                 if finished:
                     # 只保留哨兵前的命令输出（哨兵行/退出码/pwd输出是基础设施噪声）
-                    body = self._clean_output(output.split(marker, 1)[0]).strip()
+                    body = _incremental_body(output.split(marker, 1)[0],
+                                             strip_sentinel_echo=True)
                     if body:
                         self._append_backlog(body)
                     cwd = self._extract_cwd(output, marker, pwd_marker)
                     if cwd:
                         self._cwd = cwd
                 else:
-                    body = self._clean_output(output).strip()
+                    body = _incremental_body(output, strip_sentinel_echo=False)
                     if body:
                         self._append_backlog(body)
                 self._busy = False
@@ -537,13 +729,60 @@ class SSHSession:
                 break
         return None
 
-    def _read_until_marker(self, marker: str, pwd_marker: str, timeout: int = 0) -> str:
+    @staticmethod
+    def _ps1_candidate(text: str) -> bool:
+        """检测输出尾部是否疑似出现shell提示符（命令完成迹象，待静默确认）。
+
+        PS1提取: bash打印PS1前会先输出OSC窗口标题序列（\x1b]0;...\x07）。
+        - 独立PS1行: OSC+PS1在同一行，切分后得到纯PS1行
+        - PS1与无尾随换行的命令输出粘连（printf后PS1拼在输出后）: OSC序列
+          是PS1的起点标记，从其终止符\x07后截取得到纯PS1
+
+        两级判定:
+        1. 严格: 行首即 user@host:path$/# 形态（bash真实PS1）
+        2. 宽:   最后一行很短且以 $/# 结尾（busybox sh 的裸 "# "/"~ $ " 等）
+        PS2续行提示"> "不以$/#结尾，绝不会被误判为完成。
+        """
+        raw_tail = text[-4096:]
+        last_line_raw = raw_tail.split("\n")[-1]
+        osc_start = last_line_raw.rfind("\x1b]0;")
+        if osc_start >= 0:
+            osc_end = last_line_raw.rfind("\x07", osc_start)
+            if osc_end > osc_start:
+                # OSC标题之后是PS1本体（含可能的\a后残留）
+                last_line_raw = last_line_raw[osc_end + 1:]
+        last_line = _ansi_sub(last_line_raw).replace("\r", "").strip()
+        if not last_line:
+            return False
+        if SSHSession.PS1_STRICT_RE.match(last_line):
+            return True
+        if SSHSession.PS1_LOOSE_RE.search(last_line):
+            return True
+        return False
+
+    def _send_sentinel(self, marker: str, pwd_marker: str):
+        """向shell发送独立哨兵命令（延迟注入）。
+
+        调用前提: shell已回到PS1提示符（命令已完成/被中断）。
+        此时 $? 仍保持用户命令的退出码（PS1打印不改$?，除非设备配置了
+        PROMPT_COMMAND），哨兵行以独立命令身份执行，绝不被用户命令消费。
+        """
+        self._channel.send(f"rc=$?; printf '\\n'; echo {marker}$rc; pwd -P; echo {pwd_marker}\n")
+        self._sentinel_sent = True
+
+    def _read_until_marker(self, marker: str, pwd_marker: str, timeout: int = 0,
+                           expect_echo: bool = True) -> str:
         """读取channel输出，直到读到pwd_marker。
 
         timeout:
           >0  - 等待指定秒数，超时返回已收集输出+超时提示
                 （命令继续后台运行，终端标记为忙，AI可用input应答或^C中断）
           ≤0  - 兜底：上层调用保证传入正数
+        expect_echo:
+          True  - exec 路径：tty 有回显时提交的命令行必被回显，零输出可判定连接已断
+                  （tty 处于 echo off 时零输出无区分度，由 _echo_enabled 排除）
+          False - input 路径：echo off 时输入不回显、其后命令可长时间静默，
+                  零输出无法与"连接已死"区分，不能据此判中断
 
         纯管道原则: 超时只告知AI，不替AI杀进程。
         ESC铁律: 用户按ESC立即中断，发Ctrl+C，宁可丢数据不卡住。
@@ -557,6 +796,9 @@ class SSHSession:
         # timeout≤0 兜底为无限等待（上层调用保证传正数）
         deadline = time.time() + timeout if timeout > 0 else float('inf')
         found = False
+        # 连接中断标志：EOF或套接字异常时置位（设备关机/重启）。
+        # 与"命令超时"必须区分：超时是命令还在跑，中断是连接已死、结果未知
+        conn_lost = False
         # 找到marker后，连续recv超时次数达到此阈值才认为数据读完
         DRAIN_CONSECUTIVE_TIMEOUTS = 3
         # sudo密码注入状态: 是否已注入过(防止重复注入)
@@ -568,6 +810,9 @@ class SSHSession:
         # 密码提示疑似时间戳: 0.0=无疑似。提示出现后需观察宽容期，避免命令自身输出含
         # "Password:"字样（如 echo "Password: x"）时被误判为真实密码提示
         prompt_suspect_ts = 0.0
+        # PS1候选状态: 输出尾部疑似出现shell提示符(命令完成迹象)，待静默确认窗口
+        ps1_suspect = False
+        silent_timeouts = 0
 
         while time.time() < deadline:
             # 中断检查：ESC打断时立即退出（数据路径中也检查，不只依赖timeout分支）
@@ -578,58 +823,80 @@ class SSHSession:
                 chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
                 # EOF检测：channel关闭/远端断开时recv返回空字节，必须立即退出
                 if not chunk:
+                    conn_lost = True
                     break
                 output += chunk
 
-                # 检测哨兵：跳过回显行（PTY会回显完整命令，含marker，不能误匹配）
-                # 回显是output的第一行。哨兵永远出现在输出末尾，仅扫描尾部窗口
-                # （此前对全量output做切片+搜索，大输出时O(n²)浪费CPU）
-                # 仅匹配「以pwd_marker开头的独立行」：heredoc等多行命令场景，
-                # 哨兵行的回显（echo __NARNAT_PWD_x__）先于真实输出行到达，
-                # 子串匹配会误命中回显 → 提前判完成 → 真实哨兵输出还没读齐。
                 if not found:
-                    first_newline = output.find('\n')
-                    if first_newline >= 0:
-                        tail = output[max(first_newline + 1, len(output) - SSHSession.MARKER_TAIL_WINDOW):]
-                        found = SSHSession._sentinel_line_present(tail, pwd_marker)
-                        if found:
-                            # 继续读取，等待prompt出现或连续超时
-                            # prompt格式: user@host:path$ (可能含~缩写)
-                            prompt_pattern = re.compile(r'[#$>]\s*$')
-                            consecutive_timeouts = 0
-                            # 最多再读3秒，确保prompt和尾部数据到达
-                            post_marker_deadline = time.time() + 3.0
-                            while time.time() < post_marker_deadline:
-                                if self._interrupt.is_set():
-                                    break
-                                try:
-                                    extra = self._channel.recv(4096).decode("utf-8", errors="replace")
-                                    # EOF检测：channel关闭时立即退出
-                                    if not extra:
+                    # 阶段1(哨兵未发送): 等待PS1提示符（命令完成迹象）
+                    # 阶段2(哨兵已发送): 等待pwd_marker输出；若shell又出现PS1
+                    # 而哨兵输出缺失 → 哨兵被交互程序消费/丢失 → 置候选待重发
+                    if self._sentinel_sent:
+                        # 哨兵行永远在输出末尾，仅扫描尾部窗口。仅匹配「以
+                        # pwd_marker开头的独立行」：哨兵命令回显行
+                        # （"rc=$?; ...echo __NARNAT_PWD_x__"）行首是rc=，不会误命中。
+                        first_newline = output.find('\n')
+                        if first_newline >= 0:
+                            tail = output[max(first_newline + 1, len(output) - SSHSession.MARKER_TAIL_WINDOW):]
+                            found = SSHSession._sentinel_line_present(tail, pwd_marker)
+                            if found:
+                                # 继续读取，等待prompt出现或连续超时
+                                # prompt格式: user@host:path$ (可能含~缩写)
+                                prompt_pattern = re.compile(r'[#$>]\s*$')
+                                consecutive_timeouts = 0
+                                # 最多再读3秒，确保prompt和尾部数据到达
+                                post_marker_deadline = time.time() + 3.0
+                                while time.time() < post_marker_deadline:
+                                    if self._interrupt.is_set():
+                                        break
+                                    try:
+                                        extra = self._channel.recv(4096).decode("utf-8", errors="replace")
+                                        # EOF检测：channel关闭时立即退出
+                                        if not extra:
+                                            consecutive_timeouts += 1
+                                            if consecutive_timeouts >= DRAIN_CONSECUTIVE_TIMEOUTS:
+                                                break
+                                            continue
+                                        output += extra
+                                        consecutive_timeouts = 0
+                                        # 检查是否已读到prompt(shell就绪)
+                                        last_lines = output.rstrip().split('\n')
+                                        if last_lines and prompt_pattern.search(last_lines[-1]):
+                                            break
+                                    except socket.timeout:
+                                        if self._interrupt.is_set():
+                                            break
                                         consecutive_timeouts += 1
                                         if consecutive_timeouts >= DRAIN_CONSECUTIVE_TIMEOUTS:
                                             break
-                                        continue
-                                    output += extra
-                                    consecutive_timeouts = 0
-                                    # 检查是否已读到prompt(shell就绪)
-                                    last_lines = output.rstrip().split('\n')
-                                    if last_lines and prompt_pattern.search(last_lines[-1]):
+                                    except Exception:
                                         break
-                                except socket.timeout:
-                                    if self._interrupt.is_set():
-                                        break
-                                    consecutive_timeouts += 1
-                                    if consecutive_timeouts >= DRAIN_CONSECUTIVE_TIMEOUTS:
-                                        break
-                                except Exception:
-                                    break
-                            break
+                                break
+                    if not found:
+                        # PS1候选评估（两阶段共用）：新数据可推翻伪候选
+                        if self._ps1_candidate(output):
+                            ps1_suspect = True
+                            silent_timeouts = 0
+                        else:
+                            ps1_suspect = False
+                            silent_timeouts = 0
 
             except socket.timeout:
                 if self._interrupt.is_set() or found:
                     break
+                # PS1候选静默确认: 连续N次recv超时无新数据 → 确认命令已完成，
+                # 发送独立哨兵命令（幂等：阶段2哨兵丢失时同样靠此重发自愈）。
+                # 真实PS1后通道必静默；伪提示符（输出内容中的"xxx@xxx:xx$"行）
+                # 会被后续chunk推翻，误确认仅导致哨兵在shell队列中排队
+                # （命令完成后才执行，解析结果仍正确）。
+                if ps1_suspect:
+                    silent_timeouts += 1
+                    if silent_timeouts >= SSHSession.PS1_CONFIRM_TIMEOUTS:
+                        self._send_sentinel(marker, pwd_marker)
+                        silent_timeouts = 0
             except Exception:
+                # 套接字异常（设备重启后RST/网络断）：连接已死
+                conn_lost = True
                 break
 
             # sudo密码提示检测与自动注入（三态状态机）
@@ -675,7 +942,9 @@ class SSHSession:
                                 # 判失败：本会话停用自动注入，密码提示一律转交AI input
                                 self._sudo_mismatch = True
                                 self._busy = True
-                                self._start_busy_watcher(marker, pwd_marker)
+                                self._start_busy_watcher(marker, pwd_marker,
+                                                         initial_output=output[-4096:],
+                                                         ps1_suspect=ps1_suspect)
                                 reason = (
                                     "自动注入的登录密码被sudo拒绝"
                                     if rejected else "多次注入后仍在等待密码"
@@ -692,7 +961,9 @@ class SSHSession:
                         else:
                             # mismatch 或未设置密码 → 告知AI，命令等待input
                             self._busy = True
-                            self._start_busy_watcher(marker, pwd_marker)
+                            self._start_busy_watcher(marker, pwd_marker,
+                                                     initial_output=output[-4096:],
+                                                     ps1_suspect=ps1_suspect)
                             return (f"{self._clean_output(self._strip_echo(output))}\n"
                                     f"[检测到密码提示，请用input action输入密码]")
                 else:
@@ -706,14 +977,25 @@ class SSHSession:
                 # ── ESC打断: Ctrl+C已由kill_active_exec发送（远程进程正在终止）──
                 # 只需排空channel收取 ^C 回显、提示符等残留输出
                 self._interrupt.clear()
-                # 等待远程进程终止、shell恢复并输出哨兵
+                # 等待远程进程终止、shell恢复（可能输出哨兵，也可能只回到提示符）
                 residual = self._try_read_residual(duration=3.0)
                 if residual:
                     output += residual
-                    # 跳过回显行检测哨兵（行首匹配，回显行"echo __NARNAT_PWD_x__"不会误命中）
+
+                def _sentinel_in_output() -> bool:
                     first_nl = output.find('\n')
                     check_region = output[first_nl + 1:] if first_nl >= 0 else ""
-                    if SSHSession._sentinel_line_present(check_region, pwd_marker):
+                    return SSHSession._sentinel_line_present(check_region, pwd_marker)
+
+                if _sentinel_in_output():
+                    found = True
+                elif not self._sentinel_sent and self._ps1_candidate(output):
+                    # shell已回到提示符（哨兵尚未发送）：补发哨兵取退出码/cwd
+                    self._send_sentinel(marker, pwd_marker)
+                    extra = self._try_read_residual(duration=3.0)
+                    if extra:
+                        output += extra
+                    if _sentinel_in_output():
                         found = True
 
                 # Ctrl+C后哨兵出现了 → 走正常解析(远程进程已被终止)
@@ -723,7 +1005,7 @@ class SSHSession:
                     if cwd:
                         self._cwd = cwd
                     cmd_output = self._strip_caret_echo(self._strip_trailing_prompt(cmd_output))
-                    ec = f"[exit code: {exit_code}]\n" if exit_code is not None else ""
+                    ec = f"{rc_line(exit_code)}\n" if exit_code is not None else ""
                     if cmd_output:
                         return f"{ec}{cmd_output}\n[用户中断]\n{self.prompt}"
                     else:
@@ -737,10 +1019,34 @@ class SSHSession:
                 else:
                     return f"[用户中断]\n{self.prompt}"
 
+            if conn_lost or (expect_echo and not output and self._echo_enabled):
+                # 连接中断，命令结果未知。两种情况：
+                # - conn_lost: EOF/套接字异常，TCP已察觉
+                # - 零输出: 连PTY命令回显都未收到。exec路径存活连接必有回显
+                #   （_strip_echo依赖此前提），零输出说明连接实际已断，只是TCP
+                #   尚未报错（设备刚关机时的形态）；echo off 的 tty 无回显，
+                #   零输出无区分度（_echo_enabled=False），退回超时语义
+                # 不能走超时分支——那会误报"仍在后台运行"并置busy
+                # 关闭channel：EOF/套接字异常不一定置 closed，主动关闭让
+                # _exec/_input 入口的断线检测立即生效，设备恢复后下次调用即重连；
+                # 否则要等 keepalive 判死，期间每次重试都白等一个 timeout
+                try:
+                    self._channel.close()
+                except Exception:
+                    pass
+                self._busy = False
+                return (error_line("连接已中断（设备可能关机/重启或网络不通），命令结果未知")
+                        + f"\n{self.prompt}")
+
             # ── 纯超时: 不杀进程，命令继续后台运行 ──
-            # 终端标记为忙，后台watcher等命令完成后自动清除busy、缓存输出
+            # 终端标记为忙，后台watcher等命令完成后自动清除busy、缓存输出。
+            # 把已读输出的尾部与PS1候选状态传给watcher：PS1可能已被本循环读走
+            # （超时前一刻命令恰好完成），watcher重新读将永远等不到PS1，必须
+            # 继承候选状态在静默窗口后补发哨兵。
             self._busy = True
-            self._start_busy_watcher(marker, pwd_marker)
+            self._start_busy_watcher(marker, pwd_marker,
+                                     initial_output=output[-4096:],
+                                     ps1_suspect=ps1_suspect)
             cmd_output = self._parse_partial_output(output, marker)
             tag = (f"[超时: 命令执行超过{timeout}秒，仍在后台运行。"
                    f"可用 input 应答其交互提示（如y/n、密码），或用 input 发送 ^C 中断它]")
@@ -755,7 +1061,7 @@ class SSHSession:
         if cwd:
             self._cwd = cwd
 
-        ec = f"[exit code: {exit_code}]\n" if exit_code is not None else ""
+        ec = f"{rc_line(exit_code)}\n" if exit_code is not None else ""
         if cmd_output:
             return f"{ec}{cmd_output}\n{self.prompt}"
         else:
@@ -844,6 +1150,23 @@ class SSHSession:
 
         before_marker = "\n".join(filtered)
 
+        # ── 哨兵延迟协议适配: 剥离命令完成后的真实提示符行 ──
+        # 新协议输出结构: 真实输出 + PS1 + [哨兵命令回显] + marker行...
+        # PS1有两种形态:
+        # 1. 独立成行(user@host:path$) → 尾部行剥离
+        # 2. 与无尾随换行的输出粘连(printf输出后PS1直接拼在其后) →
+        #    行含OSC标题序列 \x1b]0;...\x07（bash打印PS1前的窗口标题），
+        #    以该序列为界截断，保留之前的真实输出
+        if before_marker:
+            lines_out = before_marker.split("\n")
+            if lines_out:
+                last = lines_out[-1]
+                idx = last.rfind("\x1b]0;")
+                if idx >= 0:
+                    lines_out[-1] = last[:idx]
+                before_marker = "\n".join(lines_out)
+            before_marker = self._strip_trailing_prompt(before_marker)
+
         # 命令回显已在上面剥离，首行是真实输出，不能再无条件跳首行（否则丢第一条输出）
         cmd_output = self._strip_echo(before_marker, drop_echo_first_line=False)
 
@@ -921,11 +1244,12 @@ class SSHSession:
         正常完成路径的cmd_output由哨兵截断，不含真实提示符；
         恢复路径的输出含Ctrl+C后shell打印的真实提示符（user@host:path$ 形态），
         与后续追加的合成提示符重复，需剥离避免双提示符。
+        匹配前先剥ANSI（带颜色码的PS1行尾有\x1b[0m，不剥无法匹配）。
         """
         if not text:
             return text
         lines = text.split("\n")
-        while lines and SSHSession.PROMPT_LINE_RE.match(lines[-1]):
+        while lines and SSHSession.PROMPT_LINE_RE.match(_ansi_sub(lines[-1]).replace("\r", "")):
             lines.pop()
         return "\n".join(lines)
 

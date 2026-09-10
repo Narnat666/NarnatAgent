@@ -18,7 +18,8 @@ from typing import Optional
 
 import paramiko
 
-from .ssh_session import SSHSession, _truncate_output
+from .ssh_session import SSHSession
+from ..exec_signal import error_line
 
 __all__ = ["execute", "DEFINITION", "get_session", "SSHSession", "kill_active_exec", "cleanup", "TerminalRuntime", "resolve_dev_display"]
 
@@ -75,7 +76,7 @@ DEFINITION = {
                     "enum": ["connect", "exec", "input", "status", "close", "transfer"],
                     "description": "操作类型（默认exec）",
                 },
-                "host": {"type": "string", "description": "connect时填被控设备IP/域名（建立连接，连接成功后每个设备返回唯一dev编号）；exec/input/close时填dev编号（dev1..devn）"},
+                "host": {"type": "string", "description": "设备引用，统一用dev编号：dev0=本机（本机执行命令请用Shell工具），dev1..devn=已connect的被控设备。connect时填被控设备IP/域名（连接成功后返回其dev编号）；exec/input/close时填dev编号"},
                 "username": {"type": "string", "description": "SSH用户名（connect时使用）"},
                 "port": {"type": "integer", "description": "SSH端口（默认22）"},
                 "password": {"type": "string", "description": "认证凭据（connect时使用）：登录密码或私钥路径（如~/.ssh/id_rsa），不填则自动尝试默认密钥。填密码时sudo密码自动用同登录密码注入"},
@@ -83,9 +84,9 @@ DEFINITION = {
                 "input": {"type": "string", "description": "交互输入内容（需先设action=input，如sudo密码、y/n确认）。仅当有命令在等待输入时有效（通常是上个命令超时仍在后台运行）；发送 ^C 可中断仍在运行的命令；空闲终端发送会被拒绝"},
                 "timeout": {"type": "integer", "description": "命令超时秒数（正整数）。exec/input默认120，超时后命令继续后台运行，可用input应答其交互提示或^C中断；connect默认15，连不上时快速报错"},
                 "max_output_chars": {"type": "integer", "description": "最大输出字符数（正整数，默认8000，超出截断并提示）"},
-                "source_host": {"type": "string", "description": "传输源设备：默认dev0即本机（可省略），设置dev1..devn选择被控设备（action=transfer时使用）"},
+                "source_host": {"type": "string", "description": "传输源设备：dev0=本机（默认，可省略），dev1..devn=被控设备（action=transfer时使用）"},
                 "source_path": {"type": "string", "description": "源文件在源设备上的绝对路径（action=transfer时使用）"},
-                "target_host": {"type": "string", "description": "传输目标设备：默认dev0即本机（可省略），设置dev1..devn选择被控设备（action=transfer时使用）"},
+                "target_host": {"type": "string", "description": "传输目标设备：dev0=本机（默认，可省略），dev1..devn=被控设备（action=transfer时使用）"},
                 "target_path": {"type": "string", "description": "目标文件在目标设备上的绝对路径（action=transfer时使用）"},
             },
             "required": [],
@@ -181,7 +182,7 @@ def execute(
         session_id = int(session_id) if session_id is not None else -1
         max_output_chars = int(max_output_chars) if max_output_chars is not None else 8000
     except (TypeError, ValueError):
-        return "[错误: port/timeout/session_id/max_output_chars需为整数]"
+        return error_line("port/timeout/session_id/max_output_chars需为整数")
 
     if action == "connect":
         # connect默认超时15秒（exec/input默认120秒）：连错IP/黑洞IP时快速失败，
@@ -203,7 +204,7 @@ def execute(
     elif action == "transfer":
         return _transfer(source_host, source_path, target_host, target_path, _tool_context)
     else:
-        return f"[错误: 未知action '{action}'，可选: connect/exec/input/status/close/transfer]"
+        return error_line(f"未知action '{action}'，可选: connect/exec/input/status/close/transfer")
 
 
 def _allocate_session_id() -> int:
@@ -247,7 +248,7 @@ def _normalize_device_for_tools(device: str) -> Optional[str]:
 def _file_tool_device_hint() -> str:
     """文件工具(Read/Edit/Write)设备标识错误时的统一指导：
     附当前已连接设备清单，减少AI回查status的往返"""
-    base = "设备标识使用devN编号(dev0=本机, dev1..devn=被控设备)"
+    base = "设备引用统一用devN编号(dev0=本机, dev1..devn=被控设备)"
     devs = _list_devices()
     if devs == "(无)":
         return f"{base}。当前无已连接设备，请先Terminal connect"
@@ -261,7 +262,7 @@ def _device_error(host: str) -> Optional[str]:
     if TerminalRuntime.RE_DEV.match(host.strip()):
         return None
     with TerminalRuntime.sessions_lock:
-        return f"[错误: {_dev_hint_locked()}]"
+        return error_line(f"{_dev_hint_locked()}")
 
 
 def _dev_label(sid: int) -> str:
@@ -316,10 +317,11 @@ def resolve_dev_display(dev: str) -> str:
 
 def _dev_hint_locked() -> str:
     """设备标识错误时的统一指导：说明devN用法 + 列出当前可用设备（调用者需持有TerminalRuntime.sessions_lock）"""
+    base = "设备引用统一用devN编号(dev0=本机, dev1..devn=被控设备；本机执行命令请用Shell工具)"
     devs = _list_devices_locked()
     if devs == "(无)":
-        return "设备标识使用devN编号(dev0=本机, dev1..devn=被控设备)。当前无已连接设备，请先connect"
-    return f"设备标识使用devN编号(dev0=本机, dev1..devn=被控设备)。当前已连接: {devs}"
+        return f"{base}。当前无已连接设备，请先connect"
+    return f"{base}。当前已连接: {devs}"
 
 
 def _resolve_session_id(session_id: int, host: str = "") -> tuple[int, "SSHSession"]:
@@ -343,7 +345,7 @@ def _resolve_session_id(session_id: int, host: str = "") -> tuple[int, "SSHSessi
             m = TerminalRuntime.RE_DEV.match(h)
             if not m:
                 # 宽松匹配: 允许直接用IP或用户名@IP引用已连接设备，
-                # 减少AI回查dev编号的往返（如 exec host=192.168.1.213）
+                # 避免AI回查dev编号（如 exec host=192.168.1.213）
                 matched = [
                     sid for sid, s in TerminalRuntime.sessions.items()
                     if s is not None and (s.host == h or f"{s.username}@{s.host}" == h)
@@ -358,7 +360,7 @@ def _resolve_session_id(session_id: int, host: str = "") -> tuple[int, "SSHSessi
                 raise ValueError(_dev_hint_locked())
             d = int(m.group(1))
             if d == 0:
-                raise ValueError("dev0是当前设备(本机)，无SSH会话，仅transfer可用")
+                raise ValueError("dev0是本机，无SSH会话。本机执行命令请用 Shell 工具（Terminal 的 exec 用于SSH远程设备，dev0仅用于transfer）")
             sid = d - 1
             if sid >= TerminalRuntime.max_sessions or sid not in TerminalRuntime.sessions:
                 raise ValueError(f"dev{d}未连接，请先connect。当前已连接: {_list_devices_locked()}")
@@ -382,7 +384,7 @@ def _connect(host: str, username: str, port: int = 22,
              timeout: int = 15) -> str:
     """建立SSH会话。timeout为连接超时（默认15秒），黑洞IP快速失败。"""
     if not host or not username:
-        return "[错误: connect需要提供host和username]"
+        return error_line("connect需要提供host和username")
 
     # timeout非正整数时兜底默认15秒（LLM可能传0/负数）
     if not timeout or timeout <= 0:
@@ -392,7 +394,7 @@ def _connect(host: str, username: str, port: int = 22,
         # 指定了session_id
         if session_id >= 0:
             if session_id >= TerminalRuntime.max_sessions:
-                return f"[错误: session_id范围0-{TerminalRuntime.max_sessions - 1}]"
+                return error_line(f"session_id范围0-{TerminalRuntime.max_sessions - 1}")
             if session_id in TerminalRuntime.sessions:
                 session = TerminalRuntime.sessions[session_id]
                 if not session._channel.closed:
@@ -406,7 +408,7 @@ def _connect(host: str, username: str, port: int = 22,
             alloc_id = _allocate_session_id()
             if alloc_id < 0:
                 active = [_dev_label(s) for s in sorted(TerminalRuntime.sessions.keys())]
-                return f"[错误: 已达最大会话数({TerminalRuntime.max_sessions})，当前已连接: {active}，请先close释放]"
+                return error_line(f"已达最大会话数({TerminalRuntime.max_sessions})，当前已连接: {active}，请先close释放")
 
     try:
         # password 三合一：私钥路径（~或路径分隔符开头/包含 + 文件存在）→ 密钥认证；
@@ -481,19 +483,19 @@ def _connect(host: str, username: str, port: int = 22,
             hint = "。未提供password，大多数设备需要密码认证，请在password参数填登录密码后重试"
         elif looks_like_path and not os.path.isfile(os.path.expanduser(password)):
             hint = "。password疑似私钥路径但本地文件不存在，请确认路径或改填登录密码"
-        return f"[错误: 认证失败({username}@{host})，请检查password{hint}]"
+        return error_line(f"认证失败({username}@{host})，请检查password{hint}")
     except paramiko.SSHException as e:
-        return f"[错误: SSH连接失败({username}@{host}): {e}]"
+        return error_line(f"SSH连接失败({username}@{host}): {e}")
     except Exception as e:
-        return f"[错误: 连接失败({username}@{host}): {e}]"
+        return error_line(f"连接失败({username}@{host}): {e}")
 
 
 def _exec(session_id: int, host: str, command: str, timeout: int = 120, max_output_chars: int = 8000, _tool_context=None) -> str:
     """在指定会话中执行命令"""
     if not command:
-        return "[错误: exec需要提供command]"
+        return error_line("exec需要提供command")
     if timeout <= 0:
-        return "[错误: timeout需为正整数（秒）]"
+        return error_line("timeout需为正整数（秒）")
 
     if _tool_context and _tool_context.max_timeout_seconds > 0:
         timeout = min(timeout, _tool_context.max_timeout_seconds)
@@ -532,13 +534,12 @@ def _exec(session_id: int, host: str, command: str, timeout: int = 120, max_outp
     try:
         sid, session = _resolve_session_id(session_id, host)
     except ValueError as e:
-        return f"[错误: {e}]"
+        return error_line(f"{e}")
 
-    if session._channel.closed:
-        with TerminalRuntime.sessions_lock:
-            TerminalRuntime.sessions.pop(sid, None)
-        session.close()
-        return f"[错误: {_dev_label(sid)}会话已断开，请重新connect]"
+    # 断线自动重连（设备关机/重启后恢复，保留dev编号与cwd）。
+    # 重连失败不丢弃会话：凭据保留，设备恢复后重试可自动连上
+    if session._channel.closed and not _try_reconnect(session):
+        return error_line(f"{_dev_label(sid)}连接中断，自动重连失败（设备可能未开机/网络不通）。设备恢复后重试将自动重连")
 
     try:
         # 注册活跃会话，agent层ESC打断后可通过kill_active_exec发送Ctrl+C
@@ -552,15 +553,20 @@ def _exec(session_id: int, host: str, command: str, timeout: int = 120, max_outp
         # 在结果前标注dev编号
         return f"[{_dev_label(sid)}] {result}"
     except Exception as e:
-        return f"[错误: {_dev_label(sid)}命令执行失败: {e}]"
+        # 连接在操作中死掉（设备重启/网络断）：先自动重连，再让AI重试
+        if session._channel.closed:
+            if _try_reconnect(session):
+                return error_line(f"{_dev_label(sid)}连接曾中断，已自动重连，请重试命令")
+            return error_line(f"{_dev_label(sid)}连接中断，自动重连失败（设备可能未开机/网络不通）。设备恢复后重试将自动重连")
+        return error_line(f"{_dev_label(sid)}命令执行失败: {e}")
 
 
 def _input(session_id: int, host: str, input: str, timeout: int = 120, max_output_chars: int = 8000, _tool_context=None) -> str:
     """向终端发送交互输入"""
     if not input:
-        return "[错误: input需要提供input内容]"
+        return error_line("input需要提供input内容")
     if timeout <= 0:
-        return "[错误: timeout需为正整数（秒）]"
+        return error_line("timeout需为正整数（秒）")
 
     if _tool_context and _tool_context.max_timeout_seconds > 0:
         timeout = min(timeout, _tool_context.max_timeout_seconds)
@@ -595,13 +601,11 @@ def _input(session_id: int, host: str, input: str, timeout: int = 120, max_outpu
     try:
         sid, session = _resolve_session_id(session_id, host)
     except ValueError as e:
-        return f"[错误: {e}]"
+        return error_line(f"{e}")
 
-    if session._channel.closed:
-        with TerminalRuntime.sessions_lock:
-            TerminalRuntime.sessions.pop(sid, None)
-        session.close()
-        return f"[错误: {_dev_label(sid)}会话已断开，请重新connect]"
+    # 断线自动重连（设备关机/重启后恢复）。重连失败不丢弃会话
+    if session._channel.closed and not _try_reconnect(session):
+        return error_line(f"{_dev_label(sid)}连接中断，自动重连失败（设备可能未开机/网络不通）。设备恢复后重试将自动重连")
 
     try:
         # 注册活跃会话，agent层ESC打断后可通过kill_active_exec发送Ctrl+C
@@ -614,7 +618,7 @@ def _input(session_id: int, host: str, input: str, timeout: int = 120, max_outpu
                 TerminalRuntime.active_exec_session = None
         return f"[{_dev_label(sid)}] {result}"
     except Exception as e:
-        return f"[错误: {_dev_label(sid)}输入发送失败: {e}]"
+        return error_line(f"{_dev_label(sid)}输入发送失败: {e}")
 
 
 def _status() -> str:
@@ -658,7 +662,7 @@ def _close(session_id: int, host: str) -> str:
         if host:
             m = TerminalRuntime.RE_DEV.match(host.strip())
             if not m:
-                return f"[错误: {_dev_hint_locked()}]"
+                return error_line(f"{_dev_hint_locked()}")
             d = int(m.group(1))
             if d == 0:
                 return "[dev0是当前设备(本机)，无需关闭]"
@@ -669,7 +673,7 @@ def _close(session_id: int, host: str) -> str:
             del TerminalRuntime.sessions[sid]
             return f"[已关闭 {_dev_label(sid)}]"
 
-        return "[错误: close需要指定dev编号(如host=dev1)或session_id]"
+        return error_line("close需要指定dev编号(如host=dev1)或session_id")
 
 
 def cleanup():
@@ -680,13 +684,35 @@ def cleanup():
         TerminalRuntime.sessions.clear()
 
 
+def _try_reconnect(session) -> bool:
+    """断线会话尝试重连（复用原凭据，保留dev编号与cwd）。失败返回False。
+
+    重连是阻塞操作（TCP连接最长等满 connect timeout）：注册为活跃会话后，
+    ESC(kill_active_exec) 能置位中断标志，重连会尽快放弃而不是卡满超时。
+    """
+    if session is None or not session._channel.closed:
+        return session is not None
+    with TerminalRuntime.active_exec_lock:
+        TerminalRuntime.active_exec_session = session
+    try:
+        session.reconnect()
+        return True
+    except Exception:
+        return False
+    finally:
+        with TerminalRuntime.active_exec_lock:
+            TerminalRuntime.active_exec_session = None
+
+
 def get_session(session_id: int = -1, host: str = "") -> Optional["SSHSession"]:
-    """获取指定SSH会话（供SFTP等内部使用）"""
+    """获取指定SSH会话（供SFTP等内部使用）。断线时自动重连，失败返回None。"""
     try:
         _, session = _resolve_session_id(session_id, host)
-        return session
     except ValueError:
         return None
+    if not _try_reconnect(session):
+        return None
+    return session
 
 
 # ── 文件传输 ──
@@ -741,7 +767,14 @@ def _ensure_remote_dir(session: "SSHSession", remote_path: str) -> bool:
                 try:
                     sftp.stat(cur)
                 except IOError:
-                    sftp.mkdir(cur)
+                    try:
+                        sftp.mkdir(cur)
+                    except IOError as e:
+                        # 并发创建/已存在可接受；仍不存在才是真失败（如权限不足）
+                        try:
+                            sftp.stat(cur)
+                        except IOError:
+                            raise e
         finally:
             sftp.close()
         return True
@@ -762,22 +795,22 @@ def _ensure_local_dir(local_path: str) -> bool:
 
 def _transfer_local_to_remote(source_path: str, target_host: str, target_path: str, max_transfer_mb: int) -> str:
     if os.path.isdir(source_path):
-        return (f"[错误: 源是目录，transfer仅支持文件传输。"
-                f"目录请先用 Shell 打包（如 tar czf x.tar.gz 目录）再传输: {source_path}]")
+        return error_line(f"源是目录，transfer仅支持文件传输。目录请先用 Shell 打包（如 tar czf x.tar.gz 目录）再传输: {source_path}")
     if not os.path.isfile(source_path):
-        return f"[错误: 源文件不存在: {source_path}]"
+        return error_line(f"源文件不存在: {source_path}")
 
     size = os.path.getsize(source_path)
     err = _check_transfer_size(size, max_transfer_mb)
     if err:
-        return f"[错误: {err}]"
+        return error_line(f"{err}")
 
     session = get_session(host=target_host)
     if session is None:
-        return f"[错误: 目标设备 {target_host} 未连接，请先connect。当前已连接: {_list_devices()}]"
+        return error_line(f"目标设备 {target_host} 未连接或已断开，请先connect。当前已连接: {_list_devices()}")
 
     if not _ensure_remote_dir(session, target_path):
-        return f"[错误: 无法创建远程目标目录: {target_path}]"
+        parent = target_path.rsplit("/", 1)[0] or "/"
+        return error_line(f"无法创建远程目标目录: {parent}（可能无写权限）")
 
     try:
         sftp = session._client.open_sftp()
@@ -786,7 +819,7 @@ def _transfer_local_to_remote(source_path: str, target_host: str, target_path: s
         finally:
             sftp.close()
     except Exception as e:
-        return f"[错误: 传输失败: {e}]"
+        return error_line(f"传输失败: {e}")
 
     return f"[已传输: 本机:{source_path} → {target_host}:{target_path} ({_format_size(size)})]"
 
@@ -794,22 +827,21 @@ def _transfer_local_to_remote(source_path: str, target_host: str, target_path: s
 def _transfer_remote_to_local(source_host: str, source_path: str, target_path: str, max_transfer_mb: int) -> str:
     session = get_session(host=source_host)
     if session is None:
-        return f"[错误: 源设备 {source_host} 未连接，请先connect。当前已连接: {_list_devices()}]"
+        return error_line(f"源设备 {source_host} 未连接或已断开，请先connect。当前已连接: {_list_devices()}")
 
     st = _get_remote_file_size(session, source_path)
     if st is None:
-        return f"[错误: 源文件不存在或无法访问: {source_host}:{source_path}]"
+        return error_line(f"源文件不存在或无法访问: {source_host}:{source_path}")
     size, is_dir = st
     if is_dir:
-        return (f"[错误: 源是目录，transfer仅支持文件传输。"
-                f"目录请先用 exec 打包（如 tar czf /tmp/x.tar.gz 目录）再传输: {source_host}:{source_path}]")
+        return error_line(f"源是目录，transfer仅支持文件传输。目录请先用 exec 打包（如 tar czf x.tar.gz 目录）再传输: {source_host}:{source_path}")
 
     err = _check_transfer_size(size, max_transfer_mb)
     if err:
-        return f"[错误: {err}]"
+        return error_line(f"{err}")
 
     if not _ensure_local_dir(target_path):
-        return f"[错误: 无法创建本地目标目录: {target_path}]"
+        return error_line(f"无法创建本地目标目录: {target_path}")
 
     try:
         sftp = session._client.open_sftp()
@@ -818,7 +850,7 @@ def _transfer_remote_to_local(source_host: str, source_path: str, target_path: s
         finally:
             sftp.close()
     except Exception as e:
-        return f"[错误: 传输失败: {e}]"
+        return error_line(f"传输失败: {e}")
 
     return f"[已传输: {source_host}:{source_path} → 本机:{target_path} ({_format_size(size)})]"
 
@@ -826,26 +858,25 @@ def _transfer_remote_to_local(source_host: str, source_path: str, target_path: s
 def _transfer_remote_to_remote(source_host: str, source_path: str, target_host: str, target_path: str, max_transfer_mb: int) -> str:
     src_session = get_session(host=source_host)
     if src_session is None:
-        return f"[错误: 源设备 {source_host} 未连接，请先connect。当前已连接: {_list_devices()}]"
+        return error_line(f"源设备 {source_host} 未连接或已断开，请先connect。当前已连接: {_list_devices()}")
 
     tgt_session = get_session(host=target_host)
     if tgt_session is None:
-        return f"[错误: 目标设备 {target_host} 未连接，请先connect。当前已连接: {_list_devices()}]"
+        return error_line(f"目标设备 {target_host} 未连接或已断开，请先connect。当前已连接: {_list_devices()}")
 
     st = _get_remote_file_size(src_session, source_path)
     if st is None:
-        return f"[错误: 源文件不存在或无法访问: {source_host}:{source_path}]"
+        return error_line(f"源文件不存在或无法访问: {source_host}:{source_path}")
     size, is_dir = st
     if is_dir:
-        return (f"[错误: 源是目录，transfer仅支持文件传输。"
-                f"目录请先在源设备 exec 打包（如 tar czf /tmp/x.tar.gz 目录）再传输: {source_host}:{source_path}]")
+        return error_line(f"源是目录，transfer仅支持文件传输。目录请先在源设备 exec 打包（如 tar czf x.tar.gz 目录）再传输: {source_host}:{source_path}")
 
     err = _check_transfer_size(size, max_transfer_mb)
     if err:
-        return f"[错误: {err}]"
+        return error_line(f"{err}")
 
     if not _ensure_remote_dir(tgt_session, target_path):
-        return f"[错误: 无法创建远程目标目录: {target_path}]"
+        return error_line(f"无法创建远程目标目录: {target_path}")
 
     transferred = 0
     try:
@@ -868,16 +899,16 @@ def _transfer_remote_to_remote(source_host: str, source_path: str, target_host: 
             src_sftp.close()
             tgt_sftp.close()
     except Exception as e:
-        return f"[错误: 传输中断，已传输 {_format_size(transferred)}/{_format_size(size)}: {e}]"
+        return error_line(f"传输中断，已传输 {_format_size(transferred)}/{_format_size(size)}: {e}")
 
     return f"[已传输: {source_host}:{source_path} → {target_host}:{target_path} ({_format_size(size)})]"
 
 
 def _transfer(source_host: str, source_path: str, target_host: str, target_path: str, _tool_context=None) -> str:
     if not source_path:
-        return "[错误: transfer需要提供source_path（源文件路径）]"
+        return error_line("transfer需要提供source_path（源文件路径）")
     if not target_path:
-        return "[错误: transfer需要提供target_path（目标文件路径）]"
+        return error_line("transfer需要提供target_path（目标文件路径）")
 
     # 设备标识校验（只认devN: dev0=本机可省略，dev1..devN=被控设备）
     source_host = _normalize_device(source_host)
@@ -887,7 +918,7 @@ def _transfer(source_host: str, source_path: str, target_host: str, target_path:
         return err
 
     if source_host == target_host and source_path == target_path:
-        return "[错误: 源和目标相同，无需传输]"
+        return error_line("源和目标相同，无需传输")
 
     max_transfer_mb = 100
     if _tool_context and hasattr(_tool_context, "max_transfer_mb"):
@@ -897,7 +928,7 @@ def _transfer(source_host: str, source_path: str, target_host: str, target_path:
     target_is_local = not target_host
 
     if source_is_local and target_is_local:
-        return "[错误: 源和目标都是本机(dev0)，请使用本地文件操作工具]"
+        return error_line("源和目标都是本机(dev0)，请使用本地文件操作工具")
     elif source_is_local:
         return _transfer_local_to_remote(source_path, target_host, target_path, max_transfer_mb)
     elif target_is_local:
