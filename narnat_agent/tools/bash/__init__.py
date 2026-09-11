@@ -278,43 +278,6 @@ def _is_cd_command(cmd: str) -> bool:
     return lower.startswith("cd ") or lower == "cd" or lower.startswith("chdir ") or lower == "chdir"
 
 
-def _has_nonpersistent_cd(command: str) -> bool:
-    """检测复合命令中是否存在不会持久化的 cd 段。
-
-    纯 cd 命令由 _is_cd_command 路径处理（os.chdir 持久化）；
-    && / || 分段由 _execute_segments 处理（cd 段同样持久化）；
-    但单个 & 或 ; 不分段，整条命令在子进程执行，其中的 cd 段只在子进程内生效。
-    此时返回 True，调用方追加提示告知 AI，避免 AI 误以为目录已切换。
-    """
-    if "&" not in command and ";" not in command:
-        return False
-    # 与执行路径一致：先按 &&/|| 分段（分段器已把 cd 段拆出并持久化），
-    # 仅检查各段内部含单个 & 或 ; 的 cd（如 `cd /tmp; ls`、`echo hi & cd x`）。
-    # 不能直接在整条命令上搜 `(^|&|;)\s*cd`：`cd X && cmd 2>&1` 中 cd 已持久化，
-    # 但 2>&1 的 & 会让整条正则命中开头的 cd，误报"cd 不持久化"误导 AI。
-    for _op, seg in _split_commands(command):
-        if "&" in seg or ";" in seg:
-            if re.search(r"(^|&|;)\s*(cd|chdir)\s+", seg, re.IGNORECASE):
-                return True
-    return False
-
-
-def _append_cd_hint(result: str, command: str) -> str:
-    """复合命令含不持久化的 cd 段时，在结果尾部（prompt 行后）追加提示。"""
-    if not _has_nonpersistent_cd(command):
-        return result
-    hint = "[提示: 复合命令中的 cd 仅在该命令内生效，不会改变后续工具调用的当前目录。如需切换目录，请单独执行 cd 命令]"
-    lines = result.rstrip("\n").split("\n")
-    # 找到最后一个 prompt 行（以 > 或 $ 结尾），提示插到其后
-    idx = len(lines) - 1
-    while idx >= 0 and not lines[idx].rstrip().endswith((">", "$")):
-        idx -= 1
-    if idx >= 0:
-        lines.insert(idx + 1, hint)
-        return "\n".join(lines)
-    return result.rstrip("\n") + "\n" + hint
-
-
 def _extract_cd_path(cmd: str) -> Optional[str]:
     """从 cd 命令中提取目标路径，处理 /d 等cmd标志。
     返回 None 表示无参数cd（仅显示当前目录，不切换）。"""
@@ -471,10 +434,7 @@ def execute(
         # 多段命令(&&/||)由Python端拆分后逐段执行
         segments = _split_commands(command)
         if len(segments) > 1:
-            return _append_cd_hint(
-                _execute_segments(segments, timeout, max_output_chars, _tool_context),
-                command,
-            )
+            return _execute_segments(segments, timeout, max_output_chars, _tool_context)
 
         # python -c "code" 形态：绕过cmd直执行，多行/%/&/|等原样传给解释器
         # 尾随AI高频后缀（2>&1、|管道、>重定向）已剥离，一并直执行
@@ -491,9 +451,7 @@ def execute(
                 )
             return _format_result(rc, out, err, status, timeout, max_output_chars)
 
-        return _append_cd_hint(
-            _execute_win32(command, timeout, max_output_chars), command
-        )
+        return _execute_win32(command, timeout, max_output_chars)
 
     # ═════════════════════════════════════════════════════════════
     # Linux/macOS: bash -c 子进程（原有逻辑）
@@ -519,10 +477,7 @@ def execute(
     # 多段命令(&&/||)由Python端拆分后逐段执行
     segments = _split_commands(command)
     if len(segments) > 1:
-        return _append_cd_hint(
-            _execute_segments(segments, timeout, max_output_chars, _tool_context),
-            command,
-        )
+        return _execute_segments(segments, timeout, max_output_chars, _tool_context)
 
     shell_cmd = [shell, "-c", command]
 
