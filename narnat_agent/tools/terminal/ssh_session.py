@@ -20,6 +20,15 @@ sudo密码自动注入:
 - connect时可选设置sudo_password，后续exec遇到sudo密码提示自动注入
 - 密码通过channel直接写入，不经过shell命令行，不出现在ps/历史记录中
 
+钩子报告协议(命令完成自报, bash专有):
+- connect后协商: 注入PROMPT_COMMAND，shell在每条命令结束、打印提示符前
+  输出报告序列 ESC]NARNAT;<随机暗号>;<退出码>;<cwd>BEL
+- 暗号每次连接随机生成，命令输出无法预知/伪造；报告自带退出码与cwd，
+  完成判定从"启发式猜测"变为"确定性收报"
+- 验证闭环: 注入后等报告，收不到（dash/busybox/cmd等无此钩子）自动降级
+  旧哨兵协议，行为与无钩子时完全一致
+- 仅本会话进程生效（环境变量），不写文件，断开即消失，不影响用户会话
+
 输出解析(PTY基础设施，不是翻译):
 - _strip_echo: 剥离PTY命令回显(不是AI命令的输出)
 - _clean_output: 清洗ANSI码、内部标记、\\r覆盖(PTY噪声)
@@ -30,6 +39,7 @@ import re
 import shlex
 import time
 import threading
+import uuid
 from typing import Optional
 
 import paramiko
@@ -142,6 +152,11 @@ class SSHSession:
         # tty 回显能力（由 _update_cwd 按实际输出判定）：
         # echo off 的 tty 下"零输出"不再是断连证据，见 _read_until_marker
         self._echo_enabled = True
+
+        # 钩子报告协议状态（_try_enable_report_protocol协商后生效）
+        self._hook_token = ""      # 本次协商的报告暗号（进程级随机，命令不可预知）
+        self._hook_active = False  # True=报告协议生效；False=旧哨兵协议
+        self._report_re: Optional[re.Pattern] = None  # 报告序列匹配（含暗号）
 
         # 待完成命令的哨兵（超时后input接管时复用）
         self._pending_marker = ""
@@ -265,6 +280,9 @@ class SSHSession:
         这样 ESC 打断 connect 时能通过 kill_active_exec() 关闭此会话。"""
         self._initial_output = self._read_until_prompt(timeout=5)
         self._update_cwd()
+        # 协商钩子报告协议（命令完成自报）：验证闭环失败自动降级旧哨兵协议。
+        # 注入命令自身完成时钩子即触发一次报告，同时顺带校准cwd。
+        self._try_enable_report_protocol()
 
     @property
     def prompt(self) -> str:
@@ -587,6 +605,106 @@ class SSHSession:
                     self._cwd = cleaned
                     break
 
+    # ── 钩子报告协议（命令完成自报）──
+    # bash的PROMPT_COMMAND在每条命令结束、打印提示符前执行。注入后shell
+    # 每次命令完成都输出报告序列 ESC]NARNAT;<暗号>;<退出码>;<cwd>BEL。
+    # 暗号每连接随机：命令输出无法预知伪造；报告自带退出码与cwd，
+    # 使完成判定从"启发式猜测"变为"确定性收报"。验证闭环失败（shell
+    # 不支持/注入失败）自动保持旧哨兵协议，行为与无钩子时完全一致。
+
+    def _try_enable_report_protocol(self) -> bool:
+        """协商钩子报告协议：注入PROMPT_COMMAND并验证闭环。
+
+        注入语句:
+          PROMPT_COMMAND="__NARNAT_EC__=\\$?;${PROMPT_COMMAND:+$PROMPT_COMMAND;}"'printf "\\033]NARNAT;<token>;%s;%s\\007" "$__NARNAT_EC__" "$(pwd -P)";unset __NARNAT_EC__'
+        - 退出码在旧PROMPT_COMMAND执行前抢先捕获到__NARNAT_EC__：报告中的rc
+          恒为用户命令的退出码，不被设备既有PROMPT_COMMAND的退出码覆盖。
+          \\$?转义使$?以字面存入PROMPT_COMMAND，在每条命令完成后展开捕获，
+          而非注入时刻展开（注入时刻$?是注入命令自己的退出码，恒为0）
+        - 已有PROMPT_COMMAND以";"拼接保留，不破坏设备既有配置
+        - unset在报告打印后清理捕获变量，不泄漏进用户shell环境
+        - token每次协商重新生成（重连后旧shell已死，新shell用新暗号）
+        - 注入命令自身完成时钩子即触发一次报告 → 收到报告=验证通过
+        - 5秒内未收到报告（dash/busybox/cmd等无此钩子或注入失败）→ 返回False降级
+
+        仅本会话进程生效（环境变量），不写任何文件；会话断开即消失，
+        不影响用户自己的SSH会话。ESC可打断（检查点退出）。
+        """
+        self._hook_active = False
+        self._hook_token = uuid.uuid4().hex[:8]
+        self._report_re = re.compile(
+            r"\x1b\]NARNAT;" + self._hook_token + r";(-?\d+);(.*?)\x07"
+        )
+        inject = (
+            'PROMPT_COMMAND="__NARNAT_EC__=\\$?;${PROMPT_COMMAND:+$PROMPT_COMMAND;}"'
+            f"'printf \"\\033]NARNAT;{self._hook_token};%s;%s\\007\" \"$__NARNAT_EC__\" \"$(pwd -P)\";unset __NARNAT_EC__'"
+        )
+        self._channel.send(inject + "\n")
+
+        raw = ""
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if self._interrupt.is_set():
+                break
+            try:
+                chunk = self._channel.recv(4096).decode("utf-8", errors="replace")
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+            if not chunk:
+                break
+            raw += chunk
+            rc, cwd, _ = self._parse_report(raw)
+            if rc is not None or cwd is not None:
+                self._hook_active = True
+                if cwd:
+                    self._cwd = cwd  # 注入命令完成即上报当前cwd，顺带校准
+                return True
+        return False
+
+    def _parse_report(self, raw: str) -> tuple[Optional[int], Optional[str], Optional[int]]:
+        """在raw尾部窗口搜索报告序列，返回(rc, cwd, 报告绝对起始索引)。
+
+        报告序列仅在输出末尾出现（提示符打印前），扫描尾部窗口足够。
+        未找到返回(None, None, None)。
+        """
+        if self._report_re is None:
+            return None, None, None
+        tail_start = max(0, len(raw) - SSHSession.MARKER_TAIL_WINDOW)
+        m = self._report_re.search(raw[tail_start:])
+        if not m:
+            return None, None, None
+        try:
+            rc = int(m.group(1))
+        except ValueError:
+            rc = None
+        cwd = m.group(2) or None
+        return rc, cwd, tail_start + m.start()
+
+    def _parse_report_output(self, raw: str, report_idx: int) -> str:
+        """钩子协议下命令输出解析：报告序列之前的内容，剥离命令回显。
+
+        输出结构: 命令回显 + 真实输出 + [报告序列] + [提示符(丢弃)]
+        报告序列由PROMPT_COMMAND打印（非命令回显），报告之后的提示符字节
+        由report_idx截断丢弃（残留通道字节由下次execute的_drain_stale_output排空）。
+        """
+        before = raw[:report_idx]
+        first_line = (self._last_command or "").split("\n")[0].strip()
+        filtered = []
+        first_content_seen = False
+        for l in before.split("\n"):
+            # 续行回显: "\x1b[?2004h> "（多行命令/heredoc中间行，与_parse_output一致）
+            if "\x1b[?2004h> " in l or "\x1b[?2004h>" in l:
+                continue
+            ansi_clean = _ansi_sub(l).replace("\r", "").strip()
+            if not first_content_seen and ansi_clean:
+                first_content_seen = True
+                if first_line and ansi_clean == first_line:
+                    continue  # 命令/输入首行回显
+            filtered.append(l)
+        return self._clean_output("\n".join(filtered))
+
     def _start_busy_watcher(self, marker: str, pwd_marker: str,
                             initial_output: str = "", ps1_suspect: bool = False):
         """超时后启动后台线程，持续读channel，等命令完成后自动清除busy标记。
@@ -612,6 +730,11 @@ class SSHSession:
             suspect = ps1_suspect or (not self._sentinel_sent and self._ps1_candidate(output))
             silent = 0
             finished = False
+            # 钩子协议完成状态（报告=确定完成；旧协议的哨兵/PS1判定不受影响）
+            hook_finish = False
+            hook_rc = None
+            hook_cwd = None
+            hook_idx = 0
             try:
                 while not self._watcher_stop.is_set():
                     if self._interrupt.is_set():
@@ -632,6 +755,14 @@ class SSHSession:
                     if not chunk:
                         break  # channel关闭/EOF
                     output += chunk
+                    if self._hook_active and not self._sentinel_sent:
+                        # 钩子协议优先: 报告到达=命令确定完成（后台命令的退出码一并带回）
+                        rc, cwd, idx = self._parse_report(output)
+                        if rc is not None or cwd is not None:
+                            finished = True
+                            hook_finish = True
+                            hook_rc, hook_cwd, hook_idx = rc, cwd, idx
+                            break
                     if not self._sentinel_sent:
                         # 阶段1: 等PS1。新数据推翻或维持候选
                         if self._ps1_candidate(output):
@@ -674,10 +805,26 @@ class SSHSession:
                         seg = self._strip_trailing_prompt("\n".join(lines))
                     return self._clean_output(seg).strip()
 
-                if finished:
+                if finished and hook_finish:
+                    # 钩子协议完成: 报告前的输出入backlog，退出码随backlog带回
+                    # （旧协议丢后台命令退出码，报告协议补齐此信息）
+                    body = _incremental_body(output[:hook_idx], strip_sentinel_echo=False)
+                    if hook_rc is not None:
+                        body = f"{rc_line(hook_rc)}\n{body}" if body else f"{rc_line(hook_rc)}"
+                    if body:
+                        self._append_backlog(body)
+                    if hook_cwd:
+                        self._cwd = hook_cwd
+                elif finished:
                     # 只保留哨兵前的命令输出（哨兵行/退出码/pwd输出是基础设施噪声）
                     body = _incremental_body(output.split(marker, 1)[0],
                                              strip_sentinel_echo=True)
+                    if self._hook_active:
+                        # 钩子激活时的哨兵路径(伪PS1误判提前发哨兵): 哨兵$?已被
+                        # 钩子重置为0，报告序列携带真实退出码，与钩子分支一致补齐
+                        rep_rc, _, _ = self._parse_report(output)
+                        if rep_rc is not None:
+                            body = f"{rc_line(rep_rc)}\n{body}" if body else f"{rc_line(rep_rc)}"
                     if body:
                         self._append_backlog(body)
                     cwd = self._extract_cwd(output, marker, pwd_marker)
@@ -774,6 +921,10 @@ class SSHSession:
                            expect_echo: bool = True) -> str:
         """读取channel输出，直到读到pwd_marker。
 
+        钩子报告协议叠加: _hook_active时优先检测报告序列（确定性完成），
+        收到即完成；未收到则完全走旧哨兵协议（PS1启发式/静默窗口/哨兵补发），
+        两条路径互不干扰，钩子失效自动降级。
+
         timeout:
           >0  - 等待指定秒数，超时返回已收集输出+超时提示
                 （命令继续后台运行，终端标记为忙，AI可用input应答或^C中断）
@@ -813,6 +964,11 @@ class SSHSession:
         # PS1候选状态: 输出尾部疑似出现shell提示符(命令完成迹象)，待静默确认窗口
         ps1_suspect = False
         silent_timeouts = 0
+        # 钩子报告协议状态: 报告到达即命令确定完成（暗号随机，命令输出不可伪造）
+        hook_finish = False
+        hook_rc: Optional[int] = None
+        hook_cwd: Optional[str] = None
+        hook_idx = 0
 
         while time.time() < deadline:
             # 中断检查：ESC打断时立即退出（数据路径中也检查，不只依赖timeout分支）
@@ -826,6 +982,19 @@ class SSHSession:
                     conn_lost = True
                     break
                 output += chunk
+
+                if not found and self._hook_active and not self._sentinel_sent:
+                    # ── 钩子报告协议: 报告到达 = 命令确定完成 ──
+                    # 哨兵在途时不采信报告：哨兵命令完成时钩子同样触发（rc恒为0，
+                    # 非用户命令退出码），且其输出与报告可能同块到达导致劫持判定
+                    # PROMPT_COMMAND在提示符打印前输出报告序列(暗号+退出码+cwd)。
+                    # 收到即完成，无需PS1启发式/静默窗口/哨兵补发；报告永远在
+                    # 输出末尾，仅扫描尾部窗口。假报告不可能（暗号随机不可预知）。
+                    hook_rc, hook_cwd, hook_idx = self._parse_report(output)
+                    if hook_rc is not None or hook_cwd is not None:
+                        hook_finish = True
+                        found = True
+                        break
 
                 if not found:
                     # 阶段1(哨兵未发送): 等待PS1提示符（命令完成迹象）
@@ -987,21 +1156,48 @@ class SSHSession:
                     check_region = output[first_nl + 1:] if first_nl >= 0 else ""
                     return SSHSession._sentinel_line_present(check_region, pwd_marker)
 
-                if _sentinel_in_output():
-                    found = True
-                elif not self._sentinel_sent and self._ps1_candidate(output):
-                    # shell已回到提示符（哨兵尚未发送）：补发哨兵取退出码/cwd
-                    self._send_sentinel(marker, pwd_marker)
-                    extra = self._try_read_residual(duration=3.0)
-                    if extra:
-                        output += extra
-                    if _sentinel_in_output():
+                if self._hook_active and not self._sentinel_sent:
+                    # 钩子协议优先: ^C后shell回到提示符，钩子即打印报告（rc=130等）
+                    # 哨兵在途时报告rc不可信（见读循环处注释），走哨兵判定
+                    hook_rc, hook_cwd, hook_idx = self._parse_report(output)
+                    if hook_rc is not None or hook_cwd is not None:
+                        hook_finish = True
                         found = True
 
-                # Ctrl+C后哨兵出现了 → 走正常解析(远程进程已被终止)
+                if not hook_finish:
+                    if _sentinel_in_output():
+                        found = True
+                    elif not self._sentinel_sent and self._ps1_candidate(output):
+                        # shell已回到提示符（哨兵尚未发送）：补发哨兵取退出码/cwd
+                        self._send_sentinel(marker, pwd_marker)
+                        extra = self._try_read_residual(duration=3.0)
+                        if extra:
+                            output += extra
+                        if _sentinel_in_output():
+                            found = True
+
+                # Ctrl+C后报告/哨兵出现了 → 走正常解析(远程进程已被终止)
                 if found:
                     self._busy = False
+                    if hook_finish:
+                        # 钩子协议解析：报告自带退出码与cwd
+                        if hook_cwd:
+                            self._cwd = hook_cwd
+                        cmd_output = self._strip_caret_echo(self._strip_trailing_prompt(
+                            self._parse_report_output(output, hook_idx)))
+                        ec = f"{rc_line(hook_rc)}\n" if hook_rc is not None else ""
+                        if cmd_output:
+                            return f"{ec}{cmd_output}\n[用户中断]\n{self.prompt}"
+                        return f"{ec}[用户中断]\n{self.prompt}"
                     cmd_output, cwd, exit_code = self._parse_output(output, marker, pwd_marker)
+                    if self._hook_active:
+                        # 同正常完成路径: ^C后钩子报告(rc=130等)先于哨兵回显出现，
+                        # 优先采信报告rc/cwd，避免哨兵$?被钩子重置为0
+                        rep_rc, rep_cwd, _ = self._parse_report(output)
+                        if rep_rc is not None:
+                            exit_code = rep_rc
+                        if rep_cwd:
+                            cwd = rep_cwd
                     if cwd:
                         self._cwd = cwd
                     cmd_output = self._strip_caret_echo(self._strip_trailing_prompt(cmd_output))
@@ -1057,7 +1253,27 @@ class SSHSession:
 
         # 正常解析
         self._busy = False
+        if hook_finish:
+            # 钩子协议解析：报告序列自带退出码与cwd，报告之前的内容即命令输出
+            # （报告后的提示符字节留在通道，由下次execute的_drain_stale_output排空）
+            if hook_cwd:
+                self._cwd = hook_cwd
+            cmd_output = self._parse_report_output(output, hook_idx)
+            ec = f"{rc_line(hook_rc)}\n" if hook_rc is not None else ""
+            if cmd_output:
+                return f"{ec}{cmd_output}\n{self.prompt}"
+            return f"{ec}{self.prompt}"
         cmd_output, cwd, exit_code = self._parse_output(output, marker, pwd_marker)
+        if self._hook_active:
+            # 哨兵路径+钩子激活(伪PS1误判提前发哨兵): 钩子PROMPT_COMMAND在哨兵
+            # 执行前已运行，$?被重置为0，哨兵捕获的rc恒为0。真实报告序列位于
+            # 哨兵回显之前（尾部窗口首匹配即真实报告），优先采信其rc/cwd；
+            # 无报告=钩子已死，$?未被污染，保留哨兵解析值。
+            rep_rc, rep_cwd, _ = self._parse_report(output)
+            if rep_rc is not None:
+                exit_code = rep_rc
+            if rep_cwd:
+                cwd = rep_cwd
         if cwd:
             self._cwd = cwd
 
