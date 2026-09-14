@@ -173,22 +173,24 @@ class Agent:
             _terminal_cleanup()
             _serial_cleanup()
 
-    def run_headless(self, task: str):
+    def run_headless(self, task: str, max_rounds: int = 0):
         """headless 一次性任务执行（nn -p 入口）。
 
         注入任务 → 目标模式自动续跑 → GoalComplete/轮数上限收尾 → 退出。
         与 run() 的区别：不读用户输入、不自动保存会话、不查余额、不显示统计栏。
         输出经 HeadlessStream（纯文本，无颜色）。
+
+        max_rounds: 自动续跑轮数上限，>0 时覆盖配置默认值（nn -g 参数）。
         """
         self._logger.info("core.agent", f"Agent启动(headless), model={self._config.ai.model}")
 
         try:
-            # 开启目标模式：注入 GoalComplete 工具（轮数上限用配置默认值）
+            # 开启目标模式：注入 GoalComplete 工具（max_rounds>0 临时覆盖，否则用配置默认值）
             self._mgr._goal_enabled = True
-            self._mgr._goal_max_rounds = 0
+            self._mgr._goal_max_rounds = max_rounds
             if getattr(self._mgr, '_set_goal_tool', None):
                 self._mgr._set_goal_tool(True)
-            goal_limit = self._config.ai.goal_max_rounds
+            goal_limit = max_rounds or self._config.ai.goal_max_rounds
             goal_task = task.strip()
 
             # 注入任务

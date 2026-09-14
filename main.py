@@ -6,7 +6,7 @@ import argparse
 import sys
 import os
 
-__version__ = "15.9.3"
+__version__ = "15.9.4"
 
 
 def main():
@@ -15,6 +15,8 @@ def main():
     parser.add_argument("-d", "--debug", action="store_true", help="调试模式，记录详细日志")
     parser.add_argument("-v", "--version", action="store_true", help="显示版本号")
     parser.add_argument("-p", "--prompt", help="headless模式：执行一次性任务后退出（纯文本输出）")
+    parser.add_argument("-g", "--goal-rounds", type=int, default=0,
+                        help="headless模式：自动续跑轮数上限（默认用配置值，-p 时生效）")
     args = parser.parse_args()
 
     if args.version:
@@ -40,8 +42,11 @@ def main():
                 pass
         from narnat_agent.output import set_plain
         set_plain(True)  # headless：全局去色，输出纯文本
+        if args.goal_rounds < 0:
+            print("错误: -g 轮数上限必须为正整数")
+            sys.exit(1)
         agent = Agent(debug=args.debug, headless=True)
-        agent.run_headless(args.prompt)
+        agent.run_headless(args.prompt, max_rounds=args.goal_rounds)
         return
 
     agent = Agent(debug=args.debug)
