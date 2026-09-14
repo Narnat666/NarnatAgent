@@ -33,9 +33,10 @@ class Assembly:
     """唯一组装点 — 构造所有对象，注入依赖"""
 
     @classmethod
-    def build(cls, project_root: Optional[str] = None, debug: bool = False) -> 'AssemblyResult':
+    def build(cls, project_root: Optional[str] = None, debug: bool = False,
+              headless: bool = False) -> 'AssemblyResult':
         # 1. 配置
-        config = load_config(project_root)
+        config = load_config(project_root, headless)
 
         # 2. UI 样式（show_cost/show_balance/max_tokens 被 loader 弹出到 UIConfig 属性，
         #   需补回 raw 中供 apply_style 读取；show_ratio/context_window 来自其他分组）
@@ -85,8 +86,13 @@ class Assembly:
         summarizer = Summarizer(llm, config, logger)
 
         # 9.5 工具上下文
+        # headless：不注册删除确认回调（无交互终端，命令按未确认处理），
+        # 权限与交互模式一致（配置"rm免确认/git免确认"仍生效）。
+        confirm_cb = None
+        if not headless and sys.platform == "win32":
+            confirm_cb = SafetyCallbacks.confirm_delete
         tool_context = ToolContext(
-            confirm_callback=SafetyCallbacks.confirm_delete if sys.platform == "win32" else None,
+            confirm_callback=confirm_cb,
             ui_callback=TodoCallbacks.on_todo_update,
             api_keys=config.api_keys,
             ignore_dirs=list(config.tools.ignore_dirs),
@@ -122,7 +128,11 @@ class Assembly:
         )
 
         # 11. UI
-        ui = UIInterface(config.ai.model, session_mgr, config.paths.data_dir)
+        if headless:
+            from .ui.headless import HeadlessUI
+            ui = HeadlessUI(config.ai.model)
+        else:
+            ui = UIInterface(config.ai.model, session_mgr, config.paths.data_dir)
 
         # 补充 session_mgr 的 UI 回调（需要 ui 先创建）
         session_mgr.summary_anim_start = lambda: ui.begin_summarizing()

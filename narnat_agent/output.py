@@ -23,6 +23,23 @@ from .config.defaults import DEFAULT_CONTEXT_WINDOW
 
 _stdout_lock = threading.Lock()
 
+# ── 纯文本模式（headless 一次性任务）──
+# 置 True 后：_Color 求值为空串（ANSI 颜色全部消失）、write() 不输出行首 \r。
+# 渲染结构（表格/列表/缩进）保留，仅去色。
+_PLAIN = False
+
+
+def set_plain(plain: bool = True) -> None:
+    """切换纯文本输出模式。headless（nn -p）启动时调用。"""
+    global _PLAIN
+    _PLAIN = plain
+
+
+def is_plain() -> bool:
+    """查询纯文本输出模式（渲染器等需运行时判断，不能 import 值快照）"""
+    return _PLAIN
+
+
 # VT 重申所需的缓存句柄（Windows 控制台），None 表示不适用/不可用
 _vt_handle = None
 _ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
@@ -83,8 +100,12 @@ _enable_vt_on_windows()
 
 def write(text: str) -> None:
     with _stdout_lock:
-        _assert_vt()
-        sys.stdout.write("\r" + text)
+        if _PLAIN:
+            # 纯文本模式：无VT重申、无行首\r（重定向到文件时保持干净）
+            sys.stdout.write(text)
+        else:
+            _assert_vt()
+            sys.stdout.write("\r" + text)
         sys.stdout.flush()
 
 
@@ -177,7 +198,7 @@ def _hex_to_ansi(hex_str: str, bg: bool = False) -> str:
 class _Color:
     __slots__ = ('_value',)
     def __init__(self, value: str): self._value = value
-    def __str__(self):  return self._value
+    def __str__(self):  return "" if _PLAIN else self._value
     def __repr__(self): return self._value
 
 

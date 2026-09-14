@@ -33,6 +33,7 @@ from .colors import (
     UI_SEPARATOR,
     _stdout_write,
 )
+from ..output import is_plain
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -277,8 +278,8 @@ def _wrap_cell(ansi_text: str, max_width: int) -> List[str]:
 
         if current_width + cw > max_width:
             # 超出宽度，换行
-            # 当前行追加重置，避免颜色泄漏到后续内容
-            lines.append(current + "\x1b[0m")
+            # 当前行追加重置，避免颜色泄漏到后续内容（纯文本模式无颜色，跳过）
+            lines.append(current + ("" if is_plain() else "\x1b[0m"))
             # 新行开头重放活跃ANSI状态
             current = "".join(active_ansi) + ch
             current_width = cw

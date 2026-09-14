@@ -4,6 +4,7 @@
 
 import json
 import os
+import re
 import sys
 import platform
 from dataclasses import dataclass, field
@@ -555,6 +556,19 @@ def _load_user_md(config_dir: str) -> str:
         return ""
 
 
+# narnat.md 子代理隐藏区块：<!-- subagent:hide --> ... <!-- /subagent:hide -->
+# headless（nn -p）时整块剥离：子代理继承其余全部内容，唯独不感知子代理调度能力。
+_SUBAGENT_HIDE_RE = re.compile(
+    r"<!--\s*subagent:hide\s*-->.*?<!--\s*/subagent:hide\s*-->",
+    re.DOTALL,
+)
+
+
+def _strip_subagent_hidden(md: str) -> str:
+    """移除 narnat.md 中标记为 subagent:hide 的区块"""
+    return _SUBAGENT_HIDE_RE.sub("", md)
+
+
 def _build_system_prompt(model: str, user_md: str, cwd: str = "", os_name: str = "", shell_name: str = "") -> str:
     """拼接系统prompt：基础prompt + 用户自定义"""
     parts = [BASE_PROMPT_TEMPLATE.format(
@@ -568,14 +582,14 @@ def _build_system_prompt(model: str, user_md: str, cwd: str = "", os_name: str =
     return "\n".join(parts)
 
 
-def load_config(project_root: Optional[str] = None) -> Config:
+def load_config(project_root: Optional[str] = None, headless: bool = False) -> Config:
     """
     加载全部配置，返回不可变的 Config 对象。
 
     1. 定位项目根目录（含 .narnat 的目录）
     2. 创建 .narnat 子目录结构（config/ data/ logs/）
     3. 读取 narnat.json → 全部配置
-    4. 读取 narnat.md → 用户自定义指令
+    4. 读取 narnat.md → 用户自定义指令（headless 时剥离 subagent:hide 区块）
     5. 拼接系统prompt
     6. 单位转换在此完成，外部直接用最终单位
     """
@@ -656,6 +670,8 @@ def load_config(project_root: Optional[str] = None) -> Config:
 
     # 读取用户自定义指令
     user_md = _load_user_md(config_dir)
+    if headless:
+        user_md = _strip_subagent_hidden(user_md)
     system_prompt = _build_system_prompt(
         model=ai_config.model,
         user_md=user_md,

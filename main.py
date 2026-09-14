@@ -6,7 +6,7 @@ import argparse
 import sys
 import os
 
-__version__ = "15.9.2"
+__version__ = "15.9.3"
 
 
 def main():
@@ -14,6 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description="Narnat Agent - 代码智能体")
     parser.add_argument("-d", "--debug", action="store_true", help="调试模式，记录详细日志")
     parser.add_argument("-v", "--version", action="store_true", help="显示版本号")
+    parser.add_argument("-p", "--prompt", help="headless模式：执行一次性任务后退出（纯文本输出）")
     args = parser.parse_args()
 
     if args.version:
@@ -26,6 +27,22 @@ def main():
         sys.path.insert(0, project_root)
 
     from narnat_agent.core.agent import Agent
+
+    if args.prompt is not None:
+        if not args.prompt.strip():
+            print("错误: -p 任务内容不能为空")
+            sys.exit(1)
+        # headless：stdout 显式 UTF-8（重定向/管道下中文与emoji不乱码）
+        if sys.platform == "win32":
+            try:
+                sys.stdout.reconfigure(encoding="utf-8")
+            except (AttributeError, OSError):
+                pass
+        from narnat_agent.output import set_plain
+        set_plain(True)  # headless：全局去色，输出纯文本
+        agent = Agent(debug=args.debug, headless=True)
+        agent.run_headless(args.prompt)
+        return
 
     agent = Agent(debug=args.debug)
     agent.run()

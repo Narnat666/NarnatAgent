@@ -20,8 +20,9 @@ from ..output import write as _stdout_write, X, R
 class Agent:
     """Narnat Agent 主控 — 纯编排者"""
 
-    def __init__(self, project_root: Optional[str] = None, debug: bool = False):
-        self._parts: AssemblyResult = Assembly.build(project_root, debug)
+    def __init__(self, project_root: Optional[str] = None, debug: bool = False,
+                 headless: bool = False):
+        self._parts: AssemblyResult = Assembly.build(project_root, debug, headless)
         self._config = self._parts.config
         self._logger = self._parts.logger
         self._ui = self._parts.ui
@@ -171,3 +172,74 @@ class Agent:
             from ..tools.serial import cleanup as _serial_cleanup
             _terminal_cleanup()
             _serial_cleanup()
+
+    def run_headless(self, task: str):
+        """headless 一次性任务执行（nn -p 入口）。
+
+        注入任务 → 目标模式自动续跑 → GoalComplete/轮数上限收尾 → 退出。
+        与 run() 的区别：不读用户输入、不自动保存会话、不查余额、不显示统计栏。
+        输出经 HeadlessStream（纯文本，无颜色）。
+        """
+        self._logger.info("core.agent", f"Agent启动(headless), model={self._config.ai.model}")
+
+        try:
+            # 开启目标模式：注入 GoalComplete 工具（轮数上限用配置默认值）
+            self._mgr._goal_enabled = True
+            self._mgr._goal_max_rounds = 0
+            if getattr(self._mgr, '_set_goal_tool', None):
+                self._mgr._set_goal_tool(True)
+            goal_limit = self._config.ai.goal_max_rounds
+            goal_task = task.strip()
+
+            # 注入任务
+            self._msg_manager.repair()
+            self._msg_manager.append_user(goal_task)
+            self._logger.info("core.agent", f"任务注入: {goal_task[:100]}")
+
+            goal_round = 0
+            while True:
+                # 压缩检查（与 run() 对齐：上下文超限时先压缩再继续）
+                if self._context.need_compress():
+                    if not self._compression.compress(goal_task):
+                        break
+
+                stream = self._ui.create_stream()
+                try:
+                    self._agent_loop.run(stream, goal_mode=True)
+                except Exception as e:
+                    self._logger.error("core.agent", f"异常: {e}")
+                    stream.abort(message=f"⚠ 程序异常，本轮回复已停止: {e}")
+                    break
+
+                goal_round += 1
+                if stream.aborted:
+                    break  # 程序异常等非正常结束：保持现状退出
+                if not self._agent_loop._last_round_ok:
+                    break  # 出错/空回复等非正常结束：保持现状退出
+                if self._parts.tool_context.goal_complete:
+                    # AI已调用GoalComplete声明完成：复位标记，结束续跑
+                    self._parts.tool_context.goal_complete = False
+                    break
+                if goal_round >= goal_limit:
+                    # 达到轮数上限：注入收尾指令，让AI总结后结束
+                    self._logger.info("core.agent", f"目标模式达到轮数上限({goal_limit})，停止续跑")
+                    self._msg_manager.append_user(
+                        f"【系统提示】目标模式已达到轮数上限（{goal_limit}轮），任务尚未完成。"
+                        "请向用户总结当前进度、已完成工作和未完成原因，无需继续执行新任务。"
+                    )
+                    stream = self._ui.create_stream()
+                    self._agent_loop.run(stream, goal_mode=True, force_final=True)
+                    break
+                # 任务未完成：注入继续消息，再跑一轮
+                self._logger.info("core.agent", f"目标模式自动续跑: 第{goal_round}轮完成，继续")
+                self._msg_manager.append_user(
+                    f"【自动续跑】已完成{goal_round}轮，任务：{goal_task}\n"
+                    "请继续推进任务。若任务已完成，请调用GoalComplete工具声明完成。"
+                )
+        finally:
+            self._parts.dispatcher._executor.shutdown(wait=False)
+            from ..tools.terminal import cleanup as _terminal_cleanup
+            from ..tools.serial import cleanup as _serial_cleanup
+            _terminal_cleanup()
+            _serial_cleanup()
+            self._logger.close()
