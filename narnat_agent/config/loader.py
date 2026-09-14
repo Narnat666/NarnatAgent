@@ -197,14 +197,38 @@ def _is_nuitka_onefile() -> bool:
 
 
 def _find_narnat_exe_dir() -> Optional[str]:
-    """通过 sys.argv[0] 获取真实 exe 所在目录。
+    """获取真实 exe 所在目录（Nuitka onefile 下指打包前的原始 exe 位置）。
 
-    Nuitka onefile 模式下 sys.argv[0] 保存原始 exe 路径，
-    不依赖名字、不依赖 PATH，改名也能正常工作。
+    定位顺序（由可靠到不可靠）：
+    1. Windows: GetModuleFileNameW —— 内核返回模块真实路径，
+       不受 argv[0] 影响。PATH 裸名调用（`nn`）时 argv[0]="nn"，
+       仅靠它会把项目根错定位到 onefile 临时解压目录。
+    2. argv[0] 为存在的完整路径（直接 `D:\\x\\nn.exe` 调用）。
+    3. argv[0] 为裸名：用 PATH 搜索解析（shutil.which）。
     """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            buf = ctypes.create_unicode_buffer(1024)
+            n = ctypes.windll.kernel32.GetModuleFileNameW(None, buf, 1024)
+            if n and buf.value:
+                path = buf.value
+                if os.path.isfile(path):
+                    return os.path.dirname(path)
+        except Exception:
+            pass
+
     argv0 = sys.argv[0]
     if argv0 and os.path.isfile(argv0):
         return os.path.dirname(os.path.abspath(argv0))
+    if argv0 and not os.path.dirname(argv0):
+        try:
+            import shutil
+            resolved = shutil.which(argv0)
+            if resolved and os.path.isfile(resolved):
+                return os.path.dirname(os.path.abspath(resolved))
+        except Exception:
+            pass
     return None
 
 

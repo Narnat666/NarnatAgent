@@ -511,6 +511,8 @@ class _AnthropicBackend:
 
                 # 不重试
                 if status in (400, 401, 403, 404, 422):
+                    # stream 模式需先 read() 才能访问 text（否则抛 ResponseNotRead 掩盖真实错误）
+                    resp.read()
                     err_text = resp.text
                     resp.close()
                     client.close()
@@ -556,6 +558,7 @@ class _AnthropicBackend:
 
                 # 成功
                 if status != 200:
+                    resp.read()
                     err_text = resp.text
                     resp.close()
                     client.close()
