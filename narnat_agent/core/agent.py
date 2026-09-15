@@ -184,6 +184,10 @@ class Agent:
         """
         self._logger.info("core.agent", f"Agent启动(headless), model={self._config.ai.model}")
 
+        # 哨兵变量在 try 外初始化：finally 无条件引用，任何异常路径都必须能打印 [NN_DONE]
+        goal_round = 0
+        end_reason = "unknown"
+
         try:
             # 开启目标模式：注入 GoalComplete 工具（max_rounds>0 临时覆盖，否则用配置默认值）
             self._mgr._goal_enabled = True
@@ -198,11 +202,11 @@ class Agent:
             self._msg_manager.append_user(goal_task)
             self._logger.info("core.agent", f"任务注入: {goal_task[:100]}")
 
-            goal_round = 0
             while True:
                 # 压缩检查（与 run() 对齐：上下文超限时先压缩再继续）
                 if self._context.need_compress():
                     if not self._compression.compress(goal_task):
+                        end_reason = "compress_failed"
                         break
 
                 stream = self._ui.create_stream()
@@ -211,16 +215,20 @@ class Agent:
                 except Exception as e:
                     self._logger.error("core.agent", f"异常: {e}")
                     stream.abort(message=f"⚠ 程序异常，本轮回复已停止: {e}")
+                    end_reason = "aborted"
                     break
 
                 goal_round += 1
                 if stream.aborted:
+                    end_reason = "aborted"
                     break  # 程序异常等非正常结束：保持现状退出
                 if not self._agent_loop._last_round_ok:
+                    end_reason = "round_failed"
                     break  # 出错/空回复等非正常结束：保持现状退出
                 if self._parts.tool_context.goal_complete:
                     # AI已调用GoalComplete声明完成：复位标记，结束续跑
                     self._parts.tool_context.goal_complete = False
+                    end_reason = "goal_complete"
                     break
                 if goal_round >= goal_limit:
                     # 达到轮数上限：注入收尾指令，让AI总结后结束
@@ -231,6 +239,7 @@ class Agent:
                     )
                     stream = self._ui.create_stream()
                     self._agent_loop.run(stream, goal_mode=True, force_final=True)
+                    end_reason = "round_limit"
                     break
                 # 任务未完成：注入继续消息，再跑一轮
                 self._logger.info("core.agent", f"目标模式自动续跑: 第{goal_round}轮完成，继续")
@@ -239,6 +248,9 @@ class Agent:
                     "请继续推进任务。若任务已完成，请调用GoalComplete工具声明完成。"
                 )
         finally:
+            # 完成信号哨兵：所有退出路径必经此处。父代理轮询结果文件时
+            # 以该行为准判定"子代理已结束"及结束原因（goal_complete/round_limit/aborted等）。
+            _stdout_write(f"\n[NN_DONE] reason={end_reason} rounds={goal_round}\n")
             self._parts.dispatcher._executor.shutdown(wait=False)
             from ..tools.terminal import cleanup as _terminal_cleanup
             from ..tools.serial import cleanup as _serial_cleanup
