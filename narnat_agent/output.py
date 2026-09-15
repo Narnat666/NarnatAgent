@@ -40,6 +40,21 @@ def is_plain() -> bool:
     return _PLAIN
 
 
+# ── 工具调度日志开关（headless 用）──
+# True=静默：不显示 [执行命令]/[读取]/diff/计划列表 等工具调度摘要，
+# 只输出 AI 文本（最终答复）。False=显示全部调度日志。
+_QUIET_TOOLS = False
+
+
+def set_quiet_tools(quiet: bool = True) -> None:
+    global _QUIET_TOOLS
+    _QUIET_TOOLS = quiet
+
+
+def is_quiet_tools() -> bool:
+    return _QUIET_TOOLS
+
+
 # VT 重申所需的缓存句柄（Windows 控制台），None 表示不适用/不可用
 _vt_handle = None
 _ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004

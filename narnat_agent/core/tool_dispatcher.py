@@ -15,7 +15,7 @@ from ..tools.terminal import resolve_dev_display as _dev_display
 from ..tools.serial import kill_active_exec as _kill_serial_exec
 from ..tools.tool_context import ToolContext
 from ..tools.exec_signal import has_error, strip_tags
-from ..output import write as _stdout_write, D, R, X
+from ..output import write as _stdout_write, D, R, X, is_quiet_tools
 
 
 def _local_hostname() -> str:
@@ -363,7 +363,9 @@ class ToolDispatcher:
         return empty_label
 
     def _show_tool_call(self, name: str, arguments: dict):
-        """在终端显示工具调用摘要"""
+        """在终端显示工具调用摘要（静默模式跳过）"""
+        if is_quiet_tools():
+            return
         label = ToolDispatcher.TOOL_LABELS.get(name, name)
         summary = ""
         if name in ToolDispatcher.FILE_PATH_TOOLS:
@@ -447,13 +449,17 @@ class ToolDispatcher:
             _stdout_write(f"  {D}[{label}]{R}\n")
 
     def _show_diff(self, color_diff: str):
-        """在终端展示着色diff"""
+        """在终端展示着色diff（静默模式跳过）"""
+        if is_quiet_tools():
+            return
         buf = "\n".join(f"  {line}" for line in color_diff.split("\n"))
         # 空编辑的"[无差异]"是单行提示，其后不再加空行，直接接后续输出
         tail = "\n" if "\n" not in color_diff and "[无差异]" in color_diff else "\n\n"
         _stdout_write(buf + tail)
 
     def _show_tool_failed(self, name: str):
-        """工具执行失败：终端显示一行红色失败提示，具体原因只进AI上下文"""
+        """工具执行失败：终端显示一行红色失败提示（静默模式跳过）"""
+        if is_quiet_tools():
+            return
         label = ToolDispatcher.TOOL_LABELS.get(name, name)
         _stdout_write(f"  {X}[{label}失败]{R}\n")

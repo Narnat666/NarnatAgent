@@ -6,7 +6,7 @@
 
 import sys
 
-from ..output import write as _stdout_write, B, D, E, G, R, Y
+from ..output import write as _stdout_write, B, D, E, G, R, Y, is_quiet_tools
 
 
 class SafetyCallbacks:
@@ -28,6 +28,8 @@ class TodoCallbacks:
 
     @staticmethod
     def on_todo_update(todos):
+        if is_quiet_tools():
+            return
         for t in todos:
             status = t["status"]
             content = t.get("content", "")

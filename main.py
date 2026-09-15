@@ -6,7 +6,7 @@ import argparse
 import sys
 import os
 
-__version__ = "15.9.5"
+__version__ = "15.9.6"
 
 
 def main():
@@ -17,6 +17,8 @@ def main():
     parser.add_argument("-p", "--prompt", help="headless模式：执行一次性任务后退出（纯文本输出）")
     parser.add_argument("-g", "--goal-rounds", type=int, default=0,
                         help="headless模式：自动续跑轮数上限（默认用配置值，-p 时生效）")
+    parser.add_argument("-l", "--tool-log", action="store_true",
+                        help="headless模式：显示详细工具调度日志（默认仅输出AI最终答复文本，-p 时生效）")
     args = parser.parse_args()
 
     if args.version:
@@ -40,8 +42,9 @@ def main():
                 sys.stdout.reconfigure(encoding="utf-8")
             except (AttributeError, OSError):
                 pass
-        from narnat_agent.output import set_plain
+        from narnat_agent.output import set_plain, set_quiet_tools
         set_plain(True)  # headless：全局去色，输出纯文本
+        set_quiet_tools(not args.tool_log)  # headless：默认静默工具调度日志，-l 开启全量
         if args.goal_rounds < 0:
             print("错误: -g 轮数上限必须为正整数")
             sys.exit(1)
