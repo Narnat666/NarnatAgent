@@ -57,6 +57,9 @@ class BashRuntime:
     # ESC打断标记，kill_active()设置，execute()检查后清除
     interrupted = False
 
+    # 读线程收尾宽限（秒），供 _drain_readers 共享一个截止（详见该函数）
+    DRAIN_GRACE = 0.3
+
     PLATFORM_LABEL = "Windows(cmd)" if sys.platform == "win32" else "Linux/macOS(bash)"
 
 
@@ -323,6 +326,21 @@ def _kill_proc_tree(proc: subprocess.Popen):
             pass
 
 
+def _drain_readers(*threads) -> None:
+    """读线程收尾：共享一个宽限，而非逐个 join 各自的超时。
+
+    `start /b` 分离出的孙进程会继承管道写端，cmd.exe 退出后管道仍不 EOF，
+    读线程一直阻塞在 read()；逐个 join(timeout=5) 会串成 10 秒天花板，
+    命令早已结束却仍要等满。管道背压使 cmd 退出时缓冲留存有界（毫秒级可
+    读完），故共享宽限只对"永不 EOF"的分离场景生效，正常命令零影响。
+    """
+    deadline = time.time() + BashRuntime.DRAIN_GRACE
+    for t in threads:
+        remain = deadline - time.time()
+        if remain > 0:
+            t.join(timeout=remain)
+
+
 def _truncate_output(text: str, max_chars: int) -> str:
     """截断输出：保留头部和尾部（尾部含提示符，对AI判断shell状态至关重要），中段提示"""
     if max_chars <= 0:
@@ -543,14 +561,13 @@ def execute(
             time.sleep(0.05)
 
         # 先杀进程树再收尾输出："超时/中断"的语义是命令已被终止。
-        # 若先 join 读线程(最多5秒)，进程在 join 窗口内自然跑完时会
-        # 输出完整结果却仍标注"已终止"，语义矛盾且每次超时白等5秒。
+        # 若先 join 读线程，进程在 join 窗口内自然跑完时会输出完整结果
+        # 却仍标注"已终止"，语义矛盾且每次超时白等收尾宽限。
         if was_interrupted or timed_out:
             _kill_proc_tree(proc)
             proc.wait(timeout=5)
 
-        for t in (t_out, t_err):
-            t.join(timeout=5.0)
+        _drain_readers(t_out, t_err)
 
         stdout = b"".join(stdout_chunks)
         stderr = b"".join(stderr_chunks)
@@ -641,8 +658,7 @@ def _collect_proc_output(proc: subprocess.Popen, timeout: int, max_output_chars:
             _kill_proc_tree(proc)
             proc.wait(timeout=5)
 
-        for t in (t_out, t_err):
-            t.join(timeout=5.0)
+        _drain_readers(t_out, t_err)
 
         out = _decode_output(b"".join(stdout_chunks))
         err = _decode_output(b"".join(stderr_chunks))
@@ -949,8 +965,7 @@ def _execute_segments(segments: list, timeout: int,
                 _kill_proc_tree(proc)
                 proc.wait(timeout=5)
 
-            for t in (t_out, t_err):
-                t.join(timeout=5.0)
+            _drain_readers(t_out, t_err)
 
             if was_interrupted:
                 break
