@@ -412,7 +412,7 @@ def execute(
         timeout = min(timeout, _tool_context.max_timeout_seconds)
 
     # ═════════════════════════════════════════════════════════════
-    # Windows: cmd /c 子进程（stdin 继承 TTY，避免外部工具因管道 stdin 阻塞）
+    # Windows: cmd /c 子进程（stdin 隔离为 DEVNULL，防止挂起子进程偷吃ESC）
     # ═════════════════════════════════════════════════════════════
     if sys.platform == "win32":
         # 入口清零：上轮残留的ESC中断标志不污染本轮（覆盖单段/多段全部子路径）
@@ -482,9 +482,13 @@ def execute(
     shell_cmd = [shell, "-c", command]
 
     # 用新进程组，确保能 killpg 杀整棵树
+    # stdin 隔离为 DEVNULL：Shell 是纯管道语义（不支持交互，交互走
+    # terminal/serial 工具），且挂起子进程继承控制台 stdin 会偷吃用户
+    # 的 ESC 按键导致打断失效（同 Windows 分支的修复）
     try:
         proc = subprocess.Popen(
             shell_cmd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=os.getcwd(),
@@ -681,11 +685,14 @@ def _format_result(rc: int, out: str, err: str, status: str,
 
 def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
     """Windows: shell=True 起子进程。cmd 交互式解析（引号按用户预期处理），
-    stdin 继承控制台（避免 eza 等工具因管道 stdin 阻塞）。"""
+    stdin 隔离为 DEVNULL：防止挂起子进程（cooked 行读共享控制台输入队列）
+    偷吃用户的 ESC 按键导致打断失效；DEVNULL 对读 stdin 的工具立即返回
+    EOF 而不阻塞（eza 等不读 stdin 的工具不受影响）。"""
     try:
         proc = subprocess.Popen(
             command,
             shell=True,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=os.getcwd(),
@@ -707,12 +714,14 @@ def _execute_py_direct(exe: str, flags: str, tail: str,
 
     载荷由 CommandLineToArgvW 规则解析：双引号内的换行/%/&/|/<等一律字面
     传给解释器，从根上规避 cmd 吞多行、改写特殊字符的问题。
+    stdin 隔离为 DEVNULL（同 _execute_win32 的 ESC 偷吃防护）。
     返回 (rc, out, err, status)，格式与 _collect_proc_output 一致。
     """
     try:
         proc = subprocess.Popen(
             f'"{exe}"{flags} -c {tail}',
             shell=False,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=os.getcwd(),
@@ -884,6 +893,7 @@ def _execute_segments(segments: list, timeout: int,
             proc = subprocess.Popen(
                 seg,
                 shell=True,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=os.getcwd(),
