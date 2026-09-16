@@ -28,7 +28,8 @@ class AgentLoop:
     def __init__(self, llm: LLMClient, msg_manager: MessageManager,
                  dispatcher: ToolDispatcher, tool_context: ToolContext,
                  stats: StatsTracker, ui: UIInterface,
-                 config: Config, logger: AgentLogger):
+                 config: Config, logger: AgentLogger,
+                 compression=None):
         self._llm = llm
         self._msg_manager = msg_manager
         self._dispatcher = dispatcher
@@ -37,6 +38,8 @@ class AgentLoop:
         self._ui = ui
         self._config = config
         self._logger = logger
+        # 溢出恢复压缩协调器（assembly 注入；None=禁用溢出恢复）
+        self._compression = compression
 
     @property
     def _thinking_label(self) -> str:
@@ -59,6 +62,7 @@ class AgentLoop:
         # 出错/中断/空回复等非正常结束不触发自动续跑。
         self._last_round_ok = False
         stream_interrupted_retries = 0  # 响应流中断（无完成标记）的自动重试计数
+        overflow_compacted = False      # 本次 run 内是否已做过溢出恢复压缩（重发再溢出则放弃）
         # 流中断重试上限 = 配置的"LLM重试次数"（每轮独立：收到正常完成标记后重置，
         # 与连接层重试语义一致，仅累计同一次中断后的连续重试）
         try:
@@ -123,6 +127,9 @@ class AgentLoop:
                 # h. 处理结束
                 if "finish_reason" in chunk:
                     parsed_finish_reason = chunk["finish_reason"]
+                    if parsed_finish_reason == "context_overflow":
+                        # 上下文超限：跳出chunk循环，走压缩恢复分支
+                        break
                     if parsed_finish_reason == "error":
                         stream.finish(
                             self._stats.input_tokens,
@@ -133,6 +140,49 @@ class AgentLoop:
                             thinking_effort=self._thinking_label,
                         )
                         return
+
+            # ── 上下文超限溢出恢复：压缩历史 → 重发请求 ──
+            # 此时 assistant 消息尚未写入历史，压缩+重发幂等安全。
+            # 每次 run 内最多恢复一次：重发仍溢出说明单条消息/系统提示词
+            # 本身超限，压不压都救不了，报错收尾防死循环。
+            if parsed_finish_reason == "context_overflow":
+                if overflow_compacted or self._compression is None:
+                    stream.feed(
+                        "\n\n⚠ 请求超出模型上下文限制。"
+                        "请尝试缩减本次输入，或 /save 保存会话后开启新对话。\n"
+                    )
+                    stream.finish(
+                        self._stats.input_tokens,
+                        self._stats.output_tokens,
+                        cache_ratio=self._stats.cache_hit_ratio,
+                        cost=self._stats.cost,
+                        balance=self._stats.balance,
+                        thinking_effort=self._thinking_label,
+                    )
+                    return
+                overflow_compacted = True
+                if self._logger:
+                    self._logger.warning("agent_loop", "请求被拒绝: 上下文超限，执行压缩恢复")
+                stream.reset_renderer()
+                stream.feed("\n⚠ 上下文超限，正在自动压缩历史…\n")
+                if self._compression.compress_no_input():
+                    if self._logger:
+                        self._logger.info("agent_loop", "压缩恢复完成，重发请求")
+                    stream.feed("  压缩完成，重试请求…\n")
+                    continue
+                stream.feed(
+                    "\n\n⚠ 自动压缩失败，请求仍超出模型上下文限制。"
+                    "请尝试缩减本次输入，或 /save 保存会话后开启新对话。\n"
+                )
+                stream.finish(
+                    self._stats.input_tokens,
+                    self._stats.output_tokens,
+                    cache_ratio=self._stats.cache_hit_ratio,
+                    cost=self._stats.cost,
+                    balance=self._stats.balance,
+                    thinking_effort=self._thinking_label,
+                )
+                return
 
             # 中断检查
             if stream.cancelled:

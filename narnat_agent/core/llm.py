@@ -92,6 +92,41 @@ def _is_retryable_http(status: int) -> bool:
     return status in (408, 409) or status >= 500
 
 
+# ── 上下文超限特征（400 响应归类，供 agent_loop 溢出恢复路径使用）──
+_CONTEXT_OVERFLOW_HINTS = (
+    "context length",
+    "context window",
+    "context_length_exceeded",
+    "context is too long",
+    "prompt is too long",
+    "too long",
+    "exceeds the maximum",
+    "maximum context",
+    "input length",
+    "超出上下文",
+    "上下文长度",
+    "超出限制",
+    "超限",
+)
+
+
+def _is_context_overflow(text: str) -> bool:
+    """识别 API 400 响应中的上下文超限特征。
+
+    提供商措辞可能随版本变化，多特征匹配兜底；命中后由上层
+    （agent_loop）归类为 context_overflow 并走压缩恢复，而非普通错误。
+    """
+    lowered = text.lower()
+    return any(hint in lowered for hint in _CONTEXT_OVERFLOW_HINTS)
+
+
+def _user_has_tool_result(user_msg: Dict[str, Any]) -> bool:
+    """转换后的 user 消息内容块里是否含有 tool_result 块。"""
+    content = user_msg.get("content")
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+
+
 def abort_active_llm_request():
     """关闭当前LLM请求的HTTP连接。"""
     resp = LLMClient._active_response
@@ -288,6 +323,13 @@ class _OpenAIBackend:
                 LLMClient._active_response = None
                 status = e.status_code
                 if status in (400, 401, 403, 404, 422):
+                    # 上下文超限单独归类：溢出恢复路径（压缩→重发）而非普通错误
+                    if status == 400 and _is_context_overflow(
+                            f"{e}{getattr(e, 'body', '')}"):
+                        if self._logger:
+                            self._logger.warning("core.llm", "API返回400: 上下文超限")
+                        yield {"finish_reason": "context_overflow"}
+                        return
                     if self._logger:
                         self._logger.error("core.llm", f"API调用失败(不可重试): {e}")
                     yield {"content": f"[错误: API调用失败({type(e).__name__}): {e}]", "finish_reason": "error"}
@@ -564,6 +606,12 @@ class _AnthropicBackend:
                     resp.close()
                     client.close()
                     LLMClient._active_response = None
+                    # 上下文超限单独归类：溢出恢复路径（压缩→重发）而非普通错误
+                    if status == 400 and _is_context_overflow(err_text):
+                        if self._logger:
+                            self._logger.warning("core.llm", "API返回400: 上下文超限")
+                        yield {"finish_reason": "context_overflow"}
+                        return
                     if self._logger:
                         self._logger.error("core.llm", f"API调用失败(不可重试): {status} {err_text[:200]}")
                     yield {"content": f"[错误: API调用失败({status}): {err_text[:200]}]", "finish_reason": "error"}
@@ -928,7 +976,23 @@ class _AnthropicBackend:
                 continue
 
             if role == "user":
-                anthropic_msgs.append({"role": "user", "content": content or ""})
+                content = content or ""
+                prev = anthropic_msgs[-1] if anthropic_msgs else None
+                if (content and prev is not None and prev["role"] == "user"
+                        and not _user_has_tool_result(prev)):
+                    # 合并纯文本连续 user（Anthropic 强制角色交替）。
+                    # 含 tool_result 的 user 消息不合并：DeepSeek 校验
+                    # tool_result 必须紧邻 tool_use（同消息插入 text 会破坏
+                    # 校验），且 tool_result 后的独立 user 已被真实API验证可接受。
+                    if isinstance(prev["content"], list):
+                        prev["content"].append({"type": "text", "text": content})
+                    else:
+                        prev["content"] = [
+                            {"type": "text", "text": prev["content"]},
+                            {"type": "text", "text": content},
+                        ]
+                else:
+                    anthropic_msgs.append({"role": "user", "content": content})
 
             elif role == "assistant":
                 tool_calls = msg.get("tool_calls")

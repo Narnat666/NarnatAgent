@@ -1,6 +1,8 @@
 """压缩协调器 —— 上下文压缩流程编排
 
 从 Agent._handle_compress() 提取。算法逻辑原样保留。
+溢出恢复入口（compress_no_input）供 agent_loop 在请求被 400 上下文超限
+拒绝时使用：压缩后追加内部继续指令，不携带新用户输入。
 """
 
 from ..config.loader import Config
@@ -10,6 +12,12 @@ from .context import ContextManager
 from ..ui.ui_design import UIInterface
 from ..ui.interrupt import _interrupt_ctrl
 from ..logger import AgentLogger
+
+# 溢出恢复压缩成功后追加的内部继续消息：告知模型历史已被压缩、任务继续。
+OVERFLOW_CONTINUE_MESSAGE = (
+    "[]对话历史过长已自动压缩，早前内容已总结为上下文成果。"
+    "请基于当前上下文直接继续推进任务，无需复述历史。"
+)
 
 
 class CompressionCoordinator:
@@ -47,6 +55,37 @@ class CompressionCoordinator:
             cancel_check=lambda: _interrupt_ctrl.is_set,
             on_interrupt=on_interrupt,
             on_llm_error=on_llm_error,
+            retain_tokens=self._config.session.retain_tokens,
+        )
+        if result:
+            self._ui.end_compressing()
+            self._context.reset()
+        return result
+
+    def compress_no_input(self) -> bool:
+        """溢出恢复压缩：请求被 400 上下文超限拒绝后调用，无新用户输入。
+
+        成功后消息以内部继续指令收尾（OpenAI 协议要求消息序列以
+        user/assistant 收尾，system 兜底不可行），调用方随后重发请求。
+        """
+        def on_interrupt():
+            self._ui.end_compressing()
+            self._context.reset()
+
+        def on_llm_error(msg):
+            self._ui.end_compressing()
+            self._logger.error("compressor", msg)
+            self._context.set_retry_soon()
+
+        self._ui.begin_compressing()
+        result = self._msg_manager.handle_compress(
+            OVERFLOW_CONTINUE_MESSAGE,
+            self._config.system_prompt,
+            self._llm,
+            cancel_check=lambda: _interrupt_ctrl.is_set,
+            on_interrupt=on_interrupt,
+            on_llm_error=on_llm_error,
+            retain_tokens=self._config.session.retain_tokens,
         )
         if result:
             self._ui.end_compressing()

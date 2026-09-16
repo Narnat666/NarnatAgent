@@ -175,6 +175,7 @@ class Assembly:
         agent_loop = AgentLoop(
             llm, msg_manager, dispatcher, tool_context,
             stats, ui, config, logger,
+            compression=compression_coordinator,
         )
 
         return AssemblyResult(

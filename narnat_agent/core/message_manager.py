@@ -6,7 +6,7 @@ MessageManager 负责消息的修复逻辑和压缩流程编排，
 
 from typing import Optional
 
-from .compressor import Compressor
+from .compressor import Compressor, select_cut_index
 from .message_list import MessageList, MessageView, SYNTHETIC_THINKING
 from ..logger import AgentLogger
 
@@ -84,9 +84,13 @@ class MessageManager:
     # ── 压缩方法（逻辑原样保留，通过 view/to_list 读取）──
 
     def handle_compress(self, pending_input: str, system_prompt: str,
-                        llm_client, cancel_check, on_interrupt, on_llm_error) -> bool:
+                        llm_client, cancel_check, on_interrupt, on_llm_error,
+                        retain_tokens: int = 0) -> bool:
         """
         处理上下文压缩。
+
+        retain_tokens: 逐字保留的近期尾部预算（启发式估价token），0=全量压缩。
+        摘要输入始终为全部历史；切点选择只决定压缩后保留哪些近期消息。
 
         Returns:
             True=压缩成功，pending_input已在messages中
@@ -94,8 +98,10 @@ class MessageManager:
         """
         self._logger.info("message_manager", f"压缩触发, messages={len(self._messages)}条")
 
-        # 构建压缩请求
-        compress_messages = self._compressor.build_compress_messages(self._messages.view().to_list())
+        full_messages = self._messages.view().to_list()
+
+        # 构建压缩请求（全部历史 + 指令，摘要质量不受尾部切分影响）
+        compress_messages = self._compressor.build_compress_messages(full_messages)
 
         # 发送压缩请求，收集AI输出
         summary_content = []
@@ -122,11 +128,23 @@ class MessageManager:
             return False
 
         # 先完整构建新会话（含用户问题），再原子替换旧会话
-        new_messages = self._compressor.build_new_session_messages(system_prompt, summary)
-        new_messages.append({"role": "user", "content": pending_input})
+        cut = select_cut_index(full_messages, retain_tokens)
+        tail = full_messages[cut:] if cut is not None else []
+        new_messages = self._compressor.build_new_session_messages(system_prompt, summary, tail)
+        if tail and tail[-1].get("role") == "user":
+            # 防连续 user（Anthropic 严格后端强制角色交替）：
+            # 尾部末条已是 user（如溢出场景的触发输入）时把新输入合并进该条
+            merged = dict(tail[-1])
+            merged["content"] = (tail[-1].get("content") or "") + "\n\n" + pending_input
+            new_messages[-1] = merged
+        else:
+            new_messages.append({"role": "user", "content": pending_input})
         self._messages.replace_all(new_messages)
 
-        self._logger.info("message_manager", "压缩成功，新会话已创建")
+        self._logger.info(
+            "message_manager",
+            f"压缩成功，新会话已创建, 保留尾部={len(tail)}条",
+        )
         return True
 
     def clear_and_rebuild(self, system_prompt: str, summary_text: str) -> None:

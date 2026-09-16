@@ -19,6 +19,7 @@ from .defaults import (
     DEFAULT_PROTOCOL, DEFAULT_THINKING_ENABLED, DEFAULT_THINKING_EFFORT,
     DEFAULT_THINKING_PASSBACK,
     DEFAULT_CONTEXT_WINDOW, DEFAULT_SHOW_RATIO, DEFAULT_WARN_RATIO, DEFAULT_COMPRESS_RATIO,
+    DEFAULT_COMPRESS_RETAIN_TOKENS,
     DEFAULT_GIT_SKIP, DEFAULT_RM_SKIP,
     DEFAULT_REQUIRE_PLAN, DEFAULT_MIN_TOOLS,
     DEFAULT_MAX_TOOL_OUTPUT_KB,
@@ -94,6 +95,7 @@ class SessionConfig:
     show_ratio: bool = DEFAULT_SHOW_RATIO
     warn_ratio: int = DEFAULT_WARN_RATIO
     compress_ratio: int = DEFAULT_COMPRESS_RATIO
+    retain_tokens: int = DEFAULT_COMPRESS_RETAIN_TOKENS  # 压缩保留尾部预算（token），0=不保留
 
 
 @dataclass(frozen=True)
@@ -678,6 +680,7 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
                             "占比显示": DEFAULT_SHOW_RATIO,
                             "告警": DEFAULT_WARN_RATIO,
                             "压缩": DEFAULT_COMPRESS_RATIO,
+                            "保留尾部": DEFAULT_COMPRESS_RETAIN_TOKENS,
                         },
                         "计划": {},
                         "忽略目录": DEFAULT_IGNORE_DIRS,
@@ -713,6 +716,11 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
     # ── 单位转换在此完成 ──
     max_output_kb = int(data.get("工具", {}).get("输出上限KB", DEFAULT_MAX_TOOL_OUTPUT_KB))
     max_output_chars = max_output_kb * 1024 if max_output_kb > 0 else 0
+
+    # 压缩保留尾部：0 是合法值（关闭保留），不能用 `or` 兜底；负数按 0 处理
+    _retain_raw = _coerce(data.get("压缩", {}).get("保留尾部"), int)
+    compress_retain = (DEFAULT_COMPRESS_RETAIN_TOKENS if _retain_raw is None
+                       else max(0, _retain_raw))
 
     # 补充 AIConfig 的 retry_count（从JSON读取，不在 _build_ai_config 中处理）
     ai_config = AIConfig(
@@ -763,6 +771,7 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
             show_ratio=bool(data.get("压缩", {}).get("占比显示", DEFAULT_SHOW_RATIO)),
             warn_ratio=_coerce(data.get("压缩", {}).get("告警"), int) or DEFAULT_WARN_RATIO,
             compress_ratio=_coerce(data.get("压缩", {}).get("压缩"), int) or DEFAULT_COMPRESS_RATIO,
+            retain_tokens=compress_retain,
         ),
         skills=SkillConfig(project_roots=_parse_project_skill_roots(data)),
         pricing=pricing_config,
