@@ -6,7 +6,7 @@ import argparse
 import sys
 import os
 
-__version__ = "16.0.8"
+__version__ = "16.0.9"
 
 
 def main():
@@ -48,8 +48,17 @@ def main():
         if args.goal_rounds < 0:
             print("错误: -g 轮数上限必须为正整数")
             sys.exit(1)
-        agent = Agent(debug=args.debug, headless=True)
-        agent.run_headless(args.prompt, max_rounds=args.goal_rounds)
+        # 子会话后台日志隔离：headless/nn 进程 cwd 与主会话相同，若不隔离，
+        # 其会话级 prepare/cleanup 会误清主会话的 .background 日志目录。
+        import shutil
+        import tempfile
+        _bg_root = tempfile.mkdtemp(prefix="narnat_bg_")
+        os.environ["NARNAT_BG_ROOT"] = _bg_root
+        try:
+            agent = Agent(debug=args.debug, headless=True)
+            agent.run_headless(args.prompt, max_rounds=args.goal_rounds)
+        finally:
+            shutil.rmtree(_bg_root, ignore_errors=True)
         return
 
     agent = Agent(debug=args.debug)

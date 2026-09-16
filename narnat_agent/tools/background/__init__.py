@@ -53,11 +53,17 @@ STATUS_CANCELLED = "cancelled"
 # 结果目录根：首次使用时快照 cwd（此后 AI 的 cd 不影响结果路径）
 _base_dir: Optional[str] = None
 
+# 子会话隔离开关：headless/nn 子代理启动时设为独立临时目录，
+# 使其 .background 与主会话分离——子代理进程 cwd 与主会话相同，
+# 若不隔离，其 prepare/cleanup 会误清主会话的 .background 日志。
+_BG_ROOT_ENV = "NARNAT_BG_ROOT"
+
 
 def _root_dir() -> str:
     global _base_dir
     if _base_dir is None:
-        _base_dir = os.path.abspath(os.getcwd())
+        env_root = os.environ.get(_BG_ROOT_ENV)
+        _base_dir = os.path.abspath(env_root) if env_root else os.path.abspath(os.getcwd())
     return _base_dir
 
 
