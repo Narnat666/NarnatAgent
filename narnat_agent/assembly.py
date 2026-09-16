@@ -113,6 +113,8 @@ class Assembly:
             thinking_effort_getter=lambda: config.ai.thinking_effort,
             thinking_effort_setter=lambda v: setattr(config.ai, 'thinking_effort', v),
             thinking_options=config.ai.thinking_options,
+            thinking_passback_getter=lambda: config.ai.thinking_passback,
+            thinking_passback_setter=lambda v: setattr(config.ai, 'thinking_passback', v),
             model_getter=lambda: config.ai.model,
             model_setter=lambda v: setattr(config.ai, 'model', v),
             model_options=config.ai.model_options,

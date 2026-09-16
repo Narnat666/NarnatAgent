@@ -103,6 +103,10 @@ class ToolDispatcher:
             else:
                 serial_group.append((idx, tc_id, name, arguments))
 
+        # 计划优先：批内 TodoWrite 须在其他串行工具前执行（先定计划再动工具）。
+        # 稳定排序：TodoWrite 提到最前，其余保持原始顺序。
+        serial_group.sort(key=lambda item: item[2] != "TodoWrite")
+
         # 结果容器
         results: Dict[int, Tuple[str, str]] = {}
 
@@ -307,6 +311,12 @@ class ToolDispatcher:
         if not ctx.require_plan:
             return None
 
+        # 批内已含TodoWrite：计划要求在本批内即可满足（TodoWrite在串行组中优先执行），
+        # 不拦截。否则TodoWrite会被连坐吞掉，其tool_call结果缺失还会触发消息repair，
+        # 伪造"[用户中断]"并埋下后续请求400的隐患。
+        if any(tc["function"]["name"] == "TodoWrite" for tc in tool_calls):
+            return None
+
         non_todo_names = []
         non_todo_ids = []
         for tc in tool_calls:
@@ -377,7 +387,18 @@ class ToolDispatcher:
             fp = arguments.get("file_path", "")
             summary = f"{dev}:{fp}" if dev else fp
         elif name == "Shell":
-            summary = self._fmt_cmd(arguments.get("command", ""))
+            bg_op = arguments.get("bg", "")
+            if arguments.get("background"):
+                summary = f"后台提交 {self._fmt_cmd(arguments.get('command', ''))}"
+            elif bg_op == "status":
+                summary = "后台状态"
+            elif bg_op == "wait":
+                t = arguments.get("timeout", "")
+                summary = "等待后台任务" + (f"(≤{t}s)" if t else "")
+            elif bg_op == "cancel":
+                summary = f"取消后台任务 bg{arguments.get('id', '?')}"
+            else:
+                summary = self._fmt_cmd(arguments.get("command", ""))
         elif name == "Terminal":
             action = arguments.get("action", "")
             if not action and arguments.get("command", ""):

@@ -17,6 +17,7 @@ from .defaults import (
     DEFAULT_IGNORE_DIRS,
     DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL,
     DEFAULT_PROTOCOL, DEFAULT_THINKING_ENABLED, DEFAULT_THINKING_EFFORT,
+    DEFAULT_THINKING_PASSBACK,
     DEFAULT_CONTEXT_WINDOW, DEFAULT_SHOW_RATIO, DEFAULT_WARN_RATIO, DEFAULT_COMPRESS_RATIO,
     DEFAULT_GIT_SKIP, DEFAULT_RM_SKIP,
     DEFAULT_REQUIRE_PLAN, DEFAULT_MIN_TOOLS,
@@ -44,6 +45,7 @@ class AIConfig:
     max_tokens: Optional[int] = None
     thinking_enabled: bool = DEFAULT_THINKING_ENABLED
     thinking_effort: str = DEFAULT_THINKING_EFFORT
+    thinking_passback: bool = DEFAULT_THINKING_PASSBACK  # 思考回传开关（由 /thinkback 命令修改）
     thinking_options: dict = field(default_factory=lambda: {"high": "高", "max": "全开"})
     context_window: int = DEFAULT_CONTEXT_WINDOW   # 模型上下文窗口（token数），≤0 视为无效
     retry_count: int = 3
@@ -365,13 +367,14 @@ def _build_ai_config(data: dict) -> AIConfig:
     ai = data.get("智能体", {})
 
     protocol = ai.get("协议", DEFAULT_PROTOCOL)
+    base_url = ai.get("接口地址", DEFAULT_BASE_URL)
+    model, model_options = _parse_model_config(ai.get("模型"))
 
     thinking_cfg = ai.get("思考", {})
     thinking_enabled = bool(thinking_cfg.get("启用", DEFAULT_THINKING_ENABLED))
     thinking_effort = thinking_cfg.get("强度", DEFAULT_THINKING_EFFORT)
+    thinking_passback = bool(thinking_cfg.get("回传", DEFAULT_THINKING_PASSBACK))
     thinking_options = thinking_cfg.get("强度选项", {"high": "高", "max": "全开"})
-
-    model, model_options = _parse_model_config(ai.get("模型"))
 
     # 上下文窗口：缺失/非法 → 默认；显式 ≤0 → 保留原值（下游视为无效，占比显示 --）
     parsed_cw = _coerce(ai.get("上下文窗口大小"), int)
@@ -379,7 +382,7 @@ def _build_ai_config(data: dict) -> AIConfig:
 
     return AIConfig(
         api_key=ai.get("接口密钥", DEFAULT_API_KEY),
-        base_url=ai.get("接口地址", DEFAULT_BASE_URL),
+        base_url=base_url,
         model=model,
         model_options=model_options,
         protocol=protocol,
@@ -387,6 +390,7 @@ def _build_ai_config(data: dict) -> AIConfig:
         max_tokens=_coerce(ai.get("最大输出token数"), int),
         thinking_enabled=thinking_enabled,
         thinking_effort=thinking_effort,
+        thinking_passback=thinking_passback,
         thinking_options=thinking_options,
         context_window=context_window,
         goal_max_rounds=_coerce(ai.get("目标模式最大轮数"), int) or DEFAULT_GOAL_MAX_ROUNDS,
@@ -721,6 +725,7 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
         max_tokens=ai_config.max_tokens,
         thinking_enabled=ai_config.thinking_enabled,
         thinking_effort=ai_config.thinking_effort,
+        thinking_passback=ai_config.thinking_passback,
         thinking_options=ai_config.thinking_options,
         context_window=ai_config.context_window,
         retry_count=int(data.get("智能体", {}).get("LLM重试次数", 3)),

@@ -37,6 +37,9 @@ class Agent:
 
     def run(self):
         """主循环"""
+        # 会话开始预清：清空上次异常退出的后台残留（正常退出由 finally 硬清理）
+        from ..tools.background import prepare as _bg_prepare
+        _bg_prepare()
         self._ui.start()
         self._logger.info("core.agent", f"Agent启动, model={self._config.ai.model}")
 
@@ -79,6 +82,8 @@ class Agent:
                 self._parts.tool_context.goal_complete = False
                 # 收尾软提醒标志同步复位：新任务允许再次提醒一次
                 self._parts.tool_context.todo_reminded = False
+                # 后台任务软提醒标志同步复位：新任务允许再次提醒一次
+                self._parts.tool_context.bg_reminded = False
                 # 新任务翻篇：清空上一任务的计划状态。旧计划未勾选项属于已结案任务
                 # （AI已向用户说明无法完成/跳过原因），不清空会在新任务收尾时误触发提醒
                 self._parts.tool_context.current_todos = []
@@ -170,8 +175,10 @@ class Agent:
             self._parts.dispatcher._executor.shutdown(wait=False)
             from ..tools.terminal import cleanup as _terminal_cleanup
             from ..tools.serial import cleanup as _serial_cleanup
+            from ..tools.background import cleanup_all as _bg_cleanup
             _terminal_cleanup()
             _serial_cleanup()
+            _bg_cleanup()
 
     def run_headless(self, task: str, max_rounds: int = 0):
         """headless 一次性任务执行（nn -p 入口）。
@@ -183,6 +190,10 @@ class Agent:
         max_rounds: 自动续跑轮数上限，>0 时覆盖配置默认值（nn -g 参数）。
         """
         self._logger.info("core.agent", f"Agent启动(headless), model={self._config.ai.model}")
+
+        # 会话开始预清：清空上次异常退出的后台残留（与 run() 一致）
+        from ..tools.background import prepare as _bg_prepare
+        _bg_prepare()
 
         # 哨兵变量在 try 外初始化：finally 无条件引用，任何异常路径都必须能打印 [NN_DONE]
         goal_round = 0
@@ -254,6 +265,8 @@ class Agent:
             self._parts.dispatcher._executor.shutdown(wait=False)
             from ..tools.terminal import cleanup as _terminal_cleanup
             from ..tools.serial import cleanup as _serial_cleanup
+            from ..tools.background import cleanup_all as _bg_cleanup
             _terminal_cleanup()
             _serial_cleanup()
+            _bg_cleanup()
             self._logger.close()

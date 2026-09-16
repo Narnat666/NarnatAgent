@@ -321,6 +321,14 @@ def _cmd_thinking(args: str, mgr) -> CommandResult:
     return CommandResult.HANDLED
 
 
+@_register("thinkback")
+def _cmd_thinkback(args: str, mgr) -> CommandResult:
+    """思考回传开关：/thinkback 查状态，/thinkback on|off 切换"""
+    result = mgr.on_thinkback(args.strip() if args else "")
+    _stdout_write(f"  {CMD_HIGHLIGHT}{result}{R}\n")
+    return CommandResult.HANDLED
+
+
 @_register("mode")
 def _cmd_mode(args: str, mgr) -> CommandResult:
     result = mgr.on_mode(args.strip() if args else "")

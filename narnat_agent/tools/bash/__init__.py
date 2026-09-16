@@ -13,7 +13,7 @@ import threading
 import time
 from typing import Optional
 
-from ..exec_signal import rc_line, error_line, tag_error
+from ..exec_signal import rc_line, error_line, tag_error, safe_cut_points
 
 
 class BashRuntime:
@@ -172,15 +172,28 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Shell",
-        "description": f"本地Shell — 在{BashRuntime.PLATFORM_LABEL}执行命令。",
+        "description": (
+            f"本地Shell — 在{BashRuntime.PLATFORM_LABEL}执行命令。\n"
+            "前台: 直接执行 command，同步等待完成。\n"
+            "后台: background=true 提交后台任务，立即返回 bgN 编号 "
+            ".background/bgN.log（用 Read/Grep 读取该文件，编号与文件一一对应；"
+            "输出随任务运行尽力实时落盘——Linux 实时，Windows cmd 管道输出按块缓冲、可能到任务结束才可见）；\n"
+            "  bg=\"status\" 查看所有后台任务状态（编号/状态/退出码/输出大小/结果路径）；\n"
+            "  bg=\"wait\" 挂起等待任意后台任务完成——有任务完成立即返回，超时(timeout参数)返回内容即最新状态快照；\n"
+            "  bg=\"cancel\" + id=N 取消 bgN（杀进程树，已产出内容保留可读）。\n"
+            "后台并发上限8个(bg1~bg8，终态槽位自动释放复用，复用前旧结果自动归档为 bgN.log.N.prev 仍可 Read 读取、不丢失)，会话结束自动清理全部后台任务。\n"
+        ),
         "parameters": {
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "命令"},
-                "timeout": {"type": "integer", "description": "超时秒数（正整数，默认120，超时后命令会被终止）"},
-                "max_output_chars": {"type": "integer", "description": "最大输出字符数（正整数，默认4000）"},
+                "command": {"type": "string", "description": "命令（前台执行时必填；bg=status/wait 时可省略）"},
+                "timeout": {"type": "integer", "description": "前台=超时秒数（正整数，默认120，超时后命令被终止）；bg=wait 时=最长等待秒数"},
+                "max_output_chars": {"type": "integer", "description": "最大输出字符数（正整数，默认4000，仅前台命令生效）"},
+                "background": {"type": "boolean", "description": "true=命令在后台执行，立即返回 bgN 编号（不阻塞），结果写入 .background/bgN.log"},
+                "bg": {"type": "string", "description": "后台任务管理操作: status / wait / cancel（cancel 配合 id）"},
+                "id": {"type": "integer", "description": "后台任务编号（bg=cancel 时必填，如 id=3 取消 bg3）"},
             },
-            "required": ["command"],
+            "required": [],
         },
     },
 }
@@ -342,17 +355,21 @@ def _drain_readers(*threads) -> None:
 
 
 def _truncate_output(text: str, max_chars: int) -> str:
-    """截断输出：保留头部和尾部（尾部含提示符，对AI判断shell状态至关重要），中段提示"""
+    """截断输出：保留头部和尾部（尾部含提示符，对AI判断shell状态至关重要），中段提示。
+
+    切点先做标签吸附（safe_cut_points）：框架标签不允许被切开——残缺
+    片段无法被 strip_tags 匹配，会泄漏给AI并让失败判定失效。
+    """
     if max_chars <= 0:
         return error_line("max_output_chars需为正整数")
     if len(text) <= max_chars:
         return text
     head = max_chars * 2 // 3
-    tail = max_chars - head
+    head_end, tail_start = safe_cut_points(text, head, len(text) - (max_chars - head))
     return (
-        text[:head]
-        + f"\n...[中间截断: 输出共{len(text)}字符, 已保留首{head}字符+尾{tail}字符。增大max_output_chars可获取完整输出]\n"
-        + text[-tail:]
+        text[:head_end]
+        + f"\n...[中间截断: 输出共{len(text)}字符, 已保留首{head_end}字符+尾{len(text) - tail_start}字符。增大max_output_chars可获取完整输出]\n"
+        + text[tail_start:]
     )
 
 
@@ -372,9 +389,12 @@ def _format_prompt() -> str:
 
 
 def execute(
-    command: str,
+    command: str = None,
     timeout: int = 120,
     max_output_chars: int = 4000,
+    background: bool = False,
+    bg: str = None,
+    id: int = None,
     _tool_context=None,
 ) -> str:
     """
@@ -383,14 +403,21 @@ def execute(
     Windows: 持久化cmd会话，命令直写stdin，行为与真实cmd窗口一致。
     Linux/macOS: bash -c 子进程。
 
+    前台（默认）: command 同步执行，返回 stdout + stderr + 退出码。
+    后台: background=true 提交后台任务（立即返回 bgN，结果落盘 .background/bgN.log）；
+    bg=status/wait/cancel 管理后台任务（见 tools/background 模块）。
+
     Args:
-        command: shell命令
-        timeout: 超时秒数
-        max_output_chars: 返回内容最大字符数，正整数，默认4000
+        command: shell命令（前台必填；background=true 提交时必填；bg 操作可省略）
+        timeout: 超时秒数（前台=命令超时；bg=wait 时=最长等待秒数）
+        max_output_chars: 返回内容最大字符数，正整数，默认4000（仅前台生效）
+        background: true=命令后台执行
+        bg: 后台任务管理操作: status / wait / cancel
+        id: 后台任务编号（bg=cancel 时必填）
         _tool_context: 工具运行时上下文（内部参数，由registry注入）
 
     Returns:
-        stdout + stderr + 退出码
+        前台: stdout + stderr + 退出码；后台: 提交/状态/等待/取消结果
     """
     # 函数内多分支读写该标志（BashRuntime.interrupted）
     # AI可能传字符串类型的数值参数，统一转int（与Grep/Read容错风格一致）
@@ -400,11 +427,12 @@ def execute(
     except (TypeError, ValueError):
         return error_line("timeout/max_output_chars需为整数")
     # ── 安全检查：删除命令和git命令根据配置决定是否需要确认 ──
+    # 后台提交与前台同一套确认（bg 管理操作无 command 自然跳过）
     need_confirm = False
     tc = _tool_context
-    if tc and not tc.rm_skip_confirm and BashRuntime.RE_DELETE.search(command):
+    if command and tc and not tc.rm_skip_confirm and BashRuntime.RE_DELETE.search(command):
         need_confirm = True
-    elif tc and not tc.git_skip_confirm and BashRuntime.RE_GIT.search(command):
+    elif command and tc and not tc.git_skip_confirm and BashRuntime.RE_GIT.search(command):
         need_confirm = True
 
     if need_confirm:
@@ -420,8 +448,22 @@ def execute(
                         "command": command,
                         "timeout": timeout,
                         "max_output_chars": max_output_chars,
+                        "background": background,
+                        "bg": bg,
+                        "id": id,
                     })
                 return "__AWAIT_CONFIRM__"
+
+    # ── 后台任务分发（bg 参数）：独立模块实现，前台逻辑不变 ──
+    if background or bg:
+        from ..background import bg_execute
+        return bg_execute(command, timeout, background, bg, id, _tool_context)
+
+    if not command:
+        return error_line(
+            "command为空：前台执行需提供 command；"
+            "后台任务用 background=true 提交，管理用 bg=status/wait/cancel"
+        )
 
     if timeout <= 0:
         return error_line("timeout需为正整数（秒）")

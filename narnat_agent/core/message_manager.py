@@ -7,7 +7,7 @@ MessageManager 负责消息的修复逻辑和压缩流程编排，
 from typing import Optional
 
 from .compressor import Compressor
-from .message_list import MessageList, MessageView
+from .message_list import MessageList, MessageView, SYNTHETIC_THINKING
 from ..logger import AgentLogger
 
 
@@ -33,8 +33,10 @@ class MessageManager:
     def append_user(self, content: str) -> None:
         self._messages.append_user(content)
 
-    def append_assistant(self, content: str, tool_calls: Optional[list] = None) -> None:
-        self._messages.append_assistant(content, tool_calls)
+    def append_assistant(self, content: str, tool_calls: Optional[list] = None,
+                         thinking: Optional[str] = None,
+                         thinking_signature: Optional[str] = None) -> None:
+        self._messages.append_assistant(content, tool_calls, thinking, thinking_signature)
 
     def append_tool_result(self, tool_call_id: str, result: str) -> None:
         self._messages.append_tool_result(tool_call_id, result)
@@ -72,7 +74,9 @@ class MessageManager:
 
         # 2. 只有在第1步确实修复了未回复的tool_call时，才补assistant
         if repaired and len(msgs) > 0 and msgs.view()[-1].get("role") == "tool":
-            msgs.append_assistant("（用户中断了工具执行）")
+            # 思考模式下请求末尾的 assistant 消息必须携带非空 thinking 块，
+            # 否则 DeepSeek V4 返回 400（The content[].thinking ... must be passed back）
+            msgs.append_assistant(SYNTHETIC_THINKING, thinking=SYNTHETIC_THINKING)
 
         if repaired:
             self._logger.info("core.message_manager", "repair: 修复了打断后的消息序列")

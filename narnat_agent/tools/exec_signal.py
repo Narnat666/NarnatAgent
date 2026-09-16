@@ -12,7 +12,7 @@ AI 看到的内容与不带标签时完全一致。
 
 import re
 import uuid
-from typing import Optional
+from typing import Optional, Tuple
 
 # 退出码标签：进程级随机，命令无法预知/伪造
 _TAG = uuid.uuid4().hex[:8]
@@ -58,3 +58,26 @@ def parse_rc(result: str) -> Optional[int]:
 def strip_tags(result: str) -> str:
     """剥离全部框架标签（退出码标签+错误标签）：AI 只应看到无标签文本"""
     return _ERR_TAG_RE.sub("", _TAG_RE.sub("", result))
+
+
+def safe_cut_points(text: str, head_pos: int, tail_pos: int) -> Tuple[int, int]:
+    """截断切点吸附：框架标签不允许被切开（完整留给 strip_tags 剥离）。
+
+    截断若从标签中间切开，残缺片段无法被 strip_tags 匹配，会泄漏给 AI，
+    且 has_error/parse_rc 对截断结果失效。规则：切点落在标签内部时——
+    头部切点吸附到标签结尾（标签留在头部侧）、尾部切点吸附到标签
+    开头（标签留在尾部侧）；吸附后两切点相向越过（仅紧贴 max_chars
+    的退化场景）时取尾部切点收口，保证两侧都不切标签。
+    """
+    spans = [m.span() for m in _TAG_RE.finditer(text)]
+    spans += [m.span() for m in _ERR_TAG_RE.finditer(text)]
+    spans.sort()
+    for start, end in spans:
+        if start < head_pos < end:
+            head_pos = end
+    for start, end in reversed(spans):
+        if start < tail_pos < end:
+            tail_pos = start
+    if head_pos > tail_pos:
+        head_pos = tail_pos
+    return head_pos, tail_pos

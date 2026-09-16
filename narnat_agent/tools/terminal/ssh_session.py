@@ -45,7 +45,7 @@ from typing import Optional
 import paramiko
 import socket
 
-from ..exec_signal import rc_line, error_line
+from ..exec_signal import rc_line, error_line, safe_cut_points
 
 
 def _ansi_sub(text: str) -> str:
@@ -54,17 +54,21 @@ def _ansi_sub(text: str) -> str:
 
 
 def _truncate_output(text: str, max_chars: int) -> str:
-    """截断输出：保留头部和尾部（尾部含提示符，对AI判断shell状态至关重要），中段提示"""
+    """截断输出：保留头部和尾部（尾部含提示符，对AI判断shell状态至关重要），中段提示。
+
+    切点先做标签吸附（safe_cut_points）：框架标签不允许被切开——残缺
+    片段无法被 strip_tags 匹配，会泄漏给AI并让失败判定失效。
+    """
     if max_chars <= 0:
         return error_line("max_output_chars需为正整数")
     if len(text) <= max_chars:
         return text
     head = max_chars * 2 // 3
-    tail = max_chars - head
+    head_end, tail_start = safe_cut_points(text, head, len(text) - (max_chars - head))
     return (
-        text[:head]
-        + f"\n...[中间截断: 输出共{len(text)}字符, 已保留首{head}字符+尾{tail}字符。增大max_output_chars可获取完整输出]\n"
-        + text[-tail:]
+        text[:head_end]
+        + f"\n...[中间截断: 输出共{len(text)}字符, 已保留首{head_end}字符+尾{len(text) - tail_start}字符。增大max_output_chars可获取完整输出]\n"
+        + text[tail_start:]
     )
 
 

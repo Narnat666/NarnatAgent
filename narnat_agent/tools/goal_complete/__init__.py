@@ -53,4 +53,11 @@ def execute(_tool_context=None) -> str:
                 "请再次调用GoalComplete并在最终总结中向用户说明原因。"
             )
         _tool_context.goal_complete = True
+        # 硬兜底：声明完成 = 会话结案，清理全部受管后台任务（杀 running + 清目录）。
+        # 延迟导入避免 tools 包加载顺序依赖。
+        try:
+            from ..background import cleanup_all
+            cleanup_all()
+        except Exception:
+            pass
     return "[GOAL_COMPLETE] 目标任务已声明完成，自动续跑将停止。请向用户总结完成情况。"

@@ -12,6 +12,7 @@ from .exec_signal import error_line
 from .tool_context import ToolContext
 
 # ── 显式导入各工具（Nuitka安全） ──
+from . import background  # noqa: F401  Shell 工具的 bg 附属模块（bash 内延迟导入；显式导入确保 Nuitka 打包）
 from .read import execute as read_execute, DEFINITION as READ_DEF
 from .glob import execute as glob_execute, DEFINITION as GLOB_DEF
 from .grep import execute as grep_execute, DEFINITION as GREP_DEF

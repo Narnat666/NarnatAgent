@@ -12,6 +12,8 @@ from .llm import LLMClient, retry_sleep
 from .message_manager import MessageManager
 from .tool_dispatcher import ToolDispatcher
 from ..tools.tool_context import ToolContext, AWAIT_CONFIRM
+from ..tools.background import running_count as _bg_running_count
+from ..tools.background import running_summary as _bg_running_summary
 from .stats import StatsTracker
 from ..ui.ui_design import UIInterface
 from ..config.loader import Config
@@ -76,11 +78,14 @@ class AgentLoop:
             call_usage = None
             parsed_finish_reason = None
             stream_interrupted_info = None  # LLM层上报的流中断信息（kind/detail）
+            thinking_text = None            # 本轮思考内容（仅工具轮回传，学官方 harness 规则）
+            thinking_signature = None       # 本轮思考签名（Claude 回传思考块必需）
 
             for chunk in self._llm.chat_stream(self._msg_manager.view.to_list(), cancel_check=lambda: stream.cancelled):
                 # b. 检查中断
                 if stream.cancelled:
                     if content_parts:
+                        # 中断残留是纯文本轮：不回传思考（学官方：仅工具轮回传）
                         self._msg_manager.append_assistant("".join(content_parts))
                     stream.abort()
                     self._ui.on_interrupted()
@@ -89,6 +94,12 @@ class AgentLoop:
                 # c. 处理tool_call
                 if "tool_calls" in chunk:
                     tool_calls_result = chunk["tool_calls"]
+
+                # c2. 捕获思考内容（assistant消息回传API用）
+                if "thinking" in chunk:
+                    thinking_text = chunk["thinking"]
+                if "thinking_signature" in chunk:
+                    thinking_signature = chunk["thinking_signature"]
 
                 # d. 处理纯文本
                 if "content" in chunk and "tool_calls" not in chunk:
@@ -138,6 +149,8 @@ class AgentLoop:
                 self._msg_manager.append_assistant(
                     "".join(content_parts) or None,
                     tool_calls=tool_calls_result,
+                    thinking=thinking_text,
+                    thinking_signature=thinking_signature,
                 )
 
                 tool_results = self._dispatcher.execute_tool_calls(tool_calls_result, stream)
@@ -224,6 +237,8 @@ class AgentLoop:
 
             # 无tool_call → 纯文本输出完成
             if content_parts:
+                # 纯文本轮不回传思考（学官方 harness：reasoning_content 仅工具轮回传，
+                # 纯文本轮被忽略，省 token）
                 self._msg_manager.append_assistant("".join(content_parts))
             else:
                 # 空回复
@@ -277,11 +292,37 @@ class AgentLoop:
                 stream.begin()
                 continue
 
+            # ── 后台任务软提醒：结束回合时仍有 running → 提醒一次，AI 不处理则放行 ──
+            # 不强杀：wait 挂住回合才是默认姿态；用户ESC插话后 AI 带着 running
+            # 结束本轮是常态，强杀会杀掉用户正在等的任务（硬兜底在 GoalComplete/会话结束）。
+            bg_summary = _bg_running_summary()
+            if bg_summary and not self._tool_context.bg_reminded:
+                self._tool_context.bg_reminded = True
+                self._msg_manager.append_user(
+                    f"[系统提醒] 后台仍有任务在运行: {bg_summary}。"
+                    "若需等待其完成，请调用 Shell(bg=\"wait\")（任一任务完成会立即返回）；"
+                    "若不再需要这些任务，请调用 Shell(bg=\"cancel\", id=N) 清理后结束回复。"
+                )
+                # 复用同一stream继续内循环：先把上一轮文字落定到屏幕，
+                # 再重启"思考中"spinner，避免LLM等待期界面无动画静默卡住
+                stream.flush_renderer()
+                stream.begin()
+                continue
+
             self._last_round_ok = True  # 正常完成：无tool_call纯文本输出
             # 统计栏 = 结案信号：普通模式每轮结束都显示；
             # 目标模式只有AI声明完成（goal_complete已置位）或强制收尾轮才显示，
             # 中间轮静默结束（AI文字照常显示，仅不打印统计栏）。
             show_stats = (not goal_mode) or self._tool_context.goal_complete or force_final
+            # 后台仍有运行中任务：不显示统计栏（结案信号），终端提示仍在运行，
+            # 避免用户误以为 agent 已全部完成而离开
+            bg_running = _bg_running_count()
+            if bg_running:
+                show_stats = False
+                _stdout_write(
+                    f"  ⚠ 后台 {bg_running} 个任务仍在运行"
+                    f"（Shell(bg=\"wait\") 等待 / Shell(bg=\"cancel\", id=N) 清理）\n"
+                )
             stream.finish(
                 self._stats.input_tokens,
                 self._stats.output_tokens,

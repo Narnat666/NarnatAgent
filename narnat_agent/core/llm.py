@@ -20,8 +20,9 @@ import httpx
 from typing import List, Dict, Any, Iterator, Optional
 
 from ..config.loader import AIConfig
-from ..config.defaults import resolve_thinking_params
+from ..config.defaults import resolve_thinking_params, resolve_thinking_passback
 from .interrupt import register_abort
+from .message_list import SYNTHETIC_THINKING
 
 
 def _strip_surrogates(obj):
@@ -214,9 +215,37 @@ class _OpenAIBackend:
             max_retries=0,
         )
 
+    def _prepare_messages(self, messages):
+        """内部消息 → OpenAI 协议请求消息。
+
+        内部 assistant 消息可携带 thinking 字段（思考回传的通用内部表示）。
+        学官方 harness 规则（serialize.ts）：reasoning_content 仅工具调用轮回传，
+        纯文本轮被忽略，直接剥离省 token：
+        - reasoning_content（DeepSeek/Kimi/GLM 查表命中）：assistant 含 tool_calls
+          时才 thinking → 顶层 reasoning_content 字段
+        - 其余（none / 纯文本轮 / 开关关闭）：剥离 thinking 字段
+        """
+        use_rc = (
+            self._config.thinking_enabled
+            and getattr(self._config, "thinking_passback", True)
+            and resolve_thinking_passback("openai", self._config.model) == "reasoning_content"
+        )
+        out = []
+        for m in messages:
+            m = dict(m)
+            thinking = m.pop("thinking", None)
+            m.pop("thinking_signature", None)
+            if (use_rc and m.get("role") == "assistant"
+                    and m.get("tool_calls") and thinking is not None):
+                m["reasoning_content"] = thinking
+            out.append(m)
+        return out
+
     def chat_stream(self, messages, no_tools=False, no_thinking=False, cancel_check=None):
         if self._logger:
             self._logger.info("core.llm", f"发送请求(OpenAI), messages={len(messages)}条")
+
+        messages = self._prepare_messages(messages)
 
         from openai import APIStatusError, APIConnectionError, APITimeoutError
 
@@ -318,6 +347,7 @@ class _OpenAIBackend:
             tool_calls_buffer = {}
             _index_to_id = {}
             content_buffer = []
+            reasoning_buffer = []  # DeepSeek/Kimi OpenAI 协议：reasoning_content（思考回传用）
             _tc_idx = 0
 
             chunk_queue = queue.Queue()
@@ -378,6 +408,14 @@ class _OpenAIBackend:
                     content_buffer.append(delta.content)
                     yield {"content": delta.content}
 
+                # 捕获 reasoning_content（DeepSeek/Kimi 思考模式：多轮对话需回传）
+                # OpenAI SDK 对非原生字段可能放进 model_extra，双路兼容
+                rc = getattr(delta, 'reasoning_content', None)
+                if rc is None:
+                    rc = (getattr(delta, 'model_extra', None) or {}).get('reasoning_content')
+                if rc:
+                    reasoning_buffer.append(rc)
+
                 if delta.tool_calls:
                     for tc in delta.tool_calls:
                         tc_index = getattr(tc, 'index', None)
@@ -400,6 +438,14 @@ class _OpenAIBackend:
 
                 if finish_reason:
                     received_finish = True
+                    # 思考回传开关 + 查表：reasoning_content 格式时随完成标记上报思考
+                    # （与 anthropic 后端的 thinking 上报同构，上层统一存进消息的 thinking 字段）
+                    rc_on = (
+                        self._config.thinking_enabled
+                        and getattr(self._config, "thinking_passback", True)
+                        and resolve_thinking_passback("openai", self._config.model) == "reasoning_content"
+                    )
+                    thinking_out = "".join(reasoning_buffer) if rc_on else None
                     if tool_calls_buffer:
                         completed_calls = []
                         for tc_id, buf in tool_calls_buffer.items():
@@ -408,9 +454,10 @@ class _OpenAIBackend:
                                 "type": "function",
                                 "function": {"name": buf["name"], "arguments": buf["arguments"]},
                             })
-                        yield {"tool_calls": completed_calls, "finish_reason": finish_reason}
+                        yield {"tool_calls": completed_calls, "finish_reason": finish_reason,
+                               "thinking": thinking_out}
                     else:
-                        yield {"finish_reason": finish_reason}
+                        yield {"finish_reason": finish_reason, "thinking": thinking_out}
 
                     if self._logger:
                         total_out = len("".join(content_buffer))
@@ -605,6 +652,8 @@ class _AnthropicBackend:
         try:
             content_buffer = []
             thinking_buffer = []  # 兜底：DeepSeek V4 有时只返回 thinking 不返回 text
+            thinking_blocks = {}  # index → 思考文本（思考模式下需回传API，见官方thinking_mode文档）
+            thinking_sigs = {}    # index → 思考块签名（Claude 要求回传时携带，经 signature_delta 送达）
             tool_use_blocks = {}
             _msg_delta_seen = False  # 守卫：防止 message_delta 正常到达后兜底重复 yield
             _start_usage = None     # message_start 中的初始 usage，兜底时补用
@@ -689,6 +738,9 @@ class _AnthropicBackend:
                             "name": cb.get("name", ""),
                             "input_json": "",
                         }
+                    elif ctype == "thinking":
+                        # 思考块开始：DeepSeek 流式下 signature 为空串且不回填，回传时无需携带
+                        thinking_blocks[idx] = ""
 
                 elif dtype == "content_block_delta":
                     delta = data.get("delta", {})
@@ -702,19 +754,37 @@ class _AnthropicBackend:
                             yield {"content": text}
 
                     elif d_type == "thinking_delta":
-                        # 收集 thinking 内容，用于 thinking-only 回复兜底
+                        # 收集 thinking 内容，用于 thinking-only 回复兜底 + 思考模式回传API
                         thinking_text = delta.get("thinking", "")
                         if thinking_text:
                             thinking_buffer.append(thinking_text)
+                            thinking_blocks[idx] = thinking_blocks.get(idx, "") + thinking_text
 
                     elif d_type == "input_json_delta":
                         pj = delta.get("partial_json", "")
                         if idx in tool_use_blocks:
                             tool_use_blocks[idx]["input_json"] += pj
 
+                    elif d_type == "signature_delta":
+                        # Claude：思考块签名经 signature_delta 事件送达（回传思考块必需）
+                        sig = delta.get("signature", "")
+                        if sig:
+                            thinking_sigs[idx] = sig
+
                 elif dtype == "message_delta":
                     _msg_delta_seen = True
                     stop_reason = data.get("delta", {}).get("stop_reason") or "end_turn"
+                    thinking_combined = "".join(thinking_blocks[i] for i in sorted(thinking_blocks))
+                    # 回传开关关闭：真实思考内容不下发（agent_loop 不会存入消息历史）；
+                    # 本轮回传空块仍由 repair/历史消息兜底。
+                    passback_on = getattr(self._config, "thinking_passback", True)
+                    thinking_out = thinking_combined if passback_on else None
+                    # Claude 签名：仅当恰好一个思考块且签名非空时上报（多块边界无法可靠对齐，宁缺勿错）
+                    thinking_sig_out = None
+                    if len(thinking_blocks) == 1:
+                        sig = thinking_sigs.get(next(iter(thinking_blocks)), "")
+                        if sig:
+                            thinking_sig_out = sig
                     if stop_reason:
                         if stop_reason == "end_turn":
                             finish_reason = "stop"
@@ -741,7 +811,8 @@ class _AnthropicBackend:
                                         "arguments": tu["input_json"],
                                     },
                                 })
-                            yield {"tool_calls": completed_calls, "finish_reason": finish_reason}
+                            yield {"tool_calls": completed_calls, "finish_reason": finish_reason,
+                                   "thinking": thinking_out, "thinking_signature": thinking_sig_out}
                         else:
                             # 兜底：DeepSeek V4 有时只返回 thinking 不返回 text
                             # 此时将 thinking 内容作为正式输出
@@ -751,7 +822,12 @@ class _AnthropicBackend:
                                 yield {"content": fallback_text}
                                 if self._logger:
                                     self._logger.info("core.llm", f"thinking-only兜底: 将thinking内容({len(fallback_text)}字符)作为text输出")
-                            yield {"finish_reason": finish_reason}
+                                # thinking 已作为 text 输出，避免下一轮回传时重复占用上下文
+                                yield {"finish_reason": finish_reason, "thinking": "",
+                                       "thinking_signature": None}
+                            else:
+                                yield {"finish_reason": finish_reason, "thinking": thinking_out,
+                                       "thinking_signature": thinking_sig_out}
 
                         if self._logger:
                             total_out = len("".join(content_buffer))
@@ -782,6 +858,15 @@ class _AnthropicBackend:
             elif not _msg_delta_seen:
                 if _start_usage:
                     yield {"usage": _start_usage}
+                thinking_combined = "".join(thinking_blocks[i] for i in sorted(thinking_blocks))
+                # 回传开关关闭：真实思考内容不下发
+                passback_on = getattr(self._config, "thinking_passback", True)
+                thinking_out = thinking_combined if passback_on else None
+                thinking_sig_out = None
+                if len(thinking_blocks) == 1:
+                    sig = thinking_sigs.get(next(iter(thinking_blocks)), "")
+                    if sig:
+                        thinking_sig_out = sig
                 if tool_use_blocks:
                     completed_calls = []
                     for idx in sorted(tool_use_blocks.keys()):
@@ -796,7 +881,8 @@ class _AnthropicBackend:
                                 },
                             })
                     if completed_calls:
-                        yield {"tool_calls": completed_calls, "finish_reason": "tool_calls"}
+                        yield {"tool_calls": completed_calls, "finish_reason": "tool_calls",
+                               "thinking": thinking_out, "thinking_signature": thinking_sig_out}
                         if self._logger:
                             self._logger.info(
                                 "core.llm",
@@ -806,14 +892,15 @@ class _AnthropicBackend:
                     fallback_text = "".join(thinking_buffer)
                     content_buffer.append(fallback_text)
                     yield {"content": fallback_text}
-                    yield {"finish_reason": "stop"}
+                    yield {"finish_reason": "stop", "thinking": "", "thinking_signature": None}
                     if self._logger:
                         self._logger.info(
                             "core.llm",
                             f"兜底: 未收到message_delta，将thinking({len(fallback_text)}字符)作为text输出",
                         )
                 elif content_buffer:
-                    yield {"finish_reason": "stop"}
+                    yield {"finish_reason": "stop", "thinking": thinking_out,
+                           "thinking_signature": thinking_sig_out}
                     if self._logger:
                         self._logger.info(
                             "core.llm",
@@ -845,8 +932,36 @@ class _AnthropicBackend:
 
             elif role == "assistant":
                 tool_calls = msg.get("tool_calls")
+                # 思考块回传按"协议+模型"查表（THINKING_PARAM_MAP.passback）：
+                # - thinking_block（DeepSeek anthropic）：回传 thinking 块，API 强制否则400
+                # - thinking_block_signed（Claude）：回传 thinking 块且必须携带签名；
+                #   未捕获签名（多思考块/无签名）→ 省略该块的思考回传（安全，Claude 不报错）
+                # 思考回传开关（/thinkback）关闭：彻底删除 thinking 段，一刀切。
+                thinking = None
+                sig = None
+                if self._config.thinking_enabled and getattr(self._config, "thinking_passback", True):
+                    mode = resolve_thinking_passback("anthropic", self._config.model)
+                    if mode in ("thinking_block", "thinking_block_signed"):
+                        t = msg.get("thinking")
+                        if t is not None:
+                            # 学官方 harness：思考仅工具调用轮回传（纯文本轮被忽略）。
+                            # 例外：repair 合成占位（SYNTHETIC_THINKING）无 tool_calls 但必须
+                            # 回传——DeepSeek 校验请求尾部 assistant 携带非空 thinking 块。
+                            if tool_calls or t == SYNTHETIC_THINKING:
+                                if mode == "thinking_block_signed":
+                                    # Claude 要求签名；无签名则省略思考块（安全，Claude 不报错）
+                                    s = msg.get("thinking_signature")
+                                    if s:
+                                        thinking, sig = t, s
+                                else:
+                                    thinking = t  # DeepSeek：无需签名（流式下签名恒空）
                 if tool_calls:
                     blocks = []
+                    if thinking is not None:
+                        blk = {"type": "thinking", "thinking": thinking}
+                        if sig:
+                            blk["signature"] = sig
+                        blocks.append(blk)
                     if content:
                         blocks.append({"type": "text", "text": content})
                     for tc in tool_calls:
@@ -861,6 +976,13 @@ class _AnthropicBackend:
                             "name": func.get("name", ""),
                             "input": inp,
                         })
+                    anthropic_msgs.append({"role": "assistant", "content": blocks})
+                elif thinking is not None:
+                    blocks = [{"type": "thinking", "thinking": thinking}]
+                    if sig:
+                        blocks[0]["signature"] = sig
+                    if content:
+                        blocks.append({"type": "text", "text": content})
                     anthropic_msgs.append({"role": "assistant", "content": blocks})
                 else:
                     anthropic_msgs.append({"role": "assistant", "content": content or ""})

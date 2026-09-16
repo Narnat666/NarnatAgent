@@ -81,6 +81,7 @@ DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_PROTOCOL = "anthropic"          # "openai" | "anthropic"
 DEFAULT_THINKING_ENABLED = True
 DEFAULT_THINKING_EFFORT = "high"      # high / max
+DEFAULT_THINKING_PASSBACK = True      # 思考回传：捕获并回传思考内容（DeepSeek思考模式契约）
 
 
 # ── Thinking 参数映射表 ──
@@ -90,6 +91,11 @@ DEFAULT_THINKING_EFFORT = "high"      # high / max
 #   "disable":  {地点: {参数: 值}}  — 禁用 thinking 时写入（可选）
 #   "effort_path": tuple | None      — effort 值的写入位置
 #   "effort_map": dict | None        — 语义 effort → provider 实际值的映射
+#   "passback": str                  — 思考回传格式（官方要求为依据）：
+#       "thinking_block"        → anthropic 协议 thinking 内容块，无需签名（DeepSeek 强制，否则400）
+#       "thinking_block_signed" → anthropic 协议 thinking 内容块，必须携带签名（Claude）
+#       "reasoning_content"     → OpenAI 协议顶层 reasoning_content 字段（DeepSeek/Kimi 强制；GLM 可选支持）
+#       "none"                  → 不回传（官方不要求/不支持/回传被忽略：GPT/Qwen 等）
 #
 # 地点说明:
 #   "body_top"  → OpenAI: 顶层 kwargs  /  Anthropic: 合并到 body
@@ -103,6 +109,8 @@ THINKING_PARAM_MAP = {
             "body_top":  {},  # output_config 由 effort_path 动态构造
         },
         "effort_path": ("body_top", "output_config", "effort"),
+        # 官方强制：请求尾部 assistant 必须携带 thinking 块，否则 400
+        "passback": "thinking_block",
     },
 
     # ── DeepSeek (OpenAI 协议) ──
@@ -112,6 +120,8 @@ THINKING_PARAM_MAP = {
             "body_top":   {},  # reasoning_effort 由 effort_path 注入
         },
         "effort_path": ("body_top", "reasoning_effort"),
+        # 官方强制：工具调用轮次的 reasoning_content 必须回传，否则 400
+        "passback": "reasoning_content",
     },
 
     # ── GLM (OpenAI 协议) ──
@@ -119,12 +129,16 @@ THINKING_PARAM_MAP = {
     # reasoning_effort 走 body_top（OpenAI SDK 原生支持）
     ("openai", "glm"): {
         "enable": {
-            "extra_body": {"thinking": {"type": "enabled"}},
+            # clear_thinking=false：官方建议值，历史 reasoning_content 作为上下文保留
+            "extra_body": {"thinking": {"type": "enabled", "clear_thinking": False}},
         },
         "disable": {
             "extra_body": {"thinking": {"type": "disabled"}},
         },
         "effort_path": ("body_top", "reasoning_effort"),
+        # 官方：assistant 消息携带 reasoning_content 时作为上下文输入（可选回传，
+        # 不回传不报错）；注：GLM-5.2 coding 端点曾报回传无效（zai-org/GLM-5#92）
+        "passback": "reasoning_content",
     },
 
     # ── Kimi (OpenAI 协议) ──
@@ -136,6 +150,32 @@ THINKING_PARAM_MAP = {
             "extra_body": {"thinking": {"type": "disabled"}},
         },
         "effort_path": None,  # Kimi 无强度概念
+        # 官方强制：多轮和工具调用必须原样回传 reasoning_content
+        "passback": "reasoning_content",
+    },
+
+    # ── 小米 MiMo (OpenAI 协议) ──
+    ("openai", "mimo"): {
+        "enable": {
+            "extra_body": {"thinking": {"type": "enabled"}},
+        },
+        "disable": {
+            "extra_body": {"thinking": {"type": "disabled"}},
+        },
+        "effort_path": None,  # 官方未提供思考强度参数
+        # 官方强制：深度思考+历史含工具调用时，assistant 含工具调用必须完整回传
+        # reasoning_content，否则 400（mimo-v2.5-pro / mimo-v2.5）
+        "passback": "reasoning_content",
+    },
+
+    # ── 小米 MiMo (Anthropic 协议) ──
+    ("anthropic", "mimo"): {
+        "enable": {
+            "body": {"thinking": {"type": "enabled"}},
+        },
+        "effort_path": None,
+        # 官方：Anthropic 兼容协议同样要求回传思考块（受影响的 Agent 产品列表含 Anthropic 兼容协议）
+        "passback": "thinking_block",
     },
 
     # ── Qwen (OpenAI 协议) ──
@@ -149,6 +189,8 @@ THINKING_PARAM_MAP = {
         "effort_path": ("extra_body", "thinking_budget"),
         "effort_map": {"max": 32000, "xhigh": 24000, "high": 16000,
                        "medium": 8000, "low": 4000, "minimal": 1000, "none": 0},
+        # 官方：可选回传，且明确禁止拼入 content；不回传不报错
+        "passback": "none",
     },
 
     # ── GPT (OpenAI 协议) ──
@@ -160,6 +202,8 @@ THINKING_PARAM_MAP = {
             "body_top": {"reasoning_effort": "none"},
         },
         "effort_path": ("body_top", "reasoning_effort"),
+        # 官方：每轮推理 token 自动丢弃，服务端生成摘要延续上下文，无需回传
+        "passback": "none",
     },
 
     # ── Claude (Anthropic 协议，新版 adaptive) ──
@@ -168,8 +212,28 @@ THINKING_PARAM_MAP = {
             "body": {"thinking": {"type": "adaptive"}},
         },
         "effort_path": ("body_top", "effort"),
+        # 官方支持回传思考块（工具轮次建议带上），但必须携带加密签名；
+        # 流式下签名经 signature_delta 事件送达，捕获后原样回传
+        "passback": "thinking_block_signed",
     },
 }
+
+
+def resolve_thinking_passback(protocol: str, model: str) -> str:
+    """查表：该 (协议, 模型前缀) 组合的思考回传格式。
+
+    Returns:
+        "thinking_block"        — anthropic 协议 thinking 内容块回传（无需签名）
+        "thinking_block_signed" — anthropic 协议 thinking 内容块回传（必须携带签名）
+        "reasoning_content"     — OpenAI 协议顶层 reasoning_content 字段回传
+        "none"                  — 不回传
+    未匹配到表项 → "none"（安全默认：不回传不会踩强制校验以外的错误）。
+    """
+    model_lower = model.lower()
+    for (proto, prefix), mapping in THINKING_PARAM_MAP.items():
+        if proto == protocol and model_lower.startswith(prefix):
+            return mapping.get("passback", "none")
+    return "none"
 
 
 def resolve_thinking_params(protocol: str, model: str,

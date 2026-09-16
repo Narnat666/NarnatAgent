@@ -6,6 +6,13 @@ MessageList 私有持有 messages 列表，外部通过 view() 获取只读视�
 
 from typing import List, Dict, Any, Iterator, Optional
 
+# 合成 assistant 消息（repair 伪造"[用户中断]"）挂载的思考占位文本。
+# DeepSeek 思考模式校验：请求尾部 assistant 必须有 thinking 块，若为空则其前
+# 最近的工具调用轮也必须有 thinking 块；用非空占位可同时兜住两种情形。
+# 转换层（llm.py）仅在"思考回传"开关开启时回传该占位（与真实思考同规则）；
+# 开关关闭时 thinking 段彻底删除（用户选择：计划放行修复后正常流程不再出现尾部AI发言）。
+SYNTHETIC_THINKING = "（用户中断了工具执行）"
+
 
 class MessageView:
     """messages 的只读视图。零拷贝，但调用方无法修改列表结构。"""
@@ -62,9 +69,20 @@ class MessageList:
         """追加用户消息"""
         self._messages.append({"role": "user", "content": content})
 
-    def append_assistant(self, content: str, tool_calls: Optional[list] = None) -> None:
-        """追加 assistant 消息"""
+    def append_assistant(self, content: str, tool_calls: Optional[list] = None,
+                         thinking: Optional[str] = None,
+                         thinking_signature: Optional[str] = None) -> None:
+        """追加 assistant 消息
+
+        thinking: 模型思考内容（思考模式 API 要求后续请求原样回传）。
+        为 None 表示未捕获（如历史会话），不写入该字段；空串是合法值（合成消息）。
+        thinking_signature: 思考块签名（Claude 回传思考块必需）；为 None 不写入。
+        """
         msg = {"role": "assistant", "content": content or None}
+        if thinking is not None:
+            msg["thinking"] = thinking
+        if thinking_signature is not None:
+            msg["thinking_signature"] = thinking_signature
         if tool_calls:
             msg["tool_calls"] = tool_calls
         self._messages.append(msg)

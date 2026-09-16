@@ -97,6 +97,7 @@ class NoSession(SessionState):
             "/rm":       "删除会话",
             "/skill":    "加载技能",
             "/thinking": "切换思考强度",
+            "/thinkback": "思考回传开关",
             "/mode":     "切换模型",
             "/goal":     "目标模式开关",
             "/exit":     "退出程序",
@@ -202,6 +203,7 @@ class RootSession(SessionState):
             "/rm":       "删除子会话",
             "/skill":    "加载技能",
             "/thinking": "切换思考强度",
+            "/thinkback": "思考回传开关",
             "/mode":     "切换模型",
             "/goal":     "目标模式开关",
             "/explore":  "创建探索分支",
@@ -386,6 +388,7 @@ class ChildSession(SessionState):
             "/cd":       "进入历史会话",
             "/skill":    "加载技能",
             "/thinking": "切换思考强度",
+            "/thinkback": "思考回传开关",
             "/mode":     "切换模型",
             "/goal":     "目标模式开关",
             "/done":     "完成探索分支",
@@ -534,6 +537,8 @@ class SessionManager:
                  thinking_effort_getter: Callable[[], str] = None,
                  thinking_effort_setter: Callable[[str], None] = None,
                  thinking_options: dict = None,
+                 thinking_passback_getter: Callable[[], bool] = None,
+                 thinking_passback_setter: Callable[[bool], None] = None,
                  model_getter: Callable[[], str] = None,
                  model_setter: Callable[[str], None] = None,
                  model_options: list = None,
@@ -552,6 +557,8 @@ class SessionManager:
         self._get_thinking_effort = thinking_effort_getter
         self._set_thinking_effort = thinking_effort_setter
         self._thinking_options = thinking_options or {"high": "高", "max": "全开"}
+        self._get_thinking_passback = thinking_passback_getter or (lambda: True)
+        self._set_thinking_passback = thinking_passback_setter
         self._get_model = model_getter
         self._set_model = model_setter
         self._model_options = model_options or []
@@ -715,6 +722,36 @@ class SessionManager:
 
     def on_list_thinking_options(self) -> list:
         return list(self._thinking_options.keys())
+
+    def on_thinkback(self, action: str) -> str:
+        """思考回传开关：/thinkback 查状态，/thinkback on|off 切换并持久化。
+
+        关闭后：真实思考内容不再捕获/回传（省上下文）；
+        repair 合成的安全空块仍始终回传（400兜底，零上下文占用）。
+        """
+        current = self._get_thinking_passback()
+        act = action.strip().lower()
+        if not act:
+            state = "开" if current else "关"
+            return f"思考回传: {state}（/thinkback on|off 切换）"
+        if act in ("on", "off"):
+            target = act == "on"
+            if self._set_thinking_passback:
+                self._set_thinking_passback(target)
+            if self._config_dir:
+                config_path = os.path.join(self._config_dir, "narnat.json")
+                try:
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    data.setdefault("智能体", {}).setdefault("思考", {})["回传"] = target
+                    with open(config_path, "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+                except Exception:
+                    pass
+            if current == target:
+                return f"思考回传已是{'开启' if target else '关闭'}状态"
+            return f"思考回传已{'开启' if target else '关闭'}"
+        return f"无效值: {act}（可用: on / off）"
 
     def on_mode(self, name: str) -> str:
         options = list(self._model_options or [])

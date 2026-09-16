@@ -132,6 +132,28 @@ def translate_one(session_path: Path, output_dir: Path, root_dir: Path) -> str:
         elif role == "assistant":
             tool_calls = msg.get("tool_calls")
             text_content = msg.get("content")
+            # 思考回传字段（修复后新会话携带；旧会话无此字段，跳过）
+            thinking = msg.get("thinking")
+            thinking_signature = msg.get("thinking_signature")
+
+            if thinking and thinking.strip():
+                lines.append("### 🧠 思考")
+                lines.append("")
+                thinking_display = thinking.strip()
+                if thinking_display == (text_content or "").strip():
+                    # repair 合成的占位思考（与正文相同）：避免重复刷屏
+                    lines.append("*(思考占位，与正文相同)*")
+                else:
+                    lines.append("<details>")
+                    lines.append(f"<summary>思考内容（{len(thinking_display)} 字符）</summary>")
+                    lines.append("")
+                    lines.append(thinking_display)
+                    lines.append("")
+                    lines.append("</details>")
+                if thinking_signature:
+                    lines.append("")
+                    lines.append(f"*签名: `{thinking_signature}`*")
+                lines.append("")
 
             if tool_calls:
                 for tc in tool_calls:
