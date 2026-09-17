@@ -605,7 +605,7 @@ def _build_system_prompt(model: str, user_md: str, cwd: str = "", os_name: str =
         model=model,
         cwd=cwd or os.getcwd(),
         platform=os_name or platform.system(),
-        shell=shell_name or ("PowerShell" if sys.platform == "win32" else "bash"),
+        shell=shell_name or ("cmd.exe" if sys.platform == "win32" else "bash"),
     )]
     if user_md:
         parts.append(user_md)

@@ -745,7 +745,7 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
     """Windows: shell=True 起子进程。cmd 交互式解析（引号按用户预期处理），
     stdin 隔离为 DEVNULL：防止挂起子进程（cooked 行读共享控制台输入队列）
     偷吃用户的 ESC 按键导致打断失效；DEVNULL 对读 stdin 的工具立即返回
-    EOF 而不阻塞（eza 等不读 stdin 的工具不受影响）。"""
+    EOF 而不阻塞（不读 stdin 的工具不受影响）。"""
     try:
         proc = subprocess.Popen(
             command,

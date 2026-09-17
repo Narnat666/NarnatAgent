@@ -1,6 +1,6 @@
 # Narnat Agent
 
-终端 AI 代码智能体。自主调用工具（读文件、改代码、执行命令、SSH/串口、联网搜索），支持会话探索分支、目标模式自动续跑、多模型热切换。
+终端 AI 代码智能体。自主调用工具（读文件、改代码、执行命令、SSH/串口、联网搜索），支持会话探索分支、目标模式自动续跑、多模型热切换、headless 一次性任务（脚本化/子代理调度）。
 
 ## 快速上手
 
@@ -27,7 +27,7 @@ python -m nuitka --onefile --output-dir=output --output-filename=narnat.exe \
   main.py
 ```
 
-产物 `output/narnat.exe`，约 30MB。
+产物 `output/narnat.exe`，约 39MB。
 
 **Ubuntu**
 
@@ -56,6 +56,20 @@ make -j$(nproc) && sudo make install
 
 编译命令与 Windows 相同（将 `python` 替换为 `/usr/local/python3.12/bin/python3.12`），耗时约 28 分钟。产物约 35MB，仅依赖 glibc ≥ 2.35。
 
+## 运行
+
+源码运行 `python main.py`，编译版直接执行 `output/` 下的产物（Windows 为 `narnat.exe`）。命令行参数：
+
+| 参数 | 说明 |
+|------|------|
+| `-d, --debug` | 调试模式，日志写入 `.narnat/logs/` |
+| `-v, --version` | 显示版本号 |
+| `-p, --prompt <任务>` | headless 模式：执行一次性任务后退出（纯文本输出） |
+| `-g, --goal-rounds N` | headless 模式：自动续跑轮数上限（`-p` 时生效） |
+| `-l, --tool-log` | headless 模式：显示详细工具调度日志（默认仅输出 AI 最终答复） |
+
+headless（`-p`）行为：注入任务 → 目标模式自动续跑 → AI 调用 GoalComplete 声明完成或达轮数上限收尾 → 退出；不读用户输入、不保存会话、不查余额、不显示统计栏，适合脚本化与父代理调度（如派发子代理任务）。输出为纯文本（全局去色，表格/列表结构保留），末行输出哨兵 `[NN_DONE] reason=… rounds=…` 供程序判定结束与结束原因（reason：`goal_complete` / `round_limit` / `aborted` / `round_failed` / `compress_failed` / `unknown`）。
+
 ## 界面预览
 
 ![启动](img/登录界面.png)
@@ -79,8 +93,8 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
 ├── config/
 │   ├── narnat.json   # 主配置（唯一需要编辑的文件）
 │   ├── narnat.md     # 自定义系统指令（追加到系统 prompt 末尾）
-│   └── skills/       # 技能文件（/skill 加载）
-├── data/             # 会话持久化数据
+│   └── skills/       # 系统技能文件（/skill 加载）
+├── data/             # 会话持久化数据 + 费用日志 cost_log.csv
 └── logs/             # 调试日志（-d 模式）
 ```
 
@@ -108,7 +122,8 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
     "思考": {
       "启用": true,                             // 关闭则不传 thinking 参数
       "强度": "high",                           // 当前生效值
-      "强度选项": { "high": "高", "max": "全开" }  // /thinking 可选值 → 显示名
+      "强度选项": { "high": "高", "max": "全开" }, // /thinking 可选值 → 显示名
+      "回传": true                              // 可选，默认 true；思考内容按厂商契约回传（/thinkback 切换）
     },
     "LLM重试次数": 3
   },
@@ -134,6 +149,13 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
       "deepseek-v4-pro":   { "输入": 3.0, "缓存命中": 0.025, "输出": 6.0 },
       "deepseek-v4-flash": { "输入": 1.0, "缓存命中": 0.02,  "输出": 2.0 }
     }
+  },
+
+  // ── 费用日志（每次调用追加一行记录到 CSV）──
+  "费用日志": {
+    "启用": false,
+    "输出文件": "",                             // 留空 = data/cost_log.csv
+    "最大容量MB": 50                            // 写满后轮转为 主名_bak.csv（磁盘上保留 1 活动 + 1 备份）
   },
 
   // ── 界面（详见下方「界面配色」）──
@@ -171,7 +193,8 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
   "压缩": {
     "占比显示": false,                          // 统计栏是否显示 窗口占比:x%
     "告警": 50,                                 // 窗口占比 ≥ 此百分比时提示一次
-    "压缩": 95                                  // 窗口占比 ≥ 此百分比时先压缩再请求
+    "压缩": 95,                                 // 窗口占比 ≥ 此百分比时先压缩再请求
+    "保留尾部": 16000                           // 压缩时逐字保留的近期消息 token 预算，0=全量压缩
   },
 
   // ── 计划优先 ──
@@ -180,10 +203,16 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
     "计划最低工具数": 2                          // 可选，单轮工具调用数 ≥ 此值才强制先写计划
   },
 
-  // ── 文件操作忽略目录（Glob/Grep/Read 跳过）──
+  // ── 技能 ──
+  "技能": {
+    "项目技能目录": []                          // 可选，缺省=自动扫描工作目录下所有 skills 目录；[] = 关闭；写目录列表则仅用指定目录
+  },
+
+  // ── 文件操作忽略目录（Glob/Grep/Read 跳过；键缺失或为空 = 不忽略任何目录）──
   "忽略目录": [
     ".git", "__pycache__", "node_modules", ".svn", ".hg",
-    "venv", ".venv", ".pytest_cache"
+    "venv", ".venv", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".cache", ".idea", ".vscode", ".tox", ".nox"
   ]
 }
 ```
@@ -194,7 +223,9 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
 
 #### thinking 参数自动适配
 
-thinking 参数按 `(协议, 模型前缀)` 由内置映射表自动翻译为对应厂商格式（DeepSeek / GLM / Kimi / Qwen / GPT / Claude），无需手动写 `extra_body`。换模型只需改 `"智能体"` 分组字段，并通过 `/mode` 或 `"模型.列表"` 切换。
+thinking 参数按 `(协议, 模型前缀)` 由内置映射表自动翻译为对应厂商格式（DeepSeek / GLM / Kimi / MiMo / Qwen / GPT / Claude），无需手动写 `extra_body`。换模型只需改 `"智能体"` 分组字段，并通过 `/mode` 或 `"模型.列表"` 切换。
+
+思考回传（`思考.回传`）同样按厂商契约自动选择格式：Anthropic 协议回传 thinking 内容块（Claude 额外携带签名）、OpenAI 协议回传 `reasoning_content`、官方不要求回传的厂商（GPT / Qwen）不回传——DeepSeek / Kimi / MiMo 工具轮次不回传会 400，由映射表兜底。`/thinkback` 可随时切换并写入 narnat.json。
 
 ### narnat.md
 
@@ -203,6 +234,8 @@ thinking 参数按 `(协议, 模型前缀)` 由内置映射表自动翻译为对
 ### 技能
 
 `config/skills/` 下每个 Markdown 文件（或含 `.md` 的同名子目录）即一个技能。输入 `/skill <名称>` 将技能内容作为系统指令注入当前对话，用于切换 AI 的工作模式或行为风格。
+
+除系统技能外，还会自动扫描工作目录下所有名为 `skills` 的目录（深度 ≤ 4）作为项目技能根（如 `.agents/skills`、顶层 `skills` 等），无需写死目录列表；`/skill <目录/文件.md>` 可按层级路径加载指定文件。可在 `"技能"."项目技能目录"` 显式指定目录列表覆盖自动发现，写 `[]` 关闭项目技能扫描。
 
 ## narnat_agent
 
@@ -221,38 +254,43 @@ narnat_agent/
 │   ├── agent_loop.py         #   单轮循环（请求 → 工具调度 → 回传）
 │   ├── llm.py                #   LLM 双协议客户端（openai / anthropic）
 │   ├── context.py            #   上下文窗口管理
-│   ├── compressor.py         #   上下文压缩
-│   ├── compression_coordinator.py  # 压缩协调（占比阈值触发）
+│   ├── compressor.py         #   上下文压缩（保留尾部切点）
+│   ├── compression_coordinator.py  # 压缩协调（占比阈值触发、溢出恢复）
+│   ├── message_list.py       #   消息唯一所有者（只读视图 / 受控修改）
 │   ├── message_manager.py    #   消息管理
 │   ├── session_callbacks.py  #   会话状态机（三态）与命令回调
 │   ├── auto_save_manager.py  #   自动保存 / 自动命名
-│   ├── tool_dispatcher.py    #   工具调度
+│   ├── tool_dispatcher.py    #   工具调度（只读并行 / 写入按文件分组 / 串行）
 │   ├── tool_callbacks.py     #   工具回调（安全确认、Todo 同步）
 │   ├── summarizer.py         #   探索分支总结
 │   ├── billing.py            #   费用 / 余额
-│   ├── stats.py              #   统计
+│   ├── stats.py              #   统计、费用日志
 │   └── interrupt.py          #   打断机制
 ├── tools/                    # 内置工具（每个工具一个子目录）
 │   ├── read/                 #   Read — 读取文件
 │   ├── glob/                 #   Glob — 模式匹配（花括号展开）
 │   ├── grep/                 #   Grep — 正则搜索
-│   ├── edit/                 #   Edit — 字符串 / 行号替换编辑
+│   ├── edit/                 #   Edit — 字符串替换编辑
 │   ├── write/                #   Write — 创建 / 覆盖文件
 │   ├── bash/                 #   Shell — 本地命令执行
+│   ├── background/           #   Shell 后台任务运行时（提交/状态/等待/取消）
 │   ├── terminal/             #   Terminal — 多终端持久 SSH + 文件传输
 │   ├── serial/               #   Serial — 多终端持久串口
 │   ├── web_search/           #   WebSearch — 网页搜索
 │   ├── todo_write/           #   TodoWrite — 任务列表
 │   ├── goal_complete/        #   GoalComplete — 目标完成标记（目标模式动态注入）
 │   ├── registry.py           #   工具注册表
+│   ├── exec_signal.py        #   退出码 / 错误标签协议（防命令输出伪造）
 │   ├── diff_utils.py         #   diff 生成
 │   ├── param_utils.py        #   参数处理
 │   └── tool_context.py       #   工具运行时上下文
 ├── ui/                       # prompt-toolkit 界面
-│   ├── ui_design.py          #   界面与配色
+│   ├── ui_design.py          #   界面与输入
+│   ├── colors.py             #   颜色常量与样式
 │   ├── renderer.py           #   流式 Markdown 渲染（表格稳定渲染）
-│   ├── session_commands.py   #   交互命令注册表
-│   └── interrupt.py          #   Esc 打断
+│   ├── session_commands.py   #   交互命令注册表（Tab 补全）
+│   ├── interrupt.py          #   Esc 打断
+│   └── headless.py           #   headless 纯文本 UI（-p 模式）
 ├── output.py                 # 终端输出 / 颜色控制
 └── logger.py                 # 日志
 ```
@@ -262,20 +300,22 @@ narnat_agent/
 | 工具 | 说明 |
 |------|------|
 | Read | 读取纯文本文件（本地/远程设备），带行号，自动识别编码 |
-| Glob | 按模式匹配文件，支持 `**` 递归与 `{}` 花括号展开 |
+| Glob | 按模式匹配文件和目录，支持 `**` 递归与 `{}` 花括号展开，结果按修改时间倒序 |
 | Grep | 正则搜索文件内容，返回带行号的匹配行与每文件计数；path 支持多路径数组，匹配超 head_limit 自动降级为文件清单 |
-| Edit | 字符串替换或行号替换编辑，自动保持编码与换行符 |
+| Edit | 字符串替换编辑，自动保持编码与换行符 |
 | Write | 创建新文件或全量覆盖 |
-| Shell | 本地命令行执行（Windows cmd，支持超时/输出上限） |
+| Shell | 本地命令行执行（平台自适应：Windows cmd / Linux·macOS bash，支持超时/输出上限/后台任务） |
 | Terminal | 多终端持久 SSH（最多 5 个），支持交互输入、sudo 密码回填、设备间文件传输 |
 | Serial | 多终端持久串口（最多 5 个），扫描/连接/交互 |
 | WebSearch | 网页搜索 |
 | TodoWrite | 任务列表管理（计划同步） |
 | GoalComplete | 声明任务完成（仅 `/goal` 目标模式开启时注入给 AI） |
 
-- 工具输出受「输出上限KB」全局硬截断（保留首尾），超时受「超时上限秒」约束
+- 工具输出受「输出上限KB」全局硬截断（保留首尾），超时受「超时上限秒」约束；Read 例外——按行截断并提示续读 offset，保证行号连续
+- Shell 后台任务：`background=true` 提交后立即返回 `bgN` 编号，结果落盘到会话专属临时目录（可 Read/Grep 读取）；`bg="status"/"wait"/"cancel"` 管理，并发上限 8 个，会话结束自动清理
 - 参数错误返回对 AI 友好的中文提示（未知参数 / 缺失参数直接列出有效参数名）
 - 编辑类工具返回着色 diff，终端同步展示改动
+- 工具执行失败/退出码经进程级随机标签协议传递，命令自身输出无法伪造失败状态（UI 判定 100% 准确）
 
 ### 交互命令
 
@@ -289,9 +329,10 @@ narnat_agent/
 | `/rm <名称 \| --all>` | 删除会话（退出时生效） | 全部 |
 | `/explore <名称>` | 从当前会话创建探索分支 | RootSession |
 | `/done` | 完成分支探索，AI 总结后合并回父会话 | ChildSession |
-| `/skill <名称>` | 加载技能文件 | 全部 |
-| `/thinking <强度>` | 切换思考强度（由 `思考.强度选项` 定义） | 全部 |
-| `/mode <模型>` | 切换模型（由 `模型.列表` 定义，支持 Tab 补全） | 全部 |
+| `/skill <名称 \| 目录/文件.md>` | 加载技能文件（系统技能或项目技能） | 全部 |
+| `/thinking <强度>` | 切换思考强度（由 `思考.强度选项` 定义，写入 narnat.json） | 全部 |
+| `/thinkback [on\|off]` | 思考回传开关（无参数查看状态，写入 narnat.json） | 全部 |
+| `/mode <模型>` | 切换模型（由 `模型.列表` 定义，支持 Tab 补全，写入 narnat.json） | 全部 |
 | `/goal on [N]` | 开启目标模式（N=临时轮数上限） | 全部 |
 | `/goal off` | 关闭目标模式 | 全部 |
 | `/goal` | 查看目标模式状态 | 全部 |
@@ -320,4 +361,6 @@ NoSession ──/save──▶ RootSession ──/explore──▶ ChildSession
 
 ### 上下文压缩
 
-按上下文窗口占比（token 数 / `智能体.上下文窗口大小`）触发：占比 ≥ `压缩.告警` 时提示一次，≥ `压缩.压缩` 时先压缩历史再发起请求；`压缩.占比显示` 开启后统计栏实时显示窗口占比。压缩由 AI 将历史对话总结为结构化经验（请求、进展、未完成任务、关键决策、错误与解法），替代原文进入新会话。
+按上下文窗口占比（token 数 / `智能体.上下文窗口大小`）触发：占比 ≥ `压缩.告警` 时提示一次，≥ `压缩.压缩` 时先压缩历史再发起请求；`压缩.占比显示` 开启后统计栏实时显示窗口占比。
+
+压缩由 AI 将历史对话总结为结构化检查点（原始请求与意图 / 关键技术概念 / 文件与代码 / 错误与修复 / 待办任务 / 当前工作 / 下一步 / 关键上下文），作为「上一轮对话成果」进入新会话，`压缩.保留尾部` 预算内的近期消息逐字保留。压缩失败不阻塞对话（下次输入前自动重试）；请求被服务端以「上下文超限」拒绝时，也会自动压缩后原地续跑。

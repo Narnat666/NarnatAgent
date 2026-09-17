@@ -795,7 +795,7 @@ def _ensure_local_dir(local_path: str) -> bool:
 
 def _transfer_local_to_remote(source_path: str, target_host: str, target_path: str, max_transfer_mb: int) -> str:
     if os.path.isdir(source_path):
-        return error_line(f"源是目录，transfer仅支持文件传输。目录请先用 Shell 打包（如 tar czf x.tar.gz 目录）再传输: {source_path}")
+        return error_line(f"源是目录，transfer仅支持文件传输。目录请先用 Shell 打包为单个文件（如 tar/zip）再传输: {source_path}")
     if not os.path.isfile(source_path):
         return error_line(f"源文件不存在: {source_path}")
 
@@ -834,7 +834,7 @@ def _transfer_remote_to_local(source_host: str, source_path: str, target_path: s
         return error_line(f"源文件不存在或无法访问: {source_host}:{source_path}")
     size, is_dir = st
     if is_dir:
-        return error_line(f"源是目录，transfer仅支持文件传输。目录请先用 exec 打包（如 tar czf x.tar.gz 目录）再传输: {source_host}:{source_path}")
+        return error_line(f"源是目录，transfer仅支持文件传输。目录请先用 exec 打包为单个文件（如 tar/zip）再传输: {source_host}:{source_path}")
 
     err = _check_transfer_size(size, max_transfer_mb)
     if err:
@@ -869,7 +869,7 @@ def _transfer_remote_to_remote(source_host: str, source_path: str, target_host: 
         return error_line(f"源文件不存在或无法访问: {source_host}:{source_path}")
     size, is_dir = st
     if is_dir:
-        return error_line(f"源是目录，transfer仅支持文件传输。目录请先在源设备 exec 打包（如 tar czf x.tar.gz 目录）再传输: {source_host}:{source_path}")
+        return error_line(f"源是目录，transfer仅支持文件传输。目录请先在源设备 exec 打包为单个文件（如 tar/zip）再传输: {source_host}:{source_path}")
 
     err = _check_transfer_size(size, max_transfer_mb)
     if err:

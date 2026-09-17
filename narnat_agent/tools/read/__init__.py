@@ -128,7 +128,7 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
         return _apply_global_cap(result, _tool_context)
         
     if os.path.isdir(file_path):
-        return f"[错误: {file_path} 是目录，请用 Glob 匹配或 Shell(eza -la) 查看目录内容]"
+        return f"[错误: {file_path} 是目录，请用 Glob 匹配或 Shell 查看目录内容]"
 
     if not os.path.isfile(file_path):
         # 相对路径解析依赖当前目录（Shell cd会改变它），报错时带上cwd帮AI一次定位

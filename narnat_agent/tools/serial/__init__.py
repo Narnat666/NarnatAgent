@@ -579,6 +579,6 @@ def _resolve_session_id(session_id: int, port: str = "") -> tuple[int, "SerialSe
         else:
             summaries = [f"终端{k}: {v.prompt_info}" for k, v in sorted(active.items())]
             raise ValueError(
-                f"有{len(active)}个会话，请指定 session_id 或 port（如 port=COM3）。\n"
+                f"有{len(active)}个会话，请指定 session_id 或 port（串口设备名，如COM1、/dev/ttyUSB0）。\n"
                 + "\n".join(summaries)
             )
