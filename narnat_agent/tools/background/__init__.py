@@ -1,9 +1,13 @@
 """后台任务管理 —— Shell 工具 bg 参数的后端（bash/__init__.py 分发调用）
 
 8 固定槽位 bg1~bg8：一任务一文件 bgN.log（复用前旧结果先归档为
-bgN.log.<seq>.prev，永不静默丢失），结果落在 <会话工作目录>/.background/
-隐藏目录（内置 .gitignore 忽略一切），AI 用 Read/Grep 按编号直接读取
-结果文件，从不接触文件管理。
+bgN.log.<seq>.prev，永不静默丢失），结果落在系统临时目录下本会话
+专属子目录 narnat_bg_<随机>（每进程唯一）：
+- 不进用户工作目录：叉窗强杀残留也不会污染项目/桌面，仅占临时目录
+- 每进程唯一：同项目多 agent、父子 agent 天然互不抢目录
+- 过期清扫：会话启动时清理历史强杀残留（保活期外未动过的目录）
+AI 用 Read/Grep 按 submit/status 返回的绝对路径读取结果文件，
+从不接触文件管理。
 
 职责边界：本模块只管"跑"——提交/状态/等待/取消/清理/落盘截断；
 "看"由 AI 用现有工具完成。
@@ -31,6 +35,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -45,30 +50,81 @@ TAIL_BYTES = 1 * 1024 * 1024       # 截断后滚动保留的尾部缓冲
 DRAIN_GRACE = 0.3                  # 管道收口宽限（秒）
 TAIL_SUFFIX = ".tail"
 
+BG_DIR_PREFIX = "narnat_bg_"       # 会话临时目录前缀（过期清扫按它识别自家目录）
+BG_STALE_SECONDS = 7 * 24 * 3600   # 强杀残留保活期：目录超过此时间未动即清扫
+
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
 STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
 
-# 结果目录根：首次使用时快照 cwd（此后 AI 的 cd 不影响结果路径）
+# 结果根目录：首次使用时创建本会话专属临时目录（此后 AI 的 cd 不影响结果路径）
 _base_dir: Optional[str] = None
-
-# 子会话隔离开关：headless/nn 子代理启动时设为独立临时目录，
-# 使其 .background 与主会话分离——子代理进程 cwd 与主会话相同，
-# 若不隔离，其 prepare/cleanup 会误清主会话的 .background 日志。
-_BG_ROOT_ENV = "NARNAT_BG_ROOT"
 
 
 def _root_dir() -> str:
     global _base_dir
     if _base_dir is None:
-        env_root = os.environ.get(_BG_ROOT_ENV)
-        _base_dir = os.path.abspath(env_root) if env_root else os.path.abspath(os.getcwd())
+        _base_dir = tempfile.mkdtemp(prefix=BG_DIR_PREFIX)
+        _sweep_stale()
     return _base_dir
 
 
 def _bg_dir() -> str:
-    return os.path.join(_root_dir(), ".background")
+    return _root_dir()
+
+
+def _sweep_stale() -> None:
+    """清扫历史强杀残留：系统临时目录下保活期外未动过的 narnat_bg_* 目录。
+
+    三道防线防误删（自上而下）：
+    1. 目录 mtime 在保活期内（近期有提交/归档）→ 会话活跃，跳过；
+    2. 目录内任一文件在保活期内（长跑任务只更新日志文件 mtime）→ 活跃，跳过；
+    3. 判定过期后先原子改名再删：目录内若仍有活跃写入（打开的文件句柄），
+       Windows 下改名必然失败 → 放弃删除；改名成功（真孤儿/纯旧日志）才删。
+       Linux 无句柄锁（POSIX 语义），本防线不生效——尽力而为。
+    任何失败一律放弃，绝不强行删除；最坏后果仅是旧日志（会话级临时结果）
+    延迟回收，不影响任何功能。
+    """
+    try:
+        now = time.time()
+        tmp = tempfile.gettempdir()
+        for name in os.listdir(tmp):
+            if not name.startswith(BG_DIR_PREFIX):
+                continue
+            p = os.path.join(tmp, name)
+            try:
+                if now - os.path.getmtime(p) <= BG_STALE_SECONDS:
+                    continue  # 防线1：目录近期有提交/归档
+                if _has_fresh_file(p, now):
+                    continue  # 防线2：长跑任务日志仍在持续落盘
+                # 防线3：先原子改名再删。目录内有打开句柄（活跃写入）时
+                # Windows 下 rename 失败 → 视为活跃会话，放弃删除
+                trash = p + ".stale"
+                try:
+                    os.replace(p, trash)
+                except OSError:
+                    continue
+                shutil.rmtree(trash, ignore_errors=True)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _has_fresh_file(p: str, now: float) -> bool:
+    """目录内是否存在保活期内的文件（活跃会话的长跑日志在持续更新文件 mtime）"""
+    try:
+        entries = os.listdir(p)
+    except OSError:
+        return False
+    for f in entries:
+        try:
+            if now - os.path.getmtime(os.path.join(p, f)) <= BG_STALE_SECONDS:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 @dataclass
@@ -101,16 +157,9 @@ _archive_seq = 0                     # 归档文件序号（会话内递增，�
 
 
 def _ensure_dir() -> str:
-    """确保 .background 目录存在并带 .gitignore（内容 *，git 永不提交日志）"""
+    """确保结果目录存在（临时目录下，无 git 提交风险，无需 .gitignore）"""
     d = _bg_dir()
     os.makedirs(d, exist_ok=True)
-    gi = os.path.join(d, ".gitignore")
-    if not os.path.exists(gi):
-        try:
-            with open(gi, "w", encoding="utf-8") as f:
-                f.write("*\n")
-        except OSError:
-            pass
     return d
 
 
