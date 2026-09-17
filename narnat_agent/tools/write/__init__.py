@@ -15,14 +15,14 @@ DEFINITION = {
         "name": "Write",
         "description": (
             "创建新文件或全量覆盖文件。支持本地或远程写入文件。"
-            "覆写已存在的文件时返回diff（旧内容可见，便于核对变化）。"
+            "覆写已存在的文件时返回diff。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "文件路径（绝对或相对）"},
+                "file_path": {"type": "string", "description": "文件路径"},
                 "content": {"type": "string", "description": "完整文件内容"},
-                "device": {"type": "string", "description": "设备dev编号：默认dev0（可省略）写入本机文件，设置dev1..devn则写入被控设备文件（需先Terminal connect被控设备获取dev编号）"},
+                "device": {"type": "string", "description": "设备dev编号：默认dev0即写入本地指定文件，设置dev1..devn则写入指定远程设备文件"},
             },
             "required": ["file_path", "content"],
         },

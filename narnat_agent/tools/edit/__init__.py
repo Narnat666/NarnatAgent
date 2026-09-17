@@ -21,17 +21,17 @@ DEFINITION = {
         "name": "Edit",
         "description": (
             "编辑文件（字符串精确替换）。支持本地或远程编辑文件。"
-            "old_string 必须与文件内容精确匹配（匹配失败会给出相似行供定位）。"
-            "自动识别并保持原编码（UTF-8/GBK），自动兼容CRLF/LF换行。"
+            "old_string 必须与文件内容精确匹配。"
+            "自动识别并保持原编码（UTF-8/GBK）。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "文件路径（绝对或相对）"},
+                "file_path": {"type": "string", "description": "文件路径"},
                 "old_string": {"type": "string", "description": "待替换的原文"},
                 "new_string": {"type": "string", "description": "替换后的新文本"},
                 "replace_all": {"type": "boolean", "description": "是否替换全部匹配（默认否，即只替换唯一匹配处）"},
-                "device": {"type": "string", "description": "设备dev编号：默认dev0（可省略）编辑本机文件，设置dev1..devn则编辑被控设备文件（需先Terminal connect被控设备获取dev编号）"},
+                "device": {"type": "string", "description": "设备dev编号：默认dev0即编辑本地指定文件，设置dev1..devn则编辑指定远程设备文件"},
             },
             "required": ["file_path", "old_string"],
         },

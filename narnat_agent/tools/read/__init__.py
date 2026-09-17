@@ -52,17 +52,17 @@ DEFINITION = {
     "function": {
         "name": "Read",
         "description": (
-            "读取纯文本文件内容，返还内容带行号（由1开始）。不可读取二进制文件。"
+            "读取纯文本文件内容，返还内容带行号（由1开始）。"
             "自动识别UTF-8/GBK编码。"
             "支持本地或远程读取文件。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "文件路径（绝对或相对）"},
+                "file_path": {"type": "string", "description": "文件路径"},
                 "offset": {"type": "integer", "description": "起始行（默认1，含本行）"},
                 "limit": {"type": "integer", "description": "读取行数（正整数，默认2000）"},
-                "device": {"type": "string", "description": "设备dev编号：默认dev0（可省略）读取本机文件，设置dev1..devn则读取被控设备文件（需先Terminal connect被控设备获取dev编号）"},
+                "device": {"type": "string", "description": "设备dev编号：默认dev0即读取本地指定文件，设置dev1..devn则读取指定远程设备文件"},
             },
             "required": ["file_path"],
         },
