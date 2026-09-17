@@ -27,6 +27,25 @@ def _local_hostname() -> str:
         return "localhost"
 
 
+def _mcp_target_hint(config) -> str:
+    """MCP connect 摘要里的目标程序（脚本或命令的后两段路径，便于人眼核对）
+
+    sysplorer_mcp/main.py / npx 这种；取不到返回空串。
+    """
+    if not isinstance(config, dict):
+        return ""
+    args = [str(a) for a in (config.get("args") or [])]
+    candidates = []
+    if args and not args[0].startswith("-"):
+        candidates.append(args[0])
+    candidates.append(str(config.get("command") or ""))
+    for text in candidates:
+        parts = [p for p in text.replace("\\", "/").split("/") if p]
+        if parts:
+            return "/".join(parts[-2:])
+    return ""
+
+
 class ToolDispatcher:
     """工具调度器"""
 
@@ -47,6 +66,7 @@ class ToolDispatcher:
         "WebSearch": "联网搜索",
         "TodoWrite": "更新计划",
         "Serial": "串口",
+        "MCP": "MCP",
         "GoalComplete": "声明完成",
     }
 
@@ -216,9 +236,12 @@ class ToolDispatcher:
         #   - Terminal设计内超时(仍在后台运行)/密码提示/繁忙提示: 不带标签 → 不显示
         # 其他工具(Read/Edit/Write/Serial等): 结果纯框架文本、绝无命令输出，
         #   startswith("[错误")即100%确定，沿用。
+        # MCP 工具(mcp__*)结果含"服务端任意文本"（可能自带"[错误"开头的中文文本），
+        #   与命令类工具同源：只认框架不可伪造标签，避免服务端文本被误判为工具失败。
         # 框架标签只服务于判定，不给AI看（strip_tags剥离后AI看到的内容与无标签一致）
+        tagged_judge = name in ("Shell", "Terminal") or name.startswith("mcp__")
         exec_failed = (
-            name in ("Shell", "Terminal")
+            tagged_judge
             and isinstance(llm_result, str)
             and has_error(llm_result)
         )
@@ -239,7 +262,7 @@ class ToolDispatcher:
         elif exec_failed:
             # Shell/Terminal框架错误（带不可伪造标签）：终端补一行失败提示，原因只进AI上下文
             self._show_tool_failed(name)
-        elif (name not in ("Shell", "Terminal")
+        elif (not tagged_judge
               and isinstance(llm_result, str)
               and llm_result.startswith("[错误")):
             # 非命令类工具(Read/Edit/Write/Serial等)：结果纯框架文本、绝无命令输出，
@@ -378,6 +401,18 @@ class ToolDispatcher:
             return
         label = ToolDispatcher.TOOL_LABELS.get(name, name)
         summary = ""
+        if name.startswith("mcp__"):
+            # MCP 工具（mcp__<服务器>__<工具>）：标签显示服务器，摘要显示工具名+参数（紧凑）
+            parts = name.split("__", 2)
+            if len(parts) == 3:
+                label = f"MCP:{parts[1]}"
+                summary = parts[2]
+                if arguments:
+                    args_text = json.dumps(arguments, ensure_ascii=False,
+                                           separators=(",", ":"))
+                    if len(args_text) > 100:
+                        args_text = args_text[:100] + "…"
+                    summary += f" {args_text}"
         if name in ToolDispatcher.FILE_PATH_TOOLS:
             dev_raw = arguments.get("device", "")
             # 只有远程设备(dev1..devn)才显示设备；dev0/省略=本机不显示
@@ -441,6 +476,17 @@ class ToolDispatcher:
         elif name == "TodoWrite":
             todos = arguments.get("todos", [])
             summary = f"{len(todos)}项" if todos else "(空)"
+        elif name == "MCP":
+            # 与 Terminal 同风格：动作 + 目标（括号内为启动程序，便于人眼核对连的是什么）
+            action = arguments.get("action", "connect")
+            target = arguments.get("name", "")
+            if action == "connect":
+                hint = _mcp_target_hint(arguments.get("config"))
+                summary = f"connect {target}{f' ({hint})' if hint else ''}".strip()
+            elif action == "disconnect":
+                summary = f"disconnect {target}".strip()
+            else:
+                summary = str(action)
         elif name == "Serial":
             action = arguments.get("action", "exec")
             sid = arguments.get("session_id", -1)

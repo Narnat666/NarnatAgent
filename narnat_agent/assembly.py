@@ -55,7 +55,9 @@ class Assembly:
         if debug:
             logger.start(config.paths.logs_dir)
 
-        # 5. 工具定义（LLM 需要它，但 LLM 不直接依赖 tools 包）
+        # 5. MCP 连接管理器（AI 按需连接，narnat.json 不配置名单）+ 工具定义
+        from .mcp import McpManager
+        mcp_manager = McpManager(logger)
         from .tools.registry import get_tool_definitions
         tool_definitions = get_tool_definitions()
 
@@ -66,6 +68,10 @@ class Assembly:
             max_output_tokens=config.ui.max_output_tokens,
             tool_definitions=tool_definitions,
         )
+
+        # 6.5 MCP 工具热更新接线：AI 运行时 connect/disconnect 的工具
+        # 通过回调同步进 LLM 工具表（下一轮请求即可见）
+        mcp_manager.set_tool_sinks(llm.add_tool_definitions, llm.remove_tool_definitions)
 
         # 6. 上下文管理
         context = ContextManager(
@@ -103,6 +109,7 @@ class Assembly:
             max_timeout_seconds=config.tools.max_timeout_seconds,
             require_plan=config.plan.require_plan,
             min_tools=config.plan.min_tools,
+            mcp_manager=mcp_manager,
         )
 
         # 10. 会话管理器
@@ -193,6 +200,7 @@ class Assembly:
             auto_save_mgr=auto_save_mgr,
             compression_coordinator=compression_coordinator,
             agent_loop=agent_loop,
+            mcp_manager=mcp_manager,
         )
 
 
@@ -201,7 +209,8 @@ class AssemblyResult:
 
     def __init__(self, config, logger, llm, context, message_list,
                  msg_manager, session_mgr, ui, tool_context, dispatcher,
-                 stats, auto_save_mgr, compression_coordinator, agent_loop):
+                 stats, auto_save_mgr, compression_coordinator, agent_loop,
+                 mcp_manager=None):
         self.config = config
         self.logger = logger
         self.llm = llm
@@ -216,3 +225,4 @@ class AssemblyResult:
         self.auto_save_mgr = auto_save_mgr
         self.compression_coordinator = compression_coordinator
         self.agent_loop = agent_loop
+        self.mcp_manager = mcp_manager

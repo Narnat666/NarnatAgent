@@ -66,6 +66,8 @@ class Agent:
                     if result == 2:
                         self._auto_save.on_exit()
                         self._logger.info("core.agent", "用户退出")
+                        # os._exit 不走 finally：MCP 服务端子进程在此显式回收
+                        self._parts.mcp_manager.cleanup()
                         self._logger.close()
                         os._exit(0)
                     if result == 1:
@@ -179,6 +181,7 @@ class Agent:
             _terminal_cleanup()
             _serial_cleanup()
             _bg_cleanup()
+            self._parts.mcp_manager.cleanup()
 
     def run_headless(self, task: str, max_rounds: int = 0):
         """headless 一次性任务执行（nn -p 入口）。
@@ -269,4 +272,5 @@ class Agent:
             _terminal_cleanup()
             _serial_cleanup()
             _bg_cleanup()
+            self._parts.mcp_manager.cleanup()
             self._logger.close()

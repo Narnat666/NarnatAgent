@@ -24,6 +24,7 @@ from .terminal import execute as terminal_execute, DEFINITION as TERMINAL_DEF
 from .web_search import execute as web_search_execute, DEFINITION as WEBSEARCH_DEF
 from .todo_write import execute as todo_write_execute, DEFINITION as TODOWRITE_DEF
 from .serial import execute as serial_execute, DEFINITION as SERIAL_DEF
+from .mcp_tool import execute as mcp_execute, DEFINITION as MCP_DEF
 from .goal_complete import execute as goal_complete_execute
 
 
@@ -43,6 +44,7 @@ _TOOL_IMPLEMENTATIONS: Dict[str, Callable] = {
     "WebSearch": web_search_execute,
     "TodoWrite": todo_write_execute,
     "Serial": serial_execute,
+    "MCP": mcp_execute,
     "GoalComplete": goal_complete_execute,
 }
 
@@ -54,10 +56,44 @@ _TOOL_IMPLEMENTATIONS: Dict[str, Callable] = {
 TOOL_DEFINITIONS: List[Dict] = [
     READ_DEF, GLOB_DEF, GREP_DEF, EDIT_DEF, WRITE_DEF,
     BASH_DEF, TERMINAL_DEF, WEBSEARCH_DEF, TODOWRITE_DEF,
-    SERIAL_DEF,
+    SERIAL_DEF, MCP_DEF,
 ]
 # GoalComplete 不进默认工具定义：由 /goal 开启时通过 LLMClient.set_goal_tool(True) 动态注入，
 # 普通模式不暴露给 LLM（执行能力始终注册，兼容历史残留调用）。
+
+
+# ═══════════════════════════════════════════════════════════════
+# 运行时动态工具（MCP 服务器工具等，由 assembly 启动时注册）
+# ═══════════════════════════════════════════════════════════════
+
+_DYNAMIC_IMPLEMENTATIONS: Dict[str, Callable] = {}
+_DYNAMIC_DEFINITIONS: List[Dict] = []
+
+
+def register_dynamic_tools(entries: List[tuple]) -> None:
+    """注册运行时动态工具（当前来源：MCP 服务器 tools/list）。
+
+    entries: [(工具名, LLM工具定义, 实现函数), ...]
+    与内置工具重名时跳过（内置优先），重复调用幂等。
+    """
+    for name, definition, impl in entries:
+        if name in _TOOL_IMPLEMENTATIONS or name in _DYNAMIC_IMPLEMENTATIONS:
+            continue
+        _DYNAMIC_IMPLEMENTATIONS[name] = impl
+        _DYNAMIC_DEFINITIONS.append(definition)
+
+
+def unregister_dynamic_tools(names: List[str]) -> None:
+    """注销运行时动态工具（MCP 断开时调用）。内置工具不受影响"""
+    targets = set(names or ())
+    if not targets:
+        return
+    for name in targets:
+        _DYNAMIC_IMPLEMENTATIONS.pop(name, None)
+    _DYNAMIC_DEFINITIONS[:] = [
+        d for d in _DYNAMIC_DEFINITIONS
+        if d.get("function", {}).get("name") not in targets
+    ]
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -65,7 +101,7 @@ TOOL_DEFINITIONS: List[Dict] = [
 # ═══════════════════════════════════════════════════════════════
 
 # 需要tool_context的工具：执行时注入 _tool_context 参数
-_CONTEXT_TOOLS = {"Shell", "Terminal", "TodoWrite", "WebSearch", "Read", "Glob", "Grep", "Serial", "GoalComplete"}
+_CONTEXT_TOOLS = {"Shell", "Terminal", "TodoWrite", "WebSearch", "Read", "Glob", "Grep", "Serial", "MCP", "GoalComplete"}
 
 
 def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolContext] = None) -> tuple:
@@ -82,7 +118,7 @@ def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolCon
         - llm_result: 纯文本结果，传给LLM
         - color_diff: 着色diff文本，传给终端展示；空串表示无需展示
     """
-    impl = _TOOL_IMPLEMENTATIONS.get(name)
+    impl = _TOOL_IMPLEMENTATIONS.get(name) or _DYNAMIC_IMPLEMENTATIONS.get(name)
     if impl is None:
         return (error_line(f"未知工具: {name}"), "")
 
@@ -150,10 +186,10 @@ def _friendly_type_error(name: str, impl: Callable, err: TypeError) -> str:
 
 
 def get_tool_names() -> List[str]:
-    """返回所有工具名称"""
-    return list(_TOOL_IMPLEMENTATIONS.keys())
+    """返回所有工具名称（含运行时动态注册的工具）"""
+    return list(_TOOL_IMPLEMENTATIONS.keys()) + list(_DYNAMIC_IMPLEMENTATIONS.keys())
 
 
 def get_tool_definitions() -> List[Dict]:
-    """返回LLM工具定义列表"""
-    return TOOL_DEFINITIONS
+    """返回LLM工具定义列表（含运行时动态注册的工具）"""
+    return TOOL_DEFINITIONS + _DYNAMIC_DEFINITIONS

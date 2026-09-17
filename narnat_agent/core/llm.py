@@ -225,6 +225,29 @@ class LLMClient:
                 if d.get("function", {}).get("name") != name
             ]
 
+    def add_tool_definitions(self, definitions: list) -> None:
+        """热追加工具定义（MCP 运行时连接后调用）。按名称去重，幂等。
+
+        与 set_goal_tool 同机制：_tool_defs 与后端共享同一列表对象，
+        每轮请求现读 → 追加后 AI 下一轮即可见。
+        """
+        existing = {d.get("function", {}).get("name") for d in self._tool_defs}
+        for definition in definitions or []:
+            name = definition.get("function", {}).get("name")
+            if name and name not in existing:
+                self._tool_defs.append(definition)
+                existing.add(name)
+
+    def remove_tool_definitions(self, names) -> None:
+        """热移除工具定义（MCP 断开时调用）"""
+        names = set(names or ())
+        if not names:
+            return
+        self._tool_defs[:] = [
+            d for d in self._tool_defs
+            if d.get("function", {}).get("name") not in names
+        ]
+
     @property
     def raw_sse(self):
         if hasattr(self._backend, '_last_raw_sse'):

@@ -24,6 +24,8 @@ from .defaults import (
     DEFAULT_REQUIRE_PLAN, DEFAULT_MIN_TOOLS,
     DEFAULT_MAX_TOOL_OUTPUT_KB,
     DEFAULT_MAX_TIMEOUT_SECONDS,
+    DEFAULT_MCP_STARTUP_TIMEOUT,
+    DEFAULT_MCP_TOOL_TIMEOUT,
     DEFAULT_AUTO_SAVE,
     DEFAULT_AUTO_SAVE_TOKENS,
     DEFAULT_GOAL_MAX_ROUNDS,
@@ -78,6 +80,26 @@ class SafetyConfig:
     """安全确认配置（只读）"""
     git_skip_confirm: bool = DEFAULT_GIT_SKIP
     rm_skip_confirm: bool = DEFAULT_RM_SKIP
+
+
+@dataclass(frozen=True)
+class McpServerConfig:
+    """单个 MCP 服务器配置（只读）。
+
+    stdio 服务器：command/args/env/cwd 启动本地进程；命名与字段对标 codex 的
+    [mcp_servers.<name>]（startup_timeout_sec / tool_timeout_sec /
+    enabled_tools / disabled_tools）。
+    """
+    name: str = ""
+    command: str = ""
+    args: tuple = ()                        # 命令行参数
+    env: Dict[str, str] = field(default_factory=dict)   # 附加环境变量（继承本进程环境后覆盖）
+    cwd: str = ""                           # 工作目录，空=本进程当前目录
+    enabled: bool = True                    # False=不启动
+    startup_timeout: int = DEFAULT_MCP_STARTUP_TIMEOUT   # 启动+握手+列工具超时（秒）
+    tool_timeout: int = DEFAULT_MCP_TOOL_TIMEOUT         # 工具调用超时（秒）
+    enabled_tools: tuple = ()               # 工具白名单（服务端原始工具名），空=全部
+    disabled_tools: tuple = ()              # 工具黑名单（在白名单之后生效）
 
 
 @dataclass(frozen=True)
@@ -291,6 +313,73 @@ def _parse_project_skill_roots(data: dict) -> Optional[tuple]:
     if isinstance(raw, list):
         return tuple(r for r in raw if isinstance(r, str) and r.strip())
     return None
+
+
+def parse_mcp_server(name: str, entry: dict) -> Optional[McpServerConfig]:
+    """解析一个 MCP 服务器配置项（键同时接受中文与英文写法）。
+
+    来源：运行时 MCP 工具的 connect（AI 按需连接时给的配置，或候选发现的规格）。
+    entry 非 dict 或非法时返回 None。
+    """
+    if not isinstance(entry, dict) or not str(name).strip():
+        return None
+
+    def _pick(*keys, default=None):
+        """取第一个非空键值（中英文别名兼容）"""
+        for k in keys:
+            v = entry.get(k)
+            if v not in (None, ""):
+                return v
+        return default
+
+    args = _pick("参数", "args", default=[])
+    if not isinstance(args, list):
+        args = []
+
+    # command 数组形态（Claude 配置 [python, main.py, ...]）归一为 command+args，
+    # 使 AI 把其它客户端的配置原样贴进来也能直接连接
+    command = _pick("命令", "command", default="")
+    if isinstance(command, list):
+        args = list(command[1:]) + list(args)
+        command = command[0] if command else ""
+
+    env = _pick("环境变量", "env", default={})
+    if not isinstance(env, dict):
+        env = {}
+
+    startup_timeout = _coerce(_pick("启动超时秒", "startup_timeout_sec"), int)
+    if not startup_timeout or startup_timeout <= 0:
+        startup_timeout = DEFAULT_MCP_STARTUP_TIMEOUT
+
+    tool_timeout = _coerce(_pick("工具超时秒", "tool_timeout_sec"), int)
+    if not tool_timeout or tool_timeout <= 0:
+        tool_timeout = DEFAULT_MCP_TOOL_TIMEOUT
+
+    enabled_tools = _pick("工具白名单", "enabled_tools", default=[])
+    if not isinstance(enabled_tools, list):
+        enabled_tools = []
+
+    disabled_tools = _pick("工具黑名单", "disabled_tools", default=[])
+    if not isinstance(disabled_tools, list):
+        disabled_tools = []
+
+    # 布尔容错：AI 手写配置可能给字符串（"false"/"0"/"off"），不能 bool("false")=True
+    enabled = _pick("启用", "enabled", default=True)
+    if isinstance(enabled, str):
+        enabled = enabled.strip().lower() not in ("", "0", "false", "no", "off", "否")
+
+    return McpServerConfig(
+        name=str(name),
+        command=str(command),
+        args=tuple(args),
+        env={str(k): str(v) for k, v in env.items()},
+        cwd=str(_pick("工作目录", "cwd", default="")),
+        enabled=bool(enabled),
+        startup_timeout=startup_timeout,
+        tool_timeout=tool_timeout,
+        enabled_tools=tuple(str(t) for t in enabled_tools),
+        disabled_tools=tuple(str(t) for t in disabled_tools),
+    )
 
 
 def _parse_token_amount(v, default: int = 0) -> int:

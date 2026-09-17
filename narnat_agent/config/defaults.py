@@ -16,6 +16,10 @@ DEFAULT_MAX_TOOL_OUTPUT_KB = 64
 # ── 工具超时全局上限（秒），0=不限制 ──
 DEFAULT_MAX_TIMEOUT_SECONDS = 1800
 
+# ── MCP 服务器默认值（对标 codex：DEFAULT_STARTUP_TIMEOUT / DEFAULT_TOOL_TIMEOUT）──
+DEFAULT_MCP_STARTUP_TIMEOUT = 30   # 启动 + 握手 + 列工具超时（秒）
+DEFAULT_MCP_TOOL_TIMEOUT = 300     # MCP 工具调用超时（秒）
+
 # ── 计划优先默认值 ──
 DEFAULT_REQUIRE_PLAN = False  # 是否强制AI先制定计划再执行工具
 DEFAULT_MIN_TOOLS = 2         # 单轮工具调用数≥此值时才强制要求先写计划

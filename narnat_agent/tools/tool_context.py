@@ -44,6 +44,9 @@ class ToolContext:
     require_plan: bool = False       # True=强制AI先写TodoWrite再执行其他工具
     min_tools: int = 2               # 单轮工具调用数≥此值时才强制要求先写计划
 
+    # MCP 服务器管理器（由 assembly 注入；MCP 工具用它做运行时连接/断开）
+    mcp_manager: Any = None
+
     # 当前todo状态（由TodoWrite工具更新）
     current_todos: list = field(default_factory=list)
 
