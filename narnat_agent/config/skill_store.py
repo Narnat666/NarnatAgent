@@ -10,6 +10,9 @@
      - 支持层级路径: /skill 目录1/XXX.md
      - 目录内含 SKILL.md 或恰好一个 .md 时，可直接用目录名加载
      - 目录内多个 .md 且无 SKILL.md 时，用目录名加载会提示可选文件
+
+load_skill 额外返回实际读取的文件路径，供调用方告知模型"本技能目录"
+（技能正文里的相对路径以此为基准）。
 """
 
 import os
@@ -28,7 +31,9 @@ def load_skill(narnat_dir: str, name: str,
                cwd: str = "",
                ignore_dirs: tuple = (),
                scan_depth: int = DEFAULT_SKILL_SCAN_DEPTH) -> tuple:
-    """加载技能内容。返回 (content, error)。
+    """加载技能内容。返回 (content, error, path)。
+
+    path: 实际读取的技能文件绝对路径（未找到/读取失败为 ""）。
 
     project_roots:
       None      → 自动发现（扫描工作目录下所有名为 skills 的目录）
@@ -40,16 +45,16 @@ def load_skill(narnat_dir: str, name: str,
     2. 项目技能（各技能根目录下，支持 目录/文件.md 层级路径）
     """
     if not name or not name.strip():
-        return "", "技能不存在: "
+        return "", "技能不存在: ", ""
     name = name.strip().replace("\\", "/").rstrip("/")
     if _unsafe_name(name):
-        return "", f"技能不存在: {name}"
+        return "", f"技能不存在: {name}", ""
 
     # 1. 系统技能（名称不含 "/"，原有逻辑不变）
     if "/" not in name:
-        content, err = _load_system_skill(narnat_dir, name)
+        content, err, path = _load_system_skill(narnat_dir, name)
         if content or err:
-            return content, err
+            return content, err, path
 
     # 2. 项目技能
     cwd = cwd or os.getcwd()
@@ -57,7 +62,7 @@ def load_skill(narnat_dir: str, name: str,
         result = _load_project_skill(root, name)
         if result is not None:
             return result
-    return "", f"技能不存在: {name}"
+    return "", f"技能不存在: {name}", ""
 
 
 def list_skill_tree(narnat_dir: str,
@@ -158,7 +163,7 @@ def _discover_skill_roots(cwd: str, narnat_dir: str,
 
 
 def _load_system_skill(narnat_dir: str, name: str) -> tuple:
-    """原有系统技能查找逻辑。未找到返回 ("", "")。"""
+    """原有系统技能查找逻辑。未找到返回 ("", "", "")。"""
     skills_dir = os.path.join(narnat_dir, CONFIG_SUBDIR, "skills")
     path = os.path.join(skills_dir, f"{name}.md")
     if os.path.isfile(path):
@@ -171,11 +176,11 @@ def _load_system_skill(narnat_dir: str, name: str) -> tuple:
                     return _read(os.path.realpath(os.path.join(subdir, f)))
         except OSError:
             pass
-    return "", ""
+    return "", "", ""
 
 
 def _load_project_skill(base: str, name: str):
-    """在单个项目技能根 base 下解析 name。返回 (content, error)；该根下不存在返回 None。"""
+    """在单个项目技能根 base 下解析 name。返回 (content, error, path)；该根下不存在返回 None。"""
     base_real = os.path.realpath(base)
     # 1) 直接文件（支持省略 .md 后缀）
     candidates = [name]
@@ -197,7 +202,7 @@ def _resolve_project_dir(d: str, name: str) -> tuple:
     try:
         entries = sorted(os.listdir(d))
     except OSError:
-        return "", f"技能不存在: {name}"
+        return "", f"技能不存在: {name}", ""
     mds = [e for e in entries
            if os.path.isfile(os.path.join(d, e)) and e.lower().endswith(".md")]
     if not mds:
@@ -206,8 +211,8 @@ def _resolve_project_dir(d: str, name: str) -> tuple:
             hint = "、".join(f"{name}/{s}" for s in subdirs[:5])
             if len(subdirs) > 5:
                 hint += " …"
-            return "", f"技能 '{name}' 目录下没有直接技能文件，可指定子目录: {hint}"
-        return "", f"技能 '{name}' 目录下没有技能文件"
+            return "", f"技能 '{name}' 目录下没有直接技能文件，可指定子目录: {hint}", ""
+        return "", f"技能 '{name}' 目录下没有技能文件", ""
     skill = next((e for e in mds if e.lower() == "skill.md"), None)
     if skill:
         return _read(os.path.join(d, skill))
@@ -216,7 +221,7 @@ def _resolve_project_dir(d: str, name: str) -> tuple:
     hint = "、".join(f"{name}/{e}" for e in mds[:5])
     if len(mds) > 5:
         hint += f" 等{len(mds)}个"
-    return "", f"技能 '{name}' 目录下有多个技能文件，请指定具体文件，例如: {hint}"
+    return "", f"技能 '{name}' 目录下有多个技能文件，请指定具体文件，例如: {hint}", ""
 
 
 def _scan_dir(abs_dir: str, visited=None, depth: int = 0) -> dict:
@@ -298,15 +303,16 @@ def _within(base_real: str, path_real: str) -> bool:
 
 
 def _read(path: str) -> tuple:
+    """读取技能文件。返回 (content, error, path)。"""
     try:
         with open(path, "rb") as f:
             data = f.read()
     except OSError as e:
-        return "", f"读取失败: {e}"
+        return "", f"读取失败: {e}", ""
     # 先 UTF-8（含 BOM）严格解码，失败回退 GBK（中文Windows常见），都失败报错不崩溃
     for encoding in ("utf-8-sig", "gbk"):
         try:
-            return data.decode(encoding).strip(), ""
+            return data.decode(encoding).strip(), "", path
         except UnicodeDecodeError:
             continue
-    return "", "读取失败: 无法识别的文件编码"
+    return "", "读取失败: 无法识别的文件编码", ""

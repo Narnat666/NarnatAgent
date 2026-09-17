@@ -688,11 +688,16 @@ class SessionManager:
         self._state.auto_save()
 
     def on_skill(self, name: str) -> str:
-        content, err = load_skill(self.narnat_dir, name,
-                                  project_roots=self._project_skill_roots,
-                                  ignore_dirs=self._skill_ignore_dirs)
+        content, err, path = load_skill(self.narnat_dir, name,
+                                        project_roots=self._project_skill_roots,
+                                        ignore_dirs=self._skill_ignore_dirs)
         if err:
             return err
+        if path:
+            # 带上技能目录：正文里的相对路径以此为基准（技能可能装在任意层级）
+            content = (f"本技能目录: {os.path.dirname(path)}\n"
+                       "技能正文里提到的相对路径，请按上面的目录解析；引用的文件按需读取。\n\n"
+                       f"{content}")
         self._messages.append_system(content)
         return ""
 
