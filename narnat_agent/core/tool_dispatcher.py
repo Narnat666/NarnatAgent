@@ -395,17 +395,28 @@ class ToolDispatcher:
             return "(空格)"
         return empty_label
 
+    @staticmethod
+    def _tool_label(name: str) -> str:
+        """工具名→终端显示标签。MCP 工具显示所属服务器，其余查静态标签表。
+
+        调用行与失败行共用，避免两处各算一套导致显示不一致。
+        """
+        if name.startswith("mcp__"):
+            parts = name.split("__", 2)
+            if len(parts) == 3:
+                return f"MCP:{parts[1]}"
+        return ToolDispatcher.TOOL_LABELS.get(name, name)
+
     def _show_tool_call(self, name: str, arguments: dict):
         """在终端显示工具调用摘要（静默模式跳过）"""
         if is_quiet_tools():
             return
-        label = ToolDispatcher.TOOL_LABELS.get(name, name)
+        label = self._tool_label(name)
         summary = ""
         if name.startswith("mcp__"):
             # MCP 工具（mcp__<服务器>__<工具>）：标签显示服务器，摘要显示工具名+参数（紧凑）
             parts = name.split("__", 2)
             if len(parts) == 3:
-                label = f"MCP:{parts[1]}"
                 summary = parts[2]
                 if arguments:
                     args_text = json.dumps(arguments, ensure_ascii=False,
@@ -528,5 +539,5 @@ class ToolDispatcher:
         """工具执行失败：终端显示一行红色失败提示（静默模式跳过）"""
         if is_quiet_tools():
             return
-        label = ToolDispatcher.TOOL_LABELS.get(name, name)
+        label = self._tool_label(name)
         _stdout_write(f"  {X}[{label}失败]{R}\n")
