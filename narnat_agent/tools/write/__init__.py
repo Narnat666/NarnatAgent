@@ -22,7 +22,10 @@ DEFINITION = {
             "properties": {
                 "file_path": {"type": "string", "description": "文件路径"},
                 "content": {"type": "string", "description": "完整文件内容"},
-                "device": {"type": "string", "description": "设备dev编号：默认dev0即写入本地指定文件，设置dev1..devn则写入指定远程设备文件"},
+                "device": {
+                    "type": "string",
+                    "description": "设备dev编号：默认dev0即写入本地指定文件，设置dev1..devn则写入指定远程设备文件",
+                },
             },
             "required": ["file_path", "content"],
         },

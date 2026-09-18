@@ -62,7 +62,10 @@ DEFINITION = {
                 "file_path": {"type": "string", "description": "文件路径"},
                 "offset": {"type": "integer", "description": "起始行（默认1，含本行）"},
                 "limit": {"type": "integer", "description": "读取行数（正整数，默认2000）"},
-                "device": {"type": "string", "description": "设备dev编号：默认dev0即读取本地指定文件，设置dev1..devn则读取指定远程设备文件"},
+                "device": {
+                    "type": "string",
+                    "description": "设备dev编号：默认dev0即读取本地指定文件，设置dev1..devn则读取指定远程设备文件",
+                },
             },
             "required": ["file_path"],
         },

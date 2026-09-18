@@ -11,29 +11,37 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "MCP",
-        "description": (
-            "MCP 服务器连接通道：connect 连接一个本地 MCP（stdio）服务器，连接后其工具以 "
-            "mcp__<服务器名>__<工具名> 注册，后续轮次可直接调用；"
-            "disconnect 断开并注销其工具。"
-        ),
+        "description": "MCP 服务器连接通道（仅支持本地 stdio 型服务器）。",
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
                     "enum": ["connect", "disconnect"],
-                    "description": "操作类型（默认connect）",
+                    "description": (
+                        "操作类型（默认connect）。"
+                        "connect 连接一个本地 MCP（stdio）服务器，连接后其工具以 "
+                        "mcp__<服务器名>__<工具名> 注册，后续轮次可直接调用；"
+                        "disconnect 断开并注销其工具"
+                    ),
                 },
                 "name": {
                     "type": "string",
-                    "description": "服务器名（成为工具名前缀 mcp__<name>__）；disconnect 用已连接的服务器名或 all（断开全部）",
+                    "description": (
+                        "服务器名（成为工具名前缀 mcp__<name>__）；"
+                        "disconnect 用已连接的服务器名或 all（断开全部）"
+                    ),
                 },
                 "config": {
                     "type": "object",
-                    "description": ("connect 的启动配置：{\"command\": \"python\", "
-                                    "\"args\": [\"main.py\"], \"env\": {}, \"cwd\": \"\"}"
-                                    "（中英文键均可；可选 startup_timeout_sec/tool_timeout_sec/"
-                                    "enabled_tools/disabled_tools）"),
+                    "description": (
+                        "connect 的启动配置：\n"
+                        "{\"command\": \"python\", \"args\": [\"main.py\"], "
+                        "\"env\": {}, \"cwd\": \"\"}\n"
+                        "（中英文键均可；可选 startup_timeout_sec 启动超时、"
+                        "tool_timeout_sec 工具调用超时、"
+                        "enabled_tools/disabled_tools 工具白/黑名单）"
+                    ),
                 },
             },
             "required": [],

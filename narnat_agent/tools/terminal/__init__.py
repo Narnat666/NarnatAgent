@@ -67,27 +67,87 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Terminal",
-        "description": "多终端持久SSH，最多5个并发。connect建立会话，exec执行命令，input发送交互输入，status查看所有设备，close关闭会话，transfer在任意设备间传输文件(本机↔设备、设备↔设备)。",
+        "description": (
+            "多设备持久SSH：远程执行命令、设备间传输文件。"
+            "连接后保持，同一设备重复调用复用同一连接。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
                     "enum": ["connect", "exec", "input", "status", "close", "transfer"],
-                    "description": "操作类型（默认exec）",
+                    "description": (
+                        "操作类型（默认exec）。"
+                        "connect 建立SSH会话（成功后返回该设备的dev编号）；"
+                        "exec 在指定设备执行命令；"
+                        "input 向设备发送交互输入；"
+                        "status 查看所有设备状态；"
+                        "close 关闭指定设备会话（省略host时关闭全部会话）；"
+                        "transfer 在任意设备间传输文件（本机↔被控设备、被控设备↔被控设备）"
+                    ),
                 },
-                "host": {"type": "string", "description": "设备引用，统一用dev编号：dev0=本机（本机执行命令请用Shell工具），dev1..devn=已connect的被控设备。connect时填被控设备IP/域名（连接成功后返回其dev编号）；exec/input/close时填dev编号"},
+                "host": {
+                    "type": "string",
+                    "description": (
+                        "设备引用，统一用dev编号：dev0=本机（本机执行命令请用Shell工具），"
+                        "dev1..devn=已connect的被控设备。"
+                        "connect时填被控设备IP/域名（连接成功后返回其dev编号）；"
+                        "exec/input/close 填dev编号：exec/input 省略时自动选择唯一会话（多个会话时需指定），"
+                        "close 省略时关闭全部会话"
+                    ),
+                },
                 "username": {"type": "string", "description": "SSH用户名（connect时使用）"},
                 "port": {"type": "integer", "description": "SSH端口（默认22）"},
-                "password": {"type": "string", "description": "认证凭据（connect时使用）：登录密码或私钥路径（如~/.ssh/id_rsa），不填则自动尝试默认密钥。填密码时sudo密码自动用同登录密码注入"},
-                "command": {"type": "string", "description": "执行的命令（需先设action=exec）"},
-                "input": {"type": "string", "description": "交互输入内容（需先设action=input，如sudo密码、y/n确认）。仅当有命令在等待输入时有效（通常是上个命令超时仍在后台运行）；发送 ^C 可中断仍在运行的命令；空闲终端发送会被拒绝"},
-                "timeout": {"type": "integer", "description": "命令超时秒数（正整数）。exec/input默认120，超时后命令继续后台运行，可用input应答其交互提示或^C中断；connect默认15，连不上时快速报错"},
-                "max_output_chars": {"type": "integer", "description": "最大输出字符数（正整数，默认8000，超出截断并提示）"},
-                "source_host": {"type": "string", "description": "传输源设备：dev0=本机（默认，可省略），dev1..devn=被控设备（action=transfer时使用）"},
-                "source_path": {"type": "string", "description": "源文件在源设备上的绝对路径（action=transfer时使用）"},
-                "target_host": {"type": "string", "description": "传输目标设备：dev0=本机（默认，可省略），dev1..devn=被控设备（action=transfer时使用）"},
-                "target_path": {"type": "string", "description": "目标文件在目标设备上的绝对路径（action=transfer时使用）"},
+                "password": {
+                    "type": "string",
+                    "description": (
+                        "认证凭据（connect时使用）：登录密码或私钥路径（如~/.ssh/id_rsa），"
+                        "不填则自动尝试默认密钥。填密码时sudo密码自动用同登录密码注入"
+                    ),
+                },
+                "command": {"type": "string", "description": "执行的命令（action=exec时使用）"},
+                "input": {
+                    "type": "string",
+                    "description": (
+                        "交互输入内容（action=input时使用，如sudo密码、y/n确认）。"
+                        "仅当有命令在等待输入时有效（通常是上个命令超时仍在后台运行）；"
+                        "发送 ^C 可中断仍在运行的命令；空闲终端发送会被拒绝"
+                    ),
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": (
+                        "命令超时秒数（正整数）。exec/input默认120，超时后命令继续后台运行，"
+                        "可用input应答其交互提示或^C中断；connect默认15，连不上时快速报错"
+                    ),
+                },
+                "max_output_chars": {
+                    "type": "integer",
+                    "description": "最大输出字符数（正整数，默认8000，超出截断并提示）",
+                },
+                "source_host": {
+                    "type": "string",
+                    "description": (
+                        "传输源设备：dev0=本机（默认，可省略），"
+                        "dev1..devn=被控设备（action=transfer时使用）"
+                    ),
+                },
+                "source_path": {
+                    "type": "string",
+                    "description": "源文件在源设备上的绝对路径（action=transfer时使用）",
+                },
+                "target_host": {
+                    "type": "string",
+                    "description": (
+                        "传输目标设备：dev0=本机（默认，可省略），"
+                        "dev1..devn=被控设备（action=transfer时使用）"
+                    ),
+                },
+                "target_path": {
+                    "type": "string",
+                    "description": "目标文件在目标设备上的绝对路径（action=transfer时使用）",
+                },
             },
             "required": [],
         },
@@ -145,35 +205,10 @@ def execute(
     target_path: str = "",
     _tool_context=None,
 ) -> str:
-    """
-    Terminal工具：多终端可持续SSH + 文件传输。
+    """Terminal工具：多设备持久SSH + 文件传输（参数说明见 DEFINITION）。
 
-    action:
-      connect  - 建立SSH会话（首次连接或重连），连接成功后返回该设备的dev编号
-      exec     - 在指定设备（host=devN）执行命令
-      input    - 向设备发送交互输入（如sudo密码、确认提示等）
-      status   - 查看所有设备状态（dev0本机 + dev1..devn）
-      close    - 关闭指定设备（host=devN）会话
-      transfer - 在任意设备间传输文件（dev0本机 ↔ dev1..devn被控设备）
-
-    device标识:
-      dev0=本机(无需connect)，dev1..devn=已connect的被控设备
-      设备引用统一用dev编号（host参数），不填host时自动选唯一会话
-
-    session_id:
-      内部参数，AI无需使用（设备引用统一用host=devN）
-
-    sudo_password:
-      connect时设置，后续exec遇到sudo密码提示自动注入
-
-    max_output_chars:
-      返回内容最大字符数，正整数，默认8000
-
-    transfer参数:
-      source_host  - 传输源设备，dev0=本机(可省略)，dev1..devn=被控设备
-      source_path  - 源文件在源设备上的绝对路径
-      target_host  - 传输目标设备，dev0=本机(可省略)，dev1..devn=被控设备
-      target_path  - 目标文件在目标设备上的绝对路径
+    session_id: 内部参数，AI无需使用（设备引用统一用host=devN）
+    sudo_password: connect时设置，后续exec遇到sudo密码提示自动注入
     """
     # AI可能传字符串类型的数值参数，统一转int（与Grep/Read容错风格一致）
     try:

@@ -432,17 +432,23 @@ DEFINITION = {
     "function": {
         "name": "Glob",
         "description": (
-            '按模式匹配文件和目录。pattern匹配路径任意位置，如 "*.py" 递归匹配所有层的.py文件，'
-            '"dir/*.ext" 递归匹配 dir 下所有层的.ext（含子目录）。'
-            '例："**/*.h"、"src/**/*.cpp"、"*.{docx,pdf}"。返回匹配路径，按修改时间倒序。'
-            'pattern 支持绝对路径（如 win:"D:\\work\\**\\*.py"、linux/macOS:"/home/user/**/*.py"），绝对与相对写法语义一致。'
-            '默认跳过隐藏文件；pattern含以.开头的路径组件时匹配隐藏文件（".*"匹配点开头的项）。'
-            '（仅支持本机文件，不支持远程设备文件）'
+            "按模式匹配文件和目录。返回匹配路径，按修改时间倒序。"
+            "（仅支持本机文件，不支持远程设备文件）"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "Glob模式"},
+                "pattern": {
+                    "type": "string",
+                    "description": (
+                        '匹配路径任意位置，如 "*.py" 递归匹配所有层的.py文件，'
+                        '"dir/*.ext" 递归匹配 dir 下所有层的.ext（含子目录）；'
+                        '例："**/*.h"、"src/**/*.cpp"、"*.{docx,pdf}"。'
+                        '支持绝对路径（如 win:"D:\\work\\**\\*.py"、'
+                        'linux/macOS:"/home/user/**/*.py"），绝对与相对写法语义一致。'
+                        '默认跳过隐藏文件；含以.开头的路径组件时匹配隐藏文件（".*"匹配点开头的项）'
+                    ),
+                },
                 "path": {"type": "string", "description": "搜索目录（默认当前目录）"},
                 "max_results": {"type": "integer", "description": "最大结果数（正整数，默认50）"},
             },

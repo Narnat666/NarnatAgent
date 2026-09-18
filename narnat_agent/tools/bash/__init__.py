@@ -173,25 +173,55 @@ DEFINITION = {
     "function": {
         "name": "Shell",
         "description": (
-            f"本地Shell — 在{BashRuntime.PLATFORM_LABEL}执行命令。\n"
-            "前台: 直接执行 command，同步等待完成。\n"
-            "后台: background=true 提交后台任务，立即返回 bgN 编号，"
-            "结果写入会话专属临时目录并返回绝对路径 bgN.log 用Read/Grep 读取该文件，编号与文件一一对应；"
-            "输出随任务运行尽力实时落盘——Linux 实时，Windows cmd 管道输出按块缓冲、可能到任务结束才可见）；\n"
-            "  bg=\"status\" 查看所有后台任务状态（编号/状态/退出码/输出大小/结果路径）；\n"
-            "  bg=\"wait\" 挂起等待任意后台任务完成——有任务完成立即返回，超时(timeout参数)返回内容即最新状态快照；\n"
-            "  bg=\"cancel\" + id=N 取消 bgN（杀进程树，已产出内容保留可读）。\n"
-            "后台并发上限8个(bg1~bg8，终态槽位自动释放复用，复用前旧结果自动归档为 bgN.log.N.prev 仍可 Read 读取、不丢失)，会话结束自动清理全部后台任务。\n"
+            f"本地Shell — 在{BashRuntime.PLATFORM_LABEL}执行命令。"
+            "前台同步执行并返回输出；支持后台任务（提交、查询、等待、取消）。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "命令（前台执行时必填；bg=status/wait 时可省略）"},
-                "timeout": {"type": "integer", "description": "前台=超时秒数（正整数，默认120，超时后命令被终止）；bg=wait时=最长等待秒数"},
-                "max_output_chars": {"type": "integer", "description": "最大输出字符数（正整数，默认4000，仅前台命令生效）"},
-                "background": {"type": "boolean", "description": "true=命令在后台执行，立即返回 bgN 编号（不阻塞），结果写入会话专属临时目录（提交时返回绝对路径）"},
-                "bg": {"type": "string", "description": "后台任务管理操作: status / wait / cancel（cancel 配合 id）"},
-                "id": {"type": "integer", "description": "后台任务编号（bg=cancel 时必填，如 id=3 取消 bg3）"},
+                "command": {
+                    "type": "string",
+                    "description": (
+                        "命令（前台执行或 background=true 提交时必填；"
+                        "bg=status/wait/cancel 时可省略）"
+                    ),
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": (
+                        "前台=超时秒数（正整数，默认120，超时后命令被终止）；"
+                        "bg=wait时=最长等待秒数"
+                    ),
+                },
+                "max_output_chars": {
+                    "type": "integer",
+                    "description": "最大输出字符数（正整数，默认4000，仅前台命令生效）",
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": (
+                        "true=命令在后台执行，立即返回 bgN 编号（不阻塞）；"
+                        "结果写入会话专属临时目录的 bgN.log（提交时返回绝对路径，编号与文件一一对应），"
+                        "用 Read/Grep 读取该文件；"
+                        "输出随任务运行分块落盘（输出量小的任务可能到结束才可见）；"
+                        "并发上限8个（bg1~bg8，终态槽位自动释放复用，"
+                        "复用前旧结果归档为 bgN.log.N.prev，仍可 Read 读取、不丢失），"
+                        "会话结束自动清理全部后台任务"
+                    ),
+                },
+                "bg": {
+                    "type": "string",
+                    "description": (
+                        "后台任务管理操作："
+                        "status 查看所有后台任务状态（编号/状态/退出码/输出大小/结果路径）；"
+                        "wait 挂起等待任意后台任务完成（有完成立即返回，超时返回最新状态快照）；"
+                        "cancel 取消 bgN（杀进程树，已产出内容保留可读，配合 id）"
+                    ),
+                },
+                "id": {
+                    "type": "integer",
+                    "description": "后台任务编号（bg=cancel 时必填，如 id=3 取消 bg3）",
+                },
             },
             "required": [],
         },

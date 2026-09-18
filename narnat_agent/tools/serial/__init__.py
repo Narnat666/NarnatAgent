@@ -4,7 +4,7 @@
 - 支持最多 max_sessions(5) 个并发串口会话，每个会话有唯一 session_id(0-4)
 - AI 通过 session_id 指定在哪个串口操作
 - 提示符检测: 字符集匹配 + 稳定性采样
-- 超时默认 60s，超时返回已收集数据
+- 超时默认 120s，超时返回已收集数据
 """
 
 import re
@@ -55,18 +55,30 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Serial",
-        "description": "多终端持久串口，最多可连5个不同串口设备。scan扫描串口，connect连接设备，exec执行命令等待提示符，raw_exec纯超时返回（不检测提示符），input发送交互输入，status查看会话，close关闭会话。",
+        "description": "多设备持久串口：连接后保持，同一串口重复调用复用同一会话。",
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
                     "enum": ["scan", "connect", "exec", "raw_exec", "input", "status", "close"],
-                    "description": "操作类型（默认exec）",
+                    "description": (
+                        "操作类型（默认exec）。"
+                        "scan 扫描本机可用串口；"
+                        "connect 打开串口连接（自动分配或指定session_id）；"
+                        "exec 发送命令，等待提示符或超时返回；"
+                        "raw_exec 发送命令，纯超时返回（不检测提示符，适合裸机/AT固件等无标准提示符设备）；"
+                        "input 发送交互输入；"
+                        "status 查看所有串口会话状态；"
+                        "close 关闭指定会话（省略session_id/port时关闭全部会话）"
+                    ),
                 },
                 "port": {
                     "type": "string",
-                    "description": "串口设备名，如COM1、/dev/ttyUSB0（connect时必填）",
+                    "description": (
+                        "串口设备名，如COM1、/dev/ttyUSB0（connect时必填；"
+                        "其他action可直接填已连接的串口名指定会话）"
+                    ),
                 },
                 "baudrate": {
                     "type": "integer",
@@ -94,23 +106,37 @@ DEFINITION = {
                 },
                 "prompt_pattern": {
                     "type": "string",
-                    "description": "自定义提示符正则（默认匹配$#%>:❯=@~，不匹配时覆盖）",
+                    "description": "自定义提示符正则（给定时替代默认字符集 $#%>:❯=@~）",
                 },
                 "command": {
                     "type": "string",
-                    "description": "发送的命令（action=exec/raw_exec时使用）；raw_exec时为空则纯监听：不发送，仅在timeout内收集设备主动输出",
+                    "description": (
+                        "发送的命令（action=exec/raw_exec时使用）；"
+                        "raw_exec时为空则纯监听：不发送，仅在timeout内收集设备主动输出"
+                    ),
                 },
                 "input": {
                     "type": "string",
-                    "description": "交互输入内容（action=input时使用，如密码、y/n确认）；发送 ^C 可中断设备上仍在运行的命令",
+                    "description": (
+                        "交互输入内容（action=input时使用，如密码、y/n确认）。"
+                        "发送 ^C 可中断设备上仍在运行的命令；"
+                        "其他文本追加行结束符发送，空闲时等同 exec 执行命令"
+                    ),
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "超时秒数（正整数，默认120）",
+                    "description": (
+                        "超时秒数（正整数，默认120）。"
+                        "超时返回已收集输出，设备上命令仍在运行，可用input发送^C中断"
+                    ),
                 },
                 "session_id": {
                     "type": "integer",
-                    "description": "终端ID 0-4（默认自动分配；0=第一个串口终端）",
+                    "description": (
+                        "终端ID（默认自动分配；0=第一个串口终端）。"
+                        "exec/raw_exec/input 省略时自动选择唯一会话（多个会话时需指定），"
+                        "close 省略时关闭全部会话"
+                    ),
                 },
                 "max_output_chars": {
                     "type": "integer",
@@ -153,18 +179,7 @@ def execute(
     max_output_chars: int = 8000,
     _tool_context=None,
 ) -> str:
-    """
-    Serial 工具：多会话串口终端。
-
-    action:
-      scan     - 扫描本机可用串口
-      connect  - 打开串口连接，自动分配或使用指定 session_id
-      exec     - 在指定会话中发送命令，等待提示符或超时返回（默认action，与Terminal一致）
-      raw_exec - 在指定会话中发送命令，纯超时返回（不检测提示符，适合裸机/AT固件等无标准提示符设备）
-      input    - 向串口发送交互输入（如密码、确认等）；"^C"/"\\x03" 发送原始Ctrl+C中断
-      status   - 查看当前所有串口会话状态
-      close    - 关闭指定会话
-    """
+    """Serial工具：多会话串口终端（参数说明见 DEFINITION）。"""
     # AI可能传字符串类型的数值参数，统一转int/float（与Grep/Read容错风格一致）
     try:
         baudrate = int(baudrate) if baudrate is not None else 115200

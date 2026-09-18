@@ -6,7 +6,10 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "TodoWrite",
-        "description": "创建并管理任务列表（同时刻最多1个in_progress，多余会自动调整为待处理）。做任务前，优先使用此工具与用户同步计划。",
+        "description": (
+            "创建并管理任务列表。"
+            "多步任务开始前先与用户同步计划。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -15,16 +18,19 @@ DEFINITION = {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "content": {"type": "string", "description": "任务描述（祈使句，如'运行测试'）"},
+                            "content": {
+                                "type": "string",
+                                "description": "任务描述（祈使句，如'运行测试'）",
+                            },
                             "status": {
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "completed"],
-                                "description": "任务状态",
+                                "description": "任务状态（同时刻最多1个in_progress，多余的自动调整为待处理）",
                             },
                         },
                         "required": ["content", "status"],
                     },
-                    "description": "任务列表",
+                    "description": "任务列表（每次提交完整列表，整体替换）",
                 },
             },
             "required": ["todos"],
@@ -43,7 +49,7 @@ def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
         _tool_context: 工具运行时上下文（内部参数，由registry注入）
 
     Returns:
-        空串（UI侧更新显示）
+        未完成任务清单（全部完成时返回"[任务全部完成]"）
     """
     # 校验非空
     if not todos:

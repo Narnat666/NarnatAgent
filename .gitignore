@@ -39,3 +39,6 @@ Desktop.ini
 tool_exp/
 subagent_test/
 eccplan
+
+# ═══ npm 分发 ═══
+npm/

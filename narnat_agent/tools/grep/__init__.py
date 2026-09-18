@@ -50,10 +50,7 @@ DEFINITION = {
         "name": "Grep",
         "description": (
             "正则搜索文件内容（仅支持本机文件，不支持远程设备文件）。"
-            "path 支持目录、单个文件，或多个路径的数组（文件/目录可混合，按给定顺序输出）。"
-            "glob 支持花括号多模式（与Glob工具语法一致），如 *.{c,h}、src/**/*.{py,md}。"
-            "默认返回每个命中文件的分组结果：文件表头（含匹配计数）+ 带行号的匹配行；"
-            "匹配行累计达到head_limit后，剩余文件仅列文件表头（含计数）。"
+            "默认返回每个命中文件的分组结果：文件表头（含匹配计数）+ 带行号的匹配行。"
         ),
         "parameters": {
             "type": "object",
@@ -67,11 +64,17 @@ DEFINITION = {
                         {"type": "string"},
                         {"type": "array", "items": {"type": "string"}},
                     ],
-                    "description": "搜索路径（默认当前目录）；可填目录、单个文件，或多个路径的数组，如 [\"src/a.c\", \"include\"]",
+                    "description": (
+                        "搜索路径（默认当前目录）；可填目录、单个文件，或多个路径的数组"
+                        "（文件/目录可混合，按给定顺序输出），如 [\"src/a.c\", \"include\"]"
+                    ),
                 },
                 "glob": {
                     "type": "string",
-                    "description": "文件过滤，如*.py、src/*.c、**/*.c、*.{c,h}（花括号多模式，默认空）",
+                    "description": (
+                        "文件过滤，如*.py、src/*.c、**/*.c、*.{c,h}、src/**/*.{py,md}"
+                        "（花括号多模式，与Glob工具语法一致，默认空）"
+                    ),
                 },
                 "i": {
                     "type": "boolean",
@@ -91,7 +94,10 @@ DEFINITION = {
                 },
                 "head_limit": {
                     "type": "integer",
-                    "description": "最大返回匹配行数（正整数，默认30）；达到后剩余文件仅列文件名（含计数），增大可展开更多匹配行",
+                    "description": (
+                        "最大返回匹配行数（正整数，默认30）；达到后剩余文件仅列文件名（含计数），"
+                        "增大可展开更多匹配行"
+                    ),
                 },
             },
             "required": ["pattern"],
