@@ -2,6 +2,110 @@
 
 终端 AI 代码智能体。自主调用工具（读文件、改代码、执行命令、SSH/串口、联网搜索），支持会话探索分支、目标模式自动续跑、多模型热切换、headless 一次性任务（脚本化/子代理调度）。
 
+## 下载与安装
+
+> 无需安装 Python 或编译环境：下载、解压、填写密钥后即可运行。当前仅提供 Windows 版本，Linux 版本请参考下文「快速上手」自行编译。
+
+### 第 1 步 · 下载最新版本压缩包
+
+1. 打开仓库主页 <https://gitcode.com/xyint/NarnatAgent>，或直接访问发行版页 <https://gitcode.com/xyint/NarnatAgent/releases>。
+2. 点击右侧边栏「发行版」区块中的版本号或「查看全部发行版」：
+
+   ![点击发行版本](img/点击发行版本.png)
+
+3. 在最新版本的「下载」区下载 `AgentByNarnat.zip`（约 37MB）：
+
+   ![下载最新版本压缩包](img/下载最新版本压缩包到本地并解压，目前只支持windows版本，linux版本需要自己编译.png)
+
+### 第 2 步 · 解压
+
+将 `AgentByNarnat.zip` 解压到固定目录（如 `D:\AgentByNarnat`），得到如下结构：
+
+```
+AgentByNarnat/
+├── narnat.exe            # 主程序，双击运行（单文件，免安装）
+└── .narnat/              # 配置与数据，需与 exe 保持同目录
+    ├── config/
+    │   ├── narnat.json   # 需要编辑的文件：填写密钥
+    │   ├── narnat.md     # 用户级提示词，可自定义
+    │   └── skills/       # 技能文件（/skill 加载）
+    └── data/
+        └── sessions/     # 历史会话；费用日志 cost_log.csv 在首次使用后生成
+```
+
+解压后目录中应同时存在 `narnat.exe` 与 `.narnat`：
+
+![解压后的目录](img/解压后的目录.png)
+
+### 第 3 步 · 配置模型密钥
+
+用记事本打开 `.narnat\config\narnat.json`（右键 → 打开方式 → 记事本），修改图中红箭头标注的两处：
+
+![输入自己模型密钥](img/输入自己模型密钥，搜索工具用的anytingsearch可以到网站自己申请密钥.png)
+
+| 位置 | 字段 | 填什么 |
+|------|------|--------|
+| 第 3 行 | `"接口密钥"` | 你自己的模型 API 密钥。默认接口为 DeepSeek（`https://api.deepseek.com/anthropic`），密钥在 DeepSeek 开放平台（platform.deepseek.com）申请 |
+| 第 35 行 | `"websearch"` | 联网搜索工具（AnySearch）的密钥，可在 <https://anysearch.com/console/api-keys> 免费申请；不使用联网搜索时可留空，不影响其他功能 |
+
+其余字段保持默认。保存时不要修改文件名，也不要用另存副本。如需更换模型服务商，修改 `"接口地址"`、`"模型"`、`"协议"` 三项即可，详见下文「配置」。
+
+### 第 4 步 · 启动
+
+双击 `narnat.exe` 启动；也可在解压目录的地址栏输入 `cmd` 打开该目录的终端，再执行 `narnat.exe`。启动成功后显示当前模型名与 `#` 提示符：
+
+![双击 narnat.exe 启动](img/双击启动截图.png)
+
+在 `#` 提示符后输入任务并回车，例如「读一遍这个文件夹里的代码，说明它是做什么的」。常用命令如下（输入 `/` 后可用 Tab 补全）：
+
+| 命令 | 作用 |
+|------|------|
+| `/save <名称>` | 保存当前会话（不填名称自动命名） |
+| `/ls`、`/cd <名称>` | 列出 / 打开历史会话 |
+| `/mode <模型>` | 切换模型 |
+| `/goal on` | 目标模式：任务没完成自动续跑 |
+| `/exit` | 退出 |
+
+> 关于工作目录：文件操作以启动目录为基准；配置与会话始终保存在程序目录的 `.narnat/` 中，与启动位置无关。如需处理某个项目，在项目目录打开终端并运行 `D:\AgentByNarnat\narnat.exe`（替换为实际解压路径）。
+
+### 第 5 步 · 将 narnat 加入 PATH
+
+加入 PATH 后，可在任意目录直接执行 `narnat`。子代理功能依赖该设置：`.narnat\config\narnat.md` 的「narnat 子代理」段中，AI 会以命令名调用 `narnat -p "任务" -g N`；未加入 PATH 时该命令会报「'narnat' 不是内部或外部命令」，子代理无法启动。
+
+**方式一：图形界面**
+
+1. 按 `Win` 键搜索「环境变量」，打开「编辑系统环境变量」（也可搜索「编辑账户的环境变量」）
+2. 在「用户变量」中选中 `Path` → 点击「编辑」→「新建」→ 填入解压目录（如 `D:\AgentByNarnat`，只填目录，不含 `narnat.exe`）→ 逐级点击「确定」
+3. 关闭已打开的终端并重新打开，执行 `narnat -v`；能显示版本号（如 `narnat 16.2.1`）即配置生效
+
+**方式二：PowerShell 命令**（将路径替换为实际解压路径）
+
+```powershell
+$p = [Environment]::GetEnvironmentVariable('Path','User')
+[Environment]::SetEnvironmentVariable('Path', "$p;D:\AgentByNarnat", 'User')
+```
+
+该命令只修改用户变量，不修改系统变量（比 `setx` 稳妥）；同样需要重新打开终端。注意：若用户 PATH 中已有 `%...%` 形式的条目（如 `%USERPROFILE%\bin`），请改用方式一——此命令会将其立即展开为固定路径。
+
+> 加入 PATH 后，先 `cd` 到项目目录再执行 `narnat`，该目录即为工作目录（规则见上一节）；配置与会话仍按 exe 所在目录查找 `.narnat`，不受影响。
+> 若重命名了 exe 或设置了别名，需保证 `narnat.md` 中供子代理调用的名称同样位于 PATH。
+
+### 安装完成后
+
+- **自定义系统指令**：编辑 `.narnat\config\narnat.md`，其内容会作为用户级提示词追加到系统指令末尾，可写回答偏好、项目规则等；发行包中已预置一份示例，可直接修改：
+
+  ![narnat.md 用户级提示词](img/narnat.md里是用户级promit,可以自定义.png)
+
+- **会话与费用**：历史对话保存在 `.narnat\data\sessions\`；每次 API 调用的费用明细记录在 `.narnat\data\cost_log.csv`，可用 Excel 打开：
+
+  ![sessions 与 cost_log](img/sesions里存储着所有历史对话，cost_log.csv记录每次api调度的详细费用.png)
+
+- **常见问题**
+  - 双击后 Windows 提示「已保护你的电脑」：点击「更多信息」→「仍要运行」（exe 未做数字签名，SmartScreen 拦截属正常现象）。
+  - 报认证失败 / 401：按第 3 步确认 `"接口密钥"` 已替换为自己的密钥且有效。
+  - `narnat.json` 被误改损坏：删除该文件，重新启动会自动生成默认配置（密钥需重新填写）。
+  - 命令行报「'narnat' 不是内部或外部命令」，或子代理无法启动：按第 5 步将解压目录加入 PATH，并重新打开终端。
+
 ## 快速上手
 
 ### 1. 编译
