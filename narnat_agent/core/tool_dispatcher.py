@@ -414,15 +414,13 @@ class ToolDispatcher:
         label = self._tool_label(name)
         summary = ""
         if name.startswith("mcp__"):
-            # MCP 工具（mcp__<服务器>__<工具>）：标签显示服务器，摘要显示工具名+参数（紧凑）
+            # MCP 工具（mcp__<服务器>__<工具>）：标签显示服务器，摘要显示工具名+参数（紧凑全量）
             parts = name.split("__", 2)
             if len(parts) == 3:
                 summary = parts[2]
                 if arguments:
                     args_text = json.dumps(arguments, ensure_ascii=False,
                                            separators=(",", ":"))
-                    if len(args_text) > 100:
-                        args_text = args_text[:100] + "…"
                     summary += f" {args_text}"
         if name in ToolDispatcher.FILE_PATH_TOOLS:
             dev_raw = arguments.get("device", "")

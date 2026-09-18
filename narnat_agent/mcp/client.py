@@ -3,8 +3,9 @@
 对标 codex 的 rmcp-client stdio 传输：
 - 子进程 stdin/stdout 承载按行分帧的 JSON-RPC 2.0 消息（MCP stdio 传输规范）
 - stderr 单独泵线程收集进日志，不污染协议流
-- 子进程放独立进程组（POSIX setsid / Windows 新进程组）：用户的 ESC/Ctrl+C
-  中断不会误杀服务端；程序退出时显式关闭
+- 子进程放独立进程组（POSIX setsid / Windows 新进程组）+ Windows 独立无窗口控制台
+  （CREATE_NO_WINDOW）：用户的 ESC/Ctrl+C 中断不会误杀服务端，且服务端原生直写的
+  控制台输出不会落入 narnat 终端；程序退出时显式关闭
 - 握手顺序：initialize 请求 → 收响应 → notifications/initialized 通知
 
 线程模型：
@@ -56,8 +57,16 @@ class McpStdioClient:
 
         popen_kwargs = {}
         if sys.platform == "win32":
-            # 新进程组：不接收本进程控制台的 Ctrl+C 事件
-            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            # 新进程组：不接收本进程控制台的 Ctrl+C 事件。
+            # CREATE_NO_WINDOW：子进程使用独立（无窗口）控制台 —— 否则 MCP 服务端会附着到
+            #   narnat 所在终端控制台，其内嵌的 Sysplorer/MWorks 原生栈直写控制台的消息
+            #   （Message(0) / Socket / 错误(xxxx) 等）会与 UI 输出杂糅（且多为 GBK 乱码）。
+            #   独立控制台后这类直写只落在它自己的隐藏缓冲区；服务端"桌面上下文"的
+            #   FreeConsole/AttachConsole(parent) 挂回动作也会因其 GetConsoleWindow()==0
+            #   守卫而跳过。JSON-RPC 与日志均走管道/文件，不受影响。
+            popen_kwargs["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+            )
         else:
             # 新会话（等同 codex 的 process_group(0)）：Ctrl+C 不波及服务端
             popen_kwargs["start_new_session"] = True
