@@ -110,9 +110,15 @@ class MessageManager:
             if cancel_check and cancel_check():
                 on_interrupt()
                 return False
-            if "finish_reason" in chunk and chunk["finish_reason"] == "error":
-                llm_error = True
-                break
+            if "finish_reason" in chunk:
+                if chunk["finish_reason"] == "context_overflow":
+                    # 压缩请求自身也超限（全量历史+指令仍超窗口）：单独归因，
+                    # 否则会被下游误报为"总结为空"，掩盖真实原因
+                    on_llm_error("压缩失败: 压缩请求自身超出模型上下文限制")
+                    return False
+                if chunk["finish_reason"] == "error":
+                    llm_error = True
+                    break
             if "content" in chunk and "tool_calls" not in chunk:
                 summary_content.append(chunk["content"])
 

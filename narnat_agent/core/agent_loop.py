@@ -48,6 +48,15 @@ class AgentLoop:
             self._config.ai.thinking_effort, self._config.ai.thinking_effort
         )
 
+    def _sync_ratio(self):
+        """把最新输入token同步进窗口占比（每轮 usage 到达后调用）。
+
+        占比的唯一更新点原先在用户轮末（agent.py），AI 自我运行期间循环
+        顶部自查会一直读到陈旧值；刷新后 mid_run_guard 才能看到真实压力。
+        """
+        if self._compression is not None:
+            self._compression.refresh_ratio(self._stats.input_tokens)
+
     def run(self, stream, goal_mode: bool = False, force_final: bool = False):
         """工具调度内循环
 
@@ -72,6 +81,19 @@ class AgentLoop:
         # 同步LLM层重试次数：网络/5xx/429 与流中断重试统一由同一配置值控制
         self._llm.set_retry_count(stream_retry_max)
         while True:
+            # a0. 运行中自查：占比超阈值时先压缩再发本次请求
+            #     （AI 自我运行期间不经过用户轮边界；占比由每轮 usage 到达时刷新）
+            #     提示先于压缩落定到屏幕：压缩要调一次 LLM，用户需知情（headless 进日志）
+            if self._compression is not None and self._compression.need_compress():
+                stream.feed("\n⚠ 上下文占比超阈值，正在自动压缩历史…\n")
+                stream.flush_renderer()
+                if self._compression.mid_run_guard():
+                    stream.feed("  压缩完成，继续任务…\n")
+                else:
+                    stream.feed("  自动压缩失败，继续尝试本次请求…\n")
+                stream.flush_renderer()
+                stream.begin()  # 压缩动画已停止，重启"思考中"spinner
+
             # a. 修复messages
             self._msg_manager.repair()
 
@@ -235,9 +257,10 @@ class AgentLoop:
                 for tc_id, result in tool_results:
                     self._msg_manager.append_tool_result(tc_id, result)
 
-                # 更新统计
+                # 更新统计 + 刷新占比（供循环顶部运行中自查判断下一步请求压力）
                 if call_usage:
                     self._stats.update(call_usage)
+                    self._sync_ratio()
 
                 continue
 
@@ -314,9 +337,10 @@ class AgentLoop:
                 )
                 return
 
-            # 更新统计
+            # 更新统计 + 刷新占比（供循环顶部运行中自查判断下一步请求压力）
             if call_usage:
                 self._stats.update(call_usage)
+                self._sync_ratio()
 
             # ── 收尾软提醒：计划未全部勾选时提醒一次，仅一次 ──
             # AI漏勾选就输出总结时，注入一条提醒让它补勾；无论下一轮结果如何

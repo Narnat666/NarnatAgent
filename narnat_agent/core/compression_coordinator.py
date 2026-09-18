@@ -91,3 +91,29 @@ class CompressionCoordinator:
             self._ui.end_compressing()
             self._context.reset()
         return result
+
+    def need_compress(self) -> bool:
+        """占比是否已达压缩阈值（供 agent_loop 在运行中自查时先判后提示）"""
+        return self._context.need_compress()
+
+    def refresh_ratio(self, input_tokens: int) -> None:
+        """运行中刷新窗口占比（agent_loop 每轮 usage 到达时调用）。
+
+        占比原先只在用户轮结束（agent.py 轮末）更新，AI 自我运行期间连发
+        多轮请求也读不到真实压力，运行中自查（mid_run_guard）因此永远不触发。
+        """
+        self._context.update_ratio(input_tokens)
+
+    def mid_run_guard(self) -> bool:
+        """运行中自查：占比超阈值则先压缩再发请求（无新用户输入）。
+
+        由 agent_loop 在每轮请求发出前调用。AI 自我运行期间不经过用户轮
+        边界，阈值预压缩（agent.py）无从触发，只能等 400 溢出兜底；此处
+        补齐主动防线。压缩复用溢出恢复路径（compress_no_input）：压缩后
+        以内部继续指令收尾，随后正常重发。
+        返回 True=执行了压缩且成功。
+        """
+        if not self._context.need_compress():
+            return False
+        self._logger.warning("compressor", "运行中占比超阈值，主动压缩历史")
+        return self.compress_no_input()
