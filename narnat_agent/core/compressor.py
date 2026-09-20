@@ -5,34 +5,17 @@
 from typing import List, Dict, Any, Optional
 
 from ..config.defaults import COMPRESS_PROMPT
+from ..tools.token_estimate import estimate_message_tokens
 
-# ── 固定密度启发式估价（与官方 harness token-meter 同思路）──
-# 仅用于切点选择，不追求精确；精确压力判断仍由服务端 prompt_tokens 负责。
-_CHARS_PER_TOKEN = 4
-_MSG_OVERHEAD = 8
+# 估价统一走 tools/token_estimate.py 的混合密度启发式（CJK≈0.7/字、其余≈0.25/字符，
+# 对齐官方 harness token-meter 思路）。此前固定 4 字符/token 对中文低估约 3 倍，
+# 尾部保留估价失真会直接影响压缩后残留体积。仅用于切点选择，不追求精确；
+# 精确压力判断仍由服务端 prompt_tokens 负责。
 
 
 def estimate_tokens(msg: Dict[str, Any]) -> int:
-    """启发式估价一条消息占用的 token 数。
-
-    覆盖 content（str/list 两种形态）、thinking 与 tool_calls 参数串。
-    """
-    tokens = _MSG_OVERHEAD
-    content = msg.get("content")
-    if isinstance(content, str):
-        tokens += (len(content) + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
-    elif content:
-        # 防御性：块列表形态按 JSON 长度估价
-        tokens += (len(str(content)) + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
-    thinking = msg.get("thinking")
-    if thinking:
-        tokens += (len(thinking) + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
-    for tc in msg.get("tool_calls") or []:
-        fn = tc.get("function", {})
-        name = fn.get("name", "") or ""
-        args = fn.get("arguments", "") or ""
-        tokens += (len(name) + len(args) + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
-    return tokens
+    """启发式估价一条消息占用的 token 数（薄封装，见 token_estimate.py）"""
+    return estimate_message_tokens(msg)
 
 
 def _cut_balanced(messages: List[Dict[str, Any]], cut: int) -> bool:

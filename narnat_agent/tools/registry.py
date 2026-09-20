@@ -10,6 +10,7 @@ from typing import Dict, List, Any, Callable, Optional
 
 from .exec_signal import error_line
 from .tool_context import ToolContext
+from .token_estimate import estimate_text_tokens
 
 # ── 显式导入各工具（Nuitka安全） ──
 from . import background  # noqa: F401  Shell 工具的 bg 附属模块（bash 内延迟导入；显式导入确保 Nuitka 打包）
@@ -141,9 +142,10 @@ def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolCon
                 max_chars = tool_context.max_tool_output_chars
                 head = max_chars * 2 // 3
                 tail = max_chars - head
+                est = estimate_text_tokens(llm_result)  # ≈token（AI预算单位，混合密度估算）
                 llm_result = (
                     llm_result[:head]
-                    + f"\n...[全局截断: 输出共{original_len}字符, 已达全局上限{limit_kb}KB, 已保留首尾。如需更多内容，请缩小本次输出（过滤/分页/减小范围）]"
+                    + f"\n...[全局截断: 输出共{original_len}字符(≈{est}token), 已达全局上限{limit_kb}KB, 已保留首尾。如需更多内容，请缩小本次输出（过滤/分页/减小范围）]"
                     + llm_result[-tail:]
                 )
 

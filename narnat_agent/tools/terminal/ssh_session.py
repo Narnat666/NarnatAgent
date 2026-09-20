@@ -46,6 +46,7 @@ import paramiko
 import socket
 
 from ..exec_signal import rc_line, error_line, safe_cut_points
+from ..token_estimate import estimate_text_tokens
 
 
 def _ansi_sub(text: str) -> str:
@@ -65,9 +66,10 @@ def _truncate_output(text: str, max_chars: int) -> str:
         return text
     head = max_chars * 2 // 3
     head_end, tail_start = safe_cut_points(text, head, len(text) - (max_chars - head))
+    est = estimate_text_tokens(text)  # ≈token（AI预算单位，混合密度估算）
     return (
         text[:head_end]
-        + f"\n...[中间截断: 输出共{len(text)}字符, 已保留首{head_end}字符+尾{len(text) - tail_start}字符。增大max_output_chars可获取完整输出]\n"
+        + f"\n...[中间截断: 输出共{len(text)}字符, 已保留首{head_end}字符+尾{len(text) - tail_start}字符(≈{est}token)。增大max_output_chars可获取完整输出]\n"
         + text[tail_start:]
     )
 

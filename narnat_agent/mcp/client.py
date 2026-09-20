@@ -38,6 +38,26 @@ class McpError(Exception):
     """MCP 传输/协议错误（服务端错误响应、超时、进程退出等）"""
 
 
+def _decode_line(raw: bytes) -> str:
+    """MCP 通道行解码：UTF-8 严格优先，失败回退 GBK，再失败 UTF-8 replace 兜底。
+
+    与 tools/bash._decode_output 双策略一致：Windows 服务端（Sysplorer 等）
+    常输出 GBK 中文，纯 UTF-8+replace 会把整段变成 U+FFFD 乱码。
+    JSON-RPC 帧语法字符均为 ASCII，GBK 对 ASCII 解码结果与 UTF-8 一致，
+    整行回退安全；一行内混合两种编码（病态服务端）退化为 replace 兜底不丢行。
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    if sys.platform == "win32":
+        try:
+            return raw.decode("gbk")
+        except UnicodeDecodeError:
+            pass
+    return raw.decode("utf-8", errors="replace")
+
+
 class McpStdioClient:
     """单个 MCP stdio 服务器连接。一个实例对应一个服务端子进程。"""
 
@@ -84,14 +104,13 @@ class McpStdioClient:
         except OSError as e:
             raise McpError(f"启动失败: {e}")
 
-        # 二进制管道 + 显式 UTF-8 文本包装：写入侧 newline="\n" 保证协议帧
-        # 严格以 \n 分隔（不带 \r\n），读取侧通用换行、容错非 UTF-8 输出
+        # 写入侧 UTF-8 TextIOWrapper：newline="\n" 保证协议帧严格以 \n 分隔
+        # （不带 \r\n）。读取侧用原始字节流 + 逐行双策略解码（见 _decode_line）：
+        # 流式 TextIOWrapper 无法在解码失败后回退 GBK，错误字节只能 replace 成乱码。
         self._stdin = TextIOWrapper(self._proc.stdin, encoding="utf-8",
                                     errors="replace", newline="\n", write_through=True)
-        self._stdout = TextIOWrapper(self._proc.stdout, encoding="utf-8",
-                                     errors="replace", newline="")
-        self._stderr = TextIOWrapper(self._proc.stderr, encoding="utf-8",
-                                     errors="replace", newline="")
+        self._stdout = self._proc.stdout
+        self._stderr = self._proc.stderr
 
         threading.Thread(target=self._reader_loop, daemon=True,
                          name=f"mcp-{name}-reader").start()
@@ -238,10 +257,10 @@ class McpStdioClient:
         stdout = self._stdout
         try:
             while True:
-                line = stdout.readline()
-                if not line:
+                raw = stdout.readline()
+                if not raw:
                     break
-                line = line.strip()
+                line = _decode_line(raw).strip()
                 if not line:
                     continue
                 try:
@@ -270,10 +289,10 @@ class McpStdioClient:
                 q.put(None)   # EOF 哨兵：唤醒全部等待者
 
     def _stderr_loop(self) -> None:
-        """stderr 泵线程：服务端诊断信息进日志"""
+        """stderr 泵线程：服务端诊断信息进日志（逐行双策略解码）"""
         try:
-            for line in self._stderr:
-                line = line.strip()
+            for raw in self._stderr:
+                line = _decode_line(raw).strip()
                 if line:
                     self._log(f"stderr: {line[:500]}")
         except (OSError, ValueError):

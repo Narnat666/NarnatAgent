@@ -14,6 +14,7 @@ import time
 from typing import Optional
 
 from ..exec_signal import rc_line, error_line, tag_error, safe_cut_points
+from ..token_estimate import estimate_text_tokens
 
 
 class BashRuntime:
@@ -396,9 +397,10 @@ def _truncate_output(text: str, max_chars: int) -> str:
         return text
     head = max_chars * 2 // 3
     head_end, tail_start = safe_cut_points(text, head, len(text) - (max_chars - head))
+    est = estimate_text_tokens(text)  # ≈token（AI预算单位，混合密度估算）
     return (
         text[:head_end]
-        + f"\n...[中间截断: 输出共{len(text)}字符, 已保留首{head_end}字符+尾{len(text) - tail_start}字符。增大max_output_chars可获取完整输出]\n"
+        + f"\n...[中间截断: 输出共{len(text)}字符, 已保留首{head_end}字符+尾{len(text) - tail_start}字符(≈{est}token)。增大max_output_chars可获取完整输出]\n"
         + text[tail_start:]
     )
 
@@ -422,6 +424,7 @@ def execute(
     command: str = None,
     timeout: int = 120,
     max_output_chars: int = 4000,
+    max_output_tokens: int = None,
     background: bool = False,
     bg: str = None,
     id: int = None,
@@ -441,6 +444,7 @@ def execute(
         command: shell命令（前台必填；background=true 提交时必填；bg 操作可省略）
         timeout: 超时秒数（前台=命令超时；bg=wait 时=最长等待秒数）
         max_output_chars: 返回内容最大字符数，正整数，默认4000（仅前台生效）
+        max_output_tokens: max_output_chars 的别名（字符数语义），两者同传以本参数为准
         background: true=命令后台执行
         bg: 后台任务管理操作: status / wait / cancel
         id: 后台任务编号（bg=cancel 时必填）
@@ -453,6 +457,8 @@ def execute(
     # AI可能传字符串类型的数值参数，统一转int（与Grep/Read容错风格一致）
     try:
         timeout = int(timeout) if timeout is not None else 120
+        if max_output_tokens is not None:
+            max_output_chars = max_output_tokens  # 别名：归一化后统一走字符语义
         max_output_chars = int(max_output_chars) if max_output_chars is not None else 4000
     except (TypeError, ValueError):
         return error_line("timeout/max_output_chars需为整数")

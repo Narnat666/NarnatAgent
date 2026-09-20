@@ -9,14 +9,23 @@ import os
 import re
 
 from ..terminal import _normalize_device_for_tools, _file_tool_device_hint
+from ..token_estimate import estimate_text_tokens
+
+# ── 读取窗口常量 ──
+# 单行显示上限（对齐官方 harness readMaxLineLength 默认值）：
+# 一条几 MB 的无换行日志会撑爆整次输出，截断后 AI 至少能看到"行的轮廓"。
+READ_MAX_LINE_CHARS = 2000
+# 截断时统计总行数的文件大小上限：超过则跳过计数（避免秒级阻塞），提示不显示总行数。
+READ_MAX_COUNT_BYTES = 20 * 1024 * 1024
 
 
-def _apply_global_cap(text: str, _tool_context) -> str:
+def _apply_global_cap(text: str, _tool_context, total_lines: int = None) -> str:
     """全局输出上限按行截断（保留完整行+行号），并给出offset续读提示。
 
     注册表的全局截断策略(保留首尾)面向Shell类输出——尾部含提示符，
     对Read不适用：中间截断丢失行号连续性，AI无法判断从哪行续读。
-    此处按行截断并明确告知续读offset。
+    此处按行截断并明确告知续读offset（有总行数时同时给出剩余行数，
+    让AI从"盲续"变"可规划"）。
     """
     max_chars = getattr(_tool_context, "max_tool_output_chars", 0) if _tool_context else 0
     if max_chars <= 0 or len(text) <= max_chars:
@@ -41,8 +50,15 @@ def _apply_global_cap(text: str, _tool_context) -> str:
             last_num = int(m.group(1))
             break
     if last_num is not None:
-        hint = (f"... [已达全局输出上限({max_chars}字符)，仅显示前{len(kept)}行。"
-                f"使用 offset={last_num + 1} 继续读取其余部分]")
+        est = estimate_text_tokens(text)  # ≈token（AI预算单位，混合密度估算）
+        if total_lines is not None:
+            remain = f"，剩余{total_lines - last_num}行"
+            hint = (f"... [已达全局输出上限({max_chars}字符≈{est}token)，仅显示前{len(kept)}行。"
+                    f"文件共{total_lines}行{remain}。"
+                    f"使用 offset={last_num + 1} 继续读取其余部分]")
+        else:
+            hint = (f"... [已达全局输出上限({max_chars}字符≈{est}token)，仅显示前{len(kept)}行。"
+                    f"使用 offset={last_num + 1} 继续读取其余部分]")
     else:
         hint = f"... [已达全局输出上限({max_chars}字符)，使用 offset 参数继续读取其余部分]"
     return "\n".join(kept) + "\n" + hint
@@ -174,6 +190,13 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
 
                 line_num = start + i + 1
                 content = line.rstrip("\n\r")
+                # 单行超长截断：保留前段 + 后缀，避免一条无换行巨行撑爆输出
+                if len(content) > READ_MAX_LINE_CHARS:
+                    content = (
+                        content[:READ_MAX_LINE_CHARS]
+                        + f"...[单行截断: 本行共{len(content)}字符,"
+                          f"仅显示前{READ_MAX_LINE_CHARS}字符]"
+                    )
                 formatted = f"  {line_num}→{content}"
 
                 result.append(formatted)
@@ -182,6 +205,20 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
                 # 此时再尝试读一行，如果非空，说明文件还有内容，被 limit 截断了
                 if f.readline():
                     truncated_by_limit = True
+
+            # limit 截断时统计文件总行数（供提示规划续读）。
+            # 超大文件跳过计数（>20MB 扫描成本秒级）；异常放弃统计，提示降级。
+            total_lines = None
+            if truncated_by_limit:
+                try:
+                    if os.path.getsize(file_path) <= READ_MAX_COUNT_BYTES:
+                        # 探测行已读掉，从下一行计起
+                        total_lines = skipped + limit + 1 + sum(1 for _ in f)
+                except OSError:
+                    total_lines = None
+            elif offset and offset > 1:
+                # 未截断（读到EOF）：总行数 = 实际跳过 + 实际读出，零成本精确
+                total_lines = skipped + len(result)
 
     except PermissionError:
         return f"[错误: 权限不足: {file_path}]"
@@ -194,8 +231,17 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
             return f"[无内容: offset={offset} 已超出文件末尾（文件共{skipped}行）]"
         return "[文件为空]"
 
-    # 截断提示
+    # 截断提示（含总行数：AI 可算剩余页数，从"盲续"变"可规划"）
     if truncated_by_limit:
-        result.append(f"  ... [截断: 已显示 {limit} 行。使用 offset={start + limit + 1} 参数可读取其余部分]")
+        if total_lines is not None:
+            remain = total_lines - (skipped + limit)
+            result.append(
+                f"  ... [截断: 已显示 {limit} 行。文件共{total_lines}行，剩余{remain}行。"
+                f"使用 offset={skipped + limit + 1} 参数可读取其余部分]"
+            )
+        else:
+            result.append(
+                f"  ... [截断: 已显示 {limit} 行。使用 offset={skipped + limit + 1} 参数可读取其余部分]"
+            )
 
-    return _apply_global_cap("\n".join(result), _tool_context)
+    return _apply_global_cap("\n".join(result), _tool_context, total_lines)
