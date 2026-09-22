@@ -178,6 +178,27 @@ def _cmd_clear(args: str, mgr) -> CommandResult:
     return CommandResult.HANDLED
 
 
+@_register("compact")
+def _cmd_compact(args: str, mgr) -> CommandResult:
+    """手动压缩上下文：摘要全部历史，保留近期尾部；过程中可按 Esc 取消"""
+    if args.strip():
+        _stdout_write(f"  {CMD_HINT}用法: /compact（无参数）{R}\n")
+        return CommandResult.HANDLED
+    try:
+        status, text = mgr.on_compact()
+    except Exception as e:
+        # 命令层兜底：压缩内部异常不应把整个进程带崩。此处不宣称历史状态
+        # （异常可能发生在压缩生效后的落盘阶段）
+        _stdout_write(f"  {CMD_ERROR}压缩中断: 内部异常({e}){R}\n")
+        return CommandResult.HANDLED
+    if status == "error" and "取消" in text:
+        color = CMD_MUTED  # 用户主动取消属正常操作，非错误
+    else:
+        color = {"ok": CMD_SUCCESS, "empty": CMD_HINT}.get(status, CMD_ERROR)
+    _stdout_write(f"  {color}{text}{R}\n")
+    return CommandResult.HANDLED
+
+
 @_register("explore")
 def _cmd_explore(args: str, mgr) -> CommandResult:
     if _require_args(args, "用法: /explore <名称>"):

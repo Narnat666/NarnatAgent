@@ -72,6 +72,10 @@ class SessionState:
     def auto_save(self):
         pass
 
+    def reset_after_compact(self):
+        """上下文压缩后修正会话基准（默认无基准可修正，no-op）"""
+        pass
+
     def session_name(self) -> Optional[str]:
         return None
 
@@ -91,6 +95,7 @@ class NoSession(SessionState):
     def available_commands(self) -> Dict[str, str]:
         return {
             "/clear":    "清理屏幕",
+            "/compact":  "压缩上下文",
             "/save":     "保存当前会话",
             "/ls":       "显示所有会话",
             "/cd":       "进入历史会话",
@@ -197,6 +202,7 @@ class RootSession(SessionState):
     def available_commands(self) -> Dict[str, str]:
         return {
             "/clear":    "清理屏幕",
+            "/compact":  "压缩上下文",
             "/save":     "保存当前会话",
             "/ls":       "显示所有会话",
             "/cd":       "进入历史会话",
@@ -334,39 +340,55 @@ class ChildSession(SessionState):
 
     # ── 探索分支合并常量（原模块级常量收敛于此，仅本类 done() 使用）──
     BOUNDARY_MARKER_PREFIX = "━━━ 探索分支开始"
+    # 结构化检查点模板（对齐 COMPRESS_PROMPT 的固定小节骨架，见 config/defaults.py）：
+    # 固定小节顺序防止合并结论漏掉续跑最关键的信息；每条小节只写相对主分支的增量。
     SUMMARY_TASK_TEMPLATE = """# 任务：探索分支增量合并
 
-你是一个负责上下文管理的“增量提取专家”。你的任务是将“子分支”的探索过程压缩，只将**有价值的增量信息**合并回“主分支”，以保持主会话的简洁和高性能。
+你现在是压缩引擎。把子分支的探索过程浓缩成一个结构化检查点，只将**有价值的增量信息**合并回主分支，使另一个模型可以无损接续工作，同时保持主会话简洁。
 
 ## 1. 主分支当前状态
-这是主分支已知的上下文，视为“基准真理”。
+这是主分支已知的上下文，视为“基准真理”，增量判定以它为基准。
 {memory}
 
 ## 2. 子分支探索日志
-这是在子分支中进行的调试、验证、试错过程。
+这是在子分支中进行的调试、验证、试错过程。其中若包含主分支已知的内容（尤其是与上方摘要重复的部分），视为已知，不计入增量。
 {target}
 
-## 3. 处理逻辑
-请严格按照以下步骤进行合并判定：
+## 3. 输出结构
+严格按下面的 Markdown 结构输出：保持每一节的顺序，用简练的要点而非散文。空节写“(无)”，不得省略任何一节。
+除“原始请求与意图”外，每节只记录**相对主分支已知信息的新增量**：与主分支重复的内容一律不写；主分支已记录的事实不要原文照抄，只写新增、变化或修正的部分。
 
-1.  **去重**：如果子分支的内容只是重复了主分支已知的信息，**直接忽略**。
-2.  **判定增量**：
-    *   **情况 A（无新增）**：如果探索最终没有得出任何新结论，或只是确认了旧结论，输出标记 `[无实质性更新]`。
-    *   **情况 B（新增/优化）**：如果对主分支的模块进行了修改、优化，或发现了新知识，**只描述最终状态**。
-3.  **负面过滤**：对于失败的尝试，**一句话带过**（例如：“排除了方案A，因为...”），不要记录过程细节。
+## 原始请求与意图
+- [子分支本次探索的目标（即使与主分支相同也写明，供接续定位）；措辞重要处原文引用]
 
-## 4. 输出格式
-如果情况为 A，仅输出：`[无实质性更新]`。
+## 关键技术概念
+- [本次探索新涉及的技术、框架、模式与约定]
 
-如果情况为 B，请按以下极简格式输出（不要超过 1000 字）：
+## 文件与代码
+- [精确路径：其重要性、关键改动或代码片段]
 
-**更新对象**: (模块名称/功能点)
-**最终状态**: (描述合并后的最新逻辑或代码结构，直接覆盖旧认知)
-**关键变更**: (简述做了什么修改，例如“从同步改为异步”，“增加了异常捕获”)
-**避坑提示**: (可选，一句话简述被排除的错误方案)
+## 错误与修复
+- [错误：如何解决的，以及相关用户反馈；失败的尝试一句话带过（如“排除了方案A，因为…”）]
 
----
-*原则：宁可少写，不可废话。*
+## 待办任务
+- [本次探索暴露的、尚未完成的工作]
+
+## 当前工作
+- [子分支结束时正在进行的精确工作]
+
+## 下一步
+- [与主分支衔接的单一动作，或“(无)”]
+
+## 关键上下文
+- [决策及其理由、约束、用户偏好、未决问题、继续所需的数据]
+
+规则：
+- 用简洁的中文工程语言。保留精确的文件路径、命令、报错串、标识符、数值、函数签名与语法片段。
+- 忠实记录用户反馈与明确指令，尤其是纠正。
+- 不要提及本次合并请求，也不要提及这是子分支的探索过程。
+- 只输出检查点文本：不要调用任何工具或采取其他行动。
+- 总长不超过 1500 字：宁可少写，不可废话。
+- 若所有小节均为“(无)”——即探索没有产生任何新结论、只是重复或确认了主分支已知信息——则整段输出仅一行：`[无实质性更新]`（不要输出任何小节）。
 """
 
     def __init__(self, mgr: 'SessionManager', name: str, parent: str):
@@ -384,6 +406,7 @@ class ChildSession(SessionState):
     def available_commands(self) -> Dict[str, str]:
         return {
             "/clear":    "清理屏幕",
+            "/compact":  "压缩上下文",
             "/ls":       "显示所有会话",
             "/cd":       "进入历史会话",
             "/skill":    "加载技能",
@@ -518,6 +541,22 @@ class ChildSession(SessionState):
     def auto_save(self):
         self._persist()
 
+    def reset_after_compact(self):
+        """压缩后重设增量合并基准。
+
+        压缩把消息列表整体替换为 [system_prompt, 摘要, 保留尾部...]，
+        而 _parent_msg_count / _last_summarized_at 是压缩前的消息下标，
+        失配会让 /done 静默取不到增量（或把分支讨论计入父基准）。
+        重置到摘要边界：memory=压缩摘要（含父基准与早期分支内容），
+        target=压缩后逐字保留的分支近期讨论。
+        """
+        msgs = self._mgr.get_messages()
+        boundary = 0
+        while boundary < len(msgs) and msgs[boundary].get("role") == "system":
+            boundary += 1
+        self._parent_msg_count = boundary
+        self._last_summarized_at = boundary
+
     def session_name(self) -> Optional[str]:
         return self._name
 
@@ -567,6 +606,8 @@ class SessionManager:
         self.summary_anim_stop = summary_anim_stop
         self.cancel_check = cancel_check or (lambda: False)
         self.name_func = name_func
+        # 手动压缩（/compact）：由 Assembly 注入 CompressionCoordinator.compress_manual
+        self.compact_func: Optional[Callable[[], Tuple[str, str]]] = None
         self._set_goal_tool = goal_tool_setter
         # 项目技能根目录: None=自动发现（扫描所有名为 skills 的目录）；空元组=关闭；非空=显式
         self._project_skill_roots = project_skill_roots
@@ -677,6 +718,22 @@ class SessionManager:
 
     def on_done(self) -> str:
         return self._state.done()
+
+    def on_compact(self) -> Tuple[str, str]:
+        """手动压缩上下文（/compact 命令）——转发给注入的 compact_func。
+
+        成功后：先按压缩后的新列表修正会话基准（子会话的增量合并下标），
+        再落盘——命令不经过轮末自动保存，不落盘的话压缩结果会在退出时丢失。
+
+        返回 (status, text)：status="ok" 成功 / "empty" 无历史可压缩 / "error" 失败。
+        """
+        if self.compact_func is None:
+            return "error", "压缩不可用"
+        status, text = self.compact_func()
+        if status == "ok":
+            self._state.reset_after_compact()
+            self._state.auto_save()
+        return status, text
 
     def on_exit(self) -> str:
         msg, new_state = self._state.exit()

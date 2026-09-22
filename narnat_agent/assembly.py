@@ -178,6 +178,9 @@ class Assembly:
             config, msg_manager, llm, context, ui, logger,
         )
 
+        # 手动压缩命令（/compact）接线：session_mgr 转发给压缩协调器
+        session_mgr.compact_func = compression_coordinator.compress_manual
+
         # 17. AgentLoop
         agent_loop = AgentLoop(
             llm, msg_manager, dispatcher, tool_context,
