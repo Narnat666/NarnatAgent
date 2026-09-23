@@ -21,6 +21,8 @@
 | 工具批执行中按 Esc | `test_raise_sets_flag_before_broadcasting`（调度检查点归 conversation） |
 | 输入模式下按键不被吞 | `test_input_mode_has_no_listener_thread` |
 | 运行模式连按 Esc | `test_scan_escape_double_escape_is_interrupt` / `..._consumes_at_most_five_bytes` |
+| 运行模式判中断后继续消费按键（有意变更） | `test_poll_keys_triggers_once_then_keeps_consuming` / `test_poll_keys_keeps_consuming_after_window_judgement` |
+| Windows 主路径为事件源（有意变更） | `test_open_windows_source_prefers_console_input_event_source` / `test_console_input_source_self_check_*` |
 | 切换不残留 | `test_listener_switch_leaves_single_thread` |
 | 功能键不误触发 | `test_scan_escape_sequence_is_not_interrupt` / `test_console_input_source_ignores_non_escape_events` |
 | 输入重定向时降级 | `test_listener_degrades_when_source_unavailable` / `..._console_unavailable` |
@@ -59,6 +61,10 @@ from narnat_agent.interrupt.keys import (
 
 INTERRUPT_DIR = Path(__file__).resolve().parents[2] / "narnat_agent" / "interrupt"
 INTERRUPT_SOURCES = sorted(INTERRUPT_DIR.glob("*.py"))
+
+WAIT_OBJECT_0 = 0
+WAIT_TIMEOUT = 0x102
+WAIT_FAILED = keys_module.WAIT_FAILED
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -149,6 +155,60 @@ def _key_event(vk_code, *, key_down=True):
     record[4:8] = (1 if key_down else 0).to_bytes(4, "little")
     record[10:12] = vk_code.to_bytes(2, "little")
     return bytes(record)
+
+
+class _SelfCheckKernel32:
+    """句柄可用性探针替身：`WaitForSingleObject` 恒定返回指定等待码。"""
+
+    def __init__(self, wait_result):
+        self.wait_result = wait_result
+        self.wait_calls: list[tuple] = []
+
+    def GetStdHandle(self, which):
+        return 1234
+
+    def WaitForSingleObject(self, handle, milliseconds):
+        self.wait_calls.append((handle, milliseconds))
+        return self.wait_result
+
+
+class _FakeWindll:
+    """`ctypes.windll` 替身（只提供 kernel32）。"""
+
+    def __init__(self, kernel32):
+        self.kernel32 = kernel32
+
+
+def _patch_windows_environment(monkeypatch, kernel32, msvcrt=None):
+    """把 Windows 源构建所需环境（ctypes.windll.kernel32、msvcrt 模块）打上补丁。"""
+    monkeypatch.setattr(ctypes, "windll", _FakeWindll(kernel32), raising=False)
+    monkeypatch.setitem(sys.modules, "msvcrt",
+                        _FakeMsvcrt([]) if msvcrt is None else msvcrt)
+
+
+def _wait_until(predicate, timeout: float = 1.0) -> bool:
+    """轮询等待条件成立（避免固定 sleep 抖动；超时返回最终取值）。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return predicate()
+
+
+def _run_poll_keys(source, on_escape):
+    """在后台线程运行 poll_keys（新语义：判中断后仍持续消费，只有停止信号才退出）。"""
+    stop = threading.Event()
+    thread = threading.Thread(target=poll_keys, args=(source, stop, on_escape), daemon=True)
+    thread.start()
+    return thread, stop
+
+
+def _stop_poll_keys(thread, stop) -> bool:
+    """置停止信号并等待采集循环退出；返回是否已退出。"""
+    stop.set()
+    thread.join(timeout=1.0)
+    return not thread.is_alive()
 
 
 class _FakeTermios:
@@ -439,27 +499,47 @@ def test_platform_source_parameters_match_legacy_timing():
 # ═══════════════════════════════════════════════════════════════
 
 
-def test_poll_keys_triggers_once_and_returns():
-    """触发一次即结束采集（旧实现三处 break/return 的共享语义）。"""
+def test_poll_keys_triggers_once_then_keeps_consuming():
+    """有意变更（R4）：判中断触发一次后不结束采集，继续消费按键直到停止。
+
+    覆盖：中断触发一次；后续按键（含 Esc、连按 Esc）被丢弃且不重复触发；采集循环在
+    停止信号置位后才退出——即运行模式期间按键不积压（不再产生「幽灵输入」）。
+    """
     fired = []
-    poll_keys(_ScriptedSource([ESC_BYTE]), threading.Event(), lambda: fired.append(1))
+    source = _ScriptedSource([ESC_BYTE, b"`", ESC_BYTE, ESC_BYTE], escape_immediate=True)
+    thread, stop = _run_poll_keys(source, lambda: fired.append(1))
+    assert _wait_until(lambda: len(source.read_timeouts) >= 8)  # 脚本耗尽仍在继续读取
     assert fired == [1]
+    assert thread.is_alive() is True
+    assert _stop_poll_keys(thread, stop) is True
+
+
+def test_poll_keys_keeps_consuming_after_window_judgement():
+    """有意变更（R4）：窗口判定路径判中断后同样继续消费（连按 Esc 不再重复触发）。"""
+    fired = []
+    source = _ScriptedSource([ESC_BYTE, b"[", b"A", ESC_BYTE, b"`"])
+    thread, stop = _run_poll_keys(source, lambda: fired.append(1))
+    assert _wait_until(lambda: len(source.read_timeouts) >= 8)
+    assert fired == [1]
+    assert _stop_poll_keys(thread, stop) is True
 
 
 def test_poll_keys_discards_plain_keys():
     """普通按键被丢弃，直到出现 Esc。"""
     fired = []
     source = _ScriptedSource([b"a", b"b", ESC_BYTE])
-    poll_keys(source, threading.Event(), lambda: fired.append(1))
-    assert fired == [1]
+    thread, stop = _run_poll_keys(source, lambda: fired.append(1))
+    assert _wait_until(lambda: fired == [1])
+    assert _stop_poll_keys(thread, stop) is True
 
 
 def test_poll_keys_ignores_escape_sequence_and_keeps_listening():
     """转义序列被吞掉后继续监听，随后的单次 Esc 仍可中断。"""
     fired = []
     source = _ScriptedSource([ESC_BYTE, b"[", b"A", ESC_BYTE])
-    poll_keys(source, threading.Event(), lambda: fired.append(1))
-    assert fired == [1]
+    thread, stop = _run_poll_keys(source, lambda: fired.append(1))
+    assert _wait_until(lambda: fired == [1])
+    assert _stop_poll_keys(thread, stop) is True
 
 
 def test_poll_keys_exits_silently_on_source_error():
@@ -482,11 +562,18 @@ def test_poll_keys_exits_when_stop_set():
 
 
 def test_poll_keys_swallows_handler_exception():
-    """回调异常被吞掉（中断路径不允许异常打断流程）。"""
+    """回调异常被吞掉（中断路径不允许异常打断流程），采集循环继续消费。"""
+    calls = []
+
     def broken():
+        calls.append(1)
         raise RuntimeError("订阅链故障")
 
-    poll_keys(_ScriptedSource([ESC_BYTE]), threading.Event(), broken)
+    source = _ScriptedSource([ESC_BYTE], escape_immediate=True)
+    thread, stop = _run_poll_keys(source, broken)
+    assert _wait_until(lambda: len(source.read_timeouts) >= 4)
+    assert calls == [1]
+    assert _stop_poll_keys(thread, stop) is True
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -657,12 +744,69 @@ def test_console_input_source_ignores_non_escape_events():
 
 
 def test_console_input_source_drives_poll_loop():
-    """事件源走同一采集循环：Esc 事件触发回调并退出。"""
+    """事件源走同一采集循环：Esc 事件触发回调一次，此后继续消费直到停止。"""
     fired = []
     kernel32 = _FakeKernel32([_key_event(0x1B)])
-    poll_keys(_ConsoleInputSource(kernel32, ctypes), threading.Event(),
-              lambda: fired.append(1))
-    assert fired == [1]
+    source = _ConsoleInputSource(kernel32, ctypes)
+    thread, stop = _run_poll_keys(source, lambda: fired.append(1))
+    assert _wait_until(lambda: fired == [1])
+    assert _wait_until(lambda: len(kernel32.wait_calls) >= 4)  # 触发后仍被继续读取
+    assert _stop_poll_keys(thread, stop) is True
+
+
+def test_console_input_source_self_check_accepts_waitable_handle():
+    """self_check 边界：有事件（WAIT_OBJECT_0）与无事件（WAIT_TIMEOUT）都判句柄可用。"""
+    for wait_result in (WAIT_OBJECT_0, WAIT_TIMEOUT):
+        kernel32 = _SelfCheckKernel32(wait_result)
+        source = _ConsoleInputSource(kernel32, ctypes)
+        source.self_check()                       # 不抛异常即通过
+        assert kernel32.wait_calls == [(1234, 0)]  # 自检用 0 毫秒等待，不阻塞
+
+
+def test_console_input_source_self_check_rejects_invalid_handle():
+    """self_check 边界：WAIT_FAILED（无效句柄、管道输入）→ 抛异常（调用方据此降级）。"""
+    source = _ConsoleInputSource(_SelfCheckKernel32(WAIT_FAILED), ctypes)
+    with pytest.raises(OSError):
+        source.self_check()
+
+
+def test_open_windows_source_prefers_console_input_event_source(monkeypatch):
+    """Windows 主路径：事件源自检通过 → 返回 ReadConsoleInput 事件源（精确按键语义）。"""
+    kernel32 = _SelfCheckKernel32(WAIT_OBJECT_0)
+    _patch_windows_environment(monkeypatch, kernel32, _FakeMsvcrt([ESC_BYTE]))
+    source = keys_module._open_windows_source()
+    assert isinstance(source, _ConsoleInputSource)
+    assert source.escape_immediate is True
+    assert kernel32.wait_calls == [(1234, 0)]
+
+
+def test_open_windows_source_degrades_to_msvcrt_when_self_check_fails(monkeypatch):
+    """自检失败（WAIT_FAILED）→ 降级 msvcrt 字节流源（保留窗口判定与不清缓冲怪癖）。"""
+    msvcrt = _FakeMsvcrt([ESC_BYTE])
+    _patch_windows_environment(monkeypatch, _SelfCheckKernel32(WAIT_FAILED), msvcrt)
+    source = keys_module._open_windows_source()
+    assert isinstance(source, _MsvcrtSource)
+    assert (source.escape_immediate, source.probe_timeout, source.consume_timeout) == (
+        False, 0.0, 0.0)
+    assert source.read(0.0) == ESC_BYTE
+    assert msvcrt.calls == ["kbhit", "getch"]
+
+
+def test_open_windows_source_degrades_when_event_source_unusable(monkeypatch):
+    """事件源构造即失败（如 GetStdHandle 不可用）→ 同样降级 msvcrt，不向上抛。"""
+    class _BrokenKernel32:
+        def GetStdHandle(self, which):
+            raise OSError("取句柄失败")
+
+    msvcrt = _FakeMsvcrt([])
+    _patch_windows_environment(monkeypatch, _BrokenKernel32(), msvcrt)
+    assert isinstance(keys_module._open_windows_source(), _MsvcrtSource)
+
+
+def test_fallback_judgement_keeps_swallow_quirk():
+    """对照守护（exp1 C04/C08 函数级对应）：降级路径的「Esc + 紧随错键」吞键怪癖保持。"""
+    assert scan_escape(_ScriptedSource([b"`"])) is False
+    assert scan_escape(_ScriptedSource([b"a", b"b", b"c", b"d", b"e"])) is False
 
 
 def test_console_input_source_raises_on_read_failure():

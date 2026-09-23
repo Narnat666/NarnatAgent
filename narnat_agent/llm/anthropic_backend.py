@@ -35,6 +35,7 @@ from ..contracts.llm_events import (
     KEY_USAGE,
 )
 from ..contracts.messages import SYNTHETIC_THINKING
+from .cancelable import run_cancelable, safe_close
 from .retry import (
     RETRY_REASON_NETWORK,
     RETRY_REASON_RATE,
@@ -101,7 +102,13 @@ class AnthropicBackend:
 
     def chat_stream(self, messages, no_tools: bool = False, no_thinking: bool = False,
                     cancel_check=None) -> Iterator[dict]:
-        """流式请求并产出统一事件流（生成器；首次迭代才真正发请求）。"""
+        """流式请求并产出统一事件流（生成器；首次迭代才真正发请求）。
+
+        请求发送（建连/等响应头）与流式接收期间均以 ≤0.05 秒粒度轮询取消标记；
+        取消命中即静默结束本轮并清理活跃请求句柄（设计依据：`docs/recast/
+        esc_review_notes.md` 根因 A/B——消除"打断后仍等服务端响应头"的慢路径；
+        待 spec 同步）。
+        """
         self._last_raw_sse.clear()
         if self._logger:
             self._logger.info("llm", f"发送请求(Anthropic), messages={len(messages)}条")
@@ -148,7 +155,19 @@ class AnthropicBackend:
             try:
                 # 使用 stream 模式发送请求，先拿到 status_code 再决定是否读取流
                 req = client.build_request("POST", self._url, headers=self._headers, json=body)
-                resp = client.send(req, stream=True)
+                # 发送移入子线程 + 主流程轮询取消标记：建连/等响应头期间取消也能立即收敛
+                # （直接调用时生成器体卡在 send 上，取消检查点不可达）
+                cancelled, resp, err = run_cancelable(
+                    lambda: client.send(req, stream=True),
+                    cancel_check,
+                    on_cancel=lambda: safe_close(client),
+                )
+                if cancelled:
+                    client.close()  # 兜底幂等：与 on_cancel 的关闭重复无副作用
+                    self._runtime.detach_handle()
+                    return
+                if err is not None:
+                    raise err       # 交给下方既有异常分支处理（TransportError/Exception 全保留）
                 status = resp.status_code
 
                 # 不重试

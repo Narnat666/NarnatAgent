@@ -2,15 +2,22 @@
 
 契约来源：`openspec/changes/recast-v2/specs/interrupt/spec.md`「键盘监听生命周期」
 与「平台按键采集差异」（含兼容性怪癖：转义序列消费上限 5 字节、停止采集最多等待
-0.2 秒且不同步确认线程退出、Windows 原生路径不清空输入缓冲）。
+0.2 秒且不同步确认线程退出、msvcrt 降级路径不清空输入缓冲）。**本模块的 Windows
+主路径选择与采集循环退出时机为有意变更（待 spec 同步）**：
+
+- Windows 主路径 = ReadConsoleInput 事件源（精确按键语义：只认「Esc 键按下」事件，
+  交错按键不影响判定；构造后由 `self_check()` 验证句柄可等待，失败才降级）；
+- msvcrt 字节流为降级路径（保留 20 毫秒窗口 / 5 字节上限判定与不清缓冲的兼容怪癖）；
+- 判中断触发 `on_escape` 一次后，采集线程继续消费并丢弃按键直到停止：运行模式期间
+  按键不再积压，回到输入态不出现「幽灵输入」。
 
 结构（对齐 R6 报告发现「三套 ESC 轮询同构不共享」）：
 
 - 平台差异只留在三个字符源适配器里（msvcrt / ReadConsoleInput / POSIX termios），
   各自只提供「读一个字节」原语与两个平台超时参数；
 - 「20 毫秒判定窗口、转义序列最多消费 5 字节、消费窗口内第二个 Esc 判为连按」
-  与轮询骨架（30 毫秒周期、停止检查、异常静默、触发一次即退出）为单一共享实现
-  （`scan_escape` / `poll_keys`）——现状 native（旧 interrupt.py 139-163）、
+  与轮询骨架（30 毫秒周期、停止检查、异常静默、触发一次后继续消费）为单一共享
+  实现（`scan_escape` / `poll_keys`）——现状 native（旧 interrupt.py 139-163）、
   coninput（165-215）、unix（217-274）三处循环在此收敛；
 - 采集线程为守护线程：停止信号置位后最迟一个轮询周期自行退出；模式切换先停旧
   线程再启新线程，且每个线程用独立停止信号（避免旧线程被新线程的状态清除唤醒）；
@@ -49,6 +56,9 @@ STOP_JOIN_TIMEOUT_SECONDS = 0.2
 
 STD_INPUT_HANDLE = -10
 # Windows 标准输入句柄编号
+
+WAIT_FAILED = 0xFFFFFFFF
+# `WaitForSingleObject` 的失败返回值（句柄无效/不可等待）；其余返回值为可用
 
 
 class KeySource(Protocol):
@@ -107,7 +117,7 @@ class _MsvcrtSource:
 
 
 class _ConsoleInputSource:
-    """Windows 非原生控制台（Windows Terminal 等）的 ReadConsoleInput 事件源。
+    """Windows ReadConsoleInput 事件源（主路径；自检失败才降级 msvcrt）。
 
     事件级语义（spec「平台按键采集差异」）：仅「键按下且为 Esc 键」的事件触发中断，
     普通字符键不触发——Esc 键按下事件产出 Esc 字节并即刻判定（`escape_immediate`），
@@ -134,6 +144,15 @@ class _ConsoleInputSource:
         self._buffer = (ctypes_module.c_char
                         * (self.INPUT_RECORD_SIZE * self.BATCH_SIZE))()
         self._records_read = ctypes_module.c_ulong()
+
+    def self_check(self) -> None:
+        """自检控制台句柄可用：不可等待（无效句柄、管道输入）即抛异常（走降级）。
+
+        `WaitForSingleObject` 返回 `WAIT_FAILED` 表示句柄无效；`WAIT_OBJECT_0`（有
+        事件）与 `WAIT_TIMEOUT`（无事件）都表示句柄可用。
+        """
+        if self._kernel32.WaitForSingleObject(self._handle, 0) == WAIT_FAILED:
+            raise OSError("控制台标准输入句柄不可等待")
 
     def read(self, timeout: float) -> bytes | None:
         milliseconds = int(max(timeout, 0.0) * 1000)
@@ -223,24 +242,27 @@ def scan_escape(source: KeySource) -> bool:
 
 def poll_keys(source: KeySource, stop: threading.Event,
               on_escape: Callable[[], None]) -> None:
-    """统一采集循环：以 30 毫秒周期读取按键，判定中断后回调一次并退出。
+    """统一采集循环：以 30 毫秒周期读取按键，判定中断后回调一次并继续消费按键。
 
     覆盖旧实现三套循环（native / coninput / unix）的共享骨架：停止检查、异常静默
-    退出、非 Esc 按键丢弃、触发一次即结束采集线程。
+    退出、非 Esc 按键丢弃。**有意变更**：判中断触发一次后不结束采集线程，继续读取并
+    丢弃按键直到停止（运行模式期间按键不积压，回输入态不出现「幽灵输入」）。
     """
+    fired = False
     while not stop.is_set():
         try:
             key = source.read(POLL_INTERVAL_SECONDS)
-            interrupted = key == ESC_BYTE and scan_escape(source)
+            interrupted = (not fired) and key == ESC_BYTE and scan_escape(source)
         except (OSError, ValueError):
             return
         if not interrupted:
             continue
+        fired = True
         try:
             on_escape()
         except Exception:
             pass
-        return
+        # 继续消费按键（丢弃、不重复触发）直到停止：消灭积压与幽灵输入
 
 
 class KeyListener:
@@ -322,19 +344,21 @@ class KeyListener:
 
 
 def _open_windows_source() -> KeySource:
-    """Windows 平台字符源：优先 msvcrt（原生控制台），否则 ReadConsoleInput 事件源。
+    """Windows 平台字符源：优先 ReadConsoleInput 事件源（精确按键语义）。
 
-    原生控制台不清空输入缓冲（兼容怪癖保持，见 `_MsvcrtSource`）。
+    事件源构造后自检句柄可等待；失败（无效句柄、管道输入）才降级 msvcrt 字节流源，
+    降级路径保持不清空输入缓冲的兼容怪癖（见 `_MsvcrtSource`）。
     """
     import ctypes
     import msvcrt
 
     kernel32 = ctypes.windll.kernel32
-    handle = kernel32.GetStdHandle(STD_INPUT_HANDLE)
-    mode = ctypes.c_ulong()
-    if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+    try:
+        source = _ConsoleInputSource(kernel32, ctypes)
+        source.self_check()
+        return source
+    except Exception:
         return _MsvcrtSource(msvcrt)
-    return _ConsoleInputSource(kernel32, ctypes)
 
 
 def _restore_term(fd: int, settings) -> None:

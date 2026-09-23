@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from .anthropic_backend import SYNTHETIC_THINKING, AnthropicBackend, user_has_tool_result
+from .cancelable import run_cancelable
 from .client import DEFAULT_MAX_OUTPUT_TOKENS, LLMClient, strip_surrogates
 from .openai_backend import OpenAIBackend
 from .retry import (
@@ -68,6 +69,7 @@ __all__ = [
     "iter_to_queue",
     "retry_notice",
     "retry_sleep",
+    "run_cancelable",
     "server_error_reason",
     "strip_surrogates",
     "user_has_tool_result",

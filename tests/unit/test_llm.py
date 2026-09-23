@@ -66,6 +66,7 @@ from narnat_agent.llm import (
     iter_to_queue,
     retry_notice,
     retry_sleep,
+    run_cancelable,
     strip_surrogates,
 )
 from narnat_agent.llm import client as client_module
@@ -1895,12 +1896,327 @@ def test_anthropic_handle_points_to_http_client_then_response():
 
 
 def test_openai_handle_points_to_client_then_stream():
-    """OpenAI 侧活跃句柄：发请求前指向 SDK 客户端，流结束后清空。"""
+    """OpenAI 侧活跃句柄：发请求前为请求级 scope（持有共享客户端），流结束后清空。
+
+    （句柄语义随 FIX-ESC-1 有意变更：由"共享客户端本身"改为"请求级 scope"——abort
+    关闭 scope 只掐断在途请求并标记客户端重建，不再杀死共享客户端，见 P3 回归用例。）
+    """
     stream = [openai_chunk(content="答", finish_reason="stop")]
     backend, fake, runtime = make_openai(script=[stream])
     list(backend.chat_stream([]))
-    assert fake.handle_during_call is fake
+    handle = fake.handle_during_call
+    assert handle is not fake
+    assert handle._client is fake
     assert runtime._active_handle is None
+
+
+# ═══════════════════════════════════════════════════════════════
+# FIX-ESC-1：请求发送阶段可取消（根因 A/B 回归 + P3 修复回归）
+# ═══════════════════════════════════════════════════════════════
+
+
+class BlockingSendClient:
+    """httpx 客户端替身：send 阻塞到显式释放，close 对其无效（模拟建连阶段，exp4 实证）。"""
+
+    def __init__(self, block_seconds: float = 3.0):
+        self.closed = 0
+        self.released = threading.Event()
+        self.response = CloseRecorder()
+        self._block_seconds = block_seconds
+
+    def build_request(self, method, url, headers=None, json=None):
+        return httpx.Request(method, url, headers=headers or {})
+
+    def send(self, request, stream=False):
+        self.released.wait(self._block_seconds)
+        return self.response
+
+    def close(self):
+        self.closed += 1  # 只关连接池，不中断在途请求（慢路径根因 A）
+
+
+class InterruptibleSendClient:
+    """httpx 客户端替身：send 阻塞直到 close 被调用（close 有效，掐断在途请求）。"""
+
+    def __init__(self):
+        self.closed = 0
+        self._closed = threading.Event()
+
+    def build_request(self, method, url, headers=None, json=None):
+        return httpx.Request(method, url, headers=headers or {})
+
+    def send(self, request, stream=False):
+        self._closed.wait(3.0)
+        raise httpx.ReadError("连接已关闭")
+
+    def close(self):
+        self.closed += 1
+        self._closed.set()
+
+
+class ClosableFakeOpenAI:
+    """openai SDK 客户端替身：create 可阻塞、close 后不可用（模拟 abort 关闭客户端）。"""
+
+    def __init__(self, script=None, block_seconds: float = 0.0):
+        self.script = list(script or [])
+        self.calls: list[dict] = []
+        self.closed = 0
+        self.entered = threading.Event()   # create 已进入（请求已在途）
+        self.release = threading.Event()   # 放行阻塞中的 create（测试收尾用）
+        self._block_seconds = block_seconds
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        self.entered.set()
+        self.release.wait(self._block_seconds)
+        if self.closed:
+            raise openai.APIConnectionError(
+                request=httpx.Request("POST", "http://api.example.com/chat/completions"))
+        item = self.script.pop(0) if self.script else []
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def close(self):
+        self.closed += 1
+
+
+def wait_until(predicate, timeout: float = 2.0) -> bool:
+    """轮询等待条件成立（后台线程收尾断言用，避免固定 sleep 拖慢用例）。"""
+    deadline = time.time() + timeout
+    while not predicate() and time.time() < deadline:
+        time.sleep(0.01)
+    return predicate()
+
+
+def test_run_cancelable_normal_path_returns_immediately():
+    """正常完成：子线程完成即返回（无固定轮询延迟），结果为阻塞调用返回值。"""
+
+    def do_block():
+        return "ok"
+
+    started = time.perf_counter()
+    assert do_block() == "ok"
+    baseline = time.perf_counter() - started
+
+    samples = []
+    for _ in range(3):
+        started = time.perf_counter()
+        outcome = run_cancelable(do_block, None)
+        samples.append((time.perf_counter() - started, outcome))
+
+    assert all(outcome == (False, "ok", None) for _, outcome in samples)
+    assert min(elapsed for elapsed, _ in samples) < 0.3
+    # 对比基线增量 < 50ms：若实现退化为"固定轮询周期等待"，增量必 ≥ poll_seconds
+    assert min(elapsed for elapsed, _ in samples) - baseline < 0.05
+
+
+def test_run_cancelable_checks_cancel_while_blocking():
+    """阻塞期间以轮询粒度检查取消标记；未命中则等阻塞完成、返回其结果。"""
+    polls: list[float] = []
+    release = threading.Event()
+
+    def do_block():
+        release.wait(2.0)
+        return "done"
+
+    timer = threading.Timer(0.15, release.set)
+    timer.start()
+    try:
+        cancelled, result, error = run_cancelable(do_block, lambda: (polls.append(1), False)[1])
+    finally:
+        timer.cancel()
+
+    assert (cancelled, result, error) == (False, "done", None)
+    assert len(polls) >= 1
+
+
+def test_run_cancelable_cancel_returns_early_and_worker_self_destructs():
+    """取消命中：不等阻塞调用结束即返回（cancelled=True）、on_cancel 已调用；
+    阻塞解除后结果由子线程自毁（双保险）。"""
+    cancel = threading.Event()
+    release = threading.Event()
+    handle = CloseRecorder()
+    on_cancel_calls: list[int] = []
+
+    def do_block():
+        release.wait(2.0)  # 模拟"连接建立中"：取消对其无效，直到阻塞自然解除
+        return handle
+
+    timer = threading.Timer(0.1, cancel.set)
+    timer.start()
+    try:
+        started = time.perf_counter()
+        cancelled, result, error = run_cancelable(
+            do_block, cancel.is_set, on_cancel=lambda: on_cancel_calls.append(1))
+        elapsed = time.perf_counter() - started
+    finally:
+        timer.cancel()
+
+    assert (cancelled, result, error) == (True, None, None)
+    assert elapsed < 0.45          # 阻塞时长 2s，主流程未等其结束
+    assert on_cancel_calls == [1]  # 尽力掐断已调用
+
+    release.set()                  # 阻塞解除 → 子线程补关结果
+    assert wait_until(lambda: handle.closed == 1)
+
+
+def test_run_cancelable_block_error_returned():
+    """阻塞调用抛异常：以 error 原样返回（交调用方既有异常分支处理），不产生结果。"""
+    boom = RuntimeError("连接被拒绝")
+
+    def do_block():
+        raise boom
+
+    cancelled, result, error = run_cancelable(do_block, None)
+    assert cancelled is False
+    assert result is None
+    assert error is boom
+
+
+def test_run_cancelable_race_cancel_with_completed_result_closes_it():
+    """竞态：取消命中与阻塞完成同时发生 → 主线程补关结果并返回 cancelled=True。
+
+    close 幂等：任何时序下结果至多被关闭两次（主线程竞态窗口一次、子线程兜底一次）。
+    """
+    allow_finish = threading.Event()
+    handle = CloseRecorder()
+
+    def do_block():
+        allow_finish.wait(2.0)
+        return handle
+
+    def cancel_check():
+        allow_finish.set()  # 让阻塞调用在本次轮询期间完成
+        time.sleep(0.15)    # 等结果确实已产生（取消与完成同一时刻）
+        return True
+
+    cancelled, result, error = run_cancelable(do_block, cancel_check, poll_seconds=0.05)
+    assert (cancelled, result, error) == (True, None, None)
+    assert 1 <= handle.closed <= 2
+
+
+def test_anthropic_cancel_during_connect_converges_fast():
+    """核心回归（根因 A+B）：send 卡在建连阶段且 close 无效时取消 → 生成器 ≤0.5s 结束。
+
+    旧实现此场景要等响应头到达（实测 5~11.5s，见 docs/recast/esc_probe/exp4）。
+    """
+    runtime = make_runtime(max_retries=1)
+    client = BlockingSendClient(block_seconds=3.0)
+    backend = AnthropicBackend(FakeConfig(protocol="anthropic"), runtime, None,
+                               client_factory=lambda: client)
+    cancel = threading.Event()
+    timer = threading.Timer(0.1, cancel.set)
+    timer.start()
+    try:
+        started = time.perf_counter()
+        events = list(backend.chat_stream([{"role": "user", "content": "q"}],
+                                          cancel_check=cancel.is_set))
+        elapsed = time.perf_counter() - started
+    finally:
+        timer.cancel()
+
+    assert events == []                     # 静默结束：无完成/错误/中断事件
+    assert elapsed < 0.5
+    assert runtime._active_handle is None   # 活跃句柄已清理
+    assert client.closed >= 1               # 尽力掐断（对本场景无效，靠轮询收敛）
+
+    client.released.set()                   # 阻塞解除 → 在途结果由子线程自毁
+    assert wait_until(lambda: client.response.closed == 1)
+
+
+def test_anthropic_cancel_with_working_close_keeps_fast_path():
+    """close 有效（已建立连接阶段）时取消：掐断在途请求，生成器 ≤0.5s 静默结束。"""
+    runtime = make_runtime(max_retries=1)
+    client = InterruptibleSendClient()
+    backend = AnthropicBackend(FakeConfig(protocol="anthropic"), runtime, None,
+                               client_factory=lambda: client)
+    cancel = threading.Event()
+    timer = threading.Timer(0.1, cancel.set)
+    timer.start()
+    try:
+        started = time.perf_counter()
+        events = list(backend.chat_stream([], cancel_check=cancel.is_set))
+        elapsed = time.perf_counter() - started
+    finally:
+        timer.cancel()
+
+    assert events == []
+    assert elapsed < 0.5
+    assert client.closed >= 1
+    assert runtime._active_handle is None
+
+
+def test_openai_cancel_during_create_converges_fast():
+    """OpenAI 侧同构回归：create 卡在建连阶段时取消 → 生成器 ≤0.5s 静默结束。"""
+    runtime = make_runtime(max_retries=1)
+    fake = ClosableFakeOpenAI(block_seconds=3.0)
+    backend = OpenAIBackend(FakeConfig(), runtime, None, client=fake)
+    cancel = threading.Event()
+    timer = threading.Timer(0.1, cancel.set)
+    timer.start()
+    try:
+        started = time.perf_counter()
+        events = list(backend.chat_stream([{"role": "user", "content": "q"}],
+                                          cancel_check=cancel.is_set))
+        elapsed = time.perf_counter() - started
+    finally:
+        timer.cancel()
+
+    assert events == []
+    assert elapsed < 0.5
+    assert runtime._active_handle is None
+    assert fake.closed >= 1                 # 尽力掐断 + 标记客户端重建
+    assert backend._need_rebuild is True
+    fake.release.set()
+
+
+def test_openai_client_reused_across_turns_without_interrupt():
+    """无中断时共享客户端跨轮复用：不每次请求重建、不被关闭。"""
+    fake = ClosableFakeOpenAI(script=[[openai_chunk(content="一", finish_reason="stop")],
+                                      [openai_chunk(content="二", finish_reason="stop")]])
+    backend = OpenAIBackend(FakeConfig(), make_runtime(), None, client=fake)
+    list(backend.chat_stream([]))
+    list(backend.chat_stream([]))
+    assert backend._client is fake
+    assert fake.closed == 0
+    assert len(fake.calls) == 2
+
+
+def test_openai_abort_rebuilds_client_for_next_turn(monkeypatch):
+    """P3 回归：响应头前打断（abort 关闭请求级 scope）→ 下一轮用重建的客户端成功发出。
+
+    旧实现 abort 直接关闭共享客户端，打断一次后整局对话全部失败（APIConnectionError）。
+    """
+    runtime = make_runtime(max_retries=1)
+    first = ClosableFakeOpenAI(block_seconds=3.0)
+    second = ClosableFakeOpenAI(script=[[openai_chunk(content="二", finish_reason="stop")]])
+    backend = OpenAIBackend(FakeConfig(), runtime, None, client=first)
+    built: list[int] = []
+    monkeypatch.setattr(backend, "_build_client", lambda: (built.append(1), second)[1])
+    interrupted = threading.Event()
+
+    def press_esc():
+        first.entered.wait(2.0)  # 请求已在途（等响应头，句柄为请求级 scope）
+        runtime.abort()          # 中断广播：关闭活跃句柄
+        interrupted.set()        # 中断标志置位（取消检查点）
+
+    threading.Thread(target=press_esc, daemon=True).start()
+    events = list(backend.chat_stream([{"role": "user", "content": "一"}],
+                                      cancel_check=interrupted.is_set))
+    assert events == []                     # 静默打断：无完成/错误/中断事件
+    assert runtime._active_handle is None
+    assert first.closed >= 1
+    first.release.set()
+
+    # 打断后会话继续：下一轮用重建的客户端发出请求并正常完成
+    events2 = list(backend.chat_stream([{"role": "user", "content": "二"}]))
+    assert backend._client is second
+    assert len(built) == 1                  # 重建恰好一次（不重复换客户端）
+    assert len(second.calls) == 1
+    assert [e[KEY_CONTENT] for e in events2 if KEY_CONTENT in e] == ["二"]
+    assert events2[-1][KEY_FINISH_REASON] == "stop"
 
 
 # ═══════════════════════════════════════════════════════════════

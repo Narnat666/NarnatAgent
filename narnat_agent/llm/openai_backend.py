@@ -33,6 +33,7 @@ from ..contracts.llm_events import (
     KEY_TYPE,
     KEY_USAGE,
 )
+from .cancelable import run_cancelable, safe_close
 from .retry import (
     RETRY_REASON_NETWORK,
     RETRY_REASON_RATE,
@@ -55,6 +56,23 @@ from .runtime import (
 __all__ = ["OpenAIBackend"]
 
 
+class _RequestScope:
+    """abort 路径的请求级句柄：掐断在途请求（尽力）+ 标记客户端重建（不污染后续）。
+
+    设计依据：`docs/recast/esc_review_notes.md` 根因 P3——共享客户端若被 abort 直接
+    关闭，打断一次后整局对话全部失败（`APIConnectionError`）。本句柄把"关闭"变成
+    请求级动作：中断只影响本次在途请求，共享客户端由后端在下次请求前重建。
+    """
+
+    def __init__(self, backend: "OpenAIBackend", client) -> None:
+        self._backend = backend
+        self._client = client
+
+    def close(self) -> None:
+        """abort() 调用：标记客户端待重建并尽力掐断在途请求。"""
+        self._backend._invalidate_client(self._client)
+
+
 class OpenAIBackend:
     """OpenAI 兼容后端（`openai` SDK 客户端；底层自动重试关闭，重试自管）。"""
 
@@ -64,16 +82,42 @@ class OpenAIBackend:
         self._runtime = runtime
         self._logger = logger
         self._stall_seconds = stall_seconds
+        self._client_lock = threading.Lock()
+        # 中断标记：请求级 scope 被关闭后置位，下次请求前重建客户端（P3 修复）
+        self._need_rebuild = False
         if client is not None:
             self._client = client
         else:
-            from openai import OpenAI
+            self._client = self._build_client()
 
-            self._client = OpenAI(
-                api_key=config.api_key,
-                base_url=config.base_url,
-                max_retries=0,
-            )
+    def _build_client(self) -> Any:
+        """构造 SDK 客户端（底层自动重试关闭，重试自管）。"""
+        from openai import OpenAI
+
+        return OpenAI(
+            api_key=self._config.api_key,
+            base_url=self._config.base_url,
+            max_retries=0,
+        )
+
+    def _ensure_client(self) -> Any:
+        """取本轮请求使用的客户端；中断标记了重建时先换新（共享客户端不被污染）。
+
+        上一轮请求被中断（abort/取消）时旧客户端已被关闭，此处重建使后续轮次继续可用
+        （P3：旧实现 abort 关闭共享客户端后整局对话全部失败）。
+        """
+        with self._client_lock:
+            if self._need_rebuild:
+                self._need_rebuild = False
+                safe_close(self._client)
+                self._client = self._build_client()
+            return self._client
+
+    def _invalidate_client(self, client) -> None:
+        """请求级中止：标记客户端待重建（后续请求换新）并尽力掐断在途请求。"""
+        with self._client_lock:
+            self._need_rebuild = True
+        safe_close(client)
 
     def prepare_messages(self, messages):
         """内部消息 → OpenAI 协议请求消息。
@@ -107,7 +151,9 @@ class OpenAIBackend:
 
         `no_tools=True` 不带工具定义、`no_thinking=True` 走 thinking 禁用分支；
         两者均不影响思考回传开关的判定与完成事件中的思考输出（specs/llm
-        「请求裁剪选项」）。
+        「请求裁剪选项」）。请求发送（建连/等响应头）与流式接收期间均以 ≤0.05 秒
+        粒度轮询取消标记，取消命中即静默结束本轮（设计依据：`docs/recast/
+        esc_review_notes.md` 根因 A/B/P3；待 spec 同步）。
         """
         if self._logger:
             self._logger.info("llm", f"发送请求(OpenAI), messages={len(messages)}条")
@@ -121,7 +167,9 @@ class OpenAIBackend:
         stream = None
 
         while True:
-            self._runtime.attach_handle(self._client)
+            client = self._ensure_client()
+            # 句柄用请求级 scope：abort 掐断在途请求但不杀死共享客户端（P3）
+            self._runtime.attach_handle(_RequestScope(self, client))
             try:
                 think_body_top, think_extra = self._runtime.thinking_rules.resolve_thinking_params(
                     "openai", self._config.model,
@@ -146,7 +194,19 @@ class OpenAIBackend:
                     kwargs["temperature"] = self._config.temperature
                 if self._config.max_tokens is not None:
                     kwargs["max_tokens"] = self._config.max_tokens
-                stream = self._client.chat.completions.create(**kwargs)
+                # 发送移入子线程 + 主流程轮询取消标记：建连/等响应头期间取消也能立即收敛
+                # （直接调用时生成器体卡在 create 上，取消检查点不可达）；取消同样标记
+                # 客户端重建，避免下一轮复用已被关闭的客户端
+                cancelled, stream, err = run_cancelable(
+                    lambda: client.chat.completions.create(**kwargs),
+                    cancel_check,
+                    on_cancel=lambda: self._invalidate_client(client),
+                )
+                if cancelled:
+                    self._runtime.detach_handle()
+                    return
+                if err is not None:
+                    raise err       # 交给下方既有异常分支处理（SDK 异常全保留）
                 break
 
             except APIStatusError as e:
