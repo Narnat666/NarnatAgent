@@ -1,0 +1,8 @@
+  计划：先说明思路，然后用 Shell 调用 Windows 原生 find 统计 D:\desktop\NarnatAgent\README.md 的行数，最后报告结果。
+  [执行命令] C:\Windows\System32\find.exe /c /v "" "D:\desktop\NarnatAgent\README.md"
+  D:\desktop\NarnatAgent\README.md 共有 534 行。
+  说明：统计时使用 Windows 原生 find.exe /c /v "" 计数（避免 PATH 中 Cygwin 的 find 抢占），统计的是文件中的全部行数，退出码为 0，统计正常完成。
+  [声明完成]
+  任务完成：D:\desktop\NarnatAgent\README.md 的行数为 534 行。
+
+[NN_DONE] reason=goal_complete rounds=1

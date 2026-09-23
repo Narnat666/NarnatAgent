@@ -62,6 +62,10 @@ class OutputSink(Protocol):
       有消息时原样输出该消息（如程序异常文案）；
     - `restart_attempt`：重试重播——此前未完成内容作废、渲染缓冲与状态清理
       （服务端流中断自动重试之前调用，防止残留与重播内容拼接错乱）；
+    - `flush`：落定渲染缓冲（守卫：从未注入内容时不动作）；
+    - `pause` / `resume`：动画的并行暂停与恢复（计数：首个暂停者停止动画；
+      恢复递减且不为负、归零才重启动画；已中止后恢复不再启动动画）——工具行
+      显示前暂停并落定、显示完成后恢复（specs/conversation「工具调度分组与结果回传」）；
     - `cancelled` / `aborted`：状态查询（取消反映进程级中断状态；中止反映标记）。
     """
 
@@ -81,6 +85,18 @@ class OutputSink(Protocol):
 
     def notify(self, text: str) -> None:
         """状态提示（纯文本提示行）。"""
+        ...
+
+    def flush(self) -> None:
+        """落定渲染缓冲（守卫：从未注入内容时不动作）。"""
+        ...
+
+    def pause(self) -> None:
+        """暂停动画（并行计数 +1；首个暂停者真正停止动画）。"""
+        ...
+
+    def resume(self) -> None:
+        """恢复动画（计数递减且不为负；归零时才重启；已中止后不再启动）。"""
         ...
 
     def finish(self, stats: TurnStats, with_stats: bool = True) -> None:

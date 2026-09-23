@@ -115,9 +115,13 @@ TOOL_LABEL_OK = "ok"
 
 
 class FakeSink:
-    """`OutputSink` 桩：记录全部调用并允许脚本化取消 / 中止状态。"""
+    """`OutputSink` 桩：记录全部调用并允许脚本化取消 / 中止状态。
 
-    def __init__(self) -> None:
+    `events` 为可选的共享事件序列（与 `FakeConsole` 共用）：按发生顺序追加
+    `"pause"` / `"flush"` / `"resume"` 与 `("write", 文本)`，供显示顺序断言。
+    """
+
+    def __init__(self, events: list | None = None) -> None:
         self.fed: list[str] = []
         self.notified: list[str] = []
         self.finish_calls: list[tuple[object, bool]] = []
@@ -125,12 +129,28 @@ class FakeSink:
         self.abort_messages: list[str | None] = []
         self.cancelled = False
         self.restart_calls = 0
+        self.pause_count = 0
+        self.resume_count = 0
+        self.flush_count = 0
+        self.events: list = events if events is not None else []
 
     def feed(self, text: str) -> None:
         self.fed.append(text)
 
     def notify(self, text: str) -> None:
         self.notified.append(text)
+
+    def flush(self) -> None:
+        self.flush_count += 1
+        self.events.append("flush")
+
+    def pause(self) -> None:
+        self.pause_count += 1
+        self.events.append("pause")
+
+    def resume(self) -> None:
+        self.resume_count += 1
+        self.events.append("resume")
 
     def finish(self, stats, with_stats: bool = True) -> None:
         self.finish_calls.append((stats, with_stats))
@@ -151,14 +171,15 @@ class FakeSink:
 class FakeInteraction:
     """`InteractionPort` 桩：记录确认提示符、打断通知与新建的流句柄。"""
 
-    def __init__(self, confirm: bool = False) -> None:
+    def __init__(self, confirm: bool = False, events: list | None = None) -> None:
         self._confirm = confirm
+        self._events = events
         self.confirm_prompts: list[str] = []
         self.sinks: list[FakeSink] = []
         self.interrupted_calls = 0
 
     def begin_turn(self) -> FakeSink:
-        sink = FakeSink()
+        sink = FakeSink(self._events)
         self.sinks.append(sink)
         return sink
 
@@ -191,14 +212,20 @@ class FakeStats:
 
 
 class FakeConsole:
-    """`ConsolePort` 桩：记录直接写出（工具调度行、后台提示、调试文件落点）。"""
+    """`ConsolePort` 桩：记录直接写出（工具调度行、后台提示、调试文件落点）。
 
-    def __init__(self, quiet: bool = False) -> None:
+    `events` 为可选的共享事件序列（与 `FakeSink` 共用）：写出时追加
+    `("write", 文本)`，供显示顺序断言（如"落定先于工具行"）。
+    """
+
+    def __init__(self, quiet: bool = False, events: list | None = None) -> None:
         self.text: list[str] = []
         self._quiet = quiet
+        self.events: list = events if events is not None else []
 
     def write(self, text: str) -> None:
         self.text.append(text)
+        self.events.append(("write", text))
 
     def is_quiet_tools(self) -> bool:
         return self._quiet
@@ -361,8 +388,9 @@ def build_loop(
     env = env if env is not None else ToolEnvImpl()
     registry = FakeRegistry(results)
     stats = FakeStats()
-    console = FakeConsole(quiet)
-    interaction = FakeInteraction(confirm)
+    events: list = []  # 共享事件序列：sink 的 pause/flush/resume 与 console 写出的顺序
+    console = FakeConsole(quiet, events)
+    interaction = FakeInteraction(confirm, events)
     interrupt = FakeInterrupt()
     ai_options = SimpleNamespace(
         retry_count=retry_count, thinking_effort="high",
@@ -383,7 +411,7 @@ def build_loop(
     parts = SimpleNamespace(
         loop=loop, store=store, env=env, registry=registry, stats=stats,
         console=console, interaction=interaction, interrupt=interrupt, llm=llm,
-        dispatcher=dispatcher, executor=executor,
+        dispatcher=dispatcher, executor=executor, events=events,
     )
     return loop, parts
 
@@ -1547,6 +1575,64 @@ def test_dispatch_failure_line_forms(pool):
 
     assert "[执行命令失败]" in parts.console.joined
     assert "[读取失败]" in parts.console.joined
+
+
+def test_dispatch_flush_precedes_tool_line(pool):
+    """显示顺序：工具行显示前先停动画并落定文本，显示完成后恢复动画。
+
+    回归守护：重构后调度器曾丢失旧实现的 pause/flush/resume 接线，导致工具行
+    抢在悬置的 AI 文本之前输出（实测现象：工具行全部显示后，文本才在回合收尾
+    时最后一次性出现）。
+    """
+    _loop, parts = build_loop([], pool=pool)
+    sink = FakeSink(parts.events)
+    sink.feed("我先看看目录结构。")  # AI 文本悬于渲染缓冲（尚未落定）
+
+    parts.dispatcher.execute([tool_call("a", "Shell", command="dir")], sink)
+
+    events = parts.events
+    write_idx = next(i for i, e in enumerate(events)
+                     if isinstance(e, tuple) and e[0] == "write")
+    assert events.index("flush") < write_idx < events.index("resume")
+    assert sink.pause_count == sink.resume_count == 1
+    assert "  [执行命令] dir\n" in parts.console.joined
+
+
+def test_dispatch_flush_covers_all_paths(pool):
+    """三类执行路径（只读并行 / 写入分组 / 串行）均保证文本先于工具行、事后恢复动画。"""
+    cases = [
+        [tool_call("r1", "Read", file_path="a.txt"),
+         tool_call("r2", "Read", file_path="b.txt")],  # 只读并行（>1）
+        [tool_call("e1", "Edit", file_path="a.txt"),
+         tool_call("e2", "Edit", file_path="b.txt")],  # 写入：不同文件组
+        [tool_call("s1", "Shell", command="echo a"),
+         tool_call("s2", "Shell", command="echo b")],  # 串行组
+    ]
+    for calls in cases:
+        _loop, parts = build_loop([], pool=pool)
+        sink = FakeSink(parts.events)
+        sink.feed("文本。")
+        parts.dispatcher.execute(calls, sink)
+
+        events = parts.events
+        first_write = next(i for i, e in enumerate(events)
+                           if isinstance(e, tuple) and e[0] == "write")
+        assert events.index("flush") < first_write, calls
+        assert events.count("pause") == len(calls), calls
+        assert sink.pause_count == sink.resume_count == len(calls), calls
+
+
+def test_dispatch_still_flushes_in_quiet_mode(pool):
+    """静默模式：不输出工具行，但停动画 / 落定缓冲 / 恢复动画照常执行。"""
+    _loop, parts = build_loop([], quiet=True, pool=pool)
+    sink = FakeSink(parts.events)
+    sink.feed("文本。")
+
+    parts.dispatcher.execute([tool_call("a", "Shell", command="dir")], sink)
+
+    assert parts.console.text == []
+    assert sink.flush_count == 1
+    assert sink.pause_count == sink.resume_count == 1
 
 
 def test_mcp_tool_label_in_summary(pool):

@@ -148,6 +148,27 @@ class CancelProbe(Protocol):
         ...
 
 
+class DisplayProbe(CancelProbe, Protocol):
+    """工具行显示协调面（实现方：`contracts.output.OutputSink`）。
+
+    单个工具执行前先 `pause()` 暂停动画、`flush()` 落定渲染缓冲（保证 AI 本轮
+    已输出的文本先于工具行落到终端），执行与差异/失败显示完成后 `resume()`
+    恢复动画（specs/conversation「工具调度分组与结果回传」；静默模式下同样执行）。
+    """
+
+    def pause(self) -> None:
+        """暂停动画（并行计数 +1；首个暂停者真正停止动画）。"""
+        ...
+
+    def flush(self) -> None:
+        """落定渲染缓冲（守卫：从未注入内容时不动作）。"""
+        ...
+
+    def resume(self) -> None:
+        """恢复动画（计数递减且不为负；归零时才重启；已中止后不再启动）。"""
+        ...
+
+
 class LogPort(Protocol):
     """日志端口（构造注入；未注入则不记录）。"""
 
@@ -294,7 +315,7 @@ class ToolDispatcher:
     # ── 主入口 ──
 
     def execute(self, tool_calls: Sequence[Mapping[str, Any]],
-                sink: CancelProbe) -> list[tuple[str, ToolResult]]:
+                sink: DisplayProbe) -> list[tuple[str, ToolResult]]:
         """执行一批工具调用，返回 `[(tool_call_id, ToolResult), ...]`。
 
         - 计划优先命中时整批拦截（不执行任何工具，回传提示与占位结果）；
@@ -374,13 +395,13 @@ class ToolDispatcher:
 
     # ── 阶段实现 ──
 
-    def _run_parallel(self, group, results, sink: CancelProbe) -> None:
+    def _run_parallel(self, group, results, sink: DisplayProbe) -> None:
         """只读阶段：全部并行，结果按原始顺序回传。"""
         if len(group) == 1:
             index, tc_id, name, arguments = group[0]
             if sink.cancelled:
                 return
-            future = self._executor.submit(self._run_single, name, arguments)
+            future = self._executor.submit(self._run_single, name, arguments, sink)
             if not self._wait_future(future, sink):
                 return
             self._store_result(future, index, tc_id, name, results, with_name=True)
@@ -390,7 +411,7 @@ class ToolDispatcher:
         for index, tc_id, name, arguments in group:
             if sink.cancelled:
                 break
-            future = self._executor.submit(self._run_single, name, arguments)
+            future = self._executor.submit(self._run_single, name, arguments, sink)
             futures[future] = (index, tc_id, name)
         remaining = set(futures)
         while remaining:
@@ -401,14 +422,14 @@ class ToolDispatcher:
             for future in done:
                 self._store_result(future, *futures[future], results, with_name=True)
 
-    def _run_write_groups(self, write_groups, results, sink: CancelProbe) -> None:
+    def _run_write_groups(self, write_groups, results, sink: DisplayProbe) -> None:
         """写入阶段：单文件组主线程逐个串行；多文件组并行、组内串行。"""
         file_groups = list(write_groups.values())
         if len(file_groups) == 1:
             for index, tc_id, name, arguments in file_groups[0]:
                 if sink.cancelled:
                     break
-                future = self._executor.submit(self._run_single, name, arguments)
+                future = self._executor.submit(self._run_single, name, arguments, sink)
                 if not self._wait_future(future, sink):
                     break
                 self._store_result(future, index, tc_id, name, results, with_name=False)
@@ -416,7 +437,8 @@ class ToolDispatcher:
 
         futures: dict[Future, list] = {}
         for group in file_groups:
-            futures[self._executor.submit(self._run_sequential_group, group, results)] = group
+            futures[self._executor.submit(self._run_sequential_group, group, results,
+                                          sink)] = group
         remaining = set(futures)
         while remaining:
             if sink.cancelled:
@@ -432,40 +454,49 @@ class ToolDispatcher:
                         if _index not in results:
                             self._show_tool_failed(name)
 
-    def _run_serial(self, group, results, sink: CancelProbe) -> None:
+    def _run_serial(self, group, results, sink: DisplayProbe) -> None:
         """串行阶段：命令、终端、串口、计划、MCP 与未知工具逐个执行。"""
         for index, tc_id, name, arguments in group:
             if sink.cancelled:
                 break
-            future = self._executor.submit(self._run_single, name, arguments)
+            future = self._executor.submit(self._run_single, name, arguments, sink)
             if not self._wait_future(future, sink):
                 break
             self._store_result(future, index, tc_id, name, results, with_name=False)
 
-    def _run_sequential_group(self, group, results) -> None:
+    def _run_sequential_group(self, group, results, sink: DisplayProbe) -> None:
         """串行执行同一文件组的写入工具（由线程池调度，不同文件组并行）。"""
         for index, tc_id, name, arguments in group:
-            result = self._run_single(name, arguments)
+            result = self._run_single(name, arguments, sink)
             results[index] = (tc_id, result)
 
-    def _run_single(self, name: str, arguments: dict) -> ToolResult:
-        """执行单个工具调用：显示调用摘要 → 执行 → 差异 / 失败提示 → 日志。"""
-        self._show_tool_call(name, arguments)
-        result = self._registry.execute(name, arguments, self._env)
-        if self._logger is not None:
-            self._logger.info(
-                f"tools.{name.lower()}",
-                f"调用: {json.dumps(arguments, ensure_ascii=False)[:200]}",
-            )
-            self._logger.info(
-                f"tools.{name.lower()}",
-                f"结果: {result.llm_text[:200] if result.llm_text else '(空)'}",
-            )
-        if result.ui_text:
-            self._show_diff(result.ui_text)
-        elif self._is_failed(name, result):
-            self._show_tool_failed(name)
-        return result
+    def _run_single(self, name: str, arguments: dict, sink: DisplayProbe) -> ToolResult:
+        """执行单个工具调用：停动画并落定文本 → 显示摘要 → 执行 → 差异 / 失败提示 → 恢复动画。
+
+        显示摘要前先 `pause()` + `flush()`（AI 本轮已输出的文本先于工具行落到终端），
+        显示完成后 `resume()`（finally 保证异常路径计数平衡）。
+        """
+        sink.pause()
+        sink.flush()
+        try:
+            self._show_tool_call(name, arguments)
+            result = self._registry.execute(name, arguments, self._env)
+            if self._logger is not None:
+                self._logger.info(
+                    f"tools.{name.lower()}",
+                    f"调用: {json.dumps(arguments, ensure_ascii=False)[:200]}",
+                )
+                self._logger.info(
+                    f"tools.{name.lower()}",
+                    f"结果: {result.llm_text[:200] if result.llm_text else '(空)'}",
+                )
+            if result.ui_text:
+                self._show_diff(result.ui_text)
+            elif self._is_failed(name, result):
+                self._show_tool_failed(name)
+            return result
+        finally:
+            sink.resume()
 
     def _wait_future(self, future: Future, sink: CancelProbe) -> bool:
         """等待任务完成并响应取消；返回 False 表示已取消（调用方应终止本阶段）。
