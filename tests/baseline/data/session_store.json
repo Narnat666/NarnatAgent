@@ -1,0 +1,454 @@
+{
+  "generated_by": "v2/tests/baseline/extract_old.py",
+  "source": "narnat_agent（旧实现，原位未动）",
+  "note": "随机标签 → [<TAG>]；时间文本 → <YYYY-MM-DD HH:MM>/<MM-DD HH:MM>/<HH:MM>/<MM-DD>",
+  "module": "narnat_agent.config.session_store",
+  "groups": {
+    "session_store._safe_filename": [
+      {
+        "id": "普通会话名",
+        "input": {
+          "name": "普通会话名"
+        },
+        "result": "普通会话名"
+      },
+      {
+        "id": "a/b",
+        "input": {
+          "name": "a/b"
+        },
+        "result": "a_b"
+      },
+      {
+        "id": "a\\b",
+        "input": {
+          "name": "a\\b"
+        },
+        "result": "a_b"
+      },
+      {
+        "id": "a:b",
+        "input": {
+          "name": "a:b"
+        },
+        "result": "a_b"
+      },
+      {
+        "id": "a<b>",
+        "input": {
+          "name": "a<b>"
+        },
+        "result": "a_b_"
+      },
+      {
+        "id": "a|b",
+        "input": {
+          "name": "a|b"
+        },
+        "result": "a_b"
+      },
+      {
+        "id": "a?b",
+        "input": {
+          "name": "a?b"
+        },
+        "result": "a_b"
+      },
+      {
+        "id": "a*b",
+        "input": {
+          "name": "a*b"
+        },
+        "result": "a_b"
+      },
+      {
+        "id": "",
+        "input": {
+          "name": ""
+        },
+        "result": "unnamed"
+      },
+      {
+        "id": "a..b",
+        "input": {
+          "name": "a..b"
+        },
+        "result": "a_b"
+      },
+      {
+        "id": "..",
+        "input": {
+          "name": ".."
+        },
+        "result": "_"
+      },
+      {
+        "id": "...",
+        "input": {
+          "name": "..."
+        },
+        "result": "_."
+      },
+      {
+        "id": " / \\ : < > | ? * ",
+        "input": {
+          "name": " / \\ : < > | ? * "
+        },
+        "result": " _ _ _ _ _ _ _ _ "
+      }
+    ],
+    "session_store.format_session_tree": [
+      {
+        "id": "empty",
+        "input": {
+          "tree": [],
+          "active_name": null,
+          "active_parent": null
+        },
+        "result": ""
+      },
+      {
+        "id": "no_active",
+        "input": {
+          "tree": [
+            {
+              "name": "会话A",
+              "timestamp": 4102444800,
+              "message_count": 12,
+              "children": [
+                {
+                  "name": "子任务-完成",
+                  "timestamp": 4102444500,
+                  "message_count": 3,
+                  "status": "completed",
+                  "summary": "已完成摘要"
+                },
+                {
+                  "name": "子任务-新",
+                  "timestamp": 4102444600,
+                  "message_count": 5,
+                  "status": "new",
+                  "summary": null
+                },
+                {
+                  "name": "子任务-进行中",
+                  "timestamp": 4102444700,
+                  "message_count": 7,
+                  "status": "active",
+                  "summary": "进行中的摘要"
+                }
+              ],
+              "_delete_marked": false
+            },
+            {
+              "name": "会话B",
+              "timestamp": 0,
+              "message_count": 2,
+              "children": [],
+              "_delete_marked": true
+            }
+          ],
+          "active_name": null,
+          "active_parent": null
+        },
+        "result": "  ├── 会话A  (<MM-DD HH:MM>, 12条)\n  │     ├── 子任务-完成  ✓ 已完成 (<MM-DD HH:MM>)\n  │     ├── 子任务-新  (<MM-DD HH:MM>, 5条)\n  │     └── 子任务-进行中  ⚠ 待完成 (<MM-DD HH:MM>, 7条)\n  └── 会话B  (<MM-DD HH:MM>, 2条)  ✘ 退出后删除\n   ◉  ◀ 当前"
+      },
+      {
+        "id": "active_root",
+        "input": {
+          "tree": [
+            {
+              "name": "会话A",
+              "timestamp": 4102444800,
+              "message_count": 12,
+              "children": [
+                {
+                  "name": "子任务-完成",
+                  "timestamp": 4102444500,
+                  "message_count": 3,
+                  "status": "completed",
+                  "summary": "已完成摘要"
+                },
+                {
+                  "name": "子任务-新",
+                  "timestamp": 4102444600,
+                  "message_count": 5,
+                  "status": "new",
+                  "summary": null
+                },
+                {
+                  "name": "子任务-进行中",
+                  "timestamp": 4102444700,
+                  "message_count": 7,
+                  "status": "active",
+                  "summary": "进行中的摘要"
+                }
+              ],
+              "_delete_marked": false
+            },
+            {
+              "name": "会话B",
+              "timestamp": 0,
+              "message_count": 2,
+              "children": [],
+              "_delete_marked": true
+            }
+          ],
+          "active_name": "会话A",
+          "active_parent": null
+        },
+        "result": "  ├── 会话A  (<MM-DD HH:MM>, 12条)  ◀ 当前\n  │     ├── 子任务-完成  ✓ 已完成 (<MM-DD HH:MM>)\n  │     ├── 子任务-新  (<MM-DD HH:MM>, 5条)\n  │     └── 子任务-进行中  ⚠ 待完成 (<MM-DD HH:MM>, 7条)\n  └── 会话B  (<MM-DD HH:MM>, 2条)  ✘ 退出后删除"
+      },
+      {
+        "id": "active_child",
+        "input": {
+          "tree": [
+            {
+              "name": "会话A",
+              "timestamp": 4102444800,
+              "message_count": 12,
+              "children": [
+                {
+                  "name": "子任务-完成",
+                  "timestamp": 4102444500,
+                  "message_count": 3,
+                  "status": "completed",
+                  "summary": "已完成摘要"
+                },
+                {
+                  "name": "子任务-新",
+                  "timestamp": 4102444600,
+                  "message_count": 5,
+                  "status": "new",
+                  "summary": null
+                },
+                {
+                  "name": "子任务-进行中",
+                  "timestamp": 4102444700,
+                  "message_count": 7,
+                  "status": "active",
+                  "summary": "进行中的摘要"
+                }
+              ],
+              "_delete_marked": false
+            },
+            {
+              "name": "会话B",
+              "timestamp": 0,
+              "message_count": 2,
+              "children": [],
+              "_delete_marked": true
+            }
+          ],
+          "active_name": "子任务-新",
+          "active_parent": "会话A"
+        },
+        "result": "  ├── 会话A  (<MM-DD HH:MM>, 12条)\n  │     ├── 子任务-完成  ✓ 已完成 (<MM-DD HH:MM>)\n  │     ├── 子任务-新  (<MM-DD HH:MM>, 5条)  ◀ 当前\n  │     └── 子任务-进行中  ⚠ 待完成 (<MM-DD HH:MM>, 7条)\n  └── 会话B  (<MM-DD HH:MM>, 2条)  ✘ 退出后删除"
+      },
+      {
+        "id": "delete_marked",
+        "input": {
+          "tree": [
+            {
+              "name": "会话C",
+              "timestamp": 4102444800,
+              "message_count": 1,
+              "children": [
+                {
+                  "name": "子任务-标记",
+                  "timestamp": 4102444790,
+                  "message_count": 2,
+                  "status": "completed",
+                  "summary": null,
+                  "_delete_marked": true
+                }
+              ],
+              "_delete_marked": true
+            }
+          ],
+          "active_name": "会话C",
+          "active_parent": null
+        },
+        "result": "  └── 会话C  (<MM-DD HH:MM>, 1条)  ✘ 退出后删除  ◀ 当前\n        └── 子任务-标记  ✓ 已完成 (<MM-DD HH:MM>)  ✘ 退出后删除"
+      }
+    ],
+    "session_store.format_session_summary": [
+      {
+        "id": "empty",
+        "input": {
+          "tree": [],
+          "active_name": null,
+          "active_parent": null
+        },
+        "result": ""
+      },
+      {
+        "id": "today_and_earlier",
+        "input": {
+          "tree": [
+            {
+              "name": "会话A",
+              "timestamp": 4102444800,
+              "message_count": 12,
+              "children": [
+                {
+                  "name": "子任务-完成",
+                  "timestamp": 4102444500,
+                  "message_count": 3,
+                  "status": "completed",
+                  "summary": "已完成摘要"
+                },
+                {
+                  "name": "子任务-新",
+                  "timestamp": 4102444600,
+                  "message_count": 5,
+                  "status": "new",
+                  "summary": null
+                },
+                {
+                  "name": "子任务-进行中",
+                  "timestamp": 4102444700,
+                  "message_count": 7,
+                  "status": "active",
+                  "summary": "进行中的摘要"
+                }
+              ],
+              "_delete_marked": false
+            },
+            {
+              "name": "会话B",
+              "timestamp": 0,
+              "message_count": 2,
+              "children": [],
+              "_delete_marked": true
+            }
+          ],
+          "active_name": null,
+          "active_parent": null
+        },
+        "result": "  今天 (1)\n  └── 会话A  (<HH:MM>, 12条)\n        ├── 子任务-完成  ✓ 已完成 (<MM-DD HH:MM>)\n        ├── 子任务-新  (<MM-DD HH:MM>, 5条)\n        └── 子任务-进行中  ⚠ 待完成 (<MM-DD HH:MM>, 7条)\n\n  更早 (1)\n  └── 会话B  (<MM-DD>, 2条)  ✘ 退出后删除\n   ◉  ◀ 当前"
+      },
+      {
+        "id": "active_child",
+        "input": {
+          "tree": [
+            {
+              "name": "会话A",
+              "timestamp": 4102444800,
+              "message_count": 12,
+              "children": [
+                {
+                  "name": "子任务-完成",
+                  "timestamp": 4102444500,
+                  "message_count": 3,
+                  "status": "completed",
+                  "summary": "已完成摘要"
+                },
+                {
+                  "name": "子任务-新",
+                  "timestamp": 4102444600,
+                  "message_count": 5,
+                  "status": "new",
+                  "summary": null
+                },
+                {
+                  "name": "子任务-进行中",
+                  "timestamp": 4102444700,
+                  "message_count": 7,
+                  "status": "active",
+                  "summary": "进行中的摘要"
+                }
+              ],
+              "_delete_marked": false
+            },
+            {
+              "name": "会话B",
+              "timestamp": 0,
+              "message_count": 2,
+              "children": [],
+              "_delete_marked": true
+            }
+          ],
+          "active_name": "子任务-进行中",
+          "active_parent": "会话A"
+        },
+        "result": "  今天 (1)\n  └── 会话A  (<HH:MM>, 12条)\n        ├── 子任务-完成  ✓ 已完成 (<MM-DD HH:MM>)\n        ├── 子任务-新  (<MM-DD HH:MM>, 5条)\n        └── 子任务-进行中  ⚠ 待完成 (<MM-DD HH:MM>, 7条)  ◀ 当前\n\n  更早 (1)\n  └── 会话B  (<MM-DD>, 2条)  ✘ 退出后删除"
+      },
+      {
+        "id": "earlier_overflow",
+        "input": {
+          "tree": [
+            {
+              "name": "早1",
+              "timestamp": 400,
+              "message_count": 1,
+              "children": []
+            },
+            {
+              "name": "早2",
+              "timestamp": 300,
+              "message_count": 2,
+              "children": []
+            },
+            {
+              "name": "早3",
+              "timestamp": 200,
+              "message_count": 3,
+              "children": [
+                {
+                  "name": "早3-子",
+                  "timestamp": 150,
+                  "message_count": 1,
+                  "status": "new",
+                  "summary": null
+                }
+              ]
+            },
+            {
+              "name": "早4",
+              "timestamp": 100,
+              "message_count": 4,
+              "children": []
+            },
+            {
+              "name": "早5-当前",
+              "timestamp": 50,
+              "message_count": 5,
+              "children": []
+            }
+          ],
+          "active_name": "早5-当前",
+          "active_parent": null
+        },
+        "result": "  更早 (5)\n  ├── 早1  (<MM-DD>, 1条)\n  ├── 早2  (<MM-DD>, 2条)\n  ├── 早3  (<MM-DD>, 3条)\n  │     └── 早3-子  (<MM-DD HH:MM>, 1条)\n  └── 早5-当前  (<MM-DD>, 5条)  ◀ 当前\n  … 还有 1 条更早的会话 (/ls --all 查看)"
+      }
+    ],
+    "session_store.format_session_list": [
+      {
+        "id": "empty",
+        "input": {
+          "sessions": []
+        },
+        "result": ""
+      },
+      {
+        "id": "two_sessions",
+        "input": {
+          "sessions": [
+            {
+              "name": "会话A",
+              "timestamp": 4102444800,
+              "message_count": 12
+            },
+            {
+              "name": "会话B",
+              "timestamp": 0,
+              "message_count": 0
+            }
+          ]
+        },
+        "result": "  会话A  (<YYYY-MM-DD HH:MM>, 12条消息)\n  会话B  (<YYYY-MM-DD HH:MM>, 0条消息)"
+      }
+    ]
+  }
+}

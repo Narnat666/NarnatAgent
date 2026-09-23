@@ -1,0 +1,620 @@
+{
+  "generated_by": "v2/tests/baseline/extract_old.py",
+  "source": "narnat_agent（旧实现，原位未动）",
+  "note": "随机标签 → [<TAG>]；时间文本 → <YYYY-MM-DD HH:MM>/<MM-DD HH:MM>/<HH:MM>/<MM-DD>",
+  "module": "narnat_agent.core.billing",
+  "groups": {
+    "billing.get_pricing": [
+      {
+        "id": "hit",
+        "input": {
+          "model": "m-basic",
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "input": 1000000.0,
+          "cache_hit": 100000.0,
+          "output": 2000000.0
+        }
+      },
+      {
+        "id": "zero_priced",
+        "input": {
+          "model": "m-zero",
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "input": 0.0,
+          "cache_hit": 0.0,
+          "output": 0.0
+        }
+      },
+      {
+        "id": "missing_model",
+        "input": {
+          "model": "m-missing",
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": null
+      },
+      {
+        "id": "no_user_pricing",
+        "input": {
+          "model": "m-basic",
+          "user_pricing": null
+        },
+        "result": null
+      }
+    ],
+    "billing.cost_breakdown+calculate_cost": [
+      {
+        "id": "m-basic|all_zero",
+        "input": {
+          "model": "m-basic",
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cached_tokens": 0,
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "breakdown": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "total": 0.0
+        }
+      },
+      {
+        "id": "m-basic|no_cache",
+        "input": {
+          "model": "m-basic",
+          "prompt_tokens": 1000000,
+          "completion_tokens": 500000,
+          "cached_tokens": 0,
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "breakdown": [
+            1000000.0,
+            0.0,
+            1000000.0
+          ],
+          "total": 2000000.0
+        }
+      },
+      {
+        "id": "m-basic|partial_cache",
+        "input": {
+          "model": "m-basic",
+          "prompt_tokens": 1000000,
+          "completion_tokens": 500000,
+          "cached_tokens": 400000,
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "breakdown": [
+            600000.0,
+            40000.0,
+            1000000.0
+          ],
+          "total": 1640000.0
+        }
+      },
+      {
+        "id": "m-basic|all_cached",
+        "input": {
+          "model": "m-basic",
+          "prompt_tokens": 1000,
+          "completion_tokens": 1,
+          "cached_tokens": 1000,
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "breakdown": [
+            0.0,
+            100.0,
+            2.0
+          ],
+          "total": 102.0
+        }
+      },
+      {
+        "id": "m-basic|cached_over_prompt",
+        "input": {
+          "model": "m-basic",
+          "prompt_tokens": 100,
+          "completion_tokens": 10,
+          "cached_tokens": 200,
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "breakdown": [
+            -100.0,
+            20.0,
+            20.0
+          ],
+          "total": -60.0
+        }
+      },
+      {
+        "id": "m-zero|all_zero",
+        "input": {
+          "model": "m-zero",
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cached_tokens": 0,
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "breakdown": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "total": 0.0
+        }
+      },
+      {
+        "id": "m-zero|no_cache",
+        "input": {
+          "model": "m-zero",
+          "prompt_tokens": 1000000,
+          "completion_tokens": 500000,
+          "cached_tokens": 0,
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "breakdown": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "total": 0.0
+        }
+      },
+      {
+        "id": "m-zero|partial_cache",
+        "input": {
+          "model": "m-zero",
+          "prompt_tokens": 1000000,
+          "completion_tokens": 500000,
+          "cached_tokens": 400000,
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "breakdown": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "total": 0.0
+        }
+      },
+      {
+        "id": "m-zero|all_cached",
+        "input": {
+          "model": "m-zero",
+          "prompt_tokens": 1000,
+          "completion_tokens": 1,
+          "cached_tokens": 1000,
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "breakdown": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "total": 0.0
+        }
+      },
+      {
+        "id": "m-zero|cached_over_prompt",
+        "input": {
+          "model": "m-zero",
+          "prompt_tokens": 100,
+          "completion_tokens": 10,
+          "cached_tokens": 200,
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "breakdown": [
+            -0.0,
+            0.0,
+            0.0
+          ],
+          "total": 0.0
+        }
+      },
+      {
+        "id": "m-missing|all_zero",
+        "input": {
+          "model": "m-missing",
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cached_tokens": 0,
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "breakdown": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "total": 0.0
+        }
+      },
+      {
+        "id": "m-missing|no_cache",
+        "input": {
+          "model": "m-missing",
+          "prompt_tokens": 1000000,
+          "completion_tokens": 500000,
+          "cached_tokens": 0,
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "breakdown": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "total": 0.0
+        }
+      },
+      {
+        "id": "m-missing|partial_cache",
+        "input": {
+          "model": "m-missing",
+          "prompt_tokens": 1000000,
+          "completion_tokens": 500000,
+          "cached_tokens": 400000,
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "breakdown": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "total": 0.0
+        }
+      },
+      {
+        "id": "m-missing|all_cached",
+        "input": {
+          "model": "m-missing",
+          "prompt_tokens": 1000,
+          "completion_tokens": 1,
+          "cached_tokens": 1000,
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "breakdown": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "total": 0.0
+        }
+      },
+      {
+        "id": "m-missing|cached_over_prompt",
+        "input": {
+          "model": "m-missing",
+          "prompt_tokens": 100,
+          "completion_tokens": 10,
+          "cached_tokens": 200,
+          "user_pricing": {
+            "m-basic": {
+              "input": 1000000.0,
+              "cache_hit": 100000.0,
+              "output": 2000000.0
+            },
+            "m-zero": {
+              "input": 0.0,
+              "cache_hit": 0.0,
+              "output": 0.0
+            }
+          }
+        },
+        "result": {
+          "breakdown": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "total": 0.0
+        }
+      }
+    ],
+    "billing.cost_breakdown(no_pricing)": [
+      {
+        "id": "no_pricing",
+        "input": {
+          "model": "m-basic",
+          "prompt_tokens": 1000000,
+          "completion_tokens": 500000,
+          "cached_tokens": 0,
+          "user_pricing": null
+        },
+        "result": {
+          "breakdown": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "total": 0.0
+        }
+      }
+    ],
+    "billing._resolve_jsonpath": [
+      {
+        "id": "nested_dict_index",
+        "input": {
+          "data": {
+            "balance_infos": [
+              {
+                "total_balance": "12.5"
+              }
+            ]
+          },
+          "path": "balance_infos.0.total_balance"
+        },
+        "result": "12.5"
+      },
+      {
+        "id": "missing_key",
+        "input": {
+          "data": {
+            "a": {
+              "b": 1
+            }
+          },
+          "path": "a.c"
+        },
+        "result": null
+      },
+      {
+        "id": "index_out_of_range",
+        "input": {
+          "data": {
+            "a": [
+              1
+            ]
+          },
+          "path": "a.3"
+        },
+        "result": null
+      },
+      {
+        "id": "empty_path",
+        "input": {
+          "data": {
+            "a": 1
+          },
+          "path": ""
+        },
+        "result": null
+      },
+      {
+        "id": "scalar_mid_path",
+        "input": {
+          "data": {
+            "a": 1
+          },
+          "path": "a.b"
+        },
+        "result": null
+      },
+      {
+        "id": "non_int_index",
+        "input": {
+          "data": {
+            "a": [
+              1
+            ]
+          },
+          "path": "a.x"
+        },
+        "result": null
+      },
+      {
+        "id": "top_level_scalar",
+        "input": {
+          "data": 5,
+          "path": "x"
+        },
+        "result": null
+      }
+    ]
+  }
+}

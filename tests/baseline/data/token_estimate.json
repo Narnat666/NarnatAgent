@@ -1,0 +1,221 @@
+{
+  "generated_by": "v2/tests/baseline/extract_old.py",
+  "source": "narnat_agent（旧实现，原位未动）",
+  "note": "随机标签 → [<TAG>]；时间文本 → <YYYY-MM-DD HH:MM>/<MM-DD HH:MM>/<HH:MM>/<MM-DD>",
+  "module": "narnat_agent.tools.token_estimate",
+  "groups": {
+    "token_estimate.estimate_text_tokens": [
+      {
+        "id": "empty",
+        "input": {
+          "text": ""
+        },
+        "result": 0
+      },
+      {
+        "id": "ascii",
+        "input": {
+          "text": "hello world"
+        },
+        "result": 3
+      },
+      {
+        "id": "cjk",
+        "input": {
+          "text": "你好世界"
+        },
+        "result": 3
+      },
+      {
+        "id": "mixed",
+        "input": {
+          "text": "中英mixed混排 text"
+        },
+        "result": 6
+      },
+      {
+        "id": "code",
+        "input": {
+          "text": "def f(x):\n    return x + 1"
+        },
+        "result": 7
+      },
+      {
+        "id": "emoji",
+        "input": {
+          "text": "😀 emoji 测试"
+        },
+        "result": 4
+      },
+      {
+        "id": "long_ascii",
+        "input": {
+          "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "result": 250
+      },
+      {
+        "id": "long_cjk",
+        "input": {
+          "text": "中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中"
+        },
+        "result": 70
+      },
+      {
+        "id": "fullwidth_punct",
+        "input": {
+          "text": "（全角）！？"
+        },
+        "result": 5
+      }
+    ],
+    "token_estimate.estimate_message_tokens": [
+      {
+        "id": "user_text",
+        "input": {
+          "msg": {
+            "role": "user",
+            "content": "你好"
+          }
+        },
+        "result": 10
+      },
+      {
+        "id": "assistant_thinking",
+        "input": {
+          "msg": {
+            "role": "assistant",
+            "content": "",
+            "thinking": "思考中"
+          }
+        },
+        "result": 11
+      },
+      {
+        "id": "assistant_tool_calls",
+        "input": {
+          "msg": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "function": {
+                  "name": "Read",
+                  "arguments": "{\"file_path\": \"a.txt\"}"
+                }
+              }
+            ]
+          }
+        },
+        "result": 15
+      },
+      {
+        "id": "assistant_block_list",
+        "input": {
+          "msg": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "块列表"
+              }
+            ]
+          }
+        },
+        "result": 18
+      },
+      {
+        "id": "tool_result",
+        "input": {
+          "msg": {
+            "role": "tool",
+            "tool_call_id": "1",
+            "content": "结果"
+          }
+        },
+        "result": 10
+      },
+      {
+        "id": "empty_msg",
+        "input": {
+          "msg": {}
+        },
+        "result": 8
+      }
+    ],
+    "compressor.estimate_tokens": [
+      {
+        "id": "user_text",
+        "input": {
+          "msg": {
+            "role": "user",
+            "content": "你好"
+          }
+        },
+        "result": 10
+      },
+      {
+        "id": "assistant_thinking",
+        "input": {
+          "msg": {
+            "role": "assistant",
+            "content": "",
+            "thinking": "思考中"
+          }
+        },
+        "result": 11
+      },
+      {
+        "id": "assistant_tool_calls",
+        "input": {
+          "msg": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "function": {
+                  "name": "Read",
+                  "arguments": "{\"file_path\": \"a.txt\"}"
+                }
+              }
+            ]
+          }
+        },
+        "result": 15
+      },
+      {
+        "id": "assistant_block_list",
+        "input": {
+          "msg": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "块列表"
+              }
+            ]
+          }
+        },
+        "result": 18
+      },
+      {
+        "id": "tool_result",
+        "input": {
+          "msg": {
+            "role": "tool",
+            "tool_call_id": "1",
+            "content": "结果"
+          }
+        },
+        "result": 10
+      },
+      {
+        "id": "empty_msg",
+        "input": {
+          "msg": {}
+        },
+        "result": 8
+      }
+    ]
+  }
+}

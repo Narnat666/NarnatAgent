@@ -12,7 +12,7 @@ build/
 .pytest_cache/
 
 # ═══ Nuitka 编译产物 ═══
-output/
+/output/
 main.build/
 main.dist/
 nuitka-crash-report.xml
@@ -29,7 +29,7 @@ nuitka-crash-report.xml
 
 # ═══ 运行时数据 ═══
 .narnat/
-logs/
+/logs/
 
 # ═══ 系统文件 ═══
 Thumbs.db

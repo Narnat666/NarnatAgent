@@ -1,0 +1,428 @@
+{
+  "generated_by": "v2/tests/baseline/extract_old.py",
+  "source": "narnat_agent（旧实现，原位未动）",
+  "note": "随机标签 → [<TAG>]；时间文本 → <YYYY-MM-DD HH:MM>/<MM-DD HH:MM>/<HH:MM>/<MM-DD>",
+  "module": "narnat_agent.core.message_list",
+  "groups": {
+    "message_list.scripts": [
+      {
+        "id": "basic_flow",
+        "input": {
+          "script": {
+            "id": "basic_flow",
+            "system_prompt": "你是助手",
+            "ops": [
+              {
+                "op": "append_user",
+                "content": "你好"
+              },
+              {
+                "op": "append_assistant",
+                "content": "回复内容",
+                "thinking": "思考过程",
+                "thinking_signature": "sig-1",
+                "tool_calls": [
+                  {
+                    "id": "c1",
+                    "function": {
+                      "name": "Read",
+                      "arguments": "{}"
+                    }
+                  }
+                ]
+              },
+              {
+                "op": "append_tool_result",
+                "tool_call_id": "c1",
+                "result": "文件内容"
+              },
+              {
+                "op": "append_system",
+                "content": "技能注入"
+              },
+              {
+                "op": "append_user",
+                "content": "继续"
+              }
+            ]
+          }
+        },
+        "result": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "你是助手"
+            },
+            {
+              "role": "user",
+              "content": "你好"
+            },
+            {
+              "role": "assistant",
+              "content": "回复内容",
+              "thinking": "思考过程",
+              "thinking_signature": "sig-1",
+              "tool_calls": [
+                {
+                  "id": "c1",
+                  "function": {
+                    "name": "Read",
+                    "arguments": "{}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "c1",
+              "content": "文件内容"
+            },
+            {
+              "role": "system",
+              "content": "技能注入"
+            },
+            {
+              "role": "user",
+              "content": "继续"
+            }
+          ],
+          "len": 6,
+          "counts": {
+            "system": 2,
+            "user": 2,
+            "assistant": 1,
+            "tool": 1
+          }
+        }
+      },
+      {
+        "id": "empty_content_and_optional",
+        "input": {
+          "script": {
+            "id": "empty_content_and_optional",
+            "system_prompt": "S",
+            "ops": [
+              {
+                "op": "append_assistant",
+                "content": "",
+                "thinking": "",
+                "thinking_signature": ""
+              },
+              {
+                "op": "append_user",
+                "content": ""
+              }
+            ]
+          }
+        },
+        "result": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "S"
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "thinking": "",
+              "thinking_signature": ""
+            },
+            {
+              "role": "user",
+              "content": ""
+            }
+          ],
+          "len": 3,
+          "counts": {
+            "system": 1,
+            "user": 1,
+            "assistant": 1,
+            "tool": 0
+          }
+        }
+      },
+      {
+        "id": "interrupted_repair",
+        "input": {
+          "script": {
+            "id": "interrupted_repair",
+            "system_prompt": "S",
+            "ops": [
+              {
+                "op": "append_user",
+                "content": "跑两个命令"
+              },
+              {
+                "op": "append_assistant",
+                "content": null,
+                "thinking": "占位思考",
+                "tool_calls": [
+                  {
+                    "id": "t1",
+                    "function": {
+                      "name": "Shell",
+                      "arguments": "{}"
+                    }
+                  },
+                  {
+                    "id": "t2",
+                    "function": {
+                      "name": "Shell",
+                      "arguments": "{}"
+                    }
+                  }
+                ]
+              },
+              {
+                "op": "append_tool_result",
+                "tool_call_id": "t1",
+                "result": "完成"
+              },
+              {
+                "op": "append_interrupted_tools",
+                "tool_calls": [
+                  {
+                    "id": "t1"
+                  },
+                  {
+                    "id": "t2"
+                  }
+                ],
+                "completed_ids": [
+                  "t1"
+                ]
+              }
+            ]
+          }
+        },
+        "result": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "S"
+            },
+            {
+              "role": "user",
+              "content": "跑两个命令"
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "thinking": "占位思考",
+              "tool_calls": [
+                {
+                  "id": "t1",
+                  "function": {
+                    "name": "Shell",
+                    "arguments": "{}"
+                  }
+                },
+                {
+                  "id": "t2",
+                  "function": {
+                    "name": "Shell",
+                    "arguments": "{}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "t1",
+              "content": "完成"
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "t2",
+              "content": "[用户中断]"
+            }
+          ],
+          "len": 5,
+          "counts": {
+            "system": 1,
+            "user": 1,
+            "assistant": 1,
+            "tool": 2
+          }
+        }
+      },
+      {
+        "id": "replace_all",
+        "input": {
+          "script": {
+            "id": "replace_all",
+            "system_prompt": "S",
+            "ops": [
+              {
+                "op": "append_user",
+                "content": "旧消息"
+              },
+              {
+                "op": "replace_all",
+                "messages": [
+                  {
+                    "role": "system",
+                    "content": "新系统"
+                  },
+                  {
+                    "role": "user",
+                    "content": "新消息"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "新系统"
+            },
+            {
+              "role": "user",
+              "content": "新消息"
+            }
+          ],
+          "len": 2,
+          "counts": {
+            "system": 1,
+            "user": 1,
+            "assistant": 0,
+            "tool": 0
+          }
+        }
+      },
+      {
+        "id": "clear_and_rebuild",
+        "input": {
+          "script": {
+            "id": "clear_and_rebuild",
+            "system_prompt": "S",
+            "ops": [
+              {
+                "op": "append_user",
+                "content": "旧消息"
+              },
+              {
+                "op": "clear_and_rebuild",
+                "system_prompt": "新系统",
+                "summary": "摘要文本"
+              }
+            ]
+          }
+        },
+        "result": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "新系统"
+            },
+            {
+              "role": "system",
+              "content": "# 上一轮对话成果\n\n摘要文本"
+            }
+          ],
+          "len": 2,
+          "counts": {
+            "system": 2,
+            "user": 0,
+            "assistant": 0,
+            "tool": 0
+          }
+        }
+      },
+      {
+        "id": "compress_and_rebuild_with_summary",
+        "input": {
+          "script": {
+            "id": "compress_and_rebuild_with_summary",
+            "system_prompt": "S",
+            "ops": [
+              {
+                "op": "append_user",
+                "content": "旧消息"
+              },
+              {
+                "op": "compress_and_rebuild",
+                "system_prompt": "新系统2",
+                "summary": "摘要文本2",
+                "pending_input": "待处理输入"
+              }
+            ]
+          }
+        },
+        "result": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "新系统2"
+            },
+            {
+              "role": "system",
+              "content": "# 上一轮对话成果\n\n摘要文本2"
+            },
+            {
+              "role": "user",
+              "content": "待处理输入"
+            }
+          ],
+          "len": 3,
+          "counts": {
+            "system": 2,
+            "user": 1,
+            "assistant": 0,
+            "tool": 0
+          }
+        }
+      },
+      {
+        "id": "compress_and_rebuild_no_summary",
+        "input": {
+          "script": {
+            "id": "compress_and_rebuild_no_summary",
+            "system_prompt": "S",
+            "ops": [
+              {
+                "op": "append_user",
+                "content": "旧消息"
+              },
+              {
+                "op": "compress_and_rebuild",
+                "system_prompt": "新系统3",
+                "summary": "",
+                "pending_input": "无摘要输入"
+              }
+            ]
+          }
+        },
+        "result": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "新系统3"
+            },
+            {
+              "role": "user",
+              "content": "无摘要输入"
+            }
+          ],
+          "len": 2,
+          "counts": {
+            "system": 1,
+            "user": 1,
+            "assistant": 0,
+            "tool": 0
+          }
+        }
+      }
+    ],
+    "message_list.SYNTHETIC_THINKING": [
+      {
+        "id": "constant",
+        "input": {},
+        "result": "（用户中断了工具执行）"
+      }
+    ]
+  }
+}

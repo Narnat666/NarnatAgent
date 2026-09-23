@@ -1,0 +1,1416 @@
+{
+  "generated_by": "v2/tests/baseline/extract_old.py",
+  "source": "narnat_agent（旧实现，原位未动）",
+  "note": "随机标签 → [<TAG>]；时间文本 → <YYYY-MM-DD HH:MM>/<MM-DD HH:MM>/<HH:MM>/<MM-DD>",
+  "module": "narnat_agent.config.defaults",
+  "groups": {
+    "defaults.resolve_thinking_params": [
+      {
+        "id": "anthropic|deepseek-v4-pro|effort=high",
+        "input": {
+          "protocol": "anthropic",
+          "model": "deepseek-v4-pro",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {
+            "output_config": {
+              "effort": "high"
+            }
+          },
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "anthropic|deepseek-v4-pro|effort=max",
+        "input": {
+          "protocol": "anthropic",
+          "model": "deepseek-v4-pro",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {
+            "output_config": {
+              "effort": "max"
+            }
+          },
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "anthropic|deepseek-v4-pro|effort=low",
+        "input": {
+          "protocol": "anthropic",
+          "model": "deepseek-v4-pro",
+          "thinking_enabled": true,
+          "effort": "low"
+        },
+        "result": {
+          "body_top": {
+            "output_config": {
+              "effort": "low"
+            }
+          },
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "anthropic|deepseek-v4-pro|effort=empty",
+        "input": {
+          "protocol": "anthropic",
+          "model": "deepseek-v4-pro",
+          "thinking_enabled": true,
+          "effort": ""
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "anthropic|glm-4.6|effort=high",
+        "input": {
+          "protocol": "anthropic",
+          "model": "glm-4.6",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|glm-4.6|effort=max",
+        "input": {
+          "protocol": "anthropic",
+          "model": "glm-4.6",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|glm-4.6|effort=low",
+        "input": {
+          "protocol": "anthropic",
+          "model": "glm-4.6",
+          "thinking_enabled": true,
+          "effort": "low"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|glm-4.6|effort=empty",
+        "input": {
+          "protocol": "anthropic",
+          "model": "glm-4.6",
+          "thinking_enabled": true,
+          "effort": ""
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|kimi-k2|effort=high",
+        "input": {
+          "protocol": "anthropic",
+          "model": "kimi-k2",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|kimi-k2|effort=max",
+        "input": {
+          "protocol": "anthropic",
+          "model": "kimi-k2",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|kimi-k2|effort=low",
+        "input": {
+          "protocol": "anthropic",
+          "model": "kimi-k2",
+          "thinking_enabled": true,
+          "effort": "low"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|kimi-k2|effort=empty",
+        "input": {
+          "protocol": "anthropic",
+          "model": "kimi-k2",
+          "thinking_enabled": true,
+          "effort": ""
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|mimo-v2.5|effort=high",
+        "input": {
+          "protocol": "anthropic",
+          "model": "mimo-v2.5",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "anthropic|mimo-v2.5|effort=max",
+        "input": {
+          "protocol": "anthropic",
+          "model": "mimo-v2.5",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "anthropic|mimo-v2.5|effort=low",
+        "input": {
+          "protocol": "anthropic",
+          "model": "mimo-v2.5",
+          "thinking_enabled": true,
+          "effort": "low"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "anthropic|mimo-v2.5|effort=empty",
+        "input": {
+          "protocol": "anthropic",
+          "model": "mimo-v2.5",
+          "thinking_enabled": true,
+          "effort": ""
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "anthropic|qwen3-max|effort=high",
+        "input": {
+          "protocol": "anthropic",
+          "model": "qwen3-max",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|qwen3-max|effort=max",
+        "input": {
+          "protocol": "anthropic",
+          "model": "qwen3-max",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|qwen3-max|effort=low",
+        "input": {
+          "protocol": "anthropic",
+          "model": "qwen3-max",
+          "thinking_enabled": true,
+          "effort": "low"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|qwen3-max|effort=empty",
+        "input": {
+          "protocol": "anthropic",
+          "model": "qwen3-max",
+          "thinking_enabled": true,
+          "effort": ""
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|gpt-5|effort=high",
+        "input": {
+          "protocol": "anthropic",
+          "model": "gpt-5",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|gpt-5|effort=max",
+        "input": {
+          "protocol": "anthropic",
+          "model": "gpt-5",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|gpt-5|effort=low",
+        "input": {
+          "protocol": "anthropic",
+          "model": "gpt-5",
+          "thinking_enabled": true,
+          "effort": "low"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|gpt-5|effort=empty",
+        "input": {
+          "protocol": "anthropic",
+          "model": "gpt-5",
+          "thinking_enabled": true,
+          "effort": ""
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|claude-sonnet-4|effort=high",
+        "input": {
+          "protocol": "anthropic",
+          "model": "claude-sonnet-4",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {
+            "effort": "high"
+          },
+          "extra_body": {
+            "thinking": {
+              "type": "adaptive"
+            }
+          }
+        }
+      },
+      {
+        "id": "anthropic|claude-sonnet-4|effort=max",
+        "input": {
+          "protocol": "anthropic",
+          "model": "claude-sonnet-4",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {
+            "effort": "max"
+          },
+          "extra_body": {
+            "thinking": {
+              "type": "adaptive"
+            }
+          }
+        }
+      },
+      {
+        "id": "anthropic|claude-sonnet-4|effort=low",
+        "input": {
+          "protocol": "anthropic",
+          "model": "claude-sonnet-4",
+          "thinking_enabled": true,
+          "effort": "low"
+        },
+        "result": {
+          "body_top": {
+            "effort": "low"
+          },
+          "extra_body": {
+            "thinking": {
+              "type": "adaptive"
+            }
+          }
+        }
+      },
+      {
+        "id": "anthropic|claude-sonnet-4|effort=empty",
+        "input": {
+          "protocol": "anthropic",
+          "model": "claude-sonnet-4",
+          "thinking_enabled": true,
+          "effort": ""
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "adaptive"
+            }
+          }
+        }
+      },
+      {
+        "id": "anthropic|unknown-model|effort=high",
+        "input": {
+          "protocol": "anthropic",
+          "model": "unknown-model",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|unknown-model|effort=max",
+        "input": {
+          "protocol": "anthropic",
+          "model": "unknown-model",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|unknown-model|effort=low",
+        "input": {
+          "protocol": "anthropic",
+          "model": "unknown-model",
+          "thinking_enabled": true,
+          "effort": "low"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|unknown-model|effort=empty",
+        "input": {
+          "protocol": "anthropic",
+          "model": "unknown-model",
+          "thinking_enabled": true,
+          "effort": ""
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "openai|deepseek-v4-pro|effort=high",
+        "input": {
+          "protocol": "openai",
+          "model": "deepseek-v4-pro",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {
+            "reasoning_effort": "high"
+          },
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|deepseek-v4-pro|effort=max",
+        "input": {
+          "protocol": "openai",
+          "model": "deepseek-v4-pro",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {
+            "reasoning_effort": "max"
+          },
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|deepseek-v4-pro|effort=low",
+        "input": {
+          "protocol": "openai",
+          "model": "deepseek-v4-pro",
+          "thinking_enabled": true,
+          "effort": "low"
+        },
+        "result": {
+          "body_top": {
+            "reasoning_effort": "low"
+          },
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|deepseek-v4-pro|effort=empty",
+        "input": {
+          "protocol": "openai",
+          "model": "deepseek-v4-pro",
+          "thinking_enabled": true,
+          "effort": ""
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|glm-4.6|effort=high",
+        "input": {
+          "protocol": "openai",
+          "model": "glm-4.6",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {
+            "reasoning_effort": "high"
+          },
+          "extra_body": {
+            "thinking": {
+              "type": "enabled",
+              "clear_thinking": false
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|glm-4.6|effort=max",
+        "input": {
+          "protocol": "openai",
+          "model": "glm-4.6",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {
+            "reasoning_effort": "max"
+          },
+          "extra_body": {
+            "thinking": {
+              "type": "enabled",
+              "clear_thinking": false
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|glm-4.6|effort=low",
+        "input": {
+          "protocol": "openai",
+          "model": "glm-4.6",
+          "thinking_enabled": true,
+          "effort": "low"
+        },
+        "result": {
+          "body_top": {
+            "reasoning_effort": "low"
+          },
+          "extra_body": {
+            "thinking": {
+              "type": "enabled",
+              "clear_thinking": false
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|glm-4.6|effort=empty",
+        "input": {
+          "protocol": "openai",
+          "model": "glm-4.6",
+          "thinking_enabled": true,
+          "effort": ""
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "enabled",
+              "clear_thinking": false
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|kimi-k2|effort=high",
+        "input": {
+          "protocol": "openai",
+          "model": "kimi-k2",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|kimi-k2|effort=max",
+        "input": {
+          "protocol": "openai",
+          "model": "kimi-k2",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|kimi-k2|effort=low",
+        "input": {
+          "protocol": "openai",
+          "model": "kimi-k2",
+          "thinking_enabled": true,
+          "effort": "low"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|kimi-k2|effort=empty",
+        "input": {
+          "protocol": "openai",
+          "model": "kimi-k2",
+          "thinking_enabled": true,
+          "effort": ""
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|mimo-v2.5|effort=high",
+        "input": {
+          "protocol": "openai",
+          "model": "mimo-v2.5",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|mimo-v2.5|effort=max",
+        "input": {
+          "protocol": "openai",
+          "model": "mimo-v2.5",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|mimo-v2.5|effort=low",
+        "input": {
+          "protocol": "openai",
+          "model": "mimo-v2.5",
+          "thinking_enabled": true,
+          "effort": "low"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|mimo-v2.5|effort=empty",
+        "input": {
+          "protocol": "openai",
+          "model": "mimo-v2.5",
+          "thinking_enabled": true,
+          "effort": ""
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|qwen3-max|effort=high",
+        "input": {
+          "protocol": "openai",
+          "model": "qwen3-max",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "enable_thinking": true,
+            "thinking_budget": 16000
+          }
+        }
+      },
+      {
+        "id": "openai|qwen3-max|effort=max",
+        "input": {
+          "protocol": "openai",
+          "model": "qwen3-max",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "enable_thinking": true,
+            "thinking_budget": 32000
+          }
+        }
+      },
+      {
+        "id": "openai|qwen3-max|effort=low",
+        "input": {
+          "protocol": "openai",
+          "model": "qwen3-max",
+          "thinking_enabled": true,
+          "effort": "low"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "enable_thinking": true,
+            "thinking_budget": 4000
+          }
+        }
+      },
+      {
+        "id": "openai|qwen3-max|effort=empty",
+        "input": {
+          "protocol": "openai",
+          "model": "qwen3-max",
+          "thinking_enabled": true,
+          "effort": ""
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "enable_thinking": true
+          }
+        }
+      },
+      {
+        "id": "openai|gpt-5|effort=high",
+        "input": {
+          "protocol": "openai",
+          "model": "gpt-5",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {
+            "reasoning_effort": "high"
+          },
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "openai|gpt-5|effort=max",
+        "input": {
+          "protocol": "openai",
+          "model": "gpt-5",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {
+            "reasoning_effort": "max"
+          },
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "openai|gpt-5|effort=low",
+        "input": {
+          "protocol": "openai",
+          "model": "gpt-5",
+          "thinking_enabled": true,
+          "effort": "low"
+        },
+        "result": {
+          "body_top": {
+            "reasoning_effort": "low"
+          },
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "openai|gpt-5|effort=empty",
+        "input": {
+          "protocol": "openai",
+          "model": "gpt-5",
+          "thinking_enabled": true,
+          "effort": ""
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "openai|claude-sonnet-4|effort=high",
+        "input": {
+          "protocol": "openai",
+          "model": "claude-sonnet-4",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "openai|claude-sonnet-4|effort=max",
+        "input": {
+          "protocol": "openai",
+          "model": "claude-sonnet-4",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "openai|claude-sonnet-4|effort=low",
+        "input": {
+          "protocol": "openai",
+          "model": "claude-sonnet-4",
+          "thinking_enabled": true,
+          "effort": "low"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "openai|claude-sonnet-4|effort=empty",
+        "input": {
+          "protocol": "openai",
+          "model": "claude-sonnet-4",
+          "thinking_enabled": true,
+          "effort": ""
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "openai|unknown-model|effort=high",
+        "input": {
+          "protocol": "openai",
+          "model": "unknown-model",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "openai|unknown-model|effort=max",
+        "input": {
+          "protocol": "openai",
+          "model": "unknown-model",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "openai|unknown-model|effort=low",
+        "input": {
+          "protocol": "openai",
+          "model": "unknown-model",
+          "thinking_enabled": true,
+          "effort": "low"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "openai|unknown-model|effort=empty",
+        "input": {
+          "protocol": "openai",
+          "model": "unknown-model",
+          "thinking_enabled": true,
+          "effort": ""
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|deepseek-v4-pro|disabled",
+        "input": {
+          "protocol": "anthropic",
+          "model": "deepseek-v4-pro",
+          "thinking_enabled": false,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|glm-4.6|disabled",
+        "input": {
+          "protocol": "anthropic",
+          "model": "glm-4.6",
+          "thinking_enabled": false,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|kimi-k2|disabled",
+        "input": {
+          "protocol": "anthropic",
+          "model": "kimi-k2",
+          "thinking_enabled": false,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|mimo-v2.5|disabled",
+        "input": {
+          "protocol": "anthropic",
+          "model": "mimo-v2.5",
+          "thinking_enabled": false,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|qwen3-max|disabled",
+        "input": {
+          "protocol": "anthropic",
+          "model": "qwen3-max",
+          "thinking_enabled": false,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|gpt-5|disabled",
+        "input": {
+          "protocol": "anthropic",
+          "model": "gpt-5",
+          "thinking_enabled": false,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|claude-sonnet-4|disabled",
+        "input": {
+          "protocol": "anthropic",
+          "model": "claude-sonnet-4",
+          "thinking_enabled": false,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|unknown-model|disabled",
+        "input": {
+          "protocol": "anthropic",
+          "model": "unknown-model",
+          "thinking_enabled": false,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "openai|deepseek-v4-pro|disabled",
+        "input": {
+          "protocol": "openai",
+          "model": "deepseek-v4-pro",
+          "thinking_enabled": false,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "openai|glm-4.6|disabled",
+        "input": {
+          "protocol": "openai",
+          "model": "glm-4.6",
+          "thinking_enabled": false,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "disabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|kimi-k2|disabled",
+        "input": {
+          "protocol": "openai",
+          "model": "kimi-k2",
+          "thinking_enabled": false,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "disabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|mimo-v2.5|disabled",
+        "input": {
+          "protocol": "openai",
+          "model": "mimo-v2.5",
+          "thinking_enabled": false,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "thinking": {
+              "type": "disabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|qwen3-max|disabled",
+        "input": {
+          "protocol": "openai",
+          "model": "qwen3-max",
+          "thinking_enabled": false,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "enable_thinking": false
+          }
+        }
+      },
+      {
+        "id": "openai|gpt-5|disabled",
+        "input": {
+          "protocol": "openai",
+          "model": "gpt-5",
+          "thinking_enabled": false,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {
+            "reasoning_effort": "none"
+          },
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "openai|claude-sonnet-4|disabled",
+        "input": {
+          "protocol": "openai",
+          "model": "claude-sonnet-4",
+          "thinking_enabled": false,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "openai|unknown-model|disabled",
+        "input": {
+          "protocol": "openai",
+          "model": "unknown-model",
+          "thinking_enabled": false,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {}
+        }
+      },
+      {
+        "id": "anthropic|DeepSeek-V4-upper|effort=high",
+        "input": {
+          "protocol": "anthropic",
+          "model": "DeepSeek-V4",
+          "thinking_enabled": true,
+          "effort": "high"
+        },
+        "result": {
+          "body_top": {
+            "output_config": {
+              "effort": "high"
+            }
+          },
+          "extra_body": {
+            "thinking": {
+              "type": "enabled"
+            }
+          }
+        }
+      },
+      {
+        "id": "openai|QWEN3-MAX-upper|effort=max",
+        "input": {
+          "protocol": "openai",
+          "model": "QWEN3-MAX",
+          "thinking_enabled": true,
+          "effort": "max"
+        },
+        "result": {
+          "body_top": {},
+          "extra_body": {
+            "enable_thinking": true,
+            "thinking_budget": 32000
+          }
+        }
+      }
+    ],
+    "defaults.resolve_thinking_passback": [
+      {
+        "id": "anthropic|deepseek-v4-pro",
+        "input": {
+          "protocol": "anthropic",
+          "model": "deepseek-v4-pro"
+        },
+        "result": "thinking_block"
+      },
+      {
+        "id": "anthropic|glm-4.6",
+        "input": {
+          "protocol": "anthropic",
+          "model": "glm-4.6"
+        },
+        "result": "none"
+      },
+      {
+        "id": "anthropic|kimi-k2",
+        "input": {
+          "protocol": "anthropic",
+          "model": "kimi-k2"
+        },
+        "result": "none"
+      },
+      {
+        "id": "anthropic|mimo-v2.5",
+        "input": {
+          "protocol": "anthropic",
+          "model": "mimo-v2.5"
+        },
+        "result": "thinking_block"
+      },
+      {
+        "id": "anthropic|qwen3-max",
+        "input": {
+          "protocol": "anthropic",
+          "model": "qwen3-max"
+        },
+        "result": "none"
+      },
+      {
+        "id": "anthropic|gpt-5",
+        "input": {
+          "protocol": "anthropic",
+          "model": "gpt-5"
+        },
+        "result": "none"
+      },
+      {
+        "id": "anthropic|claude-sonnet-4",
+        "input": {
+          "protocol": "anthropic",
+          "model": "claude-sonnet-4"
+        },
+        "result": "thinking_block_signed"
+      },
+      {
+        "id": "anthropic|unknown-model",
+        "input": {
+          "protocol": "anthropic",
+          "model": "unknown-model"
+        },
+        "result": "none"
+      },
+      {
+        "id": "openai|deepseek-v4-pro",
+        "input": {
+          "protocol": "openai",
+          "model": "deepseek-v4-pro"
+        },
+        "result": "reasoning_content"
+      },
+      {
+        "id": "openai|glm-4.6",
+        "input": {
+          "protocol": "openai",
+          "model": "glm-4.6"
+        },
+        "result": "reasoning_content"
+      },
+      {
+        "id": "openai|kimi-k2",
+        "input": {
+          "protocol": "openai",
+          "model": "kimi-k2"
+        },
+        "result": "reasoning_content"
+      },
+      {
+        "id": "openai|mimo-v2.5",
+        "input": {
+          "protocol": "openai",
+          "model": "mimo-v2.5"
+        },
+        "result": "reasoning_content"
+      },
+      {
+        "id": "openai|qwen3-max",
+        "input": {
+          "protocol": "openai",
+          "model": "qwen3-max"
+        },
+        "result": "none"
+      },
+      {
+        "id": "openai|gpt-5",
+        "input": {
+          "protocol": "openai",
+          "model": "gpt-5"
+        },
+        "result": "none"
+      },
+      {
+        "id": "openai|claude-sonnet-4",
+        "input": {
+          "protocol": "openai",
+          "model": "claude-sonnet-4"
+        },
+        "result": "none"
+      },
+      {
+        "id": "openai|unknown-model",
+        "input": {
+          "protocol": "openai",
+          "model": "unknown-model"
+        },
+        "result": "none"
+      },
+      {
+        "id": "other-protocol|deepseek",
+        "input": {
+          "protocol": "bedrock",
+          "model": "deepseek-v4-pro"
+        },
+        "result": "none"
+      }
+    ],
+    "defaults.prompt_templates": [
+      {
+        "id": "BASE_PROMPT_TEMPLATE",
+        "input": {},
+        "result": "| 你的身份 | 你是一位严谨、克制且极具专业素养的 {model} 智能体。 |\n| 所处环境 | narnat agent 框架内，作为自主代理运行。 |\n| 当前工作目录 | {cwd} |\n| 所处平台 | {platform} |\n| 核心任务 | 尽你所能帮助用户，为用户解难。 |\n"
+      },
+      {
+        "id": "COMPRESS_PROMPT",
+        "input": {},
+        "result": "你现在是压缩引擎。把以上对话浓缩成一个结构化检查点，使另一个模型可以无损接续工作。\n\n严格按下面的 Markdown 结构输出：保持每一节的顺序，用简练的要点而非散文。空节写\"(无)\"，不得省略任何一节。\n\n## 原始请求与意图\n- [用户最初及演进中的目标；措辞重要处原文引用]\n\n## 关键技术概念\n- [涉及的技术、框架、模式与约定]\n\n## 文件与代码\n- [精确路径：其重要性、关键改动或代码片段]\n\n## 错误与修复\n- [错误：如何解决的，以及相关用户反馈]\n\n## 待办任务\n- [已明确要求但尚未完成的工作]\n\n## 当前工作\n- [检查点时刻正在进行的精确工作]\n\n## 下一步\n- [与最近请求直接衔接的单一动作，或\"(无)\"]\n\n## 关键上下文\n- [决策及其理由、约束、用户偏好、未决问题、继续所需的数据]\n\n规则：\n- 用简洁的中文工程语言。保留精确的文件路径、命令、报错串、标识符、数值、函数签名与语法片段。\n- 忠实记录用户反馈与明确指令，尤其是纠正。\n- 不要提及本次摘要请求，也不要提及上下文被压缩。\n- 只输出检查点文本：不要调用任何工具或采取其他行动。\n- 若对话中已存在\"# 上一轮对话成果\"摘要，它是旧检查点。不要原文照抄：保留仍成立的事实、删除过时内容、把新信息合并进同一结构下的单一整合摘要。"
+      }
+    ]
+  }
+}

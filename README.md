@@ -361,62 +361,82 @@ thinking 参数按 `(协议, 模型前缀)` 由内置映射表自动翻译为对
 
 ### 项目结构
 
+按"积木"组织：每块积木独立目录、可单独测试；跨积木接口集中在 `contracts/`，积木之间只经显式契约连接（`tests/check_layering.py` 机检分层）。
+
 ```
 narnat_agent/
-├── assembly.py               # 组装层：唯一对象构造点，注入依赖
+├── app/                      # 应用层：唯一组装点与生命周期
+│   ├── assembly.py           #   线性装配（构造顺序即依赖顺序，无后置补线）
+│   ├── interactive.py        #   交互主循环（读输入 → 命令/对话 → 循环）
+│   ├── headless.py           #   headless 一次性运行（哨兵 [NN_DONE]）
+│   ├── lifecycle.py          #   日志器与退出清理
+│   └── summarizer.py         #   会话命名 / 分支总结（LLM）
+├── contracts/                # 共享契约（零逻辑）：事件 / 工具 / 输出 / 中断 / 共享字面量
 ├── config/                   # 配置
-│   ├── defaults.py           #   默认常量、prompt 模板、thinking 参数映射表
-│   ├── loader.py             #   narnat.json / narnat.md 加载与校验
-│   ├── session_store.py      #   会话持久化与树形展示
+│   ├── defaults.py           #   默认常量、prompt 模板、thinking 参数映射表（唯一权威）
+│   ├── loader.py             #   narnat.json / narnat.md 加载
+│   ├── models.py             #   配置数据类
+│   ├── parsers.py            #   键名兼容解析（中文键 / 别名 / 旧扁平键迁移）
 │   └── skill_store.py        #   技能加载
-├── core/                     # 核心
-│   ├── agent.py              #   Agent 主循环、目标模式续跑
-│   ├── agent_loop.py         #   单轮循环（请求 → 工具调度 → 回传）
-│   ├── llm.py                #   LLM 双协议客户端（openai / anthropic）
-│   ├── context.py            #   上下文窗口管理
-│   ├── compressor.py         #   上下文压缩（保留尾部切点）
-│   ├── compression_coordinator.py  # 压缩协调（占比阈值触发、溢出恢复）
-│   ├── message_list.py       #   消息唯一所有者（只读视图 / 受控修改）
-│   ├── message_manager.py    #   消息管理
-│   ├── session_callbacks.py  #   会话状态机（三态）与命令回调
-│   ├── auto_save_manager.py  #   自动保存 / 自动命名
-│   ├── tool_dispatcher.py    #   工具调度（只读并行 / 写入按文件分组 / 串行）
-│   ├── tool_callbacks.py     #   工具回调（安全确认、Todo 同步）
-│   ├── summarizer.py         #   探索分支总结
-│   ├── billing.py            #   费用 / 余额
-│   ├── stats.py              #   统计、费用日志
-│   └── interrupt.py          #   打断机制
-├── mcp/                      # MCP 客户端（stdio 服务器，AI 按需连接）
-│   ├── client.py             #   单服务器连接（JSON-RPC 2.0 / 握手 / 工具调用）
-│   └── __init__.py           #   连接管理（连接/断开、工具注册与注销、退出清理）
-├── tools/                    # 内置工具（每个工具一个子目录）
-│   ├── read/                 #   Read — 读取文件
-│   ├── mcp_tool/             #   MCP — AI 按需连接外部 MCP 服务器（connect/disconnect）
-│   ├── glob/                 #   Glob — 模式匹配（花括号展开）
-│   ├── grep/                 #   Grep — 正则搜索
-│   ├── edit/                 #   Edit — 字符串替换编辑
-│   ├── write/                #   Write — 创建 / 覆盖文件
-│   ├── bash/                 #   Shell — 本地命令执行
-│   ├── background/           #   Shell 后台任务运行时（提交/状态/等待/取消）
-│   ├── terminal/             #   Terminal — 多终端持久 SSH + 文件传输
-│   ├── serial/               #   Serial — 多终端持久串口
-│   ├── web_search/           #   WebSearch — 网页搜索
-│   ├── todo_write/           #   TodoWrite — 任务列表
-│   ├── goal_complete/        #   GoalComplete — 目标完成标记（目标模式动态注入）
-│   ├── registry.py           #   工具注册表
-│   ├── exec_signal.py        #   退出码 / 错误标签协议（防命令输出伪造）
-│   ├── diff_utils.py         #   diff 生成
-│   ├── param_utils.py        #   参数处理
-│   └── tool_context.py       #   工具运行时上下文
-├── ui/                       # prompt-toolkit 界面
-│   ├── ui_design.py          #   界面与输入
-│   ├── colors.py             #   颜色常量与样式
-│   ├── renderer.py           #   流式 Markdown 渲染（表格稳定渲染）
-│   ├── session_commands.py   #   交互命令注册表（Tab 补全）
-│   ├── interrupt.py          #   Esc 打断
-│   └── headless.py           #   headless 纯文本 UI（-p 模式）
-├── output.py                 # 终端输出 / 颜色控制
-└── logger.py                 # 日志
+├── llm/                      # LLM 双协议客户端
+│   ├── client.py             #   统一入口（事件流产出、工具定义管理）
+│   ├── openai_backend.py     #   OpenAI 兼容协议（SSE 解析 / 重试 / 思考参数）
+│   ├── anthropic_backend.py  #   Anthropic 兼容协议（消息转换 / 思考回传）
+│   ├── retry.py              #   重试分类与退避
+│   └── runtime.py            #   流哨兵 / 队列泵 / 共享状态
+├── messages/                 # 消息域
+│   ├── store.py              #   消息唯一所有者（只读视图 / 受控修改 / 中断修复）
+│   └── tokens.py             #   token 估算（唯一实现）
+├── compression/              # 上下文压缩
+│   ├── compressor.py         #   切点选择 / 重建
+│   ├── context.py            #   窗口占比跟踪
+│   └── coordinator.py        #   触发 / 摘要编排 / 溢出恢复
+├── conversation/             # 对话内循环
+│   ├── loop.py               #   事件消费 / 流中断重试 / 溢出恢复
+│   ├── dispatch.py           #   工具调度（只读并行 / 写入按文件分组 / 串行）
+│   ├── goal.py               #   目标模式（GoalComplete / 续跑 / 收尾轮）
+│   └── reminders.py          #   收尾软提醒（计划未完成 / 后台任务）
+├── sessions/                 # 会话域
+│   ├── state.py              #   三态状态机（NoSession / Root / Child）
+│   ├── store.py              #   持久化（原子写 / 树形展示 / 删除）
+│   ├── commands.py           #   交互命令实现与可用性表
+│   ├── manager.py            #   会话管理服务
+│   ├── model_state.py        #   模型 / 思考状态（写回配置）
+│   └── theme.py              #   会话侧显示
+├── stats/                    # 统计与费用
+│   ├── tracker.py            #   用量 / 费用 / 成本日志轮转
+│   └── billing.py            #   定价与余额查询
+├── interrupt/                # 中断总线
+│   ├── bus.py                #   双模式信号总线与订阅广播
+│   └── keys.py               #   ESC/SIGINT 采集（平台自适应）
+├── output/                   # 终端输出与颜色
+│   ├── console.py            #   输出原语（VT / plain / quiet）
+│   ├── style.py              #   色板 / 角色 / 配方 / 主题装配
+│   └── colors.py             #   颜色常量
+├── ui/                       # 界面
+│   ├── render.py             #   流式 Markdown 渲染状态机（表格稳定渲染）
+│   ├── markdown.py           #   行内 / 块级 Markdown 渲染
+│   ├── width.py              #   终端宽度与 CJK 显示宽度
+│   ├── stream.py             #   流句柄（OutputSink 实现）/ 统计栏 / 交互端口
+│   ├── prompt.py             #   输入会话（多行 / 历史 / 补全）
+│   ├── commands.py           #   命令路由与 Tab 补全
+│   ├── animator.py           #   动画（思考中 / 压缩 / 合并）
+│   └── headless.py           #   headless 纯文本实现
+├── tools/                    # 工具域
+│   ├── registry.py           #   注册表与执行入口
+│   ├── signal.py             #   退出码 / 错误标签协议（防命令输出伪造）
+│   ├── env.py                #   工具运行时环境（配置面 / 计划 / 目标 / 提醒 / 确认）
+│   ├── catalog.py            #   动态工具目录（MCP 热注册）
+│   ├── file/                 #   Read / Glob / Grep / Edit / Write
+│   ├── shell/                #   Shell（本地命令）+ 后台任务槽位
+│   ├── remote/               #   Terminal（SSH）+ Serial（串口）+ 文件传输
+│   ├── plan.py               #   TodoWrite + GoalComplete
+│   ├── websearch.py          #   WebSearch
+│   └── token_estimate.py     #   转发 messages.tokens（兼容导出）
+└── mcp/                      # MCP 集成（stdio 服务器，AI 按需连接）
+    ├── client.py             #   JSON-RPC 2.0 客户端（握手 / 调用 / 重连）
+    ├── manager.py            #   连接管理（热注册 / 进程生命周期）
+    └── tool.py               #   MCP 工具（connect / disconnect）
 ```
 
 ### 内置工具
@@ -435,7 +455,7 @@ narnat_agent/
 | WebSearch | 网页搜索 |
 | TodoWrite | 任务列表管理（计划同步） |
 | GoalComplete | 声明任务完成（仅 `/goal` 目标模式开启时注入给 AI） |
-| mcp__… | MCP 服务器工具（由 `"MCP服务器"` 配置动态注册，命名 `mcp__<服务器名>__<工具名>`，详见「MCP 服务器」） |
+| mcp__… | MCP 服务器工具（由 AI 运行时 connect 动态注册，命名 `mcp__<服务器名>__<工具名>`，详见「MCP 服务器」） |
 
 - 工具输出受「输出上限KB」全局硬截断（保留首尾），超时受「超时上限秒」约束；Read 例外——按行截断并提示续读 offset，保证行号连续
 - Shell 后台任务：`background=true` 提交后立即返回 `bgN` 编号，结果落盘到会话专属临时目录（可 Read/Grep 读取）；`bg="status"/"wait"/"cancel"` 管理，并发上限 8 个，会话结束自动清理

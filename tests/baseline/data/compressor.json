@@ -1,0 +1,626 @@
+{
+  "generated_by": "v2/tests/baseline/extract_old.py",
+  "source": "narnat_agent（旧实现，原位未动）",
+  "note": "随机标签 → [<TAG>]；时间文本 → <YYYY-MM-DD HH:MM>/<MM-DD HH:MM>/<HH:MM>/<MM-DD>",
+  "module": "narnat_agent.core.compressor",
+  "groups": {
+    "compressor._cut_balanced": [
+      {
+        "id": "normal_cut0_system",
+        "input": {
+          "dataset": "normal",
+          "messages": [
+            {
+              "role": "system",
+              "content": "系统提示"
+            },
+            {
+              "role": "user",
+              "content": "u1"
+            },
+            {
+              "role": "assistant",
+              "content": "a1",
+              "tool_calls": [
+                {
+                  "id": "c1",
+                  "function": {
+                    "name": "Read",
+                    "arguments": "{}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "c1",
+              "content": "结果"
+            },
+            {
+              "role": "user",
+              "content": "u2"
+            },
+            {
+              "role": "assistant",
+              "content": "a2"
+            },
+            {
+              "role": "user",
+              "content": "u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3"
+            }
+          ],
+          "cut": 0
+        },
+        "result": false
+      },
+      {
+        "id": "normal_cut1_user",
+        "input": {
+          "dataset": "normal",
+          "messages": [
+            {
+              "role": "system",
+              "content": "系统提示"
+            },
+            {
+              "role": "user",
+              "content": "u1"
+            },
+            {
+              "role": "assistant",
+              "content": "a1",
+              "tool_calls": [
+                {
+                  "id": "c1",
+                  "function": {
+                    "name": "Read",
+                    "arguments": "{}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "c1",
+              "content": "结果"
+            },
+            {
+              "role": "user",
+              "content": "u2"
+            },
+            {
+              "role": "assistant",
+              "content": "a2"
+            },
+            {
+              "role": "user",
+              "content": "u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3"
+            }
+          ],
+          "cut": 1
+        },
+        "result": true
+      },
+      {
+        "id": "normal_cut2_assistant",
+        "input": {
+          "dataset": "normal",
+          "messages": [
+            {
+              "role": "system",
+              "content": "系统提示"
+            },
+            {
+              "role": "user",
+              "content": "u1"
+            },
+            {
+              "role": "assistant",
+              "content": "a1",
+              "tool_calls": [
+                {
+                  "id": "c1",
+                  "function": {
+                    "name": "Read",
+                    "arguments": "{}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "c1",
+              "content": "结果"
+            },
+            {
+              "role": "user",
+              "content": "u2"
+            },
+            {
+              "role": "assistant",
+              "content": "a2"
+            },
+            {
+              "role": "user",
+              "content": "u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3"
+            }
+          ],
+          "cut": 2
+        },
+        "result": false
+      },
+      {
+        "id": "normal_cut_end",
+        "input": {
+          "dataset": "normal",
+          "messages": [
+            {
+              "role": "system",
+              "content": "系统提示"
+            },
+            {
+              "role": "user",
+              "content": "u1"
+            },
+            {
+              "role": "assistant",
+              "content": "a1",
+              "tool_calls": [
+                {
+                  "id": "c1",
+                  "function": {
+                    "name": "Read",
+                    "arguments": "{}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "c1",
+              "content": "结果"
+            },
+            {
+              "role": "user",
+              "content": "u2"
+            },
+            {
+              "role": "assistant",
+              "content": "a2"
+            },
+            {
+              "role": "user",
+              "content": "u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3"
+            }
+          ],
+          "cut": 7
+        },
+        "result": true
+      }
+    ],
+    "compressor.select_cut_index": [
+      {
+        "id": "zero_retain",
+        "input": {
+          "dataset": "normal",
+          "messages": [
+            {
+              "role": "system",
+              "content": "系统提示"
+            },
+            {
+              "role": "user",
+              "content": "u1"
+            },
+            {
+              "role": "assistant",
+              "content": "a1",
+              "tool_calls": [
+                {
+                  "id": "c1",
+                  "function": {
+                    "name": "Read",
+                    "arguments": "{}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "c1",
+              "content": "结果"
+            },
+            {
+              "role": "user",
+              "content": "u2"
+            },
+            {
+              "role": "assistant",
+              "content": "a2"
+            },
+            {
+              "role": "user",
+              "content": "u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3"
+            }
+          ],
+          "retain_tokens": 0
+        },
+        "result": null
+      },
+      {
+        "id": "negative_retain",
+        "input": {
+          "dataset": "normal",
+          "messages": [
+            {
+              "role": "system",
+              "content": "系统提示"
+            },
+            {
+              "role": "user",
+              "content": "u1"
+            },
+            {
+              "role": "assistant",
+              "content": "a1",
+              "tool_calls": [
+                {
+                  "id": "c1",
+                  "function": {
+                    "name": "Read",
+                    "arguments": "{}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "c1",
+              "content": "结果"
+            },
+            {
+              "role": "user",
+              "content": "u2"
+            },
+            {
+              "role": "assistant",
+              "content": "a2"
+            },
+            {
+              "role": "user",
+              "content": "u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3"
+            }
+          ],
+          "retain_tokens": -5
+        },
+        "result": null
+      },
+      {
+        "id": "tiny_retain",
+        "input": {
+          "dataset": "normal",
+          "messages": [
+            {
+              "role": "system",
+              "content": "系统提示"
+            },
+            {
+              "role": "user",
+              "content": "u1"
+            },
+            {
+              "role": "assistant",
+              "content": "a1",
+              "tool_calls": [
+                {
+                  "id": "c1",
+                  "function": {
+                    "name": "Read",
+                    "arguments": "{}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "c1",
+              "content": "结果"
+            },
+            {
+              "role": "user",
+              "content": "u2"
+            },
+            {
+              "role": "assistant",
+              "content": "a2"
+            },
+            {
+              "role": "user",
+              "content": "u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3"
+            }
+          ],
+          "retain_tokens": 10
+        },
+        "result": 6
+      },
+      {
+        "id": "medium_retain",
+        "input": {
+          "dataset": "normal",
+          "messages": [
+            {
+              "role": "system",
+              "content": "系统提示"
+            },
+            {
+              "role": "user",
+              "content": "u1"
+            },
+            {
+              "role": "assistant",
+              "content": "a1",
+              "tool_calls": [
+                {
+                  "id": "c1",
+                  "function": {
+                    "name": "Read",
+                    "arguments": "{}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "c1",
+              "content": "结果"
+            },
+            {
+              "role": "user",
+              "content": "u2"
+            },
+            {
+              "role": "assistant",
+              "content": "a2"
+            },
+            {
+              "role": "user",
+              "content": "u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3"
+            }
+          ],
+          "retain_tokens": 100
+        },
+        "result": 1
+      },
+      {
+        "id": "large_retain",
+        "input": {
+          "dataset": "normal",
+          "messages": [
+            {
+              "role": "system",
+              "content": "系统提示"
+            },
+            {
+              "role": "user",
+              "content": "u1"
+            },
+            {
+              "role": "assistant",
+              "content": "a1",
+              "tool_calls": [
+                {
+                  "id": "c1",
+                  "function": {
+                    "name": "Read",
+                    "arguments": "{}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "c1",
+              "content": "结果"
+            },
+            {
+              "role": "user",
+              "content": "u2"
+            },
+            {
+              "role": "assistant",
+              "content": "a2"
+            },
+            {
+              "role": "user",
+              "content": "u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3"
+            }
+          ],
+          "retain_tokens": 100000
+        },
+        "result": 1
+      },
+      {
+        "id": "head_assistant_small",
+        "input": {
+          "dataset": "head_assistant",
+          "messages": [
+            {
+              "role": "system",
+              "content": "系统提示"
+            },
+            {
+              "role": "assistant",
+              "content": "a1"
+            },
+            {
+              "role": "user",
+              "content": "u1"
+            }
+          ],
+          "retain_tokens": 1
+        },
+        "result": 2
+      },
+      {
+        "id": "head_assistant_large",
+        "input": {
+          "dataset": "head_assistant",
+          "messages": [
+            {
+              "role": "system",
+              "content": "系统提示"
+            },
+            {
+              "role": "assistant",
+              "content": "a1"
+            },
+            {
+              "role": "user",
+              "content": "u1"
+            }
+          ],
+          "retain_tokens": 100000
+        },
+        "result": null
+      },
+      {
+        "id": "system_only",
+        "input": {
+          "dataset": "system_only",
+          "messages": [
+            {
+              "role": "system",
+              "content": "s1"
+            },
+            {
+              "role": "system",
+              "content": "s2"
+            }
+          ],
+          "retain_tokens": 100
+        },
+        "result": null
+      },
+      {
+        "id": "empty",
+        "input": {
+          "dataset": "empty",
+          "messages": [],
+          "retain_tokens": 100
+        },
+        "result": null
+      }
+    ],
+    "compressor.Compressor.build_*": [
+      {
+        "id": "compress_msgs",
+        "input": {
+          "id": "compress_msgs",
+          "dataset": "normal"
+        },
+        "result": {
+          "count": 8,
+          "roles": [
+            "system",
+            "user",
+            "assistant",
+            "tool",
+            "user",
+            "assistant",
+            "user",
+            "user"
+          ],
+          "last_role": "user",
+          "last_content_len": 571,
+          "last_content_is_compress_prompt": true
+        }
+      },
+      {
+        "id": "new_session_with_tail",
+        "input": {
+          "id": "new_session_with_tail",
+          "dataset": "normal",
+          "system_prompt": "新系统",
+          "summary": "摘要内容",
+          "tail_from": 4
+        },
+        "result": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "新系统"
+            },
+            {
+              "role": "system",
+              "content": "# 上一轮对话成果\n\n摘要内容"
+            },
+            {
+              "role": "user",
+              "content": "u2"
+            },
+            {
+              "role": "assistant",
+              "content": "a2"
+            },
+            {
+              "role": "user",
+              "content": "u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3"
+            }
+          ]
+        }
+      },
+      {
+        "id": "new_session_no_summary",
+        "input": {
+          "id": "new_session_no_summary",
+          "dataset": "normal",
+          "system_prompt": "新系统",
+          "summary": "",
+          "tail_from": 0
+        },
+        "result": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "新系统"
+            },
+            {
+              "role": "user",
+              "content": "u1"
+            },
+            {
+              "role": "assistant",
+              "content": "a1",
+              "tool_calls": [
+                {
+                  "id": "c1",
+                  "function": {
+                    "name": "Read",
+                    "arguments": "{}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "c1",
+              "content": "结果"
+            },
+            {
+              "role": "user",
+              "content": "u2"
+            },
+            {
+              "role": "assistant",
+              "content": "a2"
+            },
+            {
+              "role": "user",
+              "content": "u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3u3"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

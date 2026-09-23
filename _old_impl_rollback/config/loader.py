@@ -1,0 +1,872 @@
+"""
+配置加载器 —— 读取 narnat.json + narnat.md，拼接系统prompt
+"""
+
+import json
+import os
+import re
+import sys
+import platform
+from dataclasses import dataclass, field
+from typing import Optional, Dict, List
+
+from .defaults import (
+    BASE_PROMPT_TEMPLATE, COMPRESS_PROMPT,
+    NARNAT_DIR, NARNAT_JSON, NARNAT_MD,
+    CONFIG_SUBDIR, DATA_SUBDIR, LOGS_SUBDIR,
+    DEFAULT_IGNORE_DIRS,
+    DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL,
+    DEFAULT_PROTOCOL, DEFAULT_THINKING_ENABLED, DEFAULT_THINKING_EFFORT,
+    DEFAULT_THINKING_PASSBACK,
+    DEFAULT_CONTEXT_WINDOW, DEFAULT_SHOW_RATIO, DEFAULT_WARN_RATIO, DEFAULT_COMPRESS_RATIO,
+    DEFAULT_COMPRESS_RETAIN_TOKENS,
+    DEFAULT_GIT_SKIP, DEFAULT_RM_SKIP,
+    DEFAULT_REQUIRE_PLAN, DEFAULT_MIN_TOOLS,
+    DEFAULT_MAX_TOOL_OUTPUT_KB,
+    DEFAULT_MAX_TIMEOUT_SECONDS,
+    DEFAULT_MCP_STARTUP_TIMEOUT,
+    DEFAULT_MCP_TOOL_TIMEOUT,
+    DEFAULT_AUTO_SAVE,
+    DEFAULT_AUTO_SAVE_TOKENS,
+    DEFAULT_GOAL_MAX_ROUNDS,
+)
+
+
+@dataclass
+class AIConfig:
+    """AI连接配置。
+
+    注意: thinking_effort 在当前阶段仍为可变状态（由 /thinking 命令修改）。
+    后续 Phase 拆分 LLMClient 后将移出此字段，届时本类将改为 frozen。
+    """
+    api_key: str = DEFAULT_API_KEY
+    base_url: str = DEFAULT_BASE_URL
+    model: str = DEFAULT_MODEL
+    model_options: list = field(default_factory=lambda: [DEFAULT_MODEL])  # /mode 可切换的模型列表
+    protocol: str = DEFAULT_PROTOCOL              # "openai" | "anthropic"
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    thinking_enabled: bool = DEFAULT_THINKING_ENABLED
+    thinking_effort: str = DEFAULT_THINKING_EFFORT
+    thinking_passback: bool = DEFAULT_THINKING_PASSBACK  # 思考回传开关（由 /thinkback 命令修改）
+    thinking_options: dict = field(default_factory=lambda: {"high": "高", "max": "全开"})
+    context_window: int = DEFAULT_CONTEXT_WINDOW   # 模型上下文窗口（token数），≤0 视为无效
+    retry_count: int = 3
+    goal_max_rounds: int = DEFAULT_GOAL_MAX_ROUNDS  # 目标模式单个任务的自动续跑轮数上限
+
+
+@dataclass(frozen=True)
+class PathConfig:
+    """路径配置（只读）"""
+    project_root: str = ""
+    narnat_dir: str = ""
+    config_dir: str = ""    # .narnat/config/
+    data_dir: str = ""      # .narnat/data/
+    logs_dir: str = ""      # .narnat/logs/
+
+
+@dataclass(frozen=True)
+class ToolConfig:
+    """工具配置（只读）。单位转换在load时完成，外部直接用最终单位。"""
+    max_sessions: int = 5                              # SSH最大会话数
+    max_transfer_mb: int = 100                          # 文件传输上限(MB)
+    max_output_chars: int = DEFAULT_MAX_TOOL_OUTPUT_KB * 1024  # 工具输出上限(字符数)
+    max_timeout_seconds: int = DEFAULT_MAX_TIMEOUT_SECONDS     # 工具超时上限(秒)，0=不限制
+    ignore_dirs: tuple = ()                             # 忽略目录（唯一来源narnat.json"忽略目录"键，空=不忽略）
+
+
+@dataclass(frozen=True)
+class SafetyConfig:
+    """安全确认配置（只读）"""
+    git_skip_confirm: bool = DEFAULT_GIT_SKIP
+    rm_skip_confirm: bool = DEFAULT_RM_SKIP
+
+
+@dataclass(frozen=True)
+class McpServerConfig:
+    """单个 MCP 服务器配置（只读）。
+
+    stdio 服务器：command/args/env/cwd 启动本地进程；命名与字段对标 codex 的
+    [mcp_servers.<name>]（startup_timeout_sec / tool_timeout_sec /
+    enabled_tools / disabled_tools）。
+    """
+    name: str = ""
+    command: str = ""
+    args: tuple = ()                        # 命令行参数
+    env: Dict[str, str] = field(default_factory=dict)   # 附加环境变量（继承本进程环境后覆盖）
+    cwd: str = ""                           # 工作目录，空=本进程当前目录
+    enabled: bool = True                    # False=不启动
+    startup_timeout: int = DEFAULT_MCP_STARTUP_TIMEOUT   # 启动+握手+列工具超时（秒）
+    tool_timeout: int = DEFAULT_MCP_TOOL_TIMEOUT         # 工具调用超时（秒）
+    enabled_tools: tuple = ()               # 工具白名单（服务端原始工具名），空=全部
+    disabled_tools: tuple = ()              # 工具黑名单（在白名单之后生效）
+
+
+@dataclass(frozen=True)
+class PlanConfig:
+    """计划优先配置（只读）"""
+    require_plan: bool = DEFAULT_REQUIRE_PLAN
+    min_tools: int = DEFAULT_MIN_TOOLS
+
+
+@dataclass(frozen=True)
+class SessionConfig:
+    """会话与上下文配置（只读）"""
+    auto_save: bool = DEFAULT_AUTO_SAVE
+    auto_save_tokens: int = DEFAULT_AUTO_SAVE_TOKENS
+    show_ratio: bool = DEFAULT_SHOW_RATIO
+    warn_ratio: int = DEFAULT_WARN_RATIO
+    compress_ratio: int = DEFAULT_COMPRESS_RATIO
+    retain_tokens: int = DEFAULT_COMPRESS_RETAIN_TOKENS  # 压缩保留尾部预算（token），0=不保留
+
+
+@dataclass(frozen=True)
+class SkillConfig:
+    """技能配置（只读）"""
+    # 项目技能根目录: None=自动发现（扫描工作目录下所有名为 skills 的目录）；
+    # 空元组=关闭项目技能扫描；非空元组=仅扫描显式指定目录（相对工作目录，支持绝对路径）
+    project_roots: Optional[tuple] = None
+
+
+@dataclass(frozen=True)
+class PricingConfig:
+    """定价配置（只读）"""
+    # 用户自定义定价（中文key映射到英文key）
+    # 格式: {"模型名": {"输入": x, "缓存命中": y, "输出": z}}
+    user_pricing: Dict[str, Dict[str, float]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class BalanceConfig:
+    """余额查询配置（只读）"""
+    enabled: bool = False
+    url: str = ""                    # 查询地址
+    auth_method: str = "bearer"      # "bearer" | "x-api-key"
+    value_path: str = ""             # 余额数值 JSONPath
+    currency_path: str = ""          # 货币单位 JSONPath
+
+
+@dataclass(frozen=True)
+class CostLogConfig:
+    """费用日志配置（只读）：开启后每次LLM请求追加一行到CSV
+
+    双文件轮转：活动文件（path）达到 max_bytes 后改名为「主名_bak.扩展名」
+    （旧的 _bak 被删除），再新建活动文件从表头开始写。
+    磁盘上始终只有 1 个活动文件 + 1 个备份文件。
+    max_bytes = 0 表示不限制（单文件无限追加）。
+    """
+    enabled: bool = False
+    path: str = ""                   # CSV输出路径，空=默认 .narnat/data/cost_log.csv
+    max_bytes: int = 50 * 1024 * 1024  # 活动文件容量上限（默认50MB），0=不限制
+
+
+@dataclass(frozen=True)
+class UIConfig:
+    """UI配置（只读）
+
+    raw: narnat.json 中 "界面" 分组的完整 dict，直接传给 apply_style()。
+    结构:
+      {
+        "colors":    {"accent": "#88C0D0", ...},
+        "markdown":  {"heading_h1": "bold accent", ...},
+        "codeblock": {"lang_cyan": "#00FFFF", ...},
+        "diff":      {"added": "success", ...},
+        "ui":        {"header": "accent", ...},
+        "cmd":       {"error": "error", ...},
+        "prompt":    {"symbol": "bold #00ff00", ...},
+        "show_cost": False,
+        "show_balance": False,
+        "max_output_tokens": 128000,
+      }
+    """
+    raw: Dict = field(default_factory=dict)
+    show_cost: bool = False
+    show_balance: bool = False
+    max_output_tokens: int = 128000
+
+
+@dataclass
+class Config:
+    """应用总配置。
+
+    注意: 本类当前非 frozen，因 AIConfig.thinking_effort 仍需运行时修改。
+    后续 Phase 拆分 LLMClient 后将改为 frozen。
+    """
+    ai: AIConfig = field(default_factory=AIConfig)
+    paths: PathConfig = field(default_factory=PathConfig)
+    tools: ToolConfig = field(default_factory=ToolConfig)
+    safety: SafetyConfig = field(default_factory=SafetyConfig)
+    plan: PlanConfig = field(default_factory=PlanConfig)
+    session: SessionConfig = field(default_factory=SessionConfig)
+    skills: SkillConfig = field(default_factory=SkillConfig)
+    pricing: PricingConfig = field(default_factory=PricingConfig)
+    balance: BalanceConfig = field(default_factory=BalanceConfig)
+    cost_log: CostLogConfig = field(default_factory=CostLogConfig)
+    ui: UIConfig = field(default_factory=UIConfig)
+    api_keys: dict = field(default_factory=dict)
+    system_prompt: str = ""
+
+
+def _is_nuitka_onefile() -> bool:
+    """检测是否运行在 Nuitka onefile 模式下。
+    
+    Nuitka onefile 不设置 sys.frozen，sys.executable 指向临时解压目录的 python.exe，
+    临时目录路径通常包含 "onefile_" 。
+    """
+    exe_dir = os.path.dirname(sys.executable)
+    exe_name = os.path.basename(sys.executable).lower()
+    if "onefile_" in exe_dir and exe_name in ("python.exe", "python", "python3"):
+        return True
+    if "__compiled__" in dir(sys.modules.get("__main__", type(None))):
+        return True
+    return False
+
+
+def _find_narnat_exe_dir() -> Optional[str]:
+    """获取真实 exe 所在目录（Nuitka onefile 下指打包前的原始 exe 位置）。
+
+    定位顺序（由可靠到不可靠）：
+    1. Windows: GetModuleFileNameW —— 内核返回模块真实路径，
+       不受 argv[0] 影响。PATH 裸名调用（`nn`）时 argv[0]="nn"，
+       仅靠它会把项目根错定位到 onefile 临时解压目录。
+    2. argv[0] 为存在的完整路径（直接 `D:\\x\\nn.exe` 调用）。
+    3. argv[0] 为裸名：用 PATH 搜索解析（shutil.which）。
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            buf = ctypes.create_unicode_buffer(1024)
+            n = ctypes.windll.kernel32.GetModuleFileNameW(None, buf, 1024)
+            if n and buf.value:
+                path = buf.value
+                if os.path.isfile(path):
+                    return os.path.dirname(path)
+        except Exception:
+            pass
+
+    argv0 = sys.argv[0]
+    if argv0 and os.path.isfile(argv0):
+        return os.path.dirname(os.path.abspath(argv0))
+    if argv0 and not os.path.dirname(argv0):
+        try:
+            import shutil
+            resolved = shutil.which(argv0)
+            if resolved and os.path.isfile(resolved):
+                return os.path.dirname(os.path.abspath(resolved))
+        except Exception:
+            pass
+    return None
+
+
+def _find_project_root() -> str:
+    # 1. 环境变量优先级最高，允许用户显式指定
+    env_home = os.environ.get("NARNAT_HOME")
+    if env_home and os.path.isdir(os.path.join(env_home, NARNAT_DIR)):
+        return env_home
+
+    # 2. Nuitka onefile 模式
+    if _is_nuitka_onefile():
+        exe_dir = _find_narnat_exe_dir()
+        if exe_dir and os.path.isdir(os.path.join(exe_dir, NARNAT_DIR)):
+            return exe_dir
+        if exe_dir:
+            return exe_dir
+        return os.path.dirname(sys.executable)
+
+    # 3. PyInstaller / Nuitka standalone 模式
+    if getattr(sys, 'frozen', False):
+        exe_dir = os.path.dirname(sys.executable)
+        if os.path.isdir(os.path.join(exe_dir, NARNAT_DIR)):
+            return exe_dir
+        return exe_dir
+
+    # 4. 开发模式：从 cwd 向上查找
+    cwd = os.getcwd()
+    candidate = cwd
+    for _ in range(10):
+        if os.path.isdir(os.path.join(candidate, NARNAT_DIR)):
+            return candidate
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            break
+        candidate = parent
+    return cwd
+
+
+def _coerce(v, target_type):
+    """字符串/数字 → target_type，空串/非法值 → None"""
+    if v in (None, ""):
+        return None
+    try:
+        return target_type(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_project_skill_roots(data: dict) -> Optional[tuple]:
+    """解析 narnat.json 的 "技能"."项目技能目录"。
+
+    - 键缺失或非列表 → None（自动发现：扫描工作目录下所有名为 skills 的目录）
+    - 列表（可为空，空列表 = 关闭项目技能扫描）→ 取其中非空字符串项作显式目录
+    """
+    raw = data.get("技能", {}).get("项目技能目录")
+    if isinstance(raw, list):
+        return tuple(r for r in raw if isinstance(r, str) and r.strip())
+    return None
+
+
+def parse_mcp_server(name: str, entry: dict) -> Optional[McpServerConfig]:
+    """解析一个 MCP 服务器配置项（键同时接受中文与英文写法）。
+
+    来源：运行时 MCP 工具的 connect（AI 按需连接时给的配置，或候选发现的规格）。
+    entry 非 dict 或非法时返回 None。
+    """
+    if not isinstance(entry, dict) or not str(name).strip():
+        return None
+
+    def _pick(*keys, default=None):
+        """取第一个非空键值（中英文别名兼容）"""
+        for k in keys:
+            v = entry.get(k)
+            if v not in (None, ""):
+                return v
+        return default
+
+    args = _pick("参数", "args", default=[])
+    if not isinstance(args, list):
+        args = []
+
+    # command 数组形态（Claude 配置 [python, main.py, ...]）归一为 command+args，
+    # 使 AI 把其它客户端的配置原样贴进来也能直接连接
+    command = _pick("命令", "command", default="")
+    if isinstance(command, list):
+        args = list(command[1:]) + list(args)
+        command = command[0] if command else ""
+
+    env = _pick("环境变量", "env", default={})
+    if not isinstance(env, dict):
+        env = {}
+
+    startup_timeout = _coerce(_pick("启动超时秒", "startup_timeout_sec"), int)
+    if not startup_timeout or startup_timeout <= 0:
+        startup_timeout = DEFAULT_MCP_STARTUP_TIMEOUT
+
+    tool_timeout = _coerce(_pick("工具超时秒", "tool_timeout_sec"), int)
+    if not tool_timeout or tool_timeout <= 0:
+        tool_timeout = DEFAULT_MCP_TOOL_TIMEOUT
+
+    enabled_tools = _pick("工具白名单", "enabled_tools", default=[])
+    if not isinstance(enabled_tools, list):
+        enabled_tools = []
+
+    disabled_tools = _pick("工具黑名单", "disabled_tools", default=[])
+    if not isinstance(disabled_tools, list):
+        disabled_tools = []
+
+    # 布尔容错：AI 手写配置可能给字符串（"false"/"0"/"off"），不能 bool("false")=True
+    enabled = _pick("启用", "enabled", default=True)
+    if isinstance(enabled, str):
+        enabled = enabled.strip().lower() not in ("", "0", "false", "no", "off", "否")
+
+    return McpServerConfig(
+        name=str(name),
+        command=str(command),
+        args=tuple(args),
+        env={str(k): str(v) for k, v in env.items()},
+        cwd=str(_pick("工作目录", "cwd", default="")),
+        enabled=bool(enabled),
+        startup_timeout=startup_timeout,
+        tool_timeout=tool_timeout,
+        enabled_tools=tuple(str(t) for t in enabled_tools),
+        disabled_tools=tuple(str(t) for t in disabled_tools),
+    )
+
+
+def _parse_token_amount(v, default: int = 0) -> int:
+    """解析token量配置：支持数字（10000）或 "10k" / "1.5K" 格式，非法值返回 default"""
+    if v in (None, ""):
+        return default
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, (int, float)):
+        try:
+            return max(0, int(v))
+        except (ValueError, OverflowError):
+            return default
+    s = str(v).strip().lower()
+    if s.endswith("k"):
+        try:
+            return max(0, int(float(s[:-1]) * 1000))
+        except ValueError:
+            return default
+    try:
+        return max(0, int(s))
+    except ValueError:
+        return default
+
+
+def _parse_pricing(data: dict) -> Dict[str, Dict[str, float]]:
+    """解析用户定价配置，中文key映射到英文key
+
+    用户配置格式: {"模型名": {"输入": x, "缓存命中": y, "输出": z}}
+    内部格式: {"模型名": {"input": x, "cache_hit": y, "output": z}}
+    """
+    result = {}
+    for model, prices in data.items():
+        if not isinstance(prices, dict):
+            continue
+        result[model] = {
+            "input": prices.get("输入", 0),
+            "cache_hit": prices.get("缓存命中", 0),
+            "output": prices.get("输出", 0),
+        }
+    return result
+
+
+def _load_json(config_dir: str) -> dict:
+    """读取 narnat.json，返回原始数据字典。解析失败返回空字典"""
+    path = os.path.join(config_dir, NARNAT_JSON)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+
+def _parse_model_config(value) -> tuple:
+    """解析 narnat.json 的 "模型" 配置，返回 (当前模型, 候选列表)。
+
+    格式: {"当前": "deepseek-v4-pro", "列表": ["deepseek-v4-pro", "deepseek-v4-flash"]}
+    """
+    if not isinstance(value, dict):
+        return DEFAULT_MODEL, [DEFAULT_MODEL]
+    options = value.get("列表")
+    if not isinstance(options, list):
+        options = []
+    options = [m for m in options if isinstance(m, str)]
+    current = value.get("当前") or (options[0] if options else DEFAULT_MODEL)
+    if current not in options:
+        options.insert(0, current)
+    return current, options
+
+
+def _build_ai_config(data: dict) -> AIConfig:
+    """从narnat.json的"智能体"分组构建AIConfig"""
+    ai = data.get("智能体", {})
+
+    protocol = ai.get("协议", DEFAULT_PROTOCOL)
+    base_url = ai.get("接口地址", DEFAULT_BASE_URL)
+    model, model_options = _parse_model_config(ai.get("模型"))
+
+    thinking_cfg = ai.get("思考", {})
+    thinking_enabled = bool(thinking_cfg.get("启用", DEFAULT_THINKING_ENABLED))
+    thinking_effort = thinking_cfg.get("强度", DEFAULT_THINKING_EFFORT)
+    thinking_passback = bool(thinking_cfg.get("回传", DEFAULT_THINKING_PASSBACK))
+    thinking_options = thinking_cfg.get("强度选项", {"high": "高", "max": "全开"})
+
+    # 上下文窗口：缺失/非法 → 默认；显式 ≤0 → 保留原值（下游视为无效，占比显示 --）
+    parsed_cw = _coerce(ai.get("上下文窗口大小"), int)
+    context_window = DEFAULT_CONTEXT_WINDOW if parsed_cw is None else parsed_cw
+
+    return AIConfig(
+        api_key=ai.get("接口密钥", DEFAULT_API_KEY),
+        base_url=base_url,
+        model=model,
+        model_options=model_options,
+        protocol=protocol,
+        temperature=_coerce(ai.get("温度"), float),
+        max_tokens=_coerce(ai.get("最大输出token数"), int),
+        thinking_enabled=thinking_enabled,
+        thinking_effort=thinking_effort,
+        thinking_passback=thinking_passback,
+        thinking_options=thinking_options,
+        context_window=context_window,
+        goal_max_rounds=_coerce(ai.get("目标模式最大轮数"), int) or DEFAULT_GOAL_MAX_ROUNDS,
+    )
+
+
+def _build_ui_config(data: dict, max_output_tokens: int = 128000) -> UIConfig:
+    """从 narnat.json 的 "界面" 分组构建 UIConfig。
+
+    支持全中文 key（如 "颜色"."强调色"），内部自动转英文。
+    """
+
+    # ── 中英映射表（section 级别 + 每 section 内部 key 级别） ──
+    _SECTION_MAP = {
+        "颜色": "colors", "基础色": "base_colors",
+        "标注": "markdown", "标记": "markdown",
+        "代码块": "codeblock", "差异": "diff", "对比": "diff",
+        "框架": "ui", "命令": "cmd", "提示符": "prompt",
+    }
+    _KEY_MAPS = {
+        "colors": {
+            # 仅保留旧格式兼容项（如 "成功色""警告色" 在配方值中可能出现）
+            "成功色": "success", "警告色": "warning",
+            "错误色": "error", "链接色": "link",
+            "装饰色": "decoration", "强调": "emphasis",
+        },
+        "base_colors": {
+            "用户": "user", "主色": "primary", "次色": "secondary",
+            "强调色": "accent", "链接": "link", "链接色": "link",
+            "装饰": "decoration", "装饰色": "decoration",
+        },
+        "markdown": {
+            "标题1": "heading_h1", "标题3": "heading_h3", "标题4": "heading_h4",
+            "粗体": "bold", "斜体": "italic", "删除线": "strikethrough",
+            "行内代码": "code_inline", "链接": "link", "图片": "image",
+            "引用": "blockquote", "分隔线": "hr",
+            "无序列表": "list_unordered", "有序列表": "list_ordered",
+            "任务完成": "task_done", "任务未完成": "task_undone",
+            "表格边框": "table_border", "表格内容": "table_content",
+        },
+        "codeblock": {
+            "背景": "background",
+            "行号": "line_number", "语言标签": "lang_label",
+            "语言青": "lang_cyan", "语言黄": "lang_yellow", "语言绿": "lang_green",
+            "语言紫": "lang_magenta", "语言红": "lang_red",
+            "语言蓝": "lang_blue", "语言灰": "lang_gray",
+        },
+        "diff": {
+            "头部": "header", "范围": "range", "添加": "added",
+            "删除": "removed", "上下文": "context",
+        },
+        "ui": {
+            "标题": "header", "加载动画": "spinner",
+            "中断": "interrupted", "中断提示": "interrupted_hint",
+            "统计标签": "stats_label", "统计数值": "stats_value", "分隔": "separator",
+        },
+        "cmd": {
+            "成功": "success", "错误": "error", "提示": "hint",
+            "高亮": "highlight", "弱化": "muted",
+        },
+        "prompt": {
+            "符号": "symbol", "文字": "text", "自定义": "custom",
+        },
+    }
+
+    ui = data.get("界面", {})
+    raw = dict(ui)
+
+    # 1. 顶层开关字段（中英均可，提取后从 raw 清理）
+    show_cost = _pop_bool_any(raw, "show_cost", "显示费用")
+    show_balance = _pop_bool_any(raw, "show_balance", "显示余额")
+    max_tokens = _pop_int_any(raw, default=max_output_tokens, keys=("max_output_tokens", "最大输出token数"))
+
+    # 2. Section 名称中→英
+    for zh, en in _SECTION_MAP.items():
+        if zh in raw and en not in raw:
+            raw[en] = raw.pop(zh)
+
+    # 3. 每个 section 内部 key 中→英
+    for section, key_map in _KEY_MAPS.items():
+        if section not in raw:
+            continue
+        sec = raw[section]
+        if not isinstance(sec, dict):
+            continue
+        for zh, en in key_map.items():
+            if zh in sec:
+                sec[en] = sec.pop(zh)
+
+    # 4. 兼容旧中文 key（扁平旧格式 "用户输入色" 等）
+    _OLD_COLOR_MAP = {
+        "用户输入色": ("base_colors", "user"),
+        "AI输出色": ("base_colors", "primary"),
+        "标题色": ("base_colors", "accent"),
+        "成功色": ("base_colors", "success"),
+        "行内代码色": ("base_colors", "warning"),
+        "错误色": ("base_colors", "error"),
+        "链接色": ("base_colors", "link"),
+        "装饰色": ("base_colors", "decoration"),
+        "加载动画色": ("base_colors", "emphasis"),
+        "次要文字色": ("base_colors", "secondary"),
+        "代码块背景色": ("codeblock", "background"),
+    }
+    for old_key, (section, new_key) in _OLD_COLOR_MAP.items():
+        if old_key in raw:
+            raw.setdefault(section, {})[new_key] = raw.pop(old_key)
+
+    # 5. 配方值中的中文色名 → 英文（如 "bold 强调色" → "bold accent"）
+    _COLOR_ZH_EN = {}
+    _COLOR_ZH_EN.update(_KEY_MAPS.get("colors", {}))
+    _COLOR_ZH_EN.update(_KEY_MAPS.get("base_colors", {}))
+    if _COLOR_ZH_EN:
+        for section_name in ("colors", "markdown", "codeblock", "diff", "ui", "cmd", "prompt"):
+            sec = raw.get(section_name)
+            if not isinstance(sec, dict):
+                continue
+            for k, v in list(sec.items()):
+                if isinstance(v, str):
+                    for zh, en in _COLOR_ZH_EN.items():
+                        v = v.replace(zh, en)
+                    sec[k] = v
+
+    return UIConfig(raw=raw, show_cost=show_cost, show_balance=show_balance,
+                    max_output_tokens=max_tokens)
+
+
+def _pop_bool_any(d: dict, *keys) -> bool:
+    for k in keys:
+        if k in d:
+            return bool(d.pop(k))
+    return False
+
+
+def _pop_int_any(d: dict, *, keys: tuple = (), default: int = 0) -> int:
+    for k in keys:
+        if k in d:
+            return int(d.pop(k))
+    return default
+
+
+def _build_pricing_config(data: dict) -> PricingConfig:
+    """从narnat.json的"定价"分组构建PricingConfig"""
+    pricing_group = data.get("定价", {})
+    if not pricing_group:
+        return PricingConfig()
+    raw_pricing = pricing_group.get("模型", {})
+    user_pricing = _parse_pricing(raw_pricing) if raw_pricing else {}
+    return PricingConfig(user_pricing=user_pricing)
+
+
+def _build_balance_config(data: dict) -> BalanceConfig:
+    """从narnat.json的"余额查询"分组构建BalanceConfig"""
+    bal = data.get("余额查询", {})
+    return BalanceConfig(
+        enabled=bool(bal.get("启用", False)),
+        url=bal.get("查询地址", ""),
+        auth_method=bal.get("认证方式", "bearer"),
+        value_path=bal.get("响应路径", ""),
+        currency_path=bal.get("货币路径", ""),
+    )
+
+
+def _build_cost_log_config(data: dict, data_dir: str) -> CostLogConfig:
+    """从narnat.json的"费用日志"分组构建CostLogConfig"""
+    cfg = data.get("费用日志", {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    enabled = bool(cfg.get("启用", False))
+    path = cfg.get("输出文件") or os.path.join(data_dir, "cost_log.csv")
+    # 最大容量MB：缺失/非法 → 50MB；显式 ≤0 → 不限制（不轮转）
+    max_mb = cfg.get("最大容量MB")
+    try:
+        max_mb = int(max_mb)
+    except (TypeError, ValueError):
+        max_mb = 50
+    if max_mb < 0:
+        max_mb = 0
+    max_bytes = max_mb * 1024 * 1024 if max_mb > 0 else 0
+    return CostLogConfig(enabled=enabled, path=path, max_bytes=max_bytes)
+
+
+def _load_user_md(config_dir: str) -> str:
+    """读取 narnat.md 用户自定义指令，不存在或为空返回空串"""
+    path = os.path.join(config_dir, NARNAT_MD)
+    if not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+# narnat.md 子代理隐藏区块：<!-- subagent:hide --> ... <!-- /subagent:hide -->
+# headless（nn -p）时整块剥离：子代理继承其余全部内容，唯独不感知子代理调度能力。
+_SUBAGENT_HIDE_RE = re.compile(
+    r"<!--\s*subagent:hide\s*-->.*?<!--\s*/subagent:hide\s*-->",
+    re.DOTALL,
+)
+
+
+def _strip_subagent_hidden(md: str) -> str:
+    """移除 narnat.md 中标记为 subagent:hide 的区块"""
+    return _SUBAGENT_HIDE_RE.sub("", md)
+
+
+def _build_system_prompt(model: str, user_md: str, cwd: str = "", os_name: str = "", shell_name: str = "") -> str:
+    """拼接系统prompt：基础prompt + 用户自定义"""
+    parts = [BASE_PROMPT_TEMPLATE.format(
+        model=model,
+        cwd=cwd or os.getcwd(),
+        platform=os_name or platform.system(),
+        shell=shell_name or ("cmd.exe" if sys.platform == "win32" else "bash"),
+    )]
+    if user_md:
+        parts.append(user_md)
+    return "\n".join(parts)
+
+
+def load_config(project_root: Optional[str] = None, headless: bool = False) -> Config:
+    """
+    加载全部配置，返回不可变的 Config 对象。
+
+    1. 定位项目根目录（含 .narnat 的目录）
+    2. 创建 .narnat 子目录结构（config/ data/ logs/）
+    3. 读取 narnat.json → 全部配置
+    4. 读取 narnat.md → 用户自定义指令（headless 时剥离 subagent:hide 区块）
+    5. 拼接系统prompt
+    6. 单位转换在此完成，外部直接用最终单位
+    """
+    root = os.path.abspath(project_root or _find_project_root())
+    narnat_dir = os.path.join(root, NARNAT_DIR)
+    config_dir = os.path.join(narnat_dir, CONFIG_SUBDIR)
+    data_dir = os.path.join(narnat_dir, DATA_SUBDIR)
+    logs_dir = os.path.join(narnat_dir, LOGS_SUBDIR)
+
+    # 确保 .narnat 及子目录存在（logs 目录由 logger.start() 在 debug 模式下按需创建）
+    os.makedirs(config_dir, exist_ok=True)
+    os.makedirs(data_dir, exist_ok=True)
+
+    # 确保关键配置文件存在
+    for fname in (NARNAT_JSON, NARNAT_MD):
+        fpath = os.path.join(config_dir, fname)
+        if not os.path.isfile(fpath):
+            with open(fpath, "w", encoding="utf-8") as f:
+                if fname == NARNAT_JSON:
+                    json.dump({
+                        "智能体": {
+                            "接口密钥": DEFAULT_API_KEY,
+                            "接口地址": DEFAULT_BASE_URL,
+                            "模型": {
+                                "当前": DEFAULT_MODEL,
+                                "列表": [DEFAULT_MODEL],
+                            },
+                            "协议": "anthropic",
+                            "温度": None,
+                            "最大输出token数": 128000,
+                            "上下文窗口大小": DEFAULT_CONTEXT_WINDOW,
+                            "目标模式最大轮数": DEFAULT_GOAL_MAX_ROUNDS,
+                            "思考": {
+                                "启用": True,
+                                "强度": "high",
+                                "强度选项": {"high": "高", "max": "全开"},
+                            },
+                            "LLM重试次数": 3,
+                        },
+                        "余额查询": {
+                            "启用": True,
+                            "查询地址": "https://api.deepseek.com/user/balance",
+                            "认证方式": "bearer",
+                            "响应路径": "balance_infos.0.total_balance",
+                            "货币路径": "balance_infos.0.currency",
+                        },
+                        "接口密钥组": {"websearch": "", "websearch_url": "https://api.anysearch.com/mcp"},
+                        "定价": {"模型": {}},
+                        "费用日志": {"启用": False, "输出文件": "", "最大容量MB": 50},
+                        "界面": {
+                            "show_cost": False,
+                            "show_balance": False,
+                            "max_output_tokens": 128000
+                        },
+                        "工具": {"输出上限KB": DEFAULT_MAX_TOOL_OUTPUT_KB, "超时上限秒": DEFAULT_MAX_TIMEOUT_SECONDS},
+                        "会话": {"自动保存Token量": DEFAULT_AUTO_SAVE_TOKENS},
+                        "压缩": {
+                            "占比显示": DEFAULT_SHOW_RATIO,
+                            "告警": DEFAULT_WARN_RATIO,
+                            "压缩": DEFAULT_COMPRESS_RATIO,
+                            "保留尾部": DEFAULT_COMPRESS_RETAIN_TOKENS,
+                        },
+                        "计划": {},
+                        "忽略目录": DEFAULT_IGNORE_DIRS,
+                    }, f, indent=2, ensure_ascii=False)
+                else:
+                    f.write("")
+
+    # 读取配置
+    data = _load_json(config_dir)
+
+    # 构建各子配置
+    ai_config = _build_ai_config(data)
+    api_keys = data.get("接口密钥组", {})
+    pricing_config = _build_pricing_config(data)
+    balance_config = _build_balance_config(data)
+    cost_log_config = _build_cost_log_config(data, data_dir)
+    ui_config = _build_ui_config(data, ai_config.max_tokens or 128000)
+
+    # 读取用户自定义指令
+    user_md = _load_user_md(config_dir)
+    if headless:
+        user_md = _strip_subagent_hidden(user_md)
+    system_prompt = _build_system_prompt(
+        model=ai_config.model,
+        user_md=user_md,
+        cwd=os.getcwd(),
+        os_name=platform.system(),
+        # 修正: Windows下Shell工具实际用cmd.exe（原为PowerShell，事实错误）。
+        # 当前BASE_PROMPT_TEMPLATE未引用{shell}，此值仅备将来模板使用
+        shell_name="cmd.exe" if sys.platform == "win32" else "bash",
+    )
+
+    # ── 单位转换在此完成 ──
+    max_output_kb = int(data.get("工具", {}).get("输出上限KB", DEFAULT_MAX_TOOL_OUTPUT_KB))
+    max_output_chars = max_output_kb * 1024 if max_output_kb > 0 else 0
+
+    # 压缩保留尾部：0 是合法值（关闭保留），不能用 `or` 兜底；负数按 0 处理
+    _retain_raw = _coerce(data.get("压缩", {}).get("保留尾部"), int)
+    compress_retain = (DEFAULT_COMPRESS_RETAIN_TOKENS if _retain_raw is None
+                       else max(0, _retain_raw))
+
+    # 补充 AIConfig 的 retry_count（从JSON读取，不在 _build_ai_config 中处理）
+    ai_config = AIConfig(
+        api_key=ai_config.api_key,
+        base_url=ai_config.base_url,
+        model=ai_config.model,
+        model_options=ai_config.model_options,
+        protocol=ai_config.protocol,
+        temperature=ai_config.temperature,
+        max_tokens=ai_config.max_tokens,
+        thinking_enabled=ai_config.thinking_enabled,
+        thinking_effort=ai_config.thinking_effort,
+        thinking_passback=ai_config.thinking_passback,
+        thinking_options=ai_config.thinking_options,
+        context_window=ai_config.context_window,
+        retry_count=int(data.get("智能体", {}).get("LLM重试次数", 3)),
+        goal_max_rounds=ai_config.goal_max_rounds,
+    )
+
+    return Config(
+        ai=ai_config,
+        paths=PathConfig(
+            project_root=root,
+            narnat_dir=narnat_dir,
+            config_dir=config_dir,
+            data_dir=data_dir,
+            logs_dir=logs_dir,
+        ),
+        tools=ToolConfig(
+            max_sessions=int(data.get("工具", {}).get("SSH最大会话数", 5)),
+            max_transfer_mb=int(data.get("工具", {}).get("最大传输文件MB", 100)),
+            max_output_chars=max_output_chars,
+            max_timeout_seconds=int(data.get("工具", {}).get("超时上限秒", DEFAULT_MAX_TIMEOUT_SECONDS)),
+            ignore_dirs=tuple(data.get("忽略目录") or []),
+        ),
+        safety=SafetyConfig(
+            git_skip_confirm=bool(data.get("工具", {}).get("git免确认", DEFAULT_GIT_SKIP)),
+            rm_skip_confirm=bool(data.get("工具", {}).get("rm免确认", DEFAULT_RM_SKIP)),
+        ),
+        plan=PlanConfig(
+            require_plan=bool(data.get("计划", {}).get("计划优先", DEFAULT_REQUIRE_PLAN)),
+            min_tools=int(data.get("计划", {}).get("计划最低工具数", DEFAULT_MIN_TOOLS)),
+        ),
+        session=SessionConfig(
+            auto_save=bool(data.get("会话", {}).get("自动保存", DEFAULT_AUTO_SAVE)),
+            auto_save_tokens=_parse_token_amount(
+                data.get("会话", {}).get("自动保存Token量"), DEFAULT_AUTO_SAVE_TOKENS),
+            show_ratio=bool(data.get("压缩", {}).get("占比显示", DEFAULT_SHOW_RATIO)),
+            warn_ratio=_coerce(data.get("压缩", {}).get("告警"), int) or DEFAULT_WARN_RATIO,
+            compress_ratio=_coerce(data.get("压缩", {}).get("压缩"), int) or DEFAULT_COMPRESS_RATIO,
+            retain_tokens=compress_retain,
+        ),
+        skills=SkillConfig(project_roots=_parse_project_skill_roots(data)),
+        pricing=pricing_config,
+        balance=balance_config,
+        cost_log=cost_log_config,
+        ui=ui_config,
+        api_keys=api_keys,
+        system_prompt=system_prompt,
+    )

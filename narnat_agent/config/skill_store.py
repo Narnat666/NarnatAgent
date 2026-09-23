@@ -1,5 +1,7 @@
-"""
-技能加载 —— 系统技能(.narnat/config/skills/) + 项目技能(工作目录下自动发现的 skills 目录)
+"""技能加载 —— 系统技能（`.narnat/config/skills/`）与项目技能（工作目录下自动发现的 skills 目录）。
+
+契约来源：`openspec/changes/recast-v2/specs/config/spec.md`
+（「项目技能目录三态」；`.narnat/config/skills/` 属「磁盘路径布局」已发布契约）。
 
 技能来源（加载时按此顺序）:
   1. 系统技能: <narnat_dir>/config/skills/  （exe 同目录，原有行为不变）
@@ -11,19 +13,20 @@
      - 目录内含 SKILL.md 或恰好一个 .md 时，可直接用目录名加载
      - 目录内多个 .md 且无 SKILL.md 时，用目录名加载会提示可选文件
 
-load_skill 额外返回实际读取的文件路径，供调用方告知模型"本技能目录"
+`load_skill` 额外返回实际读取的文件路径，供调用方告知模型"本技能目录"
 （技能正文里的相对路径以此为基准）。
+
+两个深度概念（值分别为 DEFAULT_SKILL_SCAN_DEPTH=4 与 SKILL_TREE_MAX_DEPTH=8）：
+前者是"自动发现 skills 目录"的递归深度，后者是"技能树枚举"的目录嵌套上限。
 """
+from __future__ import annotations
 
 import os
 import re
-from typing import List
 
-from .defaults import CONFIG_SUBDIR, DEFAULT_SKILL_SCAN_DEPTH
+from .defaults import CONFIG_SUBDIR, DEFAULT_SKILL_SCAN_DEPTH, SKILLS_SUBDIR, SKILL_TREE_MAX_DEPTH
 
-# 技能树目录递归深度上限（兜底；防环主要靠 realpath 已访问集合）。
-# 正常技能目录嵌套不超过 2-3 层，8 层足够宽裕。
-_MAX_DIR_DEPTH = 8
+__all__ = ["load_skill", "list_skill_tree"]
 
 
 def load_skill(narnat_dir: str, name: str,
@@ -35,7 +38,7 @@ def load_skill(narnat_dir: str, name: str,
 
     path: 实际读取的技能文件绝对路径（未找到/读取失败为 ""）。
 
-    project_roots:
+    project_roots（spec「项目技能目录三态」）:
       None      → 自动发现（扫描工作目录下所有名为 skills 的目录）
       ()        → 关闭项目技能，只加载系统技能
       非空元组  → 仅使用显式指定的技能根目录（相对工作目录，支持绝对路径）
@@ -69,7 +72,7 @@ def list_skill_tree(narnat_dir: str,
                     project_roots=None,
                     cwd: str = "",
                     ignore_dirs: tuple = (),
-                    scan_depth: int = DEFAULT_SKILL_SCAN_DEPTH) -> List[dict]:
+                    scan_depth: int = DEFAULT_SKILL_SCAN_DEPTH) -> list:
     """技能树（供 /skill 按层级 Tab 补全）。
 
     project_roots 语义同 load_skill：None=自动发现；()=关闭项目技能；非空=显式指定。
@@ -82,7 +85,7 @@ def list_skill_tree(narnat_dir: str,
         其余目录显示为 "name/" 形式供逐层进入。
     """
     tree = []
-    skills_dir = os.path.join(narnat_dir, CONFIG_SUBDIR, "skills")
+    skills_dir = os.path.join(narnat_dir, CONFIG_SUBDIR, SKILLS_SUBDIR)
     if os.path.isdir(skills_dir):
         try:
             for entry in sorted(os.listdir(skills_dir)):
@@ -113,8 +116,8 @@ def _project_roots(narnat_dir: str, project_roots, cwd: str,
     """解析项目技能根目录列表。
 
     - None → 自动发现（扫描工作目录下所有名为 skills 的目录，排除系统技能目录）
-    - ()  → 空列表
-    - 非空元组 → 按显式列表解析（相对 cwd）
+    - ()  → 空列表（关闭项目技能扫描）
+    - 非空元组 → 按显式列表解析（相对 cwd；不存在的项静默丢弃）
     """
     if project_roots is not None:
         bases = []
@@ -135,7 +138,7 @@ def _discover_skill_roots(cwd: str, narnat_dir: str,
     - 发现 skills 目录后不再进入其内部（技能内容本身不再找技能根）
     - 排除系统技能目录本身（避免与系统技能重复列出）
     """
-    system_skills = os.path.realpath(os.path.join(narnat_dir, CONFIG_SUBDIR, "skills"))
+    system_skills = os.path.realpath(os.path.join(narnat_dir, CONFIG_SUBDIR, SKILLS_SUBDIR))
     ignores = set(ignore_dirs or ())
     roots = []
 
@@ -152,7 +155,7 @@ def _discover_skill_roots(cwd: str, narnat_dir: str,
             p = os.path.join(path, entry)
             if not os.path.isdir(p):
                 continue
-            if entry.lower() == "skills":
+            if entry.lower() == SKILLS_SUBDIR:
                 if os.path.realpath(p) != system_skills:
                     roots.append(p)
                 continue
@@ -164,7 +167,7 @@ def _discover_skill_roots(cwd: str, narnat_dir: str,
 
 def _load_system_skill(narnat_dir: str, name: str) -> tuple:
     """原有系统技能查找逻辑。未找到返回 ("", "", "")。"""
-    skills_dir = os.path.join(narnat_dir, CONFIG_SUBDIR, "skills")
+    skills_dir = os.path.join(narnat_dir, CONFIG_SUBDIR, SKILLS_SUBDIR)
     path = os.path.join(skills_dir, f"{name}.md")
     if os.path.isfile(path):
         return _read(os.path.realpath(path))
@@ -228,9 +231,9 @@ def _scan_dir(abs_dir: str, visited=None, depth: int = 0) -> dict:
     """扫描目录，返回 {名字: 节点}（仅 .md 文件与含 .md 的子目录）。
 
     visited: 已访问 realpath 集合 —— 防 junction/symlink 环导致无限递归；
-    depth: 相对技能根的深度，超过 _MAX_DIR_DEPTH 停止深入（兜底，正常技能目录远达不到）。
+    depth: 相对技能根的深度，超过 SKILL_TREE_MAX_DEPTH 停止深入（兜底，正常技能目录远达不到）。
     """
-    if depth > _MAX_DIR_DEPTH:
+    if depth > SKILL_TREE_MAX_DEPTH:
         return {}
     real = os.path.realpath(abs_dir)
     if visited is None:

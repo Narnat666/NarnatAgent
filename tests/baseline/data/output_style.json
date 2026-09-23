@@ -1,0 +1,273 @@
+{
+  "generated_by": "v2/tests/baseline/extract_old.py",
+  "source": "narnat_agent（旧实现，原位未动）",
+  "note": "随机标签 → [<TAG>]；时间文本 → <YYYY-MM-DD HH:MM>/<MM-DD HH:MM>/<HH:MM>/<MM-DD>",
+  "module": "narnat_agent.output",
+  "groups": {
+    "output._parse_recipe": [
+      {
+        "id": "empty",
+        "input": {
+          "value": ""
+        },
+        "result": ""
+      },
+      {
+        "id": "spaces_only",
+        "input": {
+          "value": "   "
+        },
+        "result": ""
+      },
+      {
+        "id": "bold",
+        "input": {
+          "value": "bold"
+        },
+        "result": "\u001b[1m"
+      },
+      {
+        "id": "bold_primary",
+        "input": {
+          "value": "bold primary"
+        },
+        "result": "\u001b[1m\u001b[38;2;255;255;208m"
+      },
+      {
+        "id": "italic_dim_secondary",
+        "input": {
+          "value": "italic dim secondary"
+        },
+        "result": "\u001b[3m\u001b[2m\u001b[38;2;100;116;139m"
+      },
+      {
+        "id": "underline_error",
+        "input": {
+          "value": "underline error"
+        },
+        "result": "\u001b[4m\u001b[38;2;248;113;113m"
+      },
+      {
+        "id": "hex_fg",
+        "input": {
+          "value": "#112233"
+        },
+        "result": "\u001b[38;2;17;34;51m"
+      },
+      {
+        "id": "hex_bg",
+        "input": {
+          "value": "bg:#112233"
+        },
+        "result": "\u001b[48;2;17;34;51m"
+      },
+      {
+        "id": "bg_named",
+        "input": {
+          "value": "bg:primary"
+        },
+        "result": "\u001b[38;2;255;255;208m"
+      },
+      {
+        "id": "invalid_cn_token",
+        "input": {
+          "value": "bold 蓝"
+        },
+        "result": "\u001b[1m"
+      },
+      {
+        "id": "invalid_en_token",
+        "input": {
+          "value": "bold unknown"
+        },
+        "result": "\u001b[1m"
+      },
+      {
+        "id": "two_colors",
+        "input": {
+          "value": "primary secondary"
+        },
+        "result": "\u001b[38;2;255;255;208m\u001b[38;2;100;116;139m"
+      },
+      {
+        "id": "upper_style_ignored",
+        "input": {
+          "value": "BOLD"
+        },
+        "result": ""
+      }
+    ],
+    "output._hex_to_ansi": [
+      {
+        "id": "fg_1a2b3c",
+        "input": {
+          "hex": "#1A2B3C",
+          "bg": false
+        },
+        "result": "\u001b[38;2;26;43;60m"
+      },
+      {
+        "id": "bg_1a2b3c",
+        "input": {
+          "hex": "#1A2B3C",
+          "bg": true
+        },
+        "result": "\u001b[48;2;26;43;60m"
+      },
+      {
+        "id": "no_hash_fg",
+        "input": {
+          "hex": "FF0000",
+          "bg": false
+        },
+        "result": "\u001b[38;2;255;0;0m"
+      },
+      {
+        "id": "black_fg",
+        "input": {
+          "hex": "#000000",
+          "bg": false
+        },
+        "result": "\u001b[38;2;0;0;0m"
+      }
+    ],
+    "output._resolve_ptk_style": [
+      {
+        "id": "bold_primary",
+        "input": {
+          "value": "bold primary"
+        },
+        "result": "bold #FFFFD0"
+      },
+      {
+        "id": "unknown_name",
+        "input": {
+          "value": "纯白"
+        },
+        "result": "纯白"
+      },
+      {
+        "id": "empty",
+        "input": {
+          "value": ""
+        },
+        "result": ""
+      },
+      {
+        "id": "hex_passthrough",
+        "input": {
+          "value": "bold #00ff00"
+        },
+        "result": "bold #00ff00"
+      },
+      {
+        "id": "accent",
+        "input": {
+          "value": "accent"
+        },
+        "result": "#5EEAD4"
+      }
+    ],
+    "output.apply_style(默认色板)": [
+      {
+        "id": "default_style",
+        "input": {
+          "colors": {
+            "primary": "#FFFFD0",
+            "secondary": "#64748B",
+            "user": "#FFFFFF",
+            "accent": "#5EEAD4",
+            "success": "#34D399",
+            "warning": "#FBBF24",
+            "error": "#F87171",
+            "link": "#A78BFA",
+            "decoration": "#E879F9",
+            "emphasis": "#FB923C",
+            "code_bg": "#0F172A"
+          }
+        },
+        "result": {
+          "tokens": {
+            "C_PRIMARY": "\u001b[38;2;255;255;208m",
+            "C_SECONDARY": "\u001b[38;2;100;116;139m",
+            "C_USER": "\u001b[38;2;255;255;255m",
+            "C_ACCENT": "\u001b[38;2;94;234;212m",
+            "C_SUCCESS": "\u001b[38;2;52;211;153m",
+            "C_WARNING": "\u001b[38;2;251;191;36m",
+            "C_ERROR": "\u001b[38;2;248;113;113m",
+            "C_LINK": "\u001b[38;2;167;139;250m",
+            "C_DECORATION": "\u001b[38;2;232;121;249m",
+            "C_EMPHASIS": "\u001b[38;2;251;146;60m",
+            "C_CODE_BG": "\u001b[48;2;15;23;42m",
+            "MD_H1": "\u001b[1m\u001b[38;2;94;234;212m",
+            "MD_CODE": "\u001b[38;2;251;191;36m",
+            "MD_TABLE_BORDER": "\u001b[38;2;167;139;250m",
+            "CB_LANG_CYAN": "\u001b[38;2;94;234;212m",
+            "DIFF_ADDED": "\u001b[38;2;52;211;153m",
+            "UI_SEPARATOR": "\u001b[38;2;100;116;139m",
+            "CMD_ERROR": "\u001b[38;2;248;113;113m"
+          },
+          "ptk": {
+            "symbol": "bold #00ff00",
+            "text": "#FFFFFF",
+            "custom": "#FFFFD0"
+          },
+          "base_hex": {
+            "primary": "#FFFFD0",
+            "secondary": "#64748B",
+            "user": "#FFFFFF",
+            "accent": "#5EEAD4",
+            "success": "#34D399",
+            "warning": "#FBBF24",
+            "error": "#F87171",
+            "link": "#A78BFA",
+            "decoration": "#E879F9",
+            "emphasis": "#FB923C",
+            "code_bg": "#0F172A"
+          },
+          "display_state": {
+            "show_cost": false,
+            "show_balance": false,
+            "max_tokens": 128000,
+            "show_ratio": false,
+            "context_window": 1000000
+          }
+        }
+      }
+    ],
+    "output._hex_to_ansi(非TrueColor降级)": [
+      {
+        "id": "fg_1a2b3c",
+        "input": {
+          "hex": "#1A2B3C",
+          "bg": false
+        },
+        "result": "\u001b[30m"
+      },
+      {
+        "id": "bg_1a2b3c",
+        "input": {
+          "hex": "#1A2B3C",
+          "bg": true
+        },
+        "result": "\u001b[40m"
+      },
+      {
+        "id": "no_hash_fg",
+        "input": {
+          "hex": "FF0000",
+          "bg": false
+        },
+        "result": "\u001b[91m"
+      },
+      {
+        "id": "black_fg",
+        "input": {
+          "hex": "#000000",
+          "bg": false
+        },
+        "result": "\u001b[30m"
+      }
+    ]
+  }
+}

@@ -1,0 +1,278 @@
+{
+  "generated_by": "v2/tests/baseline/extract_old.py",
+  "source": "narnat_agent（旧实现，原位未动）",
+  "note": "随机标签 → [<TAG>]；时间文本 → <YYYY-MM-DD HH:MM>/<MM-DD HH:MM>/<HH:MM>/<MM-DD>",
+  "module": "narnat_agent.tools.param_utils / registry",
+  "groups": {
+    "param_utils.to_bool": [
+      {
+        "id": "bool_true",
+        "input": {
+          "v": true
+        },
+        "result": true
+      },
+      {
+        "id": "bool_false",
+        "input": {
+          "v": false
+        },
+        "result": false
+      },
+      {
+        "id": "str_true",
+        "input": {
+          "v": "true"
+        },
+        "result": true
+      },
+      {
+        "id": "str_TRUE",
+        "input": {
+          "v": "TRUE"
+        },
+        "result": true
+      },
+      {
+        "id": "str_yes_padded",
+        "input": {
+          "v": " yes "
+        },
+        "result": true
+      },
+      {
+        "id": "str_on",
+        "input": {
+          "v": "on"
+        },
+        "result": true
+      },
+      {
+        "id": "str_1",
+        "input": {
+          "v": "1"
+        },
+        "result": true
+      },
+      {
+        "id": "str_t",
+        "input": {
+          "v": "t"
+        },
+        "result": true
+      },
+      {
+        "id": "str_y",
+        "input": {
+          "v": "y"
+        },
+        "result": true
+      },
+      {
+        "id": "str_false",
+        "input": {
+          "v": "false"
+        },
+        "result": false
+      },
+      {
+        "id": "str_0",
+        "input": {
+          "v": "0"
+        },
+        "result": false
+      },
+      {
+        "id": "str_no",
+        "input": {
+          "v": "no"
+        },
+        "result": false
+      },
+      {
+        "id": "str_off",
+        "input": {
+          "v": "off"
+        },
+        "result": false
+      },
+      {
+        "id": "str_f",
+        "input": {
+          "v": "f"
+        },
+        "result": false
+      },
+      {
+        "id": "str_n",
+        "input": {
+          "v": "n"
+        },
+        "result": false
+      },
+      {
+        "id": "str_empty",
+        "input": {
+          "v": ""
+        },
+        "result": false
+      },
+      {
+        "id": "str_spaces",
+        "input": {
+          "v": "  "
+        },
+        "result": false
+      },
+      {
+        "id": "str_other",
+        "input": {
+          "v": "maybe"
+        },
+        "result": true
+      },
+      {
+        "id": "int_1",
+        "input": {
+          "v": 1
+        },
+        "result": true
+      },
+      {
+        "id": "int_0",
+        "input": {
+          "v": 0
+        },
+        "result": false
+      },
+      {
+        "id": "int_neg",
+        "input": {
+          "v": -1
+        },
+        "result": true
+      },
+      {
+        "id": "float",
+        "input": {
+          "v": 2.5
+        },
+        "result": true
+      },
+      {
+        "id": "none",
+        "input": {
+          "v": null
+        },
+        "result": false
+      },
+      {
+        "id": "empty_list",
+        "input": {
+          "v": []
+        },
+        "result": false
+      },
+      {
+        "id": "list_with_zero",
+        "input": {
+          "v": [
+            0
+          ]
+        },
+        "result": true
+      }
+    ],
+    "registry._friendly_type_error": [
+      {
+        "id": "unknown_param",
+        "input": {
+          "tool": "Edit",
+          "err": "Edit.execute() got an unexpected keyword argument 'filepath'"
+        },
+        "result": "收到未知参数 'filepath'。Edit 的有效参数: file_path, old_string, new_string, replace_all, device"
+      },
+      {
+        "id": "missing_one",
+        "input": {
+          "tool": "Read",
+          "err": "Read.execute() missing 1 required positional argument: 'file_path'"
+        },
+        "result": "缺少必填参数: file_path。Read 的有效参数: file_path, offset, limit, device"
+      },
+      {
+        "id": "missing_two",
+        "input": {
+          "tool": "Read",
+          "err": "missing 2 required positional arguments: 'a' and 'b'"
+        },
+        "result": "缺少必填参数: a, b。Read 的有效参数: file_path, offset, limit, device"
+      },
+      {
+        "id": "other_type_error",
+        "input": {
+          "tool": "Edit",
+          "err": "boom"
+        },
+        "result": "boom"
+      },
+      {
+        "id": "unknown_tool_impl",
+        "input": {
+          "tool": "NoSuchTool",
+          "err": "unexpected keyword argument 'x'"
+        },
+        "result": "unexpected keyword argument 'x'"
+      }
+    ],
+    "registry.execute(错误路径)": [
+      {
+        "id": "unknown_tool",
+        "input": {
+          "name": "NoSuchTool",
+          "arguments": {}
+        },
+        "result": {
+          "llm_result": {
+            "text": "[错误: 未知工具: NoSuchTool] [<TAG>]",
+            "has_tag": true,
+            "tag_count": 1
+          },
+          "color_diff": ""
+        }
+      },
+      {
+        "id": "edit_unknown_param",
+        "input": {
+          "name": "Edit",
+          "arguments": {
+            "filepath": "x"
+          }
+        },
+        "result": {
+          "llm_result": {
+            "text": "[错误: 工具参数错误(Edit): 收到未知参数 'filepath'。Edit 的有效参数: file_path, old_string, new_string, replace_all, device] [<TAG>]",
+            "has_tag": true,
+            "tag_count": 1
+          },
+          "color_diff": ""
+        }
+      },
+      {
+        "id": "read_missing_param",
+        "input": {
+          "name": "Read",
+          "arguments": {}
+        },
+        "result": {
+          "llm_result": {
+            "text": "[错误: 工具参数错误(Read): 缺少必填参数: file_path。Read 的有效参数: file_path, offset, limit, device] [<TAG>]",
+            "has_tag": true,
+            "tag_count": 1
+          },
+          "color_diff": ""
+        }
+      }
+    ]
+  }
+}

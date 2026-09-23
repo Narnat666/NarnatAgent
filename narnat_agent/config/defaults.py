@@ -1,5 +1,18 @@
-"""
-默认配置常量 —— 压缩prompt模板、阈值等
+"""配置默认值中心 —— 全部默认常量、prompt 模板、thinking 映射表与首次生成模板。
+
+对应 spec：`openspec/changes/recast-v2/specs/config/spec.md`
+（「首次运行初始化」「数值解析与容错」「磁盘路径布局」等 Requirement）。
+
+搬运约定（值不得变）：
+- 全部常量逐项搬运自旧实现 `narnat_agent/config/defaults.py`；
+- 旧实现散落在 loader 生成逻辑里的硬编码值收敛到本模块单点：
+  `DEFAULT_UI_MAX_OUTPUT_TOKENS` / `DEFAULT_LLM_RETRY_COUNT` /
+  `DEFAULT_TOOL_MAX_SESSIONS` / `DEFAULT_TOOL_MAX_TRANSFER_MB` /
+  `DEFAULT_COST_LOG_MAX_MB` / `DEFAULT_BALANCE_*`；
+- `build_first_run_config()` 是首次生成 narnat.json 的唯一模板来源
+  （键结构、键顺序、值均为已发布契约）；
+- `DEFAULT_IGNORE_DIRS` 由 list 改为 tuple：内容与 JSON 序列化结果不变，
+  但防止种子列表被运行时代码原地篡改（零观察差异的结构收敛）。
 """
 
 # ── 自动保存默认值 ──
@@ -15,6 +28,10 @@ DEFAULT_MAX_TOOL_OUTPUT_KB = 64
 
 # ── 工具超时全局上限（秒），0=不限制 ──
 DEFAULT_MAX_TIMEOUT_SECONDS = 1800
+
+# ── 工具会话/传输默认值（缺失回落值，与首次生成模板同源）──
+DEFAULT_TOOL_MAX_SESSIONS = 5      # SSH/串口最大会话数
+DEFAULT_TOOL_MAX_TRANSFER_MB = 100  # 文件传输上限（MB）
 
 # ── MCP 服务器默认值（对标 codex：DEFAULT_STARTUP_TIMEOUT / DEFAULT_TOOL_TIMEOUT）──
 DEFAULT_MCP_STARTUP_TIMEOUT = 30   # 启动 + 握手 + 列工具超时（秒）
@@ -36,6 +53,24 @@ DEFAULT_COMPRESS_RATIO = 95       # 窗口占比 ≥ 此百分比时先压缩再
 # ── 压缩保留尾部预算（token）──
 # 压缩时逐字保留的近期消息预算（启发式估价）；0=不保留（压缩后仅剩摘要，即旧行为）
 DEFAULT_COMPRESS_RETAIN_TOKENS = 16000
+
+# ── 界面显示默认值 ──
+DEFAULT_SHOW_COST = False          # 统计栏显示费用段（首次生成模板 / 解析回落共用）
+DEFAULT_SHOW_BALANCE = False       # 统计栏显示余额段
+DEFAULT_UI_MAX_OUTPUT_TOKENS = 128000  # 统计栏最大输出token默认值（「界面」未配置时取模型配置）
+
+# ── LLM 重试次数默认值 ──
+DEFAULT_LLM_RETRY_COUNT = 3
+
+# ── 余额查询默认值（解析回落值；首次生成模板的启用值见 FIRST_RUN_BALANCE_ENABLED）──
+DEFAULT_BALANCE_ENABLED = False
+DEFAULT_BALANCE_AUTH_METHOD = "bearer"   # "bearer" | "x-api-key"
+
+# ── 费用日志默认值 ──
+DEFAULT_COST_LOG_ENABLED = False
+DEFAULT_COST_LOG_MAX_MB = 50                       # 活动文件容量上限（MB），0=不限制
+DEFAULT_COST_LOG_MAX_BYTES = 50 * 1024 * 1024      # 活动文件容量上限（字节），0=不限制
+COST_LOG_FILENAME = "cost_log.csv"                 # 默认输出文件名（相对 .narnat/data/）
 
 # ── 基础Prompt模板 ──
 BASE_PROMPT_TEMPLATE = """\
@@ -92,6 +127,9 @@ COMPRESS_PROMPT = """你现在是压缩引擎。把以上对话浓缩成一个�
 # 写 [] 表示关闭项目技能扫描。
 DEFAULT_SKILL_SCAN_DEPTH = 4  # 自动发现 skills 目录的最大递归深度（根目录算第1层）
 
+# 技能树内部递归深度上限（技能目录自身的嵌套层数，与上面的"发现深度"是两个维度）。
+SKILL_TREE_MAX_DEPTH = 8
+
 # ── .narnat 目录名 ──
 NARNAT_DIR = ".narnat"
 
@@ -100,11 +138,12 @@ CONFIG_SUBDIR = "config"       # 配置层：静态、用户可编辑
 DATA_SUBDIR = "data"           # 数据层：运行时持久化
 LOGS_SUBDIR = "logs"           # 日志层：可清理
 SESSIONS_SUBDIR = "sessions"   # 会话存档（相对 data/）
+SKILLS_SUBDIR = "skills"       # 系统技能目录（相对 config/）
 
 # ── 忽略目录种子列表 ──
 # 仅用于首次生成 narnat.json 时写入"忽略目录"键（把常见噪音目录作为可见建议写入文件，用户可自行删改）。
 # 运行时以 narnat.json 为准：键缺失或为空 → 不忽略任何目录。
-DEFAULT_IGNORE_DIRS = [".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", ".idea", ".vscode", ".tox", ".nox"]
+DEFAULT_IGNORE_DIRS = (".git", "__pycache__", "node_modules", ".svn", ".hg", "venv", ".venv", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", ".idea", ".vscode", ".tox", ".nox")
 
 # ── 配置文件名（相对于 config/ 子目录） ──
 NARNAT_JSON = "narnat.json"
@@ -118,6 +157,17 @@ DEFAULT_PROTOCOL = "anthropic"          # "openai" | "anthropic"
 DEFAULT_THINKING_ENABLED = True
 DEFAULT_THINKING_EFFORT = "high"      # high / max
 DEFAULT_THINKING_PASSBACK = True      # 思考回传：捕获并回传思考内容（DeepSeek思考模式契约）
+# 思考强度选项（「/thinking」命令可选值 → 显示名）；AIConfig 默认与首次生成模板共用。
+DEFAULT_THINKING_OPTIONS = {"high": "高", "max": "全开"}
+
+# ── 首次生成 narnat.json 的模板专用值 ──
+# 说明：这些值只出现在"首次生成模板"中（用户可见的初始配置），与解析回落默认值分开；
+# 例：余额查询在生成模板中开启（True），而键缺失时的解析回落值是 DEFAULT_BALANCE_ENABLED（False）。
+FIRST_RUN_BALANCE_ENABLED = True
+FIRST_RUN_BALANCE_URL = "https://api.deepseek.com/user/balance"
+FIRST_RUN_BALANCE_VALUE_PATH = "balance_infos.0.total_balance"
+FIRST_RUN_BALANCE_CURRENCY_PATH = "balance_infos.0.currency"
+FIRST_RUN_WEBSEARCH_URL = "https://api.anysearch.com/mcp"
 
 
 # ── Thinking 参数映射表 ──
@@ -137,6 +187,8 @@ DEFAULT_THINKING_PASSBACK = True      # 思考回传：捕获并回传思考内�
 #   "body_top"  → OpenAI: 顶层 kwargs  /  Anthropic: 合并到 body
 #   "body"      → OpenAI: 不用       /  Anthropic: 合并到 body
 #   "extra_body"→ OpenAI: extra_body  /  Anthropic: 合并到 body
+#
+# 注意：遍历顺序即匹配优先级（dict 插入序），前缀互相包含的条目不允许插入更前位置。
 THINKING_PARAM_MAP = {
     # ── DeepSeek (Anthropic 协议) ──
     ("anthropic", "deepseek"): {
@@ -273,7 +325,7 @@ def resolve_thinking_passback(protocol: str, model: str) -> str:
 
 
 def resolve_thinking_params(protocol: str, model: str,
-                            thinking_enabled: bool, effort: str):
+                            thinking_enabled: bool, effort: str) -> tuple:
     """根据协议+模型查找 thinking 参数映射。
 
     Returns:
@@ -326,3 +378,57 @@ def resolve_thinking_params(protocol: str, model: str,
                 d[keys[1]] = actual_effort
 
     return body_top, extra_body
+
+
+def build_first_run_config() -> dict:
+    """首次生成 narnat.json 的完整文档（发布契约：键结构、键顺序、值均不得变）。
+
+    每次调用返回全新 dict（无共享可变对象）；所有值引用本模块常量，
+    唯一的"模板专用值"是 `FIRST_RUN_BALANCE_ENABLED=True`（解析缺省为 False）。
+    """
+    return {
+        "智能体": {
+            "接口密钥": DEFAULT_API_KEY,
+            "接口地址": DEFAULT_BASE_URL,
+            "模型": {
+                "当前": DEFAULT_MODEL,
+                "列表": [DEFAULT_MODEL],
+            },
+            "协议": DEFAULT_PROTOCOL,
+            "温度": None,
+            "最大输出token数": DEFAULT_UI_MAX_OUTPUT_TOKENS,
+            "上下文窗口大小": DEFAULT_CONTEXT_WINDOW,
+            "目标模式最大轮数": DEFAULT_GOAL_MAX_ROUNDS,
+            "思考": {
+                "启用": DEFAULT_THINKING_ENABLED,
+                "强度": DEFAULT_THINKING_EFFORT,
+                "强度选项": dict(DEFAULT_THINKING_OPTIONS),
+            },
+            "LLM重试次数": DEFAULT_LLM_RETRY_COUNT,
+        },
+        "余额查询": {
+            "启用": FIRST_RUN_BALANCE_ENABLED,
+            "查询地址": FIRST_RUN_BALANCE_URL,
+            "认证方式": DEFAULT_BALANCE_AUTH_METHOD,
+            "响应路径": FIRST_RUN_BALANCE_VALUE_PATH,
+            "货币路径": FIRST_RUN_BALANCE_CURRENCY_PATH,
+        },
+        "接口密钥组": {"websearch": "", "websearch_url": FIRST_RUN_WEBSEARCH_URL},
+        "定价": {"模型": {}},
+        "费用日志": {"启用": DEFAULT_COST_LOG_ENABLED, "输出文件": "", "最大容量MB": DEFAULT_COST_LOG_MAX_MB},
+        "界面": {
+            "show_cost": DEFAULT_SHOW_COST,
+            "show_balance": DEFAULT_SHOW_BALANCE,
+            "max_output_tokens": DEFAULT_UI_MAX_OUTPUT_TOKENS,
+        },
+        "工具": {"输出上限KB": DEFAULT_MAX_TOOL_OUTPUT_KB, "超时上限秒": DEFAULT_MAX_TIMEOUT_SECONDS},
+        "会话": {"自动保存Token量": DEFAULT_AUTO_SAVE_TOKENS},
+        "压缩": {
+            "占比显示": DEFAULT_SHOW_RATIO,
+            "告警": DEFAULT_WARN_RATIO,
+            "压缩": DEFAULT_COMPRESS_RATIO,
+            "保留尾部": DEFAULT_COMPRESS_RETAIN_TOKENS,
+        },
+        "计划": {},
+        "忽略目录": list(DEFAULT_IGNORE_DIRS),
+    }

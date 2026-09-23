@@ -1,0 +1,632 @@
+{
+  "generated_by": "v2/tests/baseline/extract_old.py",
+  "source": "narnat_agent（旧实现，原位未动）",
+  "note": "随机标签 → [<TAG>]；时间文本 → <YYYY-MM-DD HH:MM>/<MM-DD HH:MM>/<HH:MM>/<MM-DD>",
+  "module": "narnat_agent.ui.renderer",
+  "groups": {
+    "renderer._display_width": [
+      {
+        "id": "empty",
+        "input": {
+          "text": ""
+        },
+        "result": 0
+      },
+      {
+        "id": "ascii",
+        "input": {
+          "text": "abc"
+        },
+        "result": 3
+      },
+      {
+        "id": "cjk",
+        "input": {
+          "text": "中文"
+        },
+        "result": 4
+      },
+      {
+        "id": "mixed",
+        "input": {
+          "text": "中文abc"
+        },
+        "result": 7
+      },
+      {
+        "id": "ambiguous_arrows",
+        "input": {
+          "text": "→≈±"
+        },
+        "result": 3
+      },
+      {
+        "id": "emoji",
+        "input": {
+          "text": "😀🎉"
+        },
+        "result": 4
+      },
+      {
+        "id": "ansi_colored",
+        "input": {
+          "text": "\u001b[31m红色\u001b[0m"
+        },
+        "result": 4
+      },
+      {
+        "id": "ansi_interleaved",
+        "input": {
+          "text": "a\u001b[1mb\u001b[0mc"
+        },
+        "result": 3
+      },
+      {
+        "id": "fullwidth",
+        "input": {
+          "text": "ＡＢＣ"
+        },
+        "result": 6
+      },
+      {
+        "id": "tab",
+        "input": {
+          "text": "a\tb"
+        },
+        "result": 3
+      }
+    ],
+    "renderer._char_width": [
+      {
+        "id": "ascii_a",
+        "input": {
+          "ch": "a"
+        },
+        "result": 1
+      },
+      {
+        "id": "cjk_zhong",
+        "input": {
+          "ch": "中"
+        },
+        "result": 2
+      },
+      {
+        "id": "arrow",
+        "input": {
+          "ch": "→"
+        },
+        "result": 1
+      },
+      {
+        "id": "emoji_grin",
+        "input": {
+          "ch": "😀"
+        },
+        "result": 2
+      },
+      {
+        "id": "fullwidth_A",
+        "input": {
+          "ch": "Ａ"
+        },
+        "result": 2
+      },
+      {
+        "id": "space",
+        "input": {
+          "ch": " "
+        },
+        "result": 1
+      }
+    ],
+    "renderer._wrap_cell": [
+      {
+        "id": "plain_wrap",
+        "input": {
+          "text": "abcdefgh",
+          "max_width": 3
+        },
+        "result": [
+          "abc\u001b[0m",
+          "def\u001b[0m",
+          "gh"
+        ]
+      },
+      {
+        "id": "cjk_wrap",
+        "input": {
+          "text": "中文测试文本",
+          "max_width": 4
+        },
+        "result": [
+          "中文\u001b[0m",
+          "测试\u001b[0m",
+          "文本"
+        ]
+      },
+      {
+        "id": "ansi_kept",
+        "input": {
+          "text": "\u001b[31mabcdef\u001b[0m",
+          "max_width": 2
+        },
+        "result": [
+          "\u001b[31mab\u001b[0m",
+          "\u001b[31mcd\u001b[0m",
+          "\u001b[31mef\u001b[0m"
+        ]
+      },
+      {
+        "id": "zero_width",
+        "input": {
+          "text": "abc",
+          "max_width": 0
+        },
+        "result": [
+          "abc"
+        ]
+      },
+      {
+        "id": "empty",
+        "input": {
+          "text": "",
+          "max_width": 5
+        },
+        "result": [
+          ""
+        ]
+      },
+      {
+        "id": "exact_fit",
+        "input": {
+          "text": "ab",
+          "max_width": 2
+        },
+        "result": [
+          "ab"
+        ]
+      },
+      {
+        "id": "cjk_exact_fit",
+        "input": {
+          "text": "中文",
+          "max_width": 4
+        },
+        "result": [
+          "中文"
+        ]
+      }
+    ],
+    "renderer.render_line": [
+      {
+        "id": "h1",
+        "input": {
+          "line": "# 标题"
+        },
+        "result": "  \u001b[1m\u001b[38;2;94;234;212m标题\u001b[0m"
+      },
+      {
+        "id": "h2_bold",
+        "input": {
+          "line": "## 二级 **粗体**"
+        },
+        "result": "  \u001b[1m\u001b[38;2;94;234;212m二级 \u001b[1m\u001b[38;2;255;255;208m粗体\u001b[0m\u001b[0m"
+      },
+      {
+        "id": "h3",
+        "input": {
+          "line": "### 三级"
+        },
+        "result": "  \u001b[1m\u001b[38;2;52;211;153m三级\u001b[0m"
+      },
+      {
+        "id": "h4",
+        "input": {
+          "line": "#### 四级"
+        },
+        "result": "  \u001b[1m\u001b[38;2;255;255;208m四级\u001b[0m"
+      },
+      {
+        "id": "h5",
+        "input": {
+          "line": "##### 五级"
+        },
+        "result": "  \u001b[1m\u001b[38;2;255;255;208m五级\u001b[0m"
+      },
+      {
+        "id": "hr_dash",
+        "input": {
+          "line": "---"
+        },
+        "result": "  \u001b[38;2;100;116;139m---\u001b[0m"
+      },
+      {
+        "id": "hr_star",
+        "input": {
+          "line": "***"
+        },
+        "result": "  \u001b[38;2;100;116;139m***\u001b[0m"
+      },
+      {
+        "id": "task_done",
+        "input": {
+          "line": "- [x] 完成任务"
+        },
+        "result": "   \u001b[38;2;52;211;153mv\u001b[0m \u001b[38;2;255;255;208m完成任务\u001b[0m"
+      },
+      {
+        "id": "task_undone",
+        "input": {
+          "line": "- [ ] 未完成"
+        },
+        "result": "   \u001b[38;2;100;116;139mo\u001b[0m \u001b[38;2;255;255;208m未完成\u001b[0m"
+      },
+      {
+        "id": "ul_dash",
+        "input": {
+          "line": "- 无序项"
+        },
+        "result": "   \u001b[38;2;52;211;153m*\u001b[0m \u001b[38;2;255;255;208m无序项\u001b[0m"
+      },
+      {
+        "id": "ul_star",
+        "input": {
+          "line": "* 星号项"
+        },
+        "result": "   \u001b[38;2;52;211;153m*\u001b[0m \u001b[38;2;255;255;208m星号项\u001b[0m"
+      },
+      {
+        "id": "ol_dot",
+        "input": {
+          "line": "1. 有序项"
+        },
+        "result": "   \u001b[38;2;100;116;139m1.\u001b[0m \u001b[38;2;255;255;208m有序项\u001b[0m"
+      },
+      {
+        "id": "ol_paren",
+        "input": {
+          "line": "10) 括号项"
+        },
+        "result": "   \u001b[38;2;100;116;139m10.\u001b[0m \u001b[38;2;255;255;208m括号项\u001b[0m"
+      },
+      {
+        "id": "quote",
+        "input": {
+          "line": "> 引用"
+        },
+        "result": "  \u001b[2m\u001b[38;2;100;116;139m| \u001b[0m\u001b[38;2;255;255;208m引用\u001b[0m"
+      },
+      {
+        "id": "quote_nested",
+        "input": {
+          "line": ">> 嵌套引用"
+        },
+        "result": "  \u001b[2m\u001b[38;2;100;116;139m| | \u001b[0m\u001b[38;2;255;255;208m嵌套引用\u001b[0m"
+      },
+      {
+        "id": "table_row",
+        "input": {
+          "line": "| A | B |"
+        },
+        "result": "    \u001b[38;2;255;255;208mA | B\u001b[0m"
+      },
+      {
+        "id": "table_sep",
+        "input": {
+          "line": "| --- | --- |"
+        },
+        "result": ""
+      },
+      {
+        "id": "paragraph_inline",
+        "input": {
+          "line": "段落 `代码` **粗** ~~删除~~ [链](http://x) ![图](y.png)"
+        },
+        "result": "  \u001b[38;2;255;255;208m段落 \u001b[38;2;251;191;36m代码\u001b[0m \u001b[1m\u001b[38;2;255;255;208m粗\u001b[0m \u001b[38;2;248;113;113m删除\u001b[0m \u001b[38;2;167;139;250m链\u001b[0m \u001b[2m\u001b[38;2;100;116;139m图\u001b[0m\u001b[0m"
+      },
+      {
+        "id": "blank",
+        "input": {
+          "line": ""
+        },
+        "result": ""
+      },
+      {
+        "id": "spaces_only",
+        "input": {
+          "line": "   "
+        },
+        "result": ""
+      },
+      {
+        "id": "indented_table",
+        "input": {
+          "line": "  | 前导空格 | x |"
+        },
+        "result": "  \u001b[38;2;255;255;208m  | 前导空格 | x |\u001b[0m"
+      }
+    ],
+    "renderer._split_cells / _is_table_separator": [
+      {
+        "id": "normal",
+        "input": {
+          "raw": "| a | b |"
+        },
+        "result": {
+          "cells": [
+            "a",
+            "b"
+          ],
+          "is_table_separator": false
+        }
+      },
+      {
+        "id": "no_edges",
+        "input": {
+          "raw": "a | b"
+        },
+        "result": {
+          "cells": [
+            "a",
+            "b"
+          ],
+          "is_table_separator": false
+        }
+      },
+      {
+        "id": "escaped_pipe",
+        "input": {
+          "raw": "| a \\| b | c |"
+        },
+        "result": {
+          "cells": [
+            "a | b",
+            "c"
+          ],
+          "is_table_separator": false
+        }
+      },
+      {
+        "id": "double_pipe",
+        "input": {
+          "raw": "||"
+        },
+        "result": {
+          "cells": [
+            ""
+          ],
+          "is_table_separator": false
+        }
+      },
+      {
+        "id": "single_cell",
+        "input": {
+          "raw": "| a |"
+        },
+        "result": {
+          "cells": [
+            "a"
+          ],
+          "is_table_separator": false
+        }
+      }
+    ],
+    "renderer._fit_widths": [
+      {
+        "id": "plenty",
+        "input": {
+          "natural": [
+            3,
+            5,
+            7
+          ],
+          "avail": 40,
+          "min_col": 2
+        },
+        "result": [
+          9,
+          14,
+          17
+        ]
+      },
+      {
+        "id": "exact_min",
+        "input": {
+          "natural": [
+            3,
+            5,
+            7
+          ],
+          "avail": 6,
+          "min_col": 2
+        },
+        "result": [
+          2,
+          2,
+          2
+        ]
+      },
+      {
+        "id": "below_min",
+        "input": {
+          "natural": [
+            3,
+            5,
+            7
+          ],
+          "avail": 5,
+          "min_col": 2
+        },
+        "result": [
+          2,
+          2,
+          1
+        ]
+      },
+      {
+        "id": "single_col",
+        "input": {
+          "natural": [
+            1
+          ],
+          "avail": 10,
+          "min_col": 2
+        },
+        "result": [
+          10
+        ]
+      },
+      {
+        "id": "no_cols",
+        "input": {
+          "natural": [],
+          "avail": 10,
+          "min_col": 2
+        },
+        "result": []
+      },
+      {
+        "id": "proportional",
+        "input": {
+          "natural": [
+            100,
+            200
+          ],
+          "avail": 30,
+          "min_col": 2
+        },
+        "result": [
+          11,
+          19
+        ]
+      }
+    ],
+    "renderer.InlineRules.render": [
+      {
+        "id": "plain",
+        "input": {
+          "text": "纯文本"
+        },
+        "result": "纯文本"
+      },
+      {
+        "id": "bold",
+        "input": {
+          "text": "**粗体**"
+        },
+        "result": "\u001b[1m\u001b[38;2;255;255;208m粗体\u001b[0m"
+      },
+      {
+        "id": "italic",
+        "input": {
+          "text": "*斜体*"
+        },
+        "result": "\u001b[2m\u001b[38;2;255;255;208m斜体\u001b[0m"
+      },
+      {
+        "id": "strike",
+        "input": {
+          "text": "~~删除~~"
+        },
+        "result": "\u001b[38;2;248;113;113m删除\u001b[0m"
+      },
+      {
+        "id": "code",
+        "input": {
+          "text": "`代码`"
+        },
+        "result": "\u001b[38;2;251;191;36m代码\u001b[0m"
+      },
+      {
+        "id": "link",
+        "input": {
+          "text": "[链接](http://a)"
+        },
+        "result": "\u001b[38;2;167;139;250m链接\u001b[0m"
+      },
+      {
+        "id": "image",
+        "input": {
+          "text": "![图](a.png)"
+        },
+        "result": "\u001b[2m\u001b[38;2;100;116;139m图\u001b[0m"
+      },
+      {
+        "id": "combined",
+        "input": {
+          "text": "**粗** 与 `码` 与 [链](u)"
+        },
+        "result": "\u001b[1m\u001b[38;2;255;255;208m粗\u001b[0m 与 \u001b[38;2;251;191;36m码\u001b[0m 与 \u001b[38;2;167;139;250m链\u001b[0m"
+      },
+      {
+        "id": "escaped_star",
+        "input": {
+          "text": "a\\*b"
+        },
+        "result": "a\\*b"
+      }
+    ],
+    "renderer.CodeBlockRenderer.render": [
+      {
+        "id": "python",
+        "input": {
+          "lang": "python",
+          "body": "def f():\n    return 1",
+          "width": 80
+        },
+        "result": "\u001b[38;2;100;116;139m\u001b[48;2;15;23;42m  -- python --\u001b[0m\n \u001b[48;2;15;23;42m \u001b[38;2;100;116;139m  1 \u001b[0m\u001b[38;2;94;234;212mdef f():\u001b[0m\n \u001b[48;2;15;23;42m \u001b[38;2;100;116;139m  2 \u001b[0m\u001b[38;2;94;234;212m    return 1\u001b[0m"
+      },
+      {
+        "id": "no_lang",
+        "input": {
+          "lang": "",
+          "body": "plain",
+          "width": 80
+        },
+        "result": "\u001b[38;2;100;116;139m\u001b[48;2;15;23;42m  -- code --\u001b[0m\n \u001b[48;2;15;23;42m \u001b[38;2;100;116;139m  1 \u001b[0m\u001b[38;2;100;116;139mplain\u001b[0m"
+      },
+      {
+        "id": "unknown_lang",
+        "input": {
+          "lang": "UnKnown",
+          "body": "x\ny",
+          "width": 40
+        },
+        "result": "\u001b[38;2;100;116;139m\u001b[48;2;15;23;42m  -- unknown --\u001b[0m\n \u001b[48;2;15;23;42m \u001b[38;2;100;116;139m  1 \u001b[0m\u001b[38;2;100;116;139mx\u001b[0m\n \u001b[48;2;15;23;42m \u001b[38;2;100;116;139m  2 \u001b[0m\u001b[38;2;100;116;139my\u001b[0m"
+      },
+      {
+        "id": "trailing_spaces",
+        "input": {
+          "lang": "json",
+          "body": "{\n  \"a\": 1   \n}",
+          "width": 80
+        },
+        "result": "\u001b[38;2;100;116;139m\u001b[48;2;15;23;42m  -- json --\u001b[0m\n \u001b[48;2;15;23;42m \u001b[38;2;100;116;139m  1 \u001b[0m\u001b[38;2;232;121;249m{\u001b[0m\n \u001b[48;2;15;23;42m \u001b[38;2;100;116;139m  2 \u001b[0m\u001b[38;2;232;121;249m  \"a\": 1\u001b[0m\n \u001b[48;2;15;23;42m \u001b[38;2;100;116;139m  3 \u001b[0m\u001b[38;2;232;121;249m}\u001b[0m"
+      }
+    ],
+    "renderer.colorize_diff": [
+      {
+        "id": "empty",
+        "input": {
+          "diff": ""
+        },
+        "result": "\u001b[38;2;100;116;139m[无差异]\u001b[0m"
+      },
+      {
+        "id": "no_diff",
+        "input": {
+          "diff": "[无差异]"
+        },
+        "result": "\u001b[38;2;100;116;139m[无差异]\u001b[0m"
+      },
+      {
+        "id": "unified",
+        "input": {
+          "diff": "--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n ctx"
+        },
+        "result": "\u001b[1m\u001b[38;2;94;234;212m--- a\u001b[0m\n\u001b[1m\u001b[38;2;94;234;212m+++ b\u001b[0m\n\u001b[2m\u001b[38;2;94;234;212m@@ -1 +1 @@\u001b[0m\n\u001b[38;2;248;113;113m-old\u001b[0m\n\u001b[38;2;52;211;153m+new\u001b[0m\n\u001b[38;2;100;116;139m ctx\u001b[0m"
+      }
+    ]
+  }
+}

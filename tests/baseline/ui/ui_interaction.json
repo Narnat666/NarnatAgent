@@ -1,0 +1,2844 @@
+{
+  "generated_by": "v2/tests/baseline/extract_old_ui_interaction.py",
+  "source": "narnat_agent/ui/ui_design.py + ui/session_commands.py（旧实现）",
+  "note": "T3.10 补充基准：ui 交互面输出固化。固定 NARNAT_TERM_WIDTH=100、非纯文本模式、真彩、默认色板。",
+  "module": "narnat_agent.ui",
+  "groups": {
+    "ui_design.show_stats": [
+      {
+        "id": "full|input_12345_output_678_cache_50pct",
+        "input": {
+          "id": "full|input_12345_output_678_cache_50pct",
+          "switches": {
+            "show_cost": true,
+            "show_balance": true,
+            "max_tokens": 128000,
+            "show_ratio": true,
+            "context_window": 1000000
+          },
+          "stats": {
+            "input_tokens": 12345,
+            "output_tokens": 678,
+            "cache_ratio": 0.5,
+            "cost": 12.3456,
+            "balance": 88.5,
+            "thinking_effort": "高"
+          }
+        },
+        "result": "\r  \u001b[38;2;100;116;139m──────────────────────────────────────────────────────────────────────────────────────────────────\u001b[0m\n\r  \u001b[38;2;100;116;139m输入:12.3k 输出:678  缓存:50.0%  思考:高  窗口占比:1%  最大输出:128k\u001b[0m\u001b[38;2;251;191;36m  费用:¥12.3456  余额:¥88.50\u001b[0m\n"
+      },
+      {
+        "id": "cache|zero_hidden",
+        "input": {
+          "id": "cache|zero_hidden",
+          "switches": {
+            "show_cost": true,
+            "show_balance": true,
+            "max_tokens": 128000,
+            "show_ratio": true,
+            "context_window": 1000000
+          },
+          "stats": {
+            "input_tokens": 1200,
+            "output_tokens": 300,
+            "cache_ratio": 0.0,
+            "cost": 1.0,
+            "balance": 10.0,
+            "thinking_effort": "中"
+          }
+        },
+        "result": "\r  \u001b[38;2;100;116;139m──────────────────────────────────────────────────────────────────────────────────────────────────\u001b[0m\n\r  \u001b[38;2;100;116;139m输入:1.2k 输出:300  思考:中  窗口占比:0%  最大输出:128k\u001b[0m\u001b[38;2;251;191;36m  费用:¥1.0000  余额:¥10.00\u001b[0m\n"
+      },
+      {
+        "id": "cache|capped_at_100pct",
+        "input": {
+          "id": "cache|capped_at_100pct",
+          "switches": {
+            "show_cost": true,
+            "show_balance": true,
+            "max_tokens": 128000,
+            "show_ratio": true,
+            "context_window": 1000000
+          },
+          "stats": {
+            "input_tokens": 1200,
+            "output_tokens": 300,
+            "cache_ratio": 1.5,
+            "cost": 1.0,
+            "balance": 10.0,
+            "thinking_effort": "低"
+          }
+        },
+        "result": "\r  \u001b[38;2;100;116;139m──────────────────────────────────────────────────────────────────────────────────────────────────\u001b[0m\n\r  \u001b[38;2;100;116;139m输入:1.2k 输出:300  缓存:100.0%  思考:低  窗口占比:0%  最大输出:128k\u001b[0m\u001b[38;2;251;191;36m  费用:¥1.0000  余额:¥10.00\u001b[0m\n"
+      },
+      {
+        "id": "tokens|below_1000_raw",
+        "input": {
+          "id": "tokens|below_1000_raw",
+          "switches": {
+            "show_cost": true,
+            "show_balance": true,
+            "max_tokens": 128000,
+            "show_ratio": true,
+            "context_window": 1000000
+          },
+          "stats": {
+            "input_tokens": 999,
+            "output_tokens": 1,
+            "cache_ratio": 0.0,
+            "cost": 0.0,
+            "balance": 0.0,
+            "thinking_effort": "高"
+          }
+        },
+        "result": "\r  \u001b[38;2;100;116;139m──────────────────────────────────────────────────────────────────────────────────────────────────\u001b[0m\n\r  \u001b[38;2;100;116;139m输入:999 输出:1  思考:高  窗口占比:0%  最大输出:128k\u001b[0m\u001b[38;2;251;191;36m  费用:¥0.0000\u001b[0m\n"
+      },
+      {
+        "id": "tokens|max_rounding_1500",
+        "input": {
+          "id": "tokens|max_rounding_1500",
+          "switches": {
+            "show_cost": true,
+            "show_balance": true,
+            "max_tokens": 1500,
+            "show_ratio": true,
+            "context_window": 1000000
+          },
+          "stats": {
+            "input_tokens": 1000,
+            "output_tokens": 1000,
+            "cache_ratio": 0.0,
+            "cost": 0.0,
+            "balance": 0.0,
+            "thinking_effort": "高"
+          }
+        },
+        "result": "\r  \u001b[38;2;100;116;139m──────────────────────────────────────────────────────────────────────────────────────────────────\u001b[0m\n\r  \u001b[38;2;100;116;139m输入:1.0k 输出:1.0k  思考:高  窗口占比:0%  最大输出:2k\u001b[0m\u001b[38;2;251;191;36m  费用:¥0.0000\u001b[0m\n"
+      },
+      {
+        "id": "tokens|max_below_1000_raw",
+        "input": {
+          "id": "tokens|max_below_1000_raw",
+          "switches": {
+            "show_cost": true,
+            "show_balance": true,
+            "max_tokens": 500,
+            "show_ratio": true,
+            "context_window": 1000000
+          },
+          "stats": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_ratio": 0.0,
+            "cost": 0.0,
+            "balance": 0.0,
+            "thinking_effort": "max"
+          }
+        },
+        "result": "\r  \u001b[38;2;100;116;139m──────────────────────────────────────────────────────────────────────────────────────────────────\u001b[0m\n\r  \u001b[38;2;100;116;139m输入:0 输出:0  思考:max  窗口占比:--  最大输出:500\u001b[0m\u001b[38;2;251;191;36m  费用:¥0.0000\u001b[0m\n"
+      },
+      {
+        "id": "balance|zero_hidden",
+        "input": {
+          "id": "balance|zero_hidden",
+          "switches": {
+            "show_cost": true,
+            "show_balance": true,
+            "max_tokens": 128000,
+            "show_ratio": true,
+            "context_window": 1000000
+          },
+          "stats": {
+            "input_tokens": 100,
+            "output_tokens": 200,
+            "cache_ratio": 0.0,
+            "cost": 2.5,
+            "balance": 0.0,
+            "thinking_effort": "高"
+          }
+        },
+        "result": "\r  \u001b[38;2;100;116;139m──────────────────────────────────────────────────────────────────────────────────────────────────\u001b[0m\n\r  \u001b[38;2;100;116;139m输入:100 输出:200  思考:高  窗口占比:0%  最大输出:128k\u001b[0m\u001b[38;2;251;191;36m  费用:¥2.5000\u001b[0m\n"
+      },
+      {
+        "id": "balance|negative_hidden",
+        "input": {
+          "id": "balance|negative_hidden",
+          "switches": {
+            "show_cost": true,
+            "show_balance": true,
+            "max_tokens": 128000,
+            "show_ratio": true,
+            "context_window": 1000000
+          },
+          "stats": {
+            "input_tokens": 100,
+            "output_tokens": 200,
+            "cache_ratio": 0.0,
+            "cost": 2.5,
+            "balance": -3.0,
+            "thinking_effort": "高"
+          }
+        },
+        "result": "\r  \u001b[38;2;100;116;139m──────────────────────────────────────────────────────────────────────────────────────────────────\u001b[0m\n\r  \u001b[38;2;100;116;139m输入:100 输出:200  思考:高  窗口占比:0%  最大输出:128k\u001b[0m\u001b[38;2;251;191;36m  费用:¥2.5000\u001b[0m\n"
+      },
+      {
+        "id": "ratio|invalid_context_window",
+        "input": {
+          "id": "ratio|invalid_context_window",
+          "switches": {
+            "show_cost": true,
+            "show_balance": true,
+            "max_tokens": 128000,
+            "show_ratio": true,
+            "context_window": 0
+          },
+          "stats": {
+            "input_tokens": 100,
+            "output_tokens": 200,
+            "cache_ratio": 0.0,
+            "cost": 0.0,
+            "balance": 0.0,
+            "thinking_effort": "高"
+          }
+        },
+        "result": "\r  \u001b[38;2;100;116;139m──────────────────────────────────────────────────────────────────────────────────────────────────\u001b[0m\n\r  \u001b[38;2;100;116;139m输入:100 输出:200  思考:高  窗口占比:--  最大输出:128k\u001b[0m\u001b[38;2;251;191;36m  费用:¥0.0000\u001b[0m\n"
+      },
+      {
+        "id": "ratio|zero_input",
+        "input": {
+          "id": "ratio|zero_input",
+          "switches": {
+            "show_cost": true,
+            "show_balance": true,
+            "max_tokens": 128000,
+            "show_ratio": true,
+            "context_window": 1000000
+          },
+          "stats": {
+            "input_tokens": 0,
+            "output_tokens": 200,
+            "cache_ratio": 0.0,
+            "cost": 0.0,
+            "balance": 0.0,
+            "thinking_effort": "高"
+          }
+        },
+        "result": "\r  \u001b[38;2;100;116;139m──────────────────────────────────────────────────────────────────────────────────────────────────\u001b[0m\n\r  \u001b[38;2;100;116;139m输入:0 输出:200  思考:高  窗口占比:--  最大输出:128k\u001b[0m\u001b[38;2;251;191;36m  费用:¥0.0000\u001b[0m\n"
+      },
+      {
+        "id": "switches|all_off",
+        "input": {
+          "id": "switches|all_off",
+          "switches": {
+            "show_cost": false,
+            "show_balance": false,
+            "max_tokens": 65536,
+            "show_ratio": false,
+            "context_window": 1000000
+          },
+          "stats": {
+            "input_tokens": 4321,
+            "output_tokens": 8765,
+            "cache_ratio": 0.25,
+            "cost": 9.9999,
+            "balance": 77.0,
+            "thinking_effort": "高"
+          }
+        },
+        "result": "\r  \u001b[38;2;100;116;139m──────────────────────────────────────────────────────────────────────────────────────────────────\u001b[0m\n\r  \u001b[38;2;100;116;139m输入:4.3k 输出:8.8k  缓存:25.0%  思考:高  最大输出:66k\u001b[0m\u001b[38;2;251;191;36m\u001b[0m\n"
+      },
+      {
+        "id": "quirks|string_false_switch_is_truthy",
+        "input": {
+          "id": "quirks|string_false_switch_is_truthy",
+          "switches": {
+            "show_cost": "false",
+            "show_balance": "false",
+            "max_tokens": 128000,
+            "show_ratio": true,
+            "context_window": 1000000
+          },
+          "stats": {
+            "input_tokens": 1500,
+            "output_tokens": 2500,
+            "cache_ratio": 0.0,
+            "cost": 3.1416,
+            "balance": 5.0,
+            "thinking_effort": "高"
+          }
+        },
+        "result": "\r  \u001b[38;2;100;116;139m──────────────────────────────────────────────────────────────────────────────────────────────────\u001b[0m\n\r  \u001b[38;2;100;116;139m输入:1.5k 输出:2.5k  思考:高  窗口占比:0%  最大输出:128k\u001b[0m\u001b[38;2;251;191;36m  费用:¥3.1416  余额:¥5.00\u001b[0m\n"
+      }
+    ],
+    "ui_design.show_header": [
+      {
+        "id": "model|narnat",
+        "input": {
+          "id": "model|narnat",
+          "model": "narnat"
+        },
+        "result": "\r  \u001b[38;2;94;234;212mnarnat\u001b[0m\n\r  \u001b[38;2;100;116;139m──────────────────────────────────────────────────────────────────────────────────────────────────\u001b[0m\n"
+      },
+      {
+        "id": "model|long_name",
+        "input": {
+          "id": "model|long_name",
+          "model": "narnat-agent-deepseek-v4-flash"
+        },
+        "result": "\r  \u001b[38;2;94;234;212mnarnat-agent-deepseek-v4-flash\u001b[0m\n\r  \u001b[38;2;100;116;139m──────────────────────────────────────────────────────────────────────────────────────────────────\u001b[0m\n"
+      }
+    ],
+    "ui_design.show_interrupted": [
+      {
+        "id": "message|none_default_prompt",
+        "input": {
+          "id": "message|none_default_prompt"
+        },
+        "result": "\r\n  \u001b[38;2;251;191;36m已打断\u001b[0m\n  \u001b[38;2;100;116;139m继续...\u001b[0m\n"
+      }
+    ],
+    "session_commands._CommandCompleter.get_completions": [
+      {
+        "id": "command|root_all",
+        "input": {
+          "id": "command|root_all",
+          "text": "/",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "clear",
+            "start_position": 0,
+            "meta": "清屏"
+          },
+          {
+            "text": "compact",
+            "start_position": 0,
+            "meta": "压缩上下文"
+          },
+          {
+            "text": "save",
+            "start_position": 0,
+            "meta": "保存会话"
+          },
+          {
+            "text": "ls",
+            "start_position": 0,
+            "meta": "列出已保存会话"
+          },
+          {
+            "text": "cd",
+            "start_position": 0,
+            "meta": "进入会话"
+          },
+          {
+            "text": "rm",
+            "start_position": 0,
+            "meta": "删除子会话"
+          },
+          {
+            "text": "skill",
+            "start_position": 0,
+            "meta": "加载技能"
+          },
+          {
+            "text": "thinking",
+            "start_position": 0,
+            "meta": "思考强度"
+          },
+          {
+            "text": "thinkback",
+            "start_position": 0,
+            "meta": "思考回传"
+          },
+          {
+            "text": "mode",
+            "start_position": 0,
+            "meta": "切换模型"
+          },
+          {
+            "text": "goal",
+            "start_position": 0,
+            "meta": "目标模式"
+          },
+          {
+            "text": "exit",
+            "start_position": 0,
+            "meta": "退出会话"
+          },
+          {
+            "text": "explore",
+            "start_position": 0,
+            "meta": "探索分支"
+          }
+        ]
+      },
+      {
+        "id": "command|free_all",
+        "input": {
+          "id": "command|free_all",
+          "text": "/",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出程序"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "clear",
+            "start_position": 0,
+            "meta": "清屏"
+          },
+          {
+            "text": "compact",
+            "start_position": 0,
+            "meta": "压缩上下文"
+          },
+          {
+            "text": "save",
+            "start_position": 0,
+            "meta": "保存会话"
+          },
+          {
+            "text": "ls",
+            "start_position": 0,
+            "meta": "列出已保存会话"
+          },
+          {
+            "text": "cd",
+            "start_position": 0,
+            "meta": "进入会话"
+          },
+          {
+            "text": "rm",
+            "start_position": 0,
+            "meta": "删除会话"
+          },
+          {
+            "text": "skill",
+            "start_position": 0,
+            "meta": "加载技能"
+          },
+          {
+            "text": "thinking",
+            "start_position": 0,
+            "meta": "思考强度"
+          },
+          {
+            "text": "thinkback",
+            "start_position": 0,
+            "meta": "思考回传"
+          },
+          {
+            "text": "mode",
+            "start_position": 0,
+            "meta": "切换模型"
+          },
+          {
+            "text": "goal",
+            "start_position": 0,
+            "meta": "目标模式"
+          },
+          {
+            "text": "exit",
+            "start_position": 0,
+            "meta": "退出程序"
+          }
+        ]
+      },
+      {
+        "id": "command|child_all",
+        "input": {
+          "id": "command|child_all",
+          "text": "/",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "暂离探索分支",
+              "/done": "完成探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "clear",
+            "start_position": 0,
+            "meta": "清屏"
+          },
+          {
+            "text": "compact",
+            "start_position": 0,
+            "meta": "压缩上下文"
+          },
+          {
+            "text": "ls",
+            "start_position": 0,
+            "meta": "列出已保存会话"
+          },
+          {
+            "text": "cd",
+            "start_position": 0,
+            "meta": "进入会话"
+          },
+          {
+            "text": "skill",
+            "start_position": 0,
+            "meta": "加载技能"
+          },
+          {
+            "text": "thinking",
+            "start_position": 0,
+            "meta": "思考强度"
+          },
+          {
+            "text": "thinkback",
+            "start_position": 0,
+            "meta": "思考回传"
+          },
+          {
+            "text": "mode",
+            "start_position": 0,
+            "meta": "切换模型"
+          },
+          {
+            "text": "goal",
+            "start_position": 0,
+            "meta": "目标模式"
+          },
+          {
+            "text": "exit",
+            "start_position": 0,
+            "meta": "暂离探索分支"
+          },
+          {
+            "text": "done",
+            "start_position": 0,
+            "meta": "完成探索分支"
+          }
+        ]
+      },
+      {
+        "id": "command|prefix_sa",
+        "input": {
+          "id": "command|prefix_sa",
+          "text": "/sa",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "ve",
+            "start_position": 0,
+            "meta": "保存会话"
+          }
+        ]
+      },
+      {
+        "id": "command|prefix_upper_case",
+        "input": {
+          "id": "command|prefix_upper_case",
+          "text": "/SA",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "ve",
+            "start_position": 0,
+            "meta": "保存会话"
+          }
+        ]
+      },
+      {
+        "id": "command|no_match",
+        "input": {
+          "id": "command|no_match",
+          "text": "/zz",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": []
+      },
+      {
+        "id": "command|unknown_not_in_state",
+        "input": {
+          "id": "command|unknown_not_in_state",
+          "text": "/explore ",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出程序"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": []
+      },
+      {
+        "id": "names|cd_list_all",
+        "input": {
+          "id": "names|cd_list_all",
+          "text": "/cd ",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [
+              "父会话",
+              "父会话/子会话",
+              "会话A",
+              "会话B/嵌套会话"
+            ],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "父会话",
+            "start_position": 0,
+            "meta": ""
+          },
+          {
+            "text": "父会话/子会话",
+            "start_position": 0,
+            "meta": ""
+          },
+          {
+            "text": "会话A",
+            "start_position": 0,
+            "meta": ""
+          },
+          {
+            "text": "会话B/嵌套会话",
+            "start_position": 0,
+            "meta": ""
+          }
+        ]
+      },
+      {
+        "id": "names|cd_prefix",
+        "input": {
+          "id": "names|cd_prefix",
+          "text": "/cd 会",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [
+              "父会话",
+              "父会话/子会话",
+              "会话A",
+              "会话B/嵌套会话"
+            ],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "话A",
+            "start_position": 0,
+            "meta": ""
+          },
+          {
+            "text": "话B/嵌套会话",
+            "start_position": 0,
+            "meta": ""
+          }
+        ]
+      },
+      {
+        "id": "names|cd_nested_prefix",
+        "input": {
+          "id": "names|cd_nested_prefix",
+          "text": "/cd 父会话/子",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [
+              "父会话",
+              "父会话/子会话",
+              "会话A",
+              "会话B/嵌套会话"
+            ],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "子会话",
+            "start_position": -1,
+            "meta": ""
+          }
+        ]
+      },
+      {
+        "id": "names|cd_nested_prefix_partial_path",
+        "input": {
+          "id": "names|cd_nested_prefix_partial_path",
+          "text": "/cd 父/子",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [
+              "父会话",
+              "父会话/子会话",
+              "会话A",
+              "会话B/嵌套会话"
+            ],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": []
+      },
+      {
+        "id": "names|cd_no_match",
+        "input": {
+          "id": "names|cd_no_match",
+          "text": "/cd 无",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [
+              "父会话",
+              "父会话/子会话",
+              "会话A",
+              "会话B/嵌套会话"
+            ],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": []
+      },
+      {
+        "id": "names|rm_list_all",
+        "input": {
+          "id": "names|rm_list_all",
+          "text": "/rm ",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [
+              "父会话/子会话",
+              "会话A"
+            ],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "父会话/子会话",
+            "start_position": 0,
+            "meta": ""
+          },
+          {
+            "text": "会话A",
+            "start_position": 0,
+            "meta": ""
+          }
+        ]
+      },
+      {
+        "id": "names|rm_prefix",
+        "input": {
+          "id": "names|rm_prefix",
+          "text": "/rm 会",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [
+              "父会话/子会话",
+              "会话A"
+            ],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "话A",
+            "start_position": 0,
+            "meta": ""
+          }
+        ]
+      },
+      {
+        "id": "names|thinking_list_all",
+        "input": {
+          "id": "names|thinking_list_all",
+          "text": "/thinking ",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [
+              "high",
+              "max"
+            ],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "high",
+            "start_position": 0,
+            "meta": ""
+          },
+          {
+            "text": "max",
+            "start_position": 0,
+            "meta": ""
+          }
+        ]
+      },
+      {
+        "id": "names|mode_prefix",
+        "input": {
+          "id": "names|mode_prefix",
+          "text": "/mode deepseek-v4-p",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [
+              "deepseek-v4-flash",
+              "deepseek-v4-pro",
+              "qwen-max"
+            ],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "ro",
+            "start_position": 0,
+            "meta": ""
+          }
+        ]
+      },
+      {
+        "id": "static|ls_option",
+        "input": {
+          "id": "static|ls_option",
+          "text": "/ls ",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "--all",
+            "start_position": 0,
+            "meta": ""
+          }
+        ]
+      },
+      {
+        "id": "static|save_arg_no_candidate",
+        "input": {
+          "id": "static|save_arg_no_candidate",
+          "text": "/save ",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": []
+      },
+      {
+        "id": "static|third_word_no_candidate",
+        "input": {
+          "id": "static|third_word_no_candidate",
+          "text": "/cd 父会话 子",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [
+              "父会话",
+              "父会话/子会话",
+              "会话A",
+              "会话B/嵌套会话"
+            ],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": []
+      },
+      {
+        "id": "static|non_slash_input",
+        "input": {
+          "id": "static|non_slash_input",
+          "text": "看看这个",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": []
+      },
+      {
+        "id": "static|leading_space_slash",
+        "input": {
+          "id": "static|leading_space_slash",
+          "text": "   /sa",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "ve",
+            "start_position": 0,
+            "meta": "保存会话"
+          }
+        ]
+      },
+      {
+        "id": "skill|dir_prefix",
+        "input": {
+          "id": "skill|dir_prefix",
+          "text": "/skill d",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "ocs/",
+            "start_position": 0,
+            "meta": "目录"
+          }
+        ]
+      },
+      {
+        "id": "skill|leaf_partial_system",
+        "input": {
+          "id": "skill|leaf_partial_system",
+          "text": "/skill code",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "-review",
+            "start_position": 0,
+            "meta": "系统技能"
+          }
+        ]
+      },
+      {
+        "id": "skill|leaf_complete_no_candidate",
+        "input": {
+          "id": "skill|leaf_complete_no_candidate",
+          "text": "/skill code-review",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": []
+      },
+      {
+        "id": "skill|dir_complete_enters",
+        "input": {
+          "id": "skill|dir_complete_enters",
+          "text": "/skill docs",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "/",
+            "start_position": 0,
+            "meta": "进入目录"
+          }
+        ]
+      },
+      {
+        "id": "skill|nested_dir_list",
+        "input": {
+          "id": "skill|nested_dir_list",
+          "text": "/skill docs/",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "guide.md",
+            "start_position": 0,
+            "meta": "项目技能"
+          },
+          {
+            "text": "advanced/",
+            "start_position": 0,
+            "meta": "目录"
+          }
+        ]
+      },
+      {
+        "id": "skill|nested_prefix",
+        "input": {
+          "id": "skill|nested_prefix",
+          "text": "/skill docs/a",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "dvanced/",
+            "start_position": 0,
+            "meta": "目录"
+          }
+        ]
+      },
+      {
+        "id": "skill|backslash_compat",
+        "input": {
+          "id": "skill|backslash_compat",
+          "text": "/skill docs\\a",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "dvanced/",
+            "start_position": 0,
+            "meta": "目录"
+          }
+        ]
+      },
+      {
+        "id": "skill|single_dir_enters",
+        "input": {
+          "id": "skill|single_dir_enters",
+          "text": "/skill single-skill",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "/",
+            "start_position": 0,
+            "meta": "进入目录"
+          }
+        ]
+      },
+      {
+        "id": "skill|unknown_dir_no_candidate",
+        "input": {
+          "id": "skill|unknown_dir_no_candidate",
+          "text": "/skill nope/",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": []
+      },
+      {
+        "id": "skill|leaf_meta_project",
+        "input": {
+          "id": "skill|leaf_meta_project",
+          "text": "/skill docs/g",
+          "state": {
+            "commands": {
+              "/clear": "清屏",
+              "/compact": "压缩上下文",
+              "/save": "保存会话",
+              "/ls": "列出已保存会话",
+              "/cd": "进入会话",
+              "/rm": "删除子会话",
+              "/skill": "加载技能",
+              "/thinking": "思考强度",
+              "/thinkback": "思考回传",
+              "/mode": "切换模型",
+              "/goal": "目标模式",
+              "/exit": "退出会话",
+              "/explore": "探索分支"
+            },
+            "names": [],
+            "rm_names": [],
+            "thinking": [],
+            "models": [],
+            "skill_tree": [
+              {
+                "name": "code-review",
+                "type": "file",
+                "origin": "system"
+              },
+              {
+                "name": "docs",
+                "type": "dir",
+                "children": [
+                  {
+                    "name": "guide.md",
+                    "type": "file",
+                    "origin": "project"
+                  },
+                  {
+                    "name": "advanced",
+                    "type": "dir",
+                    "children": [
+                      {
+                        "name": "tips.md",
+                        "type": "file",
+                        "origin": "project"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "single-skill",
+                "type": "dir",
+                "single": true,
+                "children": [
+                  {
+                    "name": "SKILL.md",
+                    "type": "file",
+                    "origin": "project"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "result": [
+          {
+            "text": "uide.md",
+            "start_position": 0,
+            "meta": "项目技能"
+          }
+        ]
+      }
+    ]
+  }
+}

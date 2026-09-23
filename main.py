@@ -30,32 +30,23 @@ def main():
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 
-    from narnat_agent.core.agent import Agent
-
     if args.prompt is not None:
         if not args.prompt.strip():
             print("错误: -p 任务内容不能为空")
             sys.exit(1)
-        # headless：stdout 显式 UTF-8（重定向/管道下中文与emoji不乱码）
-        if sys.platform == "win32":
-            try:
-                sys.stdout.reconfigure(encoding="utf-8")
-            except (AttributeError, OSError):
-                pass
-        from narnat_agent.output import set_plain, set_quiet_tools
-        set_plain(True)  # headless：全局去色，输出纯文本
-        set_quiet_tools(not args.tool_log)  # headless：默认静默工具调度日志，-l 开启全量
         if args.goal_rounds < 0:
             print("错误: -g 轮数上限必须为正整数")
             sys.exit(1)
-        # 子代理后台日志隔离：background 模块按进程创建唯一临时目录
-        # （narnat_bg_<随机>），父/子、同项目多 agent 天然互不干扰，
-        # 无需额外环境变量。
-        agent = Agent(debug=args.debug, headless=True)
+        # headless 分支的输出编码 / 去色 / 工具日志静默由装配侧统一置位
+        from narnat_agent.app import App
+
+        agent = App(debug=args.debug, headless=True, tool_log=args.tool_log)
         agent.run_headless(args.prompt, max_rounds=args.goal_rounds)
         return
 
-    agent = Agent(debug=args.debug)
+    from narnat_agent.app import App
+
+    agent = App(debug=args.debug)
     agent.run()
 
 

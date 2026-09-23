@@ -1,0 +1,801 @@
+{
+  "generated_by": "v2/tests/baseline/extract_old_remote.py",
+  "source": "narnat_agent/tools/terminal/{ssh_session,__init__,remote}.py, narnat_agent/tools/serial/{serial_session,__init__}.py, narnat_agent/tools/{exec_signal,diff_utils,read}.py",
+  "note": "纯函数/静态方法/裸实例方法的行为基准；随机标签模式化为 [<TAG>]；输入为 remote_cases.CASES（两实现共用）",
+  "module": "narnat_agent.tools.terminal / narnat_agent.tools.serial",
+  "groups": {
+    "terminal.definition": [
+      {
+        "id": "terminal",
+        "result": {
+          "type": "function",
+          "function": {
+            "name": "Terminal",
+            "description": "多设备持久SSH：远程执行命令、设备间传输文件。连接后保持，同一设备重复调用复用同一连接。",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "connect",
+                    "exec",
+                    "input",
+                    "status",
+                    "close",
+                    "transfer"
+                  ],
+                  "description": "操作类型（默认exec）。connect 建立SSH会话（成功后返回该设备的dev编号）；exec 在指定设备执行命令；input 向设备发送交互输入；status 查看所有设备状态；close 关闭指定设备会话（省略host时关闭全部会话）；transfer 在任意设备间传输文件（本机↔被控设备、被控设备↔被控设备）"
+                },
+                "host": {
+                  "type": "string",
+                  "description": "设备引用，统一用dev编号：dev0=本机（本机执行命令请用Shell工具），dev1..devn=已connect的被控设备。connect时填被控设备IP/域名（连接成功后返回其dev编号）；exec/input/close 填dev编号：exec/input 省略时自动选择唯一会话（多个会话时需指定），close 省略时关闭全部会话"
+                },
+                "username": {
+                  "type": "string",
+                  "description": "SSH用户名（connect时使用）"
+                },
+                "port": {
+                  "type": "integer",
+                  "description": "SSH端口（默认22）"
+                },
+                "password": {
+                  "type": "string",
+                  "description": "认证凭据（connect时使用）：登录密码或私钥路径（如~/.ssh/id_rsa），不填则自动尝试默认密钥。填密码时sudo密码自动用同登录密码注入"
+                },
+                "command": {
+                  "type": "string",
+                  "description": "执行的命令（action=exec时使用）"
+                },
+                "input": {
+                  "type": "string",
+                  "description": "交互输入内容（action=input时使用，如sudo密码、y/n确认）。仅当有命令在等待输入时有效（通常是上个命令超时仍在后台运行）；发送 ^C 可中断仍在运行的命令；空闲终端发送会被拒绝"
+                },
+                "timeout": {
+                  "type": "integer",
+                  "description": "命令超时秒数（正整数）。exec/input默认120，超时后命令继续后台运行，可用input应答其交互提示或^C中断；connect默认15，连不上时快速报错"
+                },
+                "max_output_chars": {
+                  "type": "integer",
+                  "description": "最大输出字符数（正整数，默认8000，超出截断并提示）"
+                },
+                "source_host": {
+                  "type": "string",
+                  "description": "传输源设备：dev0=本机（默认，可省略），dev1..devn=被控设备（action=transfer时使用）"
+                },
+                "source_path": {
+                  "type": "string",
+                  "description": "源文件在源设备上的绝对路径（action=transfer时使用）"
+                },
+                "target_host": {
+                  "type": "string",
+                  "description": "传输目标设备：dev0=本机（默认，可省略），dev1..devn=被控设备（action=transfer时使用）"
+                },
+                "target_path": {
+                  "type": "string",
+                  "description": "目标文件在目标设备上的绝对路径（action=transfer时使用）"
+                }
+              },
+              "required": []
+            }
+          }
+        }
+      }
+    ],
+    "serial.definition": [
+      {
+        "id": "serial",
+        "result": {
+          "type": "function",
+          "function": {
+            "name": "Serial",
+            "description": "多设备持久串口：连接后保持，同一串口重复调用复用同一会话。",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "scan",
+                    "connect",
+                    "exec",
+                    "raw_exec",
+                    "input",
+                    "status",
+                    "close"
+                  ],
+                  "description": "操作类型（默认exec）。scan 扫描本机可用串口；connect 打开串口连接（自动分配或指定session_id）；exec 发送命令，等待提示符或超时返回；raw_exec 发送命令，纯超时返回（不检测提示符，适合裸机/AT固件等无标准提示符设备）；input 发送交互输入；status 查看所有串口会话状态；close 关闭指定会话（省略session_id/port时关闭全部会话）"
+                },
+                "port": {
+                  "type": "string",
+                  "description": "串口设备名，如COM1、/dev/ttyUSB0（connect时必填；其他action可直接填已连接的串口名指定会话）"
+                },
+                "baudrate": {
+                  "type": "integer",
+                  "description": "波特率，默认115200"
+                },
+                "databits": {
+                  "type": "integer",
+                  "description": "数据位5/6/7/8，默认8"
+                },
+                "parity": {
+                  "type": "string",
+                  "description": "校验位N/E/O/M/S，默认N"
+                },
+                "stopbits": {
+                  "type": "number",
+                  "description": "停止位1/1.5/2，默认1"
+                },
+                "flow_control": {
+                  "type": "string",
+                  "description": "流控none/hardware/software，默认none"
+                },
+                "line_ending": {
+                  "type": "string",
+                  "description": "行结束符\\n/\\r\\n/\\r，默认\\n"
+                },
+                "prompt_pattern": {
+                  "type": "string",
+                  "description": "自定义提示符正则（给定时替代默认字符集 $#%>:❯=@~）"
+                },
+                "command": {
+                  "type": "string",
+                  "description": "发送的命令（action=exec/raw_exec时使用）；raw_exec时为空则纯监听：不发送，仅在timeout内收集设备主动输出"
+                },
+                "input": {
+                  "type": "string",
+                  "description": "交互输入内容（action=input时使用，如密码、y/n确认）。发送 ^C 可中断设备上仍在运行的命令；其他文本追加行结束符发送，空闲时等同 exec 执行命令"
+                },
+                "timeout": {
+                  "type": "integer",
+                  "description": "超时秒数（正整数，默认120）。超时返回已收集输出，设备上命令仍在运行，可用input发送^C中断"
+                },
+                "session_id": {
+                  "type": "integer",
+                  "description": "终端ID（默认自动分配；0=第一个串口终端）。exec/raw_exec/input 省略时自动选择唯一会话（多个会话时需指定），close 省略时关闭全部会话"
+                },
+                "max_output_chars": {
+                  "type": "integer",
+                  "description": "最大输出字符数（正整数，默认8000）"
+                }
+              },
+              "required": []
+            }
+          }
+        }
+      }
+    ],
+    "terminal.truncate_output": [
+      {
+        "id": "short",
+        "result": "abc"
+      },
+      {
+        "id": "exact-limit",
+        "result": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "id": "zero-limit",
+        "result": "[错误: max_output_chars需为正整数] [<TAG>]"
+      },
+      {
+        "id": "negative-limit",
+        "result": "[错误: max_output_chars需为正整数] [<TAG>]"
+      },
+      {
+        "id": "ascii-oversize",
+        "result": "xxxxxxxxxxxxxxxxxxxx\n...[中间截断: 输出共100字符, 已保留首20字符+尾10字符(≈25token)。增大max_output_chars可获取完整输出]\nxxxxxxxxxx"
+      },
+      {
+        "id": "cjk-oversize",
+        "result": "中中中中中中中中中中中中中中中中中中中中\n...[中间截断: 输出共60字符, 已保留首20字符+尾10字符(≈42token)。增大max_output_chars可获取完整输出]\n中中中中中中中中中中"
+      },
+      {
+        "id": "multiline-oversize",
+        "result": "line-0\nline-1\nline-2\nline-\n...[中间截断: 输出共149字符, 已保留首26字符+尾14字符(≈38token)。增大max_output_chars可获取完整输出]\nine-18\nline-19"
+      },
+      {
+        "id": "rc-tag-at-cut",
+        "result": "AAAAAAAAAAAAAAAAAA[e\n...[中间截断: 输出共63字符, 已保留首20字符+尾10字符(≈16token)。增大max_output_chars可获取完整输出]\nBBBBBBBBBB"
+      },
+      {
+        "id": "err-tag-in-middle",
+        "result": "AAAAAAAAAAAAAAAAAA[错\n...[中间截断: 输出共56字符, 已保留首20字符+尾10字符(≈15token)。增大max_output_chars可获取完整输出]\nBBBBBBBBBB"
+      },
+      {
+        "id": "rc-line-prefixed",
+        "result": "[exit code: 1] [<TAG>]\n...[中间截断: 输出共51字符, 已保留首25字符+尾9字符(≈13token)。增大max_output_chars可获取完整输出]\n-marker$ "
+      }
+    ],
+    "terminal.clean_output": [
+      {
+        "id": "ansi-strip",
+        "result": "red plain"
+      },
+      {
+        "id": "osc-title",
+        "result": "user@host:~$"
+      },
+      {
+        "id": "cr-overwrite",
+        "result": "progress 90%"
+      },
+      {
+        "id": "cr-crlf",
+        "result": "a\nc"
+      },
+      {
+        "id": "markers-removed",
+        "result": "out\n0\n\npwd"
+      },
+      {
+        "id": "blank-lines",
+        "result": "a\n\nb"
+      },
+      {
+        "id": "leading-space-kept",
+        "result": "  indented\nplain"
+      },
+      {
+        "id": "trailing-space-trimmed",
+        "result": "line"
+      },
+      {
+        "id": "cr-only",
+        "result": "bbb\nccc"
+      }
+    ],
+    "terminal.ps1_candidate": [
+      {
+        "id": "strict-bash",
+        "result": true
+      },
+      {
+        "id": "strict-user-home",
+        "result": true
+      },
+      {
+        "id": "loose-busybox",
+        "result": true
+      },
+      {
+        "id": "loose-short",
+        "result": true
+      },
+      {
+        "id": "loose-with-space",
+        "result": true
+      },
+      {
+        "id": "osc-glued",
+        "result": true
+      },
+      {
+        "id": "ps2-continuation",
+        "result": false
+      },
+      {
+        "id": "empty",
+        "result": false
+      },
+      {
+        "id": "multiline-last-line",
+        "result": true
+      },
+      {
+        "id": "not-prompt-dollar-text",
+        "result": false
+      },
+      {
+        "id": "too-long-loose",
+        "result": false
+      },
+      {
+        "id": "ansi-colored-prompt",
+        "result": true
+      },
+      {
+        "id": "cr-terminated",
+        "result": true
+      }
+    ],
+    "terminal.sentinel_line_present": [
+      {
+        "id": "plain-line",
+        "result": true
+      },
+      {
+        "id": "echo-line-only",
+        "result": false
+      },
+      {
+        "id": "mid-line",
+        "result": false
+      },
+      {
+        "id": "ansi-prefixed",
+        "result": true
+      },
+      {
+        "id": "absent",
+        "result": false
+      }
+    ],
+    "terminal.strip_echo": [
+      {
+        "id": "drop-first",
+        "result": "real-output"
+      },
+      {
+        "id": "keep-first",
+        "result": "real-output\nmore"
+      },
+      {
+        "id": "single-line",
+        "result": ""
+      }
+    ],
+    "terminal.strip_trailing_prompt": [
+      {
+        "id": "prompt-at-end",
+        "result": "done"
+      },
+      {
+        "id": "ansi-prompt",
+        "result": "done"
+      },
+      {
+        "id": "no-prompt",
+        "result": "done\nmore output"
+      },
+      {
+        "id": "only-prompt",
+        "result": ""
+      },
+      {
+        "id": "pwd-like-line",
+        "result": "cd /tmp\n/tmp"
+      }
+    ],
+    "terminal.strip_caret_echo": [
+      {
+        "id": "caret-then-out",
+        "result": "real"
+      },
+      {
+        "id": "caret-blanks",
+        "result": "out"
+      },
+      {
+        "id": "no-caret",
+        "result": "out"
+      },
+      {
+        "id": "only-caret",
+        "result": ""
+      }
+    ],
+    "terminal.parse_output": [
+      {
+        "id": "normal",
+        "result": [
+          "file1\nfile2",
+          "/home/user",
+          0
+        ]
+      },
+      {
+        "id": "no-output-cmd",
+        "result": [
+          "",
+          "/tmp",
+          0
+        ]
+      },
+      {
+        "id": "exit-code-parsed",
+        "result": [
+          "",
+          "/home/u",
+          1
+        ]
+      },
+      {
+        "id": "exit-code-broken",
+        "result": [
+          "",
+          "/u",
+          null
+        ]
+      },
+      {
+        "id": "first-line-echo-exact",
+        "result": [
+          "real line",
+          "/u",
+          0
+        ]
+      },
+      {
+        "id": "first-line-not-echo",
+        "result": [
+          "GOT:G",
+          "/u",
+          0
+        ]
+      },
+      {
+        "id": "continuation-echo",
+        "result": [
+          "echo a\na\nb",
+          "/u",
+          0
+        ]
+      },
+      {
+        "id": "glued-output",
+        "result": [
+          "hi",
+          "/home/u",
+          0
+        ]
+      },
+      {
+        "id": "no-marker",
+        "result": [
+          "partial output",
+          null,
+          null
+        ]
+      },
+      {
+        "id": "ansi-in-marker-line",
+        "result": [
+          "7\n/srv",
+          null,
+          null
+        ]
+      }
+    ],
+    "terminal.parse_partial_output": [
+      {
+        "id": "no-marker",
+        "result": "输出中\nroot@dev:~$"
+      },
+      {
+        "id": "with-marker",
+        "result": "out"
+      },
+      {
+        "id": "echo-only",
+        "result": ""
+      }
+    ],
+    "terminal.extract_cwd": [
+      {
+        "id": "plain",
+        "result": "/home/user"
+      },
+      {
+        "id": "root-dir",
+        "result": "/"
+      },
+      {
+        "id": "echo-line-first",
+        "result": "/opt/app"
+      },
+      {
+        "id": "missing-marker",
+        "result": null
+      },
+      {
+        "id": "non-path-between",
+        "result": null
+      }
+    ],
+    "serial.truncate_output": [
+      {
+        "id": "short",
+        "result": "abc"
+      },
+      {
+        "id": "zero-limit",
+        "result": "[错误: max_output_chars需为正整数]"
+      },
+      {
+        "id": "negative-limit",
+        "result": "[错误: max_output_chars需为正整数]"
+      },
+      {
+        "id": "oversize",
+        "result": "xxxxxxxxxxxxxxxxxxxx\n...[中间截断: 输出共100字符, 已保留首20字符+尾10字符。增大max_output_chars可获取完整输出]\nxxxxxxxxxx"
+      },
+      {
+        "id": "multiline",
+        "result": "row0\nrow1\nrow2\nrow3\nrow4\nrow5\n\n...[中间截断: 输出共169字符, 已保留首30字符+尾15字符。增大max_output_chars可获取完整输出]\nw27\nrow28\nrow29"
+      },
+      {
+        "id": "exact",
+        "result": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+      }
+    ],
+    "serial.clean_output": [
+      {
+        "id": "ansi-strip",
+        "result": "warn ok"
+      },
+      {
+        "id": "crlf-normalized",
+        "result": "a\nb\nc"
+      },
+      {
+        "id": "cr-overwrite",
+        "result": "booting 99%"
+      },
+      {
+        "id": "mixed-cr",
+        "result": "a\nc\nd"
+      },
+      {
+        "id": "blank-lines",
+        "result": "a\n\nb"
+      },
+      {
+        "id": "strip-outer",
+        "result": "login:"
+      }
+    ],
+    "serial.merge_cr_line": [
+      {
+        "id": "no-cr",
+        "result": "plain"
+      },
+      {
+        "id": "overwrite-longer",
+        "result": "99345"
+      },
+      {
+        "id": "overwrite-shorter",
+        "result": "99999"
+      },
+      {
+        "id": "trailing-cr",
+        "result": "abc"
+      },
+      {
+        "id": "leading-cr",
+        "result": "abc"
+      },
+      {
+        "id": "empty-segments",
+        "result": "b"
+      }
+    ],
+    "serial.strip_command_echo": [
+      {
+        "id": "exact-echo",
+        "result": "usage: ..."
+      },
+      {
+        "id": "similar-echo",
+        "result": "usage: ..."
+      },
+      {
+        "id": "dissimilar-keep",
+        "result": "usage: ..."
+      },
+      {
+        "id": "long-command-prefix",
+        "result": "Version 1.2"
+      },
+      {
+        "id": "long-command-truncated",
+        "result": "Version 1.2"
+      },
+      {
+        "id": "empty-command",
+        "result": "out"
+      },
+      {
+        "id": "echo-only",
+        "result": ""
+      }
+    ],
+    "serial.dedup_prompt_lines": [
+      {
+        "id": "dup-prompt",
+        "result": "# \ncmd"
+      },
+      {
+        "id": "dup-prompt-space-diff",
+        "result": "#\ncmd"
+      },
+      {
+        "id": "dup-non-prompt-kept",
+        "result": "same\nsame\ncmd"
+      },
+      {
+        "id": "single-line",
+        "result": "# "
+      },
+      {
+        "id": "echo-and-real-prompt",
+        "result": "COM3 > echo hi\nCOM3 > hi\nCOM3 > "
+      }
+    ],
+    "serial.polish_output": [
+      {
+        "id": "echo-and-prompt",
+        "result": "usage:\n#"
+      },
+      {
+        "id": "no-echo",
+        "result": "Version 1.2\n#"
+      },
+      {
+        "id": "prompt-dup",
+        "result": "#"
+      },
+      {
+        "id": "short-input",
+        "result": "GOT:G\n#"
+      }
+    ],
+    "serial.is_at_prompt": [
+      {
+        "id": "hash-prompt",
+        "result": true
+      },
+      {
+        "id": "gt-prompt",
+        "result": true
+      },
+      {
+        "id": "mid-line-dollar",
+        "result": true
+      },
+      {
+        "id": "cr-merged",
+        "result": true
+      },
+      {
+        "id": "custom-pattern-hit",
+        "result": true
+      },
+      {
+        "id": "custom-pattern-miss",
+        "result": false
+      },
+      {
+        "id": "empty",
+        "result": false
+      }
+    ],
+    "transfer.format_size": [
+      {
+        "id": "bytes",
+        "result": "0B"
+      },
+      {
+        "id": "bytes-1023",
+        "result": "1023B"
+      },
+      {
+        "id": "kb",
+        "result": "1.0KB"
+      },
+      {
+        "id": "kb-frac",
+        "result": "1.5KB"
+      },
+      {
+        "id": "mb",
+        "result": "5.5MB"
+      },
+      {
+        "id": "gb",
+        "result": "2.0GB"
+      }
+    ],
+    "transfer.check_transfer_size": [
+      {
+        "id": "under-limit",
+        "result": null
+      },
+      {
+        "id": "exact-limit",
+        "result": null
+      },
+      {
+        "id": "over-limit",
+        "result": "文件大小 100.0MB 超过传输上限 100.0MB"
+      },
+      {
+        "id": "unlimited-zero",
+        "result": null
+      },
+      {
+        "id": "unlimited-negative",
+        "result": null
+      }
+    ],
+    "remote.make_diff": [
+      {
+        "id": "changed",
+        "result": "--- a/x.txt\n+++ b/x.txt\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c"
+      },
+      {
+        "id": "same",
+        "result": "[无差异]"
+      },
+      {
+        "id": "no-slash",
+        "result": "--- a/x.txt\n+++ b/x.txt\n@@ -1 +1 @@\n-1\n+2"
+      },
+      {
+        "id": "crlf-vs-lf",
+        "result": "[无差异]"
+      },
+      {
+        "id": "added-lines",
+        "result": "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1,3 @@\n a\n+b\n+c"
+      }
+    ],
+    "remote.describe_bytes_only_change": [
+      {
+        "id": "crlf-to-lf",
+        "result": "行尾符 CRLF→LF"
+      },
+      {
+        "id": "trailing-newline-added",
+        "result": "末尾换行已添加"
+      },
+      {
+        "id": "trailing-newline-removed",
+        "result": "行尾符 LF→无换行符、末尾换行已移除"
+      },
+      {
+        "id": "cr-only",
+        "result": "行尾符 CR→LF"
+      },
+      {
+        "id": "encoding-change",
+        "result": "换行符以外的字节表示变化（4→6字节，如编码或BOM差异）"
+      },
+      {
+        "id": "bom-added",
+        "result": "换行符以外的字节表示变化（3→6字节，如编码或BOM差异）"
+      },
+      {
+        "id": "no-newline-both",
+        "result": "换行符以外的字节表示变化（2→2字节，如编码或BOM差异）"
+      }
+    ],
+    "remote.detect_text_encoding": [
+      {
+        "id": "pure-ascii",
+        "result": "utf-8-sig"
+      },
+      {
+        "id": "utf8-cjk",
+        "result": "utf-8-sig"
+      },
+      {
+        "id": "utf8-bom",
+        "result": "utf-8-sig"
+      },
+      {
+        "id": "gbk-cjk",
+        "result": "gbk"
+      },
+      {
+        "id": "truncated-utf8-tail",
+        "result": "utf-8-sig"
+      },
+      {
+        "id": "empty",
+        "result": "utf-8-sig"
+      }
+    ]
+  }
+}

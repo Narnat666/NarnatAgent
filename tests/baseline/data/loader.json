@@ -1,0 +1,1519 @@
+{
+  "generated_by": "v2/tests/baseline/extract_old.py",
+  "source": "narnat_agent（旧实现，原位未动）",
+  "note": "随机标签 → [<TAG>]；时间文本 → <YYYY-MM-DD HH:MM>/<MM-DD HH:MM>/<HH:MM>/<MM-DD>",
+  "module": "narnat_agent.config.loader",
+  "groups": {
+    "loader._coerce": [
+      {
+        "id": "none_to_int",
+        "input": {
+          "v": null,
+          "target": "int"
+        },
+        "result": null
+      },
+      {
+        "id": "empty_str_to_int",
+        "input": {
+          "v": "",
+          "target": "int"
+        },
+        "result": null
+      },
+      {
+        "id": "invalid_str_to_int",
+        "input": {
+          "v": "abc",
+          "target": "int"
+        },
+        "result": null
+      },
+      {
+        "id": "digit_str_to_int",
+        "input": {
+          "v": "12",
+          "target": "int"
+        },
+        "result": 12
+      },
+      {
+        "id": "float_str_to_int",
+        "input": {
+          "v": "12.7",
+          "target": "int"
+        },
+        "result": null
+      },
+      {
+        "id": "int_to_int",
+        "input": {
+          "v": 12,
+          "target": "int"
+        },
+        "result": 12
+      },
+      {
+        "id": "float_to_int",
+        "input": {
+          "v": 12.7,
+          "target": "int"
+        },
+        "result": 12
+      },
+      {
+        "id": "true_to_int",
+        "input": {
+          "v": true,
+          "target": "int"
+        },
+        "result": 1
+      },
+      {
+        "id": "false_to_int",
+        "input": {
+          "v": false,
+          "target": "int"
+        },
+        "result": 0
+      },
+      {
+        "id": "negative_to_int",
+        "input": {
+          "v": -3,
+          "target": "int"
+        },
+        "result": -3
+      },
+      {
+        "id": "zero_to_int",
+        "input": {
+          "v": 0,
+          "target": "int"
+        },
+        "result": 0
+      },
+      {
+        "id": "none_to_float",
+        "input": {
+          "v": null,
+          "target": "float"
+        },
+        "result": null
+      },
+      {
+        "id": "str_to_float",
+        "input": {
+          "v": "0.75",
+          "target": "float"
+        },
+        "result": 0.75
+      },
+      {
+        "id": "list_to_float",
+        "input": {
+          "v": [
+            1
+          ],
+          "target": "float"
+        },
+        "result": null
+      },
+      {
+        "id": "int_to_str",
+        "input": {
+          "v": 42,
+          "target": "str"
+        },
+        "result": "42"
+      },
+      {
+        "id": "bool_to_str",
+        "input": {
+          "v": true,
+          "target": "str"
+        },
+        "result": "True"
+      }
+    ],
+    "loader._parse_token_amount": [
+      {
+        "id": "none_default",
+        "input": {
+          "v": null,
+          "default": 0
+        },
+        "result": 0
+      },
+      {
+        "id": "empty_str_default",
+        "input": {
+          "v": "",
+          "default": 123
+        },
+        "result": 123
+      },
+      {
+        "id": "true_uses_default",
+        "input": {
+          "v": true,
+          "default": 5
+        },
+        "result": 5
+      },
+      {
+        "id": "false_uses_default",
+        "input": {
+          "v": false,
+          "default": 5
+        },
+        "result": 5
+      },
+      {
+        "id": "int_value",
+        "input": {
+          "v": 10000,
+          "default": 0
+        },
+        "result": 10000
+      },
+      {
+        "id": "negative_int_clamped",
+        "input": {
+          "v": -5,
+          "default": 0
+        },
+        "result": 0
+      },
+      {
+        "id": "float_truncated",
+        "input": {
+          "v": 1234.9,
+          "default": 0
+        },
+        "result": 1234
+      },
+      {
+        "id": "digit_str",
+        "input": {
+          "v": "20000",
+          "default": 0
+        },
+        "result": 20000
+      },
+      {
+        "id": "k_suffix",
+        "input": {
+          "v": "10k",
+          "default": 0
+        },
+        "result": 10000
+      },
+      {
+        "id": "k_suffix_upper_float",
+        "input": {
+          "v": "1.5K",
+          "default": 0
+        },
+        "result": 1500
+      },
+      {
+        "id": "k_suffix_invalid",
+        "input": {
+          "v": "abck",
+          "default": 0
+        },
+        "result": 0
+      },
+      {
+        "id": "dot_no_k",
+        "input": {
+          "v": "1.5",
+          "default": 0
+        },
+        "result": 0
+      },
+      {
+        "id": "padded_str",
+        "input": {
+          "v": " 8000 ",
+          "default": 0
+        },
+        "result": 8000
+      },
+      {
+        "id": "invalid_uses_default",
+        "input": {
+          "v": "abc",
+          "default": 777
+        },
+        "result": 777
+      },
+      {
+        "id": "big_float",
+        "input": {
+          "v": 1e+20,
+          "default": 0
+        },
+        "result": 100000000000000000000
+      }
+    ],
+    "loader._parse_model_config": [
+      {
+        "id": "none",
+        "input": {
+          "value": null
+        },
+        "result": [
+          "deepseek-v4-flash",
+          [
+            "deepseek-v4-flash"
+          ]
+        ]
+      },
+      {
+        "id": "empty_dict",
+        "input": {
+          "value": {}
+        },
+        "result": [
+          "deepseek-v4-flash",
+          [
+            "deepseek-v4-flash"
+          ]
+        ]
+      },
+      {
+        "id": "current_only",
+        "input": {
+          "value": {
+            "当前": "m-a"
+          }
+        },
+        "result": [
+          "m-a",
+          [
+            "m-a"
+          ]
+        ]
+      },
+      {
+        "id": "list_only",
+        "input": {
+          "value": {
+            "列表": [
+              "m-a",
+              "m-b"
+            ]
+          }
+        },
+        "result": [
+          "m-a",
+          [
+            "m-a",
+            "m-b"
+          ]
+        ]
+      },
+      {
+        "id": "current_in_list",
+        "input": {
+          "value": {
+            "当前": "m-b",
+            "列表": [
+              "m-a",
+              "m-b"
+            ]
+          }
+        },
+        "result": [
+          "m-b",
+          [
+            "m-a",
+            "m-b"
+          ]
+        ]
+      },
+      {
+        "id": "current_not_in_list",
+        "input": {
+          "value": {
+            "当前": "m-c",
+            "列表": [
+              "m-a"
+            ]
+          }
+        },
+        "result": [
+          "m-c",
+          [
+            "m-c",
+            "m-a"
+          ]
+        ]
+      },
+      {
+        "id": "list_with_non_str",
+        "input": {
+          "value": {
+            "列表": [
+              "m-a",
+              1,
+              null
+            ]
+          }
+        },
+        "result": [
+          "m-a",
+          [
+            "m-a"
+          ]
+        ]
+      },
+      {
+        "id": "empty_current_empty_list",
+        "input": {
+          "value": {
+            "当前": "",
+            "列表": []
+          }
+        },
+        "result": [
+          "deepseek-v4-flash",
+          [
+            "deepseek-v4-flash"
+          ]
+        ]
+      },
+      {
+        "id": "empty_current_nonempty_list",
+        "input": {
+          "value": {
+            "当前": "",
+            "列表": [
+              "m-a"
+            ]
+          }
+        },
+        "result": [
+          "m-a",
+          [
+            "m-a"
+          ]
+        ]
+      },
+      {
+        "id": "not_dict_str",
+        "input": {
+          "value": "model"
+        },
+        "result": [
+          "deepseek-v4-flash",
+          [
+            "deepseek-v4-flash"
+          ]
+        ]
+      },
+      {
+        "id": "not_dict_list",
+        "input": {
+          "value": [
+            "m-a"
+          ]
+        },
+        "result": [
+          "deepseek-v4-flash",
+          [
+            "deepseek-v4-flash"
+          ]
+        ]
+      }
+    ],
+    "loader._parse_pricing": [
+      {
+        "id": "empty",
+        "input": {
+          "value": {}
+        },
+        "result": {}
+      },
+      {
+        "id": "full_cn_keys",
+        "input": {
+          "value": {
+            "m1": {
+              "输入": 1,
+              "缓存命中": 0.5,
+              "输出": 2
+            }
+          }
+        },
+        "result": {
+          "m1": {
+            "input": 1,
+            "cache_hit": 0.5,
+            "output": 2
+          }
+        }
+      },
+      {
+        "id": "partial_keys",
+        "input": {
+          "value": {
+            "m1": {
+              "输入": 3
+            }
+          }
+        },
+        "result": {
+          "m1": {
+            "input": 3,
+            "cache_hit": 0,
+            "output": 0
+          }
+        }
+      },
+      {
+        "id": "non_dict_skipped",
+        "input": {
+          "value": {
+            "m1": "x",
+            "m2": {
+              "输入": 1
+            }
+          }
+        },
+        "result": {
+          "m2": {
+            "input": 1,
+            "cache_hit": 0,
+            "output": 0
+          }
+        }
+      },
+      {
+        "id": "en_keys_ignored",
+        "input": {
+          "value": {
+            "m1": {
+              "input": 9
+            }
+          }
+        },
+        "result": {
+          "m1": {
+            "input": 0,
+            "cache_hit": 0,
+            "output": 0
+          }
+        }
+      },
+      {
+        "id": "values_passthrough",
+        "input": {
+          "value": {
+            "m1": {
+              "输入": "5",
+              "输出": null
+            }
+          }
+        },
+        "result": {
+          "m1": {
+            "input": "5",
+            "cache_hit": 0,
+            "output": null
+          }
+        }
+      }
+    ],
+    "loader._parse_project_skill_roots": [
+      {
+        "id": "empty_data",
+        "input": {
+          "value": {}
+        },
+        "result": null
+      },
+      {
+        "id": "missing_key",
+        "input": {
+          "value": {
+            "技能": {}
+          }
+        },
+        "result": null
+      },
+      {
+        "id": "empty_list",
+        "input": {
+          "value": {
+            "技能": {
+              "项目技能目录": []
+            }
+          }
+        },
+        "result": []
+      },
+      {
+        "id": "list_normal",
+        "input": {
+          "value": {
+            "技能": {
+              "项目技能目录": [
+                "a",
+                "b"
+              ]
+            }
+          }
+        },
+        "result": [
+          "a",
+          "b"
+        ]
+      },
+      {
+        "id": "list_filter_non_str",
+        "input": {
+          "value": {
+            "技能": {
+              "项目技能目录": [
+                "a",
+                "",
+                3,
+                "  ",
+                null,
+                "b"
+              ]
+            }
+          }
+        },
+        "result": [
+          "a",
+          "b"
+        ]
+      },
+      {
+        "id": "not_list",
+        "input": {
+          "value": {
+            "技能": {
+              "项目技能目录": "a"
+            }
+          }
+        },
+        "result": null
+      },
+      {
+        "id": "list_keeps_spaces",
+        "input": {
+          "value": {
+            "技能": {
+              "项目技能目录": [
+                " a "
+              ]
+            }
+          }
+        },
+        "result": [
+          " a "
+        ]
+      }
+    ],
+    "loader.parse_mcp_server": [
+      {
+        "id": "entry_not_dict",
+        "input": {
+          "name": "srv",
+          "entry": "notdict"
+        },
+        "result": null
+      },
+      {
+        "id": "name_empty",
+        "input": {
+          "name": "",
+          "entry": {}
+        },
+        "result": null
+      },
+      {
+        "id": "name_blank",
+        "input": {
+          "name": "   ",
+          "entry": {}
+        },
+        "result": null
+      },
+      {
+        "id": "minimal",
+        "input": {
+          "name": "srv",
+          "entry": {}
+        },
+        "result": {
+          "name": "srv",
+          "command": "",
+          "args": [],
+          "env": {},
+          "cwd": "",
+          "enabled": true,
+          "startup_timeout": 30,
+          "tool_timeout": 300,
+          "enabled_tools": [],
+          "disabled_tools": []
+        }
+      },
+      {
+        "id": "cn_keys",
+        "input": {
+          "name": "srv",
+          "entry": {
+            "命令": "python",
+            "参数": [
+              "-m",
+              "srv"
+            ],
+            "环境变量": {
+              "K": 1,
+              "J": null
+            },
+            "工作目录": "D:/x",
+            "启用": "false",
+            "启动超时秒": "60",
+            "工具超时秒": 0,
+            "工具白名单": [
+              "a"
+            ],
+            "工具黑名单": [
+              "b"
+            ]
+          }
+        },
+        "result": {
+          "name": "srv",
+          "command": "python",
+          "args": [
+            "-m",
+            "srv"
+          ],
+          "env": {
+            "K": "1",
+            "J": "None"
+          },
+          "cwd": "D:/x",
+          "enabled": false,
+          "startup_timeout": 60,
+          "tool_timeout": 300,
+          "enabled_tools": [
+            "a"
+          ],
+          "disabled_tools": [
+            "b"
+          ]
+        }
+      },
+      {
+        "id": "en_keys",
+        "input": {
+          "name": "srv",
+          "entry": {
+            "command": "node",
+            "args": [
+              "a.js"
+            ],
+            "env": {
+              "X": "1"
+            },
+            "cwd": "/tmp",
+            "enabled": "yes",
+            "startup_timeout_sec": 5,
+            "tool_timeout_sec": "7",
+            "enabled_tools": [
+              "t"
+            ],
+            "disabled_tools": [
+              "u"
+            ]
+          }
+        },
+        "result": {
+          "name": "srv",
+          "command": "node",
+          "args": [
+            "a.js"
+          ],
+          "env": {
+            "X": "1"
+          },
+          "cwd": "/tmp",
+          "enabled": true,
+          "startup_timeout": 5,
+          "tool_timeout": 7,
+          "enabled_tools": [
+            "t"
+          ],
+          "disabled_tools": [
+            "u"
+          ]
+        }
+      },
+      {
+        "id": "cn_key_priority",
+        "input": {
+          "name": "srv",
+          "entry": {
+            "命令": "cn",
+            "command": "en"
+          }
+        },
+        "result": {
+          "name": "srv",
+          "command": "cn",
+          "args": [],
+          "env": {},
+          "cwd": "",
+          "enabled": true,
+          "startup_timeout": 30,
+          "tool_timeout": 300,
+          "enabled_tools": [],
+          "disabled_tools": []
+        }
+      },
+      {
+        "id": "command_list",
+        "input": {
+          "name": "srv",
+          "entry": {
+            "command": [
+              "python",
+              "main.py"
+            ]
+          }
+        },
+        "result": {
+          "name": "srv",
+          "command": "python",
+          "args": [
+            "main.py"
+          ],
+          "env": {},
+          "cwd": "",
+          "enabled": true,
+          "startup_timeout": 30,
+          "tool_timeout": 300,
+          "enabled_tools": [],
+          "disabled_tools": []
+        }
+      },
+      {
+        "id": "command_list_plus_args",
+        "input": {
+          "name": "srv",
+          "entry": {
+            "command": [
+              "python",
+              "main.py"
+            ],
+            "args": [
+              "--x"
+            ]
+          }
+        },
+        "result": {
+          "name": "srv",
+          "command": "python",
+          "args": [
+            "main.py",
+            "--x"
+          ],
+          "env": {},
+          "cwd": "",
+          "enabled": true,
+          "startup_timeout": 30,
+          "tool_timeout": 300,
+          "enabled_tools": [],
+          "disabled_tools": []
+        }
+      },
+      {
+        "id": "command_empty_list",
+        "input": {
+          "name": "srv",
+          "entry": {
+            "command": []
+          }
+        },
+        "result": {
+          "name": "srv",
+          "command": "",
+          "args": [],
+          "env": {},
+          "cwd": "",
+          "enabled": true,
+          "startup_timeout": 30,
+          "tool_timeout": 300,
+          "enabled_tools": [],
+          "disabled_tools": []
+        }
+      },
+      {
+        "id": "args_not_list",
+        "input": {
+          "name": "srv",
+          "entry": {
+            "args": "x"
+          }
+        },
+        "result": {
+          "name": "srv",
+          "command": "",
+          "args": [],
+          "env": {},
+          "cwd": "",
+          "enabled": true,
+          "startup_timeout": 30,
+          "tool_timeout": 300,
+          "enabled_tools": [],
+          "disabled_tools": []
+        }
+      },
+      {
+        "id": "env_not_dict",
+        "input": {
+          "name": "srv",
+          "entry": {
+            "env": [
+              "x"
+            ]
+          }
+        },
+        "result": {
+          "name": "srv",
+          "command": "",
+          "args": [],
+          "env": {},
+          "cwd": "",
+          "enabled": true,
+          "startup_timeout": 30,
+          "tool_timeout": 300,
+          "enabled_tools": [],
+          "disabled_tools": []
+        }
+      },
+      {
+        "id": "enabled_str_off",
+        "input": {
+          "name": "srv",
+          "entry": {
+            "enabled": "off"
+          }
+        },
+        "result": {
+          "name": "srv",
+          "command": "",
+          "args": [],
+          "env": {},
+          "cwd": "",
+          "enabled": false,
+          "startup_timeout": 30,
+          "tool_timeout": 300,
+          "enabled_tools": [],
+          "disabled_tools": []
+        }
+      },
+      {
+        "id": "enabled_str_no_cn",
+        "input": {
+          "name": "srv",
+          "entry": {
+            "enabled": "否"
+          }
+        },
+        "result": {
+          "name": "srv",
+          "command": "",
+          "args": [],
+          "env": {},
+          "cwd": "",
+          "enabled": false,
+          "startup_timeout": 30,
+          "tool_timeout": 300,
+          "enabled_tools": [],
+          "disabled_tools": []
+        }
+      },
+      {
+        "id": "enabled_str_yes_padded",
+        "input": {
+          "name": "srv",
+          "entry": {
+            "enabled": " YES "
+          }
+        },
+        "result": {
+          "name": "srv",
+          "command": "",
+          "args": [],
+          "env": {},
+          "cwd": "",
+          "enabled": true,
+          "startup_timeout": 30,
+          "tool_timeout": 300,
+          "enabled_tools": [],
+          "disabled_tools": []
+        }
+      },
+      {
+        "id": "enabled_bool_false",
+        "input": {
+          "name": "srv",
+          "entry": {
+            "enabled": false
+          }
+        },
+        "result": {
+          "name": "srv",
+          "command": "",
+          "args": [],
+          "env": {},
+          "cwd": "",
+          "enabled": false,
+          "startup_timeout": 30,
+          "tool_timeout": 300,
+          "enabled_tools": [],
+          "disabled_tools": []
+        }
+      },
+      {
+        "id": "timeout_negative",
+        "input": {
+          "name": "srv",
+          "entry": {
+            "启动超时秒": -5
+          }
+        },
+        "result": {
+          "name": "srv",
+          "command": "",
+          "args": [],
+          "env": {},
+          "cwd": "",
+          "enabled": true,
+          "startup_timeout": 30,
+          "tool_timeout": 300,
+          "enabled_tools": [],
+          "disabled_tools": []
+        }
+      },
+      {
+        "id": "timeout_invalid_str",
+        "input": {
+          "name": "srv",
+          "entry": {
+            "启动超时秒": "abc"
+          }
+        },
+        "result": {
+          "name": "srv",
+          "command": "",
+          "args": [],
+          "env": {},
+          "cwd": "",
+          "enabled": true,
+          "startup_timeout": 30,
+          "tool_timeout": 300,
+          "enabled_tools": [],
+          "disabled_tools": []
+        }
+      }
+    ],
+    "loader._strip_subagent_hidden": [
+      {
+        "id": "plain",
+        "input": {
+          "md": "hello"
+        },
+        "result": "hello"
+      },
+      {
+        "id": "single_block",
+        "input": {
+          "md": "a\n<!-- subagent:hide -->\nhidden\n<!-- /subagent:hide -->\nb"
+        },
+        "result": "a\n\nb"
+      },
+      {
+        "id": "spaced_tags",
+        "input": {
+          "md": "a<!--  subagent:hide  -->x<!--  /subagent:hide  -->b"
+        },
+        "result": "ab"
+      },
+      {
+        "id": "two_blocks",
+        "input": {
+          "md": "A<!-- subagent:hide -->1<!-- /subagent:hide -->B<!-- subagent:hide -->2<!-- /subagent:hide -->C"
+        },
+        "result": "ABC"
+      },
+      {
+        "id": "unclosed",
+        "input": {
+          "md": "a<!-- subagent:hide --> hidden"
+        },
+        "result": "a<!-- subagent:hide --> hidden"
+      },
+      {
+        "id": "in_code_fence",
+        "input": {
+          "md": "`<!-- subagent:hide -->x<!-- /subagent:hide -->`"
+        },
+        "result": "``"
+      }
+    ],
+    "loader._build_system_prompt": [
+      {
+        "id": "no_user_md",
+        "input": {
+          "model": "deepseek-v4-flash",
+          "user_md": "",
+          "cwd": "D:/work/proj",
+          "os_name": "Windows",
+          "shell_name": "cmd.exe"
+        },
+        "result": "| 你的身份 | 你是一位严谨、克制且极具专业素养的 deepseek-v4-flash 智能体。 |\n| 所处环境 | narnat agent 框架内，作为自主代理运行。 |\n| 当前工作目录 | D:/work/proj |\n| 所处平台 | Windows |\n| 核心任务 | 尽你所能帮助用户，为用户解难。 |\n"
+      },
+      {
+        "id": "with_user_md",
+        "input": {
+          "model": "gpt-5",
+          "user_md": "# 规则\n- 只说中文",
+          "cwd": "/home/user/proj",
+          "os_name": "Linux",
+          "shell_name": "bash"
+        },
+        "result": "| 你的身份 | 你是一位严谨、克制且极具专业素养的 gpt-5 智能体。 |\n| 所处环境 | narnat agent 框架内，作为自主代理运行。 |\n| 当前工作目录 | /home/user/proj |\n| 所处平台 | Linux |\n| 核心任务 | 尽你所能帮助用户，为用户解难。 |\n\n# 规则\n- 只说中文"
+      }
+    ],
+    "loader._build_ai_config": [
+      {
+        "id": "empty",
+        "input": {
+          "value": {}
+        },
+        "result": {
+          "api_key": "",
+          "base_url": "https://api.deepseek.com/anthropic",
+          "model": "deepseek-v4-flash",
+          "model_options": [
+            "deepseek-v4-flash"
+          ],
+          "protocol": "anthropic",
+          "temperature": null,
+          "max_tokens": null,
+          "thinking_enabled": true,
+          "thinking_effort": "high",
+          "thinking_passback": true,
+          "thinking_options": {
+            "high": "高",
+            "max": "全开"
+          },
+          "context_window": 1000000,
+          "retry_count": 3,
+          "goal_max_rounds": 100
+        }
+      },
+      {
+        "id": "full_cn_keys",
+        "input": {
+          "value": {
+            "智能体": {
+              "接口密钥": "sk-x",
+              "接口地址": "https://example.com",
+              "协议": "openai",
+              "模型": {
+                "当前": "m-b",
+                "列表": [
+                  "m-a",
+                  "m-b"
+                ]
+              },
+              "温度": "0.7",
+              "最大输出token数": "4096",
+              "上下文窗口大小": "200000",
+              "目标模式最大轮数": 5,
+              "思考": {
+                "启用": true,
+                "强度": "max",
+                "回传": true,
+                "强度选项": {
+                  "high": "高",
+                  "max": "全开"
+                }
+              }
+            }
+          }
+        },
+        "result": {
+          "api_key": "sk-x",
+          "base_url": "https://example.com",
+          "model": "m-b",
+          "model_options": [
+            "m-a",
+            "m-b"
+          ],
+          "protocol": "openai",
+          "temperature": 0.7,
+          "max_tokens": 4096,
+          "thinking_enabled": true,
+          "thinking_effort": "max",
+          "thinking_passback": true,
+          "thinking_options": {
+            "high": "高",
+            "max": "全开"
+          },
+          "context_window": 200000,
+          "retry_count": 3,
+          "goal_max_rounds": 5
+        }
+      },
+      {
+        "id": "invalid_values",
+        "input": {
+          "value": {
+            "智能体": {
+              "温度": "abc",
+              "最大输出token数": "",
+              "上下文窗口大小": "x"
+            }
+          }
+        },
+        "result": {
+          "api_key": "",
+          "base_url": "https://api.deepseek.com/anthropic",
+          "model": "deepseek-v4-flash",
+          "model_options": [
+            "deepseek-v4-flash"
+          ],
+          "protocol": "anthropic",
+          "temperature": null,
+          "max_tokens": null,
+          "thinking_enabled": true,
+          "thinking_effort": "high",
+          "thinking_passback": true,
+          "thinking_options": {
+            "high": "高",
+            "max": "全开"
+          },
+          "context_window": 1000000,
+          "retry_count": 3,
+          "goal_max_rounds": 100
+        }
+      },
+      {
+        "id": "context_window_zero",
+        "input": {
+          "value": {
+            "智能体": {
+              "上下文窗口大小": 0
+            }
+          }
+        },
+        "result": {
+          "api_key": "",
+          "base_url": "https://api.deepseek.com/anthropic",
+          "model": "deepseek-v4-flash",
+          "model_options": [
+            "deepseek-v4-flash"
+          ],
+          "protocol": "anthropic",
+          "temperature": null,
+          "max_tokens": null,
+          "thinking_enabled": true,
+          "thinking_effort": "high",
+          "thinking_passback": true,
+          "thinking_options": {
+            "high": "高",
+            "max": "全开"
+          },
+          "context_window": 0,
+          "retry_count": 3,
+          "goal_max_rounds": 100
+        }
+      },
+      {
+        "id": "context_window_negative",
+        "input": {
+          "value": {
+            "智能体": {
+              "上下文窗口大小": "-5"
+            }
+          }
+        },
+        "result": {
+          "api_key": "",
+          "base_url": "https://api.deepseek.com/anthropic",
+          "model": "deepseek-v4-flash",
+          "model_options": [
+            "deepseek-v4-flash"
+          ],
+          "protocol": "anthropic",
+          "temperature": null,
+          "max_tokens": null,
+          "thinking_enabled": true,
+          "thinking_effort": "high",
+          "thinking_passback": true,
+          "thinking_options": {
+            "high": "高",
+            "max": "全开"
+          },
+          "context_window": -5,
+          "retry_count": 3,
+          "goal_max_rounds": 100
+        }
+      },
+      {
+        "id": "goal_rounds_zero",
+        "input": {
+          "value": {
+            "智能体": {
+              "目标模式最大轮数": 0
+            }
+          }
+        },
+        "result": {
+          "api_key": "",
+          "base_url": "https://api.deepseek.com/anthropic",
+          "model": "deepseek-v4-flash",
+          "model_options": [
+            "deepseek-v4-flash"
+          ],
+          "protocol": "anthropic",
+          "temperature": null,
+          "max_tokens": null,
+          "thinking_enabled": true,
+          "thinking_effort": "high",
+          "thinking_passback": true,
+          "thinking_options": {
+            "high": "高",
+            "max": "全开"
+          },
+          "context_window": 1000000,
+          "retry_count": 3,
+          "goal_max_rounds": 100
+        }
+      },
+      {
+        "id": "thinking_str_values",
+        "input": {
+          "value": {
+            "智能体": {
+              "思考": {
+                "启用": "0",
+                "回传": "",
+                "强度": "max"
+              }
+            }
+          }
+        },
+        "result": {
+          "api_key": "",
+          "base_url": "https://api.deepseek.com/anthropic",
+          "model": "deepseek-v4-flash",
+          "model_options": [
+            "deepseek-v4-flash"
+          ],
+          "protocol": "anthropic",
+          "temperature": null,
+          "max_tokens": null,
+          "thinking_enabled": true,
+          "thinking_effort": "max",
+          "thinking_passback": false,
+          "thinking_options": {
+            "high": "高",
+            "max": "全开"
+          },
+          "context_window": 1000000,
+          "retry_count": 3,
+          "goal_max_rounds": 100
+        }
+      }
+    ],
+    "loader._build_ui_config": [
+      {
+        "id": "empty",
+        "input": {
+          "value": {},
+          "max_output_tokens": 128000
+        },
+        "result": {
+          "raw": {},
+          "show_cost": false,
+          "show_balance": false,
+          "max_output_tokens": 128000
+        }
+      },
+      {
+        "id": "default_max_tokens",
+        "input": {
+          "value": {},
+          "max_output_tokens": 4096
+        },
+        "result": {
+          "raw": {},
+          "show_cost": false,
+          "show_balance": false,
+          "max_output_tokens": 4096
+        }
+      },
+      {
+        "id": "cn_sections",
+        "input": {
+          "value": {
+            "界面": {
+              "颜色": {
+                "强调色": "#112233"
+              },
+              "标注": {
+                "标题1": "bold accent"
+              },
+              "代码块": {
+                "行号": "secondary"
+              },
+              "差异": {
+                "添加": "success"
+              },
+              "框架": {
+                "标题": "accent"
+              },
+              "命令": {
+                "错误": "error"
+              },
+              "提示符": {
+                "符号": "bold #00ff00"
+              }
+            }
+          },
+          "max_output_tokens": 128000
+        },
+        "result": {
+          "raw": {
+            "colors": {
+              "强调色": "#112233"
+            },
+            "markdown": {
+              "heading_h1": "bold accent"
+            },
+            "codeblock": {
+              "line_number": "secondary"
+            },
+            "diff": {
+              "added": "success"
+            },
+            "ui": {
+              "header": "accent"
+            },
+            "cmd": {
+              "error": "error"
+            },
+            "prompt": {
+              "symbol": "bold #00ff00"
+            }
+          },
+          "show_cost": false,
+          "show_balance": false,
+          "max_output_tokens": 128000
+        }
+      },
+      {
+        "id": "top_switches",
+        "input": {
+          "value": {
+            "界面": {
+              "show_cost": true,
+              "显示余额": true,
+              "最大输出token数": "2048"
+            }
+          },
+          "max_output_tokens": 128000
+        },
+        "result": {
+          "raw": {},
+          "show_cost": true,
+          "show_balance": true,
+          "max_output_tokens": 2048
+        }
+      },
+      {
+        "id": "old_flat_keys",
+        "input": {
+          "value": {
+            "界面": {
+              "用户输入色": "#FFFFFF",
+              "代码块背景色": "code_bg",
+              "标题色": "#111111"
+            }
+          },
+          "max_output_tokens": 128000
+        },
+        "result": {
+          "raw": {
+            "base_colors": {
+              "user": "#FFFFFF",
+              "accent": "#111111"
+            },
+            "codeblock": {
+              "background": "code_bg"
+            }
+          },
+          "show_cost": false,
+          "show_balance": false,
+          "max_output_tokens": 128000
+        }
+      },
+      {
+        "id": "recipe_zh_color",
+        "input": {
+          "value": {
+            "界面": {
+              "markdown": {
+                "heading_h1": "bold 强调色"
+              }
+            }
+          },
+          "max_output_tokens": 128000
+        },
+        "result": {
+          "raw": {
+            "markdown": {
+              "heading_h1": "bold emphasis色"
+            }
+          },
+          "show_cost": false,
+          "show_balance": false,
+          "max_output_tokens": 128000
+        }
+      },
+      {
+        "id": "non_dict_section",
+        "input": {
+          "value": {
+            "界面": {
+              "markdown": "x"
+            }
+          },
+          "max_output_tokens": 128000
+        },
+        "result": {
+          "raw": {
+            "markdown": "x"
+          },
+          "show_cost": false,
+          "show_balance": false,
+          "max_output_tokens": 128000
+        }
+      }
+    ]
+  }
+}

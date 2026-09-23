@@ -1,0 +1,523 @@
+{
+  "generated_by": "v2/tests/baseline/extract_old.py",
+  "source": "narnat_agent（旧实现，原位未动）",
+  "note": "随机标签 → [<TAG>]；时间文本 → <YYYY-MM-DD HH:MM>/<MM-DD HH:MM>/<HH:MM>/<MM-DD>",
+  "module": "narnat_agent.tools.exec_signal",
+  "groups": {
+    "exec_signal.rc_line": [
+      {
+        "id": "rc_zero",
+        "input": {
+          "rc": 0
+        },
+        "result": {
+          "text": "[exit code: 0] [<TAG>]",
+          "has_tag": true,
+          "tag_count": 1
+        }
+      },
+      {
+        "id": "rc_one",
+        "input": {
+          "rc": 1
+        },
+        "result": {
+          "text": "[exit code: 1] [<TAG>]",
+          "has_tag": true,
+          "tag_count": 1
+        }
+      },
+      {
+        "id": "rc_negative",
+        "input": {
+          "rc": -1
+        },
+        "result": {
+          "text": "[exit code: -1] [<TAG>]",
+          "has_tag": true,
+          "tag_count": 1
+        }
+      },
+      {
+        "id": "rc_130",
+        "input": {
+          "rc": 130
+        },
+        "result": {
+          "text": "[exit code: 130] [<TAG>]",
+          "has_tag": true,
+          "tag_count": 1
+        }
+      }
+    ],
+    "exec_signal.error_line": [
+      {
+        "id": "err_cn",
+        "input": {
+          "msg": "连接失败"
+        },
+        "result": {
+          "text": "[错误: 连接失败] [<TAG>]",
+          "has_tag": true,
+          "tag_count": 1
+        }
+      },
+      {
+        "id": "err_empty",
+        "input": {
+          "msg": ""
+        },
+        "result": {
+          "text": "[错误: ] [<TAG>]",
+          "has_tag": true,
+          "tag_count": 1
+        }
+      },
+      {
+        "id": "err_with_brackets",
+        "input": {
+          "msg": "[超时: 命令已终止]"
+        },
+        "result": {
+          "text": "[错误: [超时: 命令已终止]] [<TAG>]",
+          "has_tag": true,
+          "tag_count": 1
+        }
+      }
+    ],
+    "exec_signal.tag_error": [
+      {
+        "id": "tag_text",
+        "input": {
+          "text": "[超时: 命令已终止]"
+        },
+        "result": {
+          "text": "[超时: 命令已终止] [<TAG>]",
+          "has_tag": true,
+          "tag_count": 1
+        }
+      },
+      {
+        "id": "tag_plain",
+        "input": {
+          "text": "失败"
+        },
+        "result": {
+          "text": "失败 [<TAG>]",
+          "has_tag": true,
+          "tag_count": 1
+        }
+      }
+    ],
+    "exec_signal.has_error": [
+      {
+        "id": "framework_error_line",
+        "input": {
+          "parts": [
+            [
+              "err_line",
+              "boom"
+            ]
+          ]
+        },
+        "result": {
+          "value": true,
+          "text": "[错误: boom] [<TAG>]"
+        }
+      },
+      {
+        "id": "fake_error_text",
+        "input": {
+          "parts": [
+            [
+              "lit",
+              "[错误: 命令找不到]"
+            ]
+          ]
+        },
+        "result": {
+          "value": false,
+          "text": "[错误: 命令找不到]"
+        }
+      },
+      {
+        "id": "framework_rc_line",
+        "input": {
+          "parts": [
+            [
+              "rc",
+              0
+            ]
+          ]
+        },
+        "result": {
+          "value": false,
+          "text": "[exit code: 0] [<TAG>]"
+        }
+      },
+      {
+        "id": "tag_error_tail",
+        "input": {
+          "parts": [
+            [
+              "lit",
+              "开始 "
+            ],
+            [
+              "tag_error",
+              "失败"
+            ]
+          ]
+        },
+        "result": {
+          "value": true,
+          "text": "开始 失败 [<TAG>]"
+        }
+      },
+      {
+        "id": "plain_ok",
+        "input": {
+          "parts": [
+            [
+              "lit",
+              "全部成功"
+            ]
+          ]
+        },
+        "result": {
+          "value": false,
+          "text": "全部成功"
+        }
+      }
+    ],
+    "exec_signal.parse_rc": [
+      {
+        "id": "tagged_single",
+        "input": {
+          "parts": [
+            [
+              "rc",
+              3
+            ]
+          ]
+        },
+        "result": {
+          "value": 3,
+          "text": "[exit code: 3] [<TAG>]"
+        }
+      },
+      {
+        "id": "tagged_multi_last_wins",
+        "input": {
+          "parts": [
+            [
+              "rc",
+              1
+            ],
+            [
+              "lit",
+              "中间输出"
+            ],
+            [
+              "rc",
+              0
+            ]
+          ]
+        },
+        "result": {
+          "value": 0,
+          "text": "[exit code: 1] [<TAG>]中间输出[exit code: 0] [<TAG>]"
+        }
+      },
+      {
+        "id": "fake_exit_code_text",
+        "input": {
+          "parts": [
+            [
+              "lit",
+              "[exit code: 1]"
+            ]
+          ]
+        },
+        "result": {
+          "value": null,
+          "text": "[exit code: 1]"
+        }
+      },
+      {
+        "id": "tagged_negative",
+        "input": {
+          "parts": [
+            [
+              "rc",
+              -9
+            ]
+          ]
+        },
+        "result": {
+          "value": -9,
+          "text": "[exit code: -9] [<TAG>]"
+        }
+      },
+      {
+        "id": "no_rc",
+        "input": {
+          "parts": [
+            [
+              "lit",
+              "hello"
+            ]
+          ]
+        },
+        "result": {
+          "value": null,
+          "text": "hello"
+        }
+      },
+      {
+        "id": "tagged_then_plain",
+        "input": {
+          "parts": [
+            [
+              "rc",
+              2
+            ],
+            [
+              "lit",
+              "[exit code: 7]"
+            ]
+          ]
+        },
+        "result": {
+          "value": 2,
+          "text": "[exit code: 2] [<TAG>][exit code: 7]"
+        }
+      }
+    ],
+    "exec_signal.strip_tags": [
+      {
+        "id": "both_tags",
+        "input": {
+          "parts": [
+            [
+              "lit",
+              "a"
+            ],
+            [
+              "rc",
+              2
+            ],
+            [
+              "lit",
+              "b"
+            ],
+            [
+              "tag_error",
+              "超时"
+            ]
+          ]
+        },
+        "result": {
+          "value": "a[exit code: 2]b超时",
+          "text": "a[exit code: 2] [<TAG>]b超时 [<TAG>]"
+        }
+      },
+      {
+        "id": "tag_at_start",
+        "input": {
+          "parts": [
+            [
+              "rc",
+              0
+            ],
+            [
+              "lit",
+              "输出"
+            ]
+          ]
+        },
+        "result": {
+          "value": "[exit code: 0]输出",
+          "text": "[exit code: 0] [<TAG>]输出"
+        }
+      },
+      {
+        "id": "fake_text_untouched",
+        "input": {
+          "parts": [
+            [
+              "lit",
+              "[exit code: 5] [错误: x]"
+            ]
+          ]
+        },
+        "result": {
+          "value": "[exit code: 5] [错误: x]",
+          "text": "[exit code: 5] [错误: x]"
+        }
+      }
+    ],
+    "exec_signal.safe_cut_points": [
+      {
+        "id": "plain_no_tag",
+        "input": {
+          "parts": [
+            [
+              "lit",
+              "abcdefghij"
+            ]
+          ],
+          "head": 2,
+          "tail": 4
+        },
+        "result": {
+          "text": "abcdefghij",
+          "cut": [
+            2,
+            4
+          ]
+        }
+      },
+      {
+        "id": "head_inside_tag",
+        "input": {
+          "parts": [
+            [
+              "lit",
+              "HEAD"
+            ],
+            [
+              "rc",
+              1
+            ],
+            [
+              "lit",
+              "TAIL"
+            ]
+          ],
+          "head": 20,
+          "tail": 29
+        },
+        "result": {
+          "text": "HEAD[exit code: 1] [<TAG>]TAIL",
+          "cut": [
+            29,
+            29
+          ]
+        }
+      },
+      {
+        "id": "tail_inside_tag",
+        "input": {
+          "parts": [
+            [
+              "lit",
+              "HEAD"
+            ],
+            [
+              "rc",
+              1
+            ],
+            [
+              "lit",
+              "TAIL"
+            ]
+          ],
+          "head": 4,
+          "tail": 22
+        },
+        "result": {
+          "text": "HEAD[exit code: 1] [<TAG>]TAIL",
+          "cut": [
+            4,
+            18
+          ]
+        }
+      },
+      {
+        "id": "both_inside_cross",
+        "input": {
+          "parts": [
+            [
+              "lit",
+              "HEAD"
+            ],
+            [
+              "rc",
+              1
+            ],
+            [
+              "lit",
+              "TAIL"
+            ]
+          ],
+          "head": 20,
+          "tail": 21
+        },
+        "result": {
+          "text": "HEAD[exit code: 1] [<TAG>]TAIL",
+          "cut": [
+            18,
+            18
+          ]
+        }
+      },
+      {
+        "id": "head_at_tag_start",
+        "input": {
+          "parts": [
+            [
+              "lit",
+              "HEAD"
+            ],
+            [
+              "rc",
+              1
+            ],
+            [
+              "lit",
+              "TAIL"
+            ]
+          ],
+          "head": 18,
+          "tail": 24
+        },
+        "result": {
+          "text": "HEAD[exit code: 1] [<TAG>]TAIL",
+          "cut": [
+            18,
+            18
+          ]
+        }
+      },
+      {
+        "id": "err_tag_inside",
+        "input": {
+          "parts": [
+            [
+              "lit",
+              "AA"
+            ],
+            [
+              "err_line",
+              "boom"
+            ],
+            [
+              "lit",
+              "BB"
+            ]
+          ],
+          "head": 15,
+          "tail": 20
+        },
+        "result": {
+          "text": "AA[错误: boom] [<TAG>]BB",
+          "cut": [
+            12,
+            12
+          ]
+        }
+      }
+    ]
+  }
+}
