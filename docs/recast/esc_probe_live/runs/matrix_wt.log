@@ -1,0 +1,180 @@
+[17:10:37] run=new_wt_baseline_r1_20260923_171037 target_dir=D:\desktop\NarnatAgent console=wt
+[17:10:37] launcher_pid=13576
+[17:10:37] target_pid=22972
+[17:10:52] driver rc=0
+[17:10:53] target killed, gone=True
+[17:10:54] narnat logs collected: ['narnat_2026-09-23_17-10-38.log']
+[17:10:54] run=new_wt_baseline_r2_20260923_171054 target_dir=D:\desktop\NarnatAgent console=wt
+[17:10:54] launcher_pid=2364
+[17:10:54] target_pid=14144
+[17:11:03] driver rc=0
+[17:11:03] target killed, gone=True
+[17:11:04] narnat logs collected: ['narnat_2026-09-23_17-10-55.log']
+[17:11:04] run=new_wt_baseline_r3_20260923_171104 target_dir=D:\desktop\NarnatAgent console=wt
+[17:11:04] launcher_pid=23256
+[17:11:04] target_pid=12132
+[17:11:13] driver rc=0
+[17:11:13] target killed, gone=True
+[17:11:14] narnat logs collected: ['narnat_2026-09-23_17-11-05.log']
+[17:11:14] run=new_wt_wrong_then_esc_r1_20260923_171114 target_dir=D:\desktop\NarnatAgent console=wt
+[17:11:14] launcher_pid=17560
+[17:11:15] target_pid=25092
+[17:11:23] driver rc=0
+[17:11:23] target killed, gone=True
+[17:11:24] narnat logs collected: ['narnat_2026-09-23_17-11-15.log']
+[17:11:24] run=new_wt_wrong_then_esc_r2_20260923_171124 target_dir=D:\desktop\NarnatAgent console=wt
+[17:11:24] launcher_pid=9352
+[17:11:25] target_pid=24788
+[17:11:44] driver rc=0
+[17:11:45] target killed, gone=True
+[17:11:46] narnat logs collected: ['narnat_2026-09-23_17-11-25.log']
+[17:11:46] run=new_wt_wrong_then_esc_r3_20260923_171146 target_dir=D:\desktop\NarnatAgent console=wt
+[17:11:46] launcher_pid=14752
+[17:11:46] target_pid=4168
+[17:11:54] driver rc=0
+[17:11:55] target killed, gone=True
+[17:11:56] narnat logs collected: ['narnat_2026-09-23_17-11-47.log']
+[17:11:56] run=new_wt_alternate_r1_20260923_171156 target_dir=D:\desktop\NarnatAgent console=wt
+[17:11:56] launcher_pid=16600
+[17:11:56] target_pid=11600
+[17:12:16] driver rc=0
+[17:12:16] target killed, gone=True
+[17:12:17] narnat logs collected: ['narnat_2026-09-23_17-11-57.log']
+[17:12:17] run=new_wt_alternate_r2_20260923_171217 target_dir=D:\desktop\NarnatAgent console=wt
+[17:12:17] launcher_pid=8824
+[17:12:17] target_pid=10980
+[17:12:26] driver rc=0
+[17:12:26] target killed, gone=True
+[17:12:27] narnat logs collected: ['narnat_2026-09-23_17-12-18.log']
+[17:12:27] run=new_wt_alternate_r3_20260923_171227 target_dir=D:\desktop\NarnatAgent console=wt
+[17:12:27] launcher_pid=20136
+[17:12:27] target_pid=24564
+[17:12:36] driver rc=0
+[17:12:36] target killed, gone=True
+[17:12:37] narnat logs collected: ['narnat_2026-09-23_17-12-28.log']
+[17:12:37] run=new_wt_rage_r1_20260923_171237 target_dir=D:\desktop\NarnatAgent console=wt
+[17:12:37] launcher_pid=3672
+[17:12:38] target_pid=11696
+[17:12:47] driver rc=0
+[17:12:47] target killed, gone=True
+[17:12:48] narnat logs collected: ['narnat_2026-09-23_17-12-38.log']
+[17:12:48] run=new_wt_rage_r2_20260923_171248 target_dir=D:\desktop\NarnatAgent console=wt
+[17:12:48] launcher_pid=15508
+[17:12:48] target_pid=18408
+[17:12:57] driver rc=0
+[17:12:58] target killed, gone=True
+[17:12:59] narnat logs collected: ['narnat_2026-09-23_17-12-49.log']
+[17:12:59] run=new_wt_rage_r3_20260923_171259 target_dir=D:\desktop\NarnatAgent console=wt
+[17:12:59] launcher_pid=15320
+[17:12:59] target_pid=15992
+[17:13:08] driver rc=0
+[17:13:08] target killed, gone=True
+[17:13:10] narnat logs collected: ['narnat_2026-09-23_17-13-00.log']
+[17:13:10] run=new_wt_delayed_r1_20260923_171310 target_dir=D:\desktop\NarnatAgent console=wt
+[17:13:10] launcher_pid=15064
+[17:13:10] target_pid=8916
+[17:13:19] driver rc=0
+[17:13:20] target killed, gone=True
+[17:13:21] narnat logs collected: ['narnat_2026-09-23_17-13-10.log']
+[17:13:21] run=new_wt_delayed_r2_20260923_171321 target_dir=D:\desktop\NarnatAgent console=wt
+[17:13:21] launcher_pid=9264
+[17:13:21] target_pid=20352
+[17:13:31] driver rc=0
+[17:13:31] target killed, gone=True
+[17:13:32] narnat logs collected: ['narnat_2026-09-23_17-13-22.log']
+[17:13:32] run=new_wt_delayed_r3_20260923_171332 target_dir=D:\desktop\NarnatAgent console=wt
+[17:13:32] launcher_pid=6072
+[17:13:33] target_pid=3672
+[17:13:42] driver rc=0
+[17:13:42] target killed, gone=True
+[17:13:43] narnat logs collected: ['narnat_2026-09-23_17-13-33.log']
+[17:13:43] run=old_wt_baseline_r1_20260923_171343 target_dir=C:\Users\GONGCH~1\AppData\Local\Temp\narnat_old console=wt
+[17:13:43] launcher_pid=18836
+[17:13:44] target_pid=17224
+[17:13:52] driver rc=0
+[17:13:52] target killed, gone=True
+[17:13:53] narnat logs collected: ['narnat_2026-09-23_17-13-44.log']
+[17:13:54] run=old_wt_baseline_r2_20260923_171353 target_dir=C:\Users\GONGCH~1\AppData\Local\Temp\narnat_old console=wt
+[17:13:54] launcher_pid=2188
+[17:13:54] target_pid=12136
+[17:14:02] driver rc=0
+[17:14:03] target killed, gone=True
+[17:14:04] narnat logs collected: ['narnat_2026-09-23_17-13-54.log']
+[17:14:04] run=old_wt_baseline_r3_20260923_171404 target_dir=C:\Users\GONGCH~1\AppData\Local\Temp\narnat_old console=wt
+[17:14:04] launcher_pid=11472
+[17:14:04] target_pid=14956
+[17:14:13] driver rc=0
+[17:14:13] target killed, gone=True
+[17:14:14] narnat logs collected: ['narnat_2026-09-23_17-14-05.log']
+[17:14:14] run=old_wt_wrong_then_esc_r1_20260923_171414 target_dir=C:\Users\GONGCH~1\AppData\Local\Temp\narnat_old console=wt
+[17:14:14] launcher_pid=13348
+[17:14:14] target_pid=1260
+[17:14:23] driver rc=0
+[17:14:23] target killed, gone=True
+[17:14:24] narnat logs collected: ['narnat_2026-09-23_17-14-15.log']
+[17:14:24] run=old_wt_wrong_then_esc_r2_20260923_171424 target_dir=C:\Users\GONGCH~1\AppData\Local\Temp\narnat_old console=wt
+[17:14:24] launcher_pid=12272
+[17:14:25] target_pid=19636
+[17:14:33] driver rc=0
+[17:14:33] target killed, gone=True
+[17:14:34] narnat logs collected: ['narnat_2026-09-23_17-14-25.log']
+[17:14:34] run=old_wt_wrong_then_esc_r3_20260923_171434 target_dir=C:\Users\GONGCH~1\AppData\Local\Temp\narnat_old console=wt
+[17:14:34] launcher_pid=25092
+[17:14:35] target_pid=23016
+[17:14:54] driver rc=0
+[17:14:54] target killed, gone=True
+[17:14:55] narnat logs collected: ['narnat_2026-09-23_17-14-35.log']
+[17:14:56] run=old_wt_alternate_r1_20260923_171455 target_dir=C:\Users\GONGCH~1\AppData\Local\Temp\narnat_old console=wt
+[17:14:56] launcher_pid=25428
+[17:14:56] target_pid=23696
+[17:15:04] driver rc=0
+[17:15:04] target killed, gone=True
+[17:15:05] narnat logs collected: ['narnat_2026-09-23_17-14-56.log']
+[17:15:06] run=old_wt_alternate_r2_20260923_171505 target_dir=C:\Users\GONGCH~1\AppData\Local\Temp\narnat_old console=wt
+[17:15:06] launcher_pid=12084
+[17:15:06] target_pid=6400
+[17:15:25] driver rc=0
+[17:15:26] target killed, gone=True
+[17:15:27] narnat logs collected: ['narnat_2026-09-23_17-15-06.log']
+[17:15:27] run=old_wt_alternate_r3_20260923_171527 target_dir=C:\Users\GONGCH~1\AppData\Local\Temp\narnat_old console=wt
+[17:15:27] launcher_pid=14516
+[17:15:27] target_pid=25468
+[17:15:35] driver rc=0
+[17:15:36] target killed, gone=True
+[17:15:37] narnat logs collected: ['narnat_2026-09-23_17-15-28.log']
+[17:15:37] run=old_wt_rage_r1_20260923_171537 target_dir=C:\Users\GONGCH~1\AppData\Local\Temp\narnat_old console=wt
+[17:15:37] launcher_pid=11260
+[17:15:37] target_pid=22092
+[17:15:46] driver rc=0
+[17:15:47] target killed, gone=True
+[17:15:48] narnat logs collected: ['narnat_2026-09-23_17-15-38.log']
+[17:15:48] run=old_wt_rage_r2_20260923_171548 target_dir=C:\Users\GONGCH~1\AppData\Local\Temp\narnat_old console=wt
+[17:15:48] launcher_pid=19860
+[17:15:48] target_pid=19744
+[17:16:08] driver rc=0
+[17:16:08] target killed, gone=True
+[17:16:09] narnat logs collected: ['narnat_2026-09-23_17-15-48.log']
+[17:16:09] run=old_wt_rage_r3_20260923_171609 target_dir=C:\Users\GONGCH~1\AppData\Local\Temp\narnat_old console=wt
+[17:16:09] launcher_pid=23312
+[17:16:09] target_pid=10156
+[17:16:18] driver rc=0
+[17:16:19] target killed, gone=True
+[17:16:20] narnat logs collected: ['narnat_2026-09-23_17-16-10.log']
+[17:16:20] run=old_wt_delayed_r1_20260923_171620 target_dir=C:\Users\GONGCH~1\AppData\Local\Temp\narnat_old console=wt
+[17:16:20] launcher_pid=22776
+[17:16:20] target_pid=9580
+[17:16:30] driver rc=0
+[17:16:30] target killed, gone=True
+[17:16:31] narnat logs collected: ['narnat_2026-09-23_17-16-20.log']
+[17:16:32] run=old_wt_delayed_r2_20260923_171631 target_dir=C:\Users\GONGCH~1\AppData\Local\Temp\narnat_old console=wt
+[17:16:32] launcher_pid=7544
+[17:16:32] target_pid=13948
+[17:16:41] driver rc=0
+[17:16:41] target killed, gone=True
+[17:16:42] narnat logs collected: ['narnat_2026-09-23_17-16-32.log']
+[17:16:43] run=old_wt_delayed_r3_20260923_171642 target_dir=C:\Users\GONGCH~1\AppData\Local\Temp\narnat_old console=wt
+[17:16:43] launcher_pid=18296
+[17:16:43] target_pid=2848
+[17:17:02] driver rc=0
+[17:17:02] target killed, gone=True
+[17:17:04] narnat logs collected: ['narnat_2026-09-23_17-16-43.log']

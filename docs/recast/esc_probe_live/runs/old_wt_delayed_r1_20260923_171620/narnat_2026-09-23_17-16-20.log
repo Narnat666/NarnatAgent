@@ -1,0 +1,4 @@
+2026-09-23 17:16:21 [narnat_1758864034032]  INFO   [core.agent] Agent启动, model=deepseek-flash
+2026-09-23 17:16:24 [narnat_1758864034032]  INFO   [core.agent] 用户输入: 你好
+2026-09-23 17:16:24 [narnat_1758864034032]  INFO   [core.llm] 发送请求(Anthropic), messages=2条
+2026-09-23 17:16:26 [narnat_1758864034032]  INFO   [core.llm] 响应完成, content_len=335, stop_reason=end_turn

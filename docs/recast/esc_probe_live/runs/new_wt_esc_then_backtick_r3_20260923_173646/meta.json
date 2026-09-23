@@ -1,0 +1,14 @@
+{
+ "run_id": "new_wt_esc_then_backtick_r3_20260923_173646",
+ "version": "new",
+ "plan": "esc_then_backtick",
+ "attempt": 3,
+ "console": "wt",
+ "target_dir": "D:\\desktop\\NarnatAgent",
+ "target_pid": 23872,
+ "driver_rc": 0,
+ "narnat_logs": [
+  "narnat_2026-09-23_17-36-47.log"
+ ],
+ "started": "2026-09-23 17:36:56"
+}

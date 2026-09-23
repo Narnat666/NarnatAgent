@@ -1,0 +1,6 @@
+[17:14:34] run=old_wt_wrong_then_esc_r3_20260923_171434 target_dir=C:\Users\GONGCH~1\AppData\Local\Temp\narnat_old console=wt
+[17:14:34] launcher_pid=25092
+[17:14:35] target_pid=23016
+[17:14:54] driver rc=0
+[17:14:54] target killed, gone=True
+[17:14:55] narnat logs collected: ['narnat_2026-09-23_17-14-35.log']

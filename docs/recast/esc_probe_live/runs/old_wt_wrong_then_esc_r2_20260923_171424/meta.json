@@ -1,0 +1,14 @@
+{
+ "run_id": "old_wt_wrong_then_esc_r2_20260923_171424",
+ "version": "old",
+ "plan": "wrong_then_esc",
+ "attempt": 2,
+ "console": "wt",
+ "target_dir": "C:\\Users\\GONGCH~1\\AppData\\Local\\Temp\\narnat_old",
+ "target_pid": 19636,
+ "driver_rc": 0,
+ "narnat_logs": [
+  "narnat_2026-09-23_17-14-25.log"
+ ],
+ "started": "2026-09-23 17:14:34"
+}

@@ -1,0 +1,14 @@
+{
+ "run_id": "old_wt_rage_r3_20260923_171609",
+ "version": "old",
+ "plan": "rage",
+ "attempt": 3,
+ "console": "wt",
+ "target_dir": "C:\\Users\\GONGCH~1\\AppData\\Local\\Temp\\narnat_old",
+ "target_pid": 10156,
+ "driver_rc": 0,
+ "narnat_logs": [
+  "narnat_2026-09-23_17-16-10.log"
+ ],
+ "started": "2026-09-23 17:16:20"
+}

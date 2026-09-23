@@ -1,0 +1,304 @@
+{
+  "scenarios": [
+    {
+      "scenario": "A 响应头等待期间置位",
+      "outcome": "interrupted",
+      "raised_at_s": 1.001,
+      "interrupted_shown_at_s": 1.001,
+      "delay_raise_to_show_s": 0.0,
+      "loop_finished_at_s": 1.001,
+      "raise_state": {
+        "handle_before": "FakeOpenAIClient",
+        "is_set_before": false,
+        "is_set_after": true,
+        "handle_after": "FakeOpenAIClient"
+      },
+      "timeline": [
+        [
+          0.0,
+          "begin_turn 完成（运行模式已启动）"
+        ],
+        [
+          0.001,
+          "loop.run 开始"
+        ],
+        [
+          0.001,
+          "chat_stream 生成器创建"
+        ],
+        [
+          0.386,
+          "create() 进入"
+        ],
+        [
+          1.001,
+          "client.close() 被调用"
+        ],
+        [
+          1.001,
+          "raise_() 完成 is_set=True handle=FakeOpenAIClient"
+        ],
+        [
+          1.001,
+          "create() 被 close 中断"
+        ],
+        [
+          1.001,
+          "loop.run 返回 outcome=interrupted"
+        ]
+      ],
+      "fake_client": {
+        "create_calls": 1,
+        "client_closed": true,
+        "stream_closed": false,
+        "chunks_served": 0
+      },
+      "console_tail": "\n  \u001b[38;2;251;191;36m已打断\u001b[0m\n  \u001b[38;2;100;116;139m继续...\u001b[0m\n"
+    },
+    {
+      "scenario": "B 流式输出期间置位",
+      "outcome": "interrupted",
+      "raised_at_s": 1.202,
+      "interrupted_shown_at_s": 1.254,
+      "delay_raise_to_show_s": 0.052,
+      "loop_finished_at_s": 1.254,
+      "raise_state": {
+        "handle_before": "_FakeStream",
+        "is_set_before": false,
+        "is_set_after": true,
+        "handle_after": "_FakeStream"
+      },
+      "timeline": [
+        [
+          0.001,
+          "begin_turn 完成（运行模式已启动）"
+        ],
+        [
+          0.002,
+          "loop.run 开始"
+        ],
+        [
+          0.002,
+          "chat_stream 生成器创建"
+        ],
+        [
+          0.002,
+          "create() 进入"
+        ],
+        [
+          0.318,
+          "create() 返回响应流"
+        ],
+        [
+          0.519,
+          "首个事件产出"
+        ],
+        [
+          1.202,
+          "stream.close()"
+        ],
+        [
+          1.202,
+          "raise_() 完成 is_set=True handle=_FakeStream"
+        ],
+        [
+          1.254,
+          "loop.run 返回 outcome=interrupted"
+        ]
+      ],
+      "fake_client": {
+        "create_calls": 1,
+        "client_closed": false,
+        "stream_closed": true,
+        "chunks_served": 4
+      },
+      "console_tail": "\n  \u001b[38;2;251;191;36m已打断\u001b[0m\n  \u001b[38;2;100;116;139m继续...\u001b[0m\n"
+    },
+    {
+      "scenario": "C 反事实：close 无法中断进行中请求",
+      "outcome": "interrupted",
+      "raised_at_s": 1.001,
+      "interrupted_shown_at_s": 5.056,
+      "delay_raise_to_show_s": 4.055,
+      "loop_finished_at_s": 5.056,
+      "raise_state": {
+        "handle_before": "FakeOpenAIClient",
+        "is_set_before": false,
+        "is_set_after": true,
+        "handle_after": "FakeOpenAIClient"
+      },
+      "timeline": [
+        [
+          0.0,
+          "begin_turn 完成（运行模式已启动）"
+        ],
+        [
+          0.001,
+          "loop.run 开始"
+        ],
+        [
+          0.001,
+          "chat_stream 生成器创建"
+        ],
+        [
+          0.001,
+          "create() 进入"
+        ],
+        [
+          1.001,
+          "client.close() 被调用"
+        ],
+        [
+          1.001,
+          "raise_() 完成 is_set=True handle=FakeOpenAIClient"
+        ],
+        [
+          4.993,
+          "create() 返回响应流"
+        ],
+        [
+          5.056,
+          "loop.run 返回 outcome=interrupted"
+        ]
+      ],
+      "fake_client": {
+        "create_calls": 1,
+        "client_closed": true,
+        "stream_closed": false,
+        "chunks_served": 0
+      },
+      "console_tail": "\n  \u001b[38;2;251;191;36m已打断\u001b[0m\n  \u001b[38;2;100;116;139m继续...\u001b[0m\n"
+    },
+    {
+      "scenario": "E 响应头已到、服务端思考静默期间置位",
+      "outcome": "interrupted",
+      "raised_at_s": 1.501,
+      "interrupted_shown_at_s": 1.562,
+      "delay_raise_to_show_s": 0.061,
+      "loop_finished_at_s": 1.562,
+      "raise_state": {
+        "handle_before": "_FakeStream",
+        "is_set_before": false,
+        "is_set_after": true,
+        "handle_after": "_FakeStream"
+      },
+      "timeline": [
+        [
+          0.0,
+          "begin_turn 完成（运行模式已启动）"
+        ],
+        [
+          0.0,
+          "loop.run 开始"
+        ],
+        [
+          0.0,
+          "chat_stream 生成器创建"
+        ],
+        [
+          0.0,
+          "create() 进入"
+        ],
+        [
+          0.313,
+          "create() 返回响应流"
+        ],
+        [
+          1.501,
+          "stream.close()"
+        ],
+        [
+          1.501,
+          "raise_() 完成 is_set=True handle=_FakeStream"
+        ],
+        [
+          1.562,
+          "loop.run 返回 outcome=interrupted"
+        ]
+      ],
+      "fake_client": {
+        "create_calls": 1,
+        "client_closed": false,
+        "stream_closed": true,
+        "chunks_served": 0
+      },
+      "console_tail": "\n  \u001b[38;2;251;191;36m已打断\u001b[0m\n  \u001b[38;2;100;116;139m继续...\u001b[0m\n"
+    },
+    {
+      "scenario": "D 中断关闭共享客户端后的第二轮请求",
+      "outcome": "interrupted",
+      "raised_at_s": 1.001,
+      "interrupted_shown_at_s": 1.002,
+      "delay_raise_to_show_s": 0.0,
+      "loop_finished_at_s": 1.002,
+      "raise_state": {
+        "handle_before": "FakeOpenAIClient",
+        "is_set_before": false,
+        "is_set_after": true,
+        "handle_after": "FakeOpenAIClient"
+      },
+      "timeline": [
+        [
+          0.0,
+          "begin_turn 完成（运行模式已启动）"
+        ],
+        [
+          0.001,
+          "loop.run 开始"
+        ],
+        [
+          0.001,
+          "chat_stream 生成器创建"
+        ],
+        [
+          0.001,
+          "create() 进入"
+        ],
+        [
+          1.001,
+          "client.close() 被调用"
+        ],
+        [
+          1.001,
+          "raise_() 完成 is_set=True handle=FakeOpenAIClient"
+        ],
+        [
+          1.002,
+          "create() 被 close 中断"
+        ],
+        [
+          1.002,
+          "loop.run 返回 outcome=interrupted"
+        ],
+        [
+          1.002,
+          "chat_stream 生成器创建"
+        ],
+        [
+          1.002,
+          "create() 进入"
+        ],
+        [
+          1.002,
+          "首个事件产出"
+        ],
+        [
+          1.948,
+          "create() 进入"
+        ]
+      ],
+      "fake_client": {
+        "create_calls": 1,
+        "client_closed": true,
+        "stream_closed": false,
+        "chunks_served": 0
+      },
+      "console_tail": "\n  \u001b[38;2;251;191;36m已打断\u001b[0m\n  \u001b[38;2;100;116;139m继续...\u001b[0m\n",
+      "second_round": {
+        "outcome": "error",
+        "elapsed_s": 0.95,
+        "error_text": "  \u001b[38;2;255;255;208m[错误: API调用失败(APIConnectionError，重试1次): Connection error.]\u001b[0m\n"
+      }
+    }
+  ]
+}

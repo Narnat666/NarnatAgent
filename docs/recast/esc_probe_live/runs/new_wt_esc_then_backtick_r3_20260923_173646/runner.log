@@ -1,0 +1,6 @@
+[17:36:46] run=new_wt_esc_then_backtick_r3_20260923_173646 target_dir=D:\desktop\NarnatAgent console=wt
+[17:36:47] launcher_pid=24108
+[17:36:47] target_pid=23872
+[17:36:55] driver rc=0
+[17:36:55] target killed, gone=True
+[17:36:56] narnat logs collected: ['narnat_2026-09-23_17-36-47.log']

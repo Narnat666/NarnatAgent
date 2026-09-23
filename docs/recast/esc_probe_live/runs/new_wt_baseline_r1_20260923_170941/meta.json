@@ -1,0 +1,14 @@
+{
+ "run_id": "new_wt_baseline_r1_20260923_170941",
+ "version": "new",
+ "plan": "baseline",
+ "attempt": 1,
+ "console": "wt",
+ "target_dir": "D:\\desktop\\NarnatAgent",
+ "target_pid": 7448,
+ "driver_rc": 0,
+ "narnat_logs": [
+  "narnat_2026-09-23_17-09-42.log"
+ ],
+ "started": "2026-09-23 17:09:51"
+}

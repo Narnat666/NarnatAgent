@@ -1,0 +1,6 @@
+[17:00:27] run=new_baseline_r1_20260923_170027 target_dir=D:\desktop\NarnatAgent
+[17:00:27] launcher cmd=$cmd.exe /c start  conhost C:\Program Files\Python312\python.exe D:\desktop\NarnatAgent\docs\recast\esc_probe_live\boot.py launcher_pid=19996
+[17:00:27] target_pid=4468
+[17:01:07] driver rc=1
+[17:01:08] target killed, gone=True
+[17:01:09] narnat logs collected: []

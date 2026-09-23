@@ -1,0 +1,14 @@
+{
+ "run_id": "new_wt_alternate_r1_20260923_170956",
+ "version": "new",
+ "plan": "alternate",
+ "attempt": 1,
+ "console": "wt",
+ "target_dir": "D:\\desktop\\NarnatAgent",
+ "target_pid": 6508,
+ "driver_rc": 0,
+ "narnat_logs": [
+  "narnat_2026-09-23_17-09-57.log"
+ ],
+ "started": "2026-09-23 17:10:07"
+}

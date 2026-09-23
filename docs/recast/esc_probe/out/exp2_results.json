@@ -1,0 +1,37 @@
+{
+  "cases": [
+    {
+      "case": "A 等待响应头期间 close()",
+      "header_delay_s": 8.0,
+      "close_at_s": 2.0,
+      "request_finished_at_s": 2.0,
+      "delay_after_close_s": 0.0,
+      "outcome": "异常 ReadError: [WinError 10038] 在一个非套接字上尝试了一个操作。",
+      "verdict": "close 提前中断了请求"
+    },
+    {
+      "case": "A2 真实 OpenAI SDK：等待响应头期间 close()",
+      "header_delay_s": 8.0,
+      "close_at_s": 2.0,
+      "create_finished_at_s": 2.0,
+      "delay_after_close_s": 0.0,
+      "outcome": "异常 APIConnectionError: Connection error.",
+      "verdict": "SDK close() 中断了进行中的请求（与 narnat abort 路径同构）"
+    },
+    {
+      "case": "B 关闭后复用客户端",
+      "httpx_reuse_error": "RuntimeError: Cannot send a request, as the client has been closed.",
+      "openai_reuse_error": "APIConnectionError: Connection error.",
+      "verdict": "关闭后的客户端不可复用（后续请求直接抛错）"
+    },
+    {
+      "case": "C 流已建立后 close(response)",
+      "lines_before_close": 40,
+      "close_at_s": 2.0,
+      "reader_finished_at_s": 2.0,
+      "delay_after_close_s": 0.0,
+      "outcome": "异常 ReadError: [WinError 10038] 在一个非套接字上尝试了一个操作。",
+      "verdict": "response.close() 立即中断 iter_lines（流阶段 abort 有效）"
+    }
+  ]
+}

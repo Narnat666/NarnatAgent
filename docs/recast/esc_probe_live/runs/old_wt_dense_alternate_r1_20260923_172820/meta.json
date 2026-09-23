@@ -1,0 +1,14 @@
+{
+ "run_id": "old_wt_dense_alternate_r1_20260923_172820",
+ "version": "old",
+ "plan": "dense_alternate",
+ "attempt": 1,
+ "console": "wt",
+ "target_dir": "C:\\Users\\GONGCH~1\\AppData\\Local\\Temp\\narnat_old",
+ "target_pid": 22196,
+ "driver_rc": 0,
+ "narnat_logs": [
+  "narnat_2026-09-23_17-28-20.log"
+ ],
+ "started": "2026-09-23 17:28:30"
+}

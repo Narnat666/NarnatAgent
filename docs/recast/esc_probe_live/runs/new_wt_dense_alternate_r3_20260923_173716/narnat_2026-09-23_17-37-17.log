@@ -1,0 +1,3 @@
+2026-09-23 17:37:17 [narnat_2640642117888]  INFO   [app] Agent启动, model=deepseek-flash
+2026-09-23 17:37:21 [narnat_2640642117888]  INFO   [app] 用户输入: 你好
+2026-09-23 17:37:21 [narnat_2640642117888]  INFO   [llm] 发送请求(Anthropic), messages=2条

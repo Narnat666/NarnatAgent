@@ -1,0 +1,12 @@
+{
+ "plan": "baseline",
+ "pid": 4468,
+ "status": "error",
+ "marks": {},
+ "events": [],
+ "screen_before": "",
+ "screen_final": "",
+ "errors": [
+  "OSError: AttachConsole(4468) 失败: 87"
+ ]
+}

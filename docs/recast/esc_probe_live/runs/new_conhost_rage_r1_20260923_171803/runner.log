@@ -1,0 +1,6 @@
+[17:18:03] run=new_conhost_rage_r1_20260923_171803 target_dir=D:\desktop\NarnatAgent console=conhost
+[17:18:03] launcher_pid=24144
+[17:18:04] target_pid=13568
+[17:18:12] driver rc=0
+[17:18:13] target killed, gone=True
+[17:18:14] narnat logs collected: ['narnat_2026-09-23_17-18-04.log']

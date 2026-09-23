@@ -1,0 +1,139 @@
+[      中断] C01 纯 Esc（采集启动前已在缓冲，基线）
+           置位时刻=21.0ms  交付字节='<Esc>'  剩余=[]
+[      中断] C02 错键在前：` 先 100ms，Esc 后
+           置位时刻=142.4ms  交付字节='`<Esc>'  剩余=[]
+[      中断] C03 错键紧邻在前：` 先 15ms，Esc 后
+           置位时刻=51.3ms  交付字节='`<Esc>'  剩余=[]
+[ 未中断(吞键)] C04 Esc 后 10ms 来错键（落入 20ms 判定窗口）
+           置位时刻=-  交付字节='<Esc>`'  剩余=[]
+[      中断] C05 Esc 后 5ms 错键、再 5ms 第二个 Esc（窗口内出现 Esc）
+           置位时刻=21.1ms  交付字节='<Esc>`<Esc>'  剩余=[]
+[      中断] C06 两次 Esc 间隔 100ms（> 20ms 窗口）
+           置位时刻=20.7ms  交付字节='<Esc>'  剩余=[[0.1, '<Esc>']]
+[      中断] C07 两次 Esc 间隔 10ms（< 20ms 窗口）
+           置位时刻=21.0ms  交付字节='<Esc><Esc>'  剩余=[]
+[ 未中断(吞键)] C08 Esc + 5 个非 Esc 字符（间隔 2ms 批量）
+           置位时刻=-  交付字节='<Esc>abcde'  剩余=[]
+[ 未中断(吞键)] C09 Esc + 6 个非 Esc 字符（5 字节消费上限边界）
+           置位时刻=-  交付字节='<Esc>abcdef'  剩余=[]
+[      中断] C10 Esc + 6 个非 Esc 字符 + 第 8 字节才是 Esc（超出消费窗口）
+           置位时刻=40.8ms  交付字节='<Esc>abcdef<Esc>'  剩余=[]
+[      中断] C11 交替连按 Esc/` 间隔 15ms ×3 轮（Esc 在先）
+           置位时刻=72.7ms  交付字节='<Esc>`<Esc>`<Esc>'  剩余=[[0.075, '`']]
+[      中断] C12 交替连按 `/Esc 间隔 15ms ×3 轮（错键在先）
+           置位时刻=51.4ms  交付字节='`<Esc>`<Esc>'  剩余=[[0.06, '`'], [0.075, '<Esc>']]
+[      中断] C13 交替连按 Esc/` 间隔 30ms ×3 轮（慢于判定窗口）
+           置位时刻=20.5ms  交付字节='<Esc>'  剩余=[[0.03, '`'], [0.06, '<Esc>'], [0.09, '`'], [0.12, '<Esc>'], [0.15, '`']]
+[      中断] C14 Windows Terminal 事件源对照（escape_immediate）：Esc 与 ` 交错
+           置位时刻=0.3ms  交付字节='<Esc>'  剩余=[[0.015, '`'], [0.03, '<Esc>']]
+[      中断] C15 采集启动前已积压：` (-500ms)、Esc (-300ms)（msvcrt 源不清缓冲）
+           置位时刻=20.8ms  交付字节='`<Esc>'  剩余=[]
+[稳定性 #1] interrupted=True raised_at=51.2ms
+[稳定性 #2] interrupted=True raised_at=51.8ms
+[稳定性 #3] interrupted=True raised_at=51.4ms
+[稳定性 #4] interrupted=True raised_at=51.3ms
+[稳定性 #5] interrupted=True raised_at=51.4ms
+[降级验证] 源构建抛异常: running=False（无异常冒出，无任何提示）
+[降级验证] 源返回 None: running=False（无异常冒出，无任何提示）
+
+汇总：15 组用例，12 组判定中断，3 组被吞；结果已写 D:\desktop\NarnatAgent\docs\recast\esc_probe\out\exp1_results.json
+stub server: http://127.0.0.1:60518（本地回环，无外网请求）
+
+A 等待响应头期间 close()
+    header_delay_s = 8.0
+    close_at_s = 2.0
+    request_finished_at_s = 2.0
+    delay_after_close_s = 0.0
+    outcome = 异常 ReadError: [WinError 10038] 在一个非套接字上尝试了一个操作。
+    → close 提前中断了请求
+
+A2 真实 OpenAI SDK：等待响应头期间 close()
+    header_delay_s = 8.0
+    close_at_s = 2.0
+    create_finished_at_s = 2.0
+    delay_after_close_s = 0.0
+    outcome = 异常 APIConnectionError: Connection error.
+    → SDK close() 中断了进行中的请求（与 narnat abort 路径同构）
+
+B 关闭后复用客户端
+    httpx_reuse_error = RuntimeError: Cannot send a request, as the client has been closed.
+    openai_reuse_error = APIConnectionError: Connection error.
+    → 关闭后的客户端不可复用（后续请求直接抛错）
+
+C 流已建立后 close(response)
+    lines_before_close = 40
+    close_at_s = 2.0
+    reader_finished_at_s = 2.0
+    delay_after_close_s = 0.001
+    outcome = 异常 ReadError: [WinError 10038] 在一个非套接字上尝试了一个操作。
+    → response.close() 立即中断 iter_lines（流阶段 abort 有效）
+
+结果已写 D:\desktop\NarnatAgent\docs\recast\esc_probe\out\exp2_results.json
+
+A 响应头等待期间置位
+    结果=interrupted  置位@1.001s  『已打断』@1.001s  延迟=0.0s  循环结束@1.001s
+    置位时 handle=FakeOpenAIClient is_set=True  chunks=0
+         0.000s  begin_turn 完成（运行模式已启动）
+         0.001s  loop.run 开始
+         0.001s  chat_stream 生成器创建
+         0.377s  create() 进入
+         1.001s  client.close() 被调用
+         1.001s  raise_() 完成 is_set=True handle=FakeOpenAIClient
+         1.001s  create() 被 close 中断
+         1.001s  loop.run 返回 outcome=interrupted
+
+B 流式输出期间置位
+    结果=interrupted  置位@1.201s  『已打断』@1.237s  延迟=0.036s  循环结束@1.237s
+    置位时 handle=_FakeStream is_set=True  chunks=4
+         0.001s  begin_turn 完成（运行模式已启动）
+         0.001s  loop.run 开始
+         0.001s  chat_stream 生成器创建
+         0.001s  create() 进入
+         0.314s  create() 返回响应流
+         0.515s  首个事件产出
+         1.201s  stream.close()
+         1.201s  raise_() 完成 is_set=True handle=_FakeStream
+         1.237s  loop.run 返回 outcome=interrupted
+
+C 反事实：close 无法中断进行中请求
+    结果=interrupted  置位@1.001s  『已打断』@5.087s  延迟=4.086s  循环结束@5.087s
+    置位时 handle=FakeOpenAIClient is_set=True  chunks=0
+         0.000s  begin_turn 完成（运行模式已启动）
+         0.000s  loop.run 开始
+         0.000s  chat_stream 生成器创建
+         0.000s  create() 进入
+         1.001s  client.close() 被调用
+         1.001s  raise_() 完成 is_set=True handle=FakeOpenAIClient
+         5.024s  create() 返回响应流
+         5.087s  loop.run 返回 outcome=interrupted
+
+E 响应头已到、服务端思考静默期间置位
+    结果=interrupted  置位@1.501s  『已打断』@1.559s  延迟=0.059s  循环结束@1.56s
+    置位时 handle=_FakeStream is_set=True  chunks=0
+         0.000s  begin_turn 完成（运行模式已启动）
+         0.000s  loop.run 开始
+         0.000s  chat_stream 生成器创建
+         0.001s  create() 进入
+         0.311s  create() 返回响应流
+         1.501s  stream.close()
+         1.501s  raise_() 完成 is_set=True handle=_FakeStream
+         1.560s  loop.run 返回 outcome=interrupted
+
+D 中断关闭共享客户端后的第二轮请求
+    结果=interrupted  置位@1.001s  『已打断』@1.002s  延迟=0.0s  循环结束@1.002s
+    置位时 handle=FakeOpenAIClient is_set=True  chunks=0
+         0.000s  begin_turn 完成（运行模式已启动）
+         0.001s  loop.run 开始
+         0.001s  chat_stream 生成器创建
+         0.001s  create() 进入
+         1.001s  client.close() 被调用
+         1.001s  raise_() 完成 is_set=True handle=FakeOpenAIClient
+         1.001s  create() 被 close 中断
+         1.002s  loop.run 返回 outcome=interrupted
+         1.002s  chat_stream 生成器创建
+         1.002s  create() 进入
+         1.002s  首个事件产出
+         2.206s  create() 进入
+    第二轮：error 耗时1.2s  错误='  \x1b[38;2;255;255;208m[错误: API调用失败(APIConnectionError，重试1次): Connection error.]\x1b[0m\n'
+
+结果已写 D:\desktop\NarnatAgent\docs\recast\esc_probe\out\exp3_results.json

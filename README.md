@@ -383,6 +383,7 @@ narnat_agent/
 │   ├── openai_backend.py     #   OpenAI 兼容协议（SSE 解析 / 重试 / 思考参数）
 │   ├── anthropic_backend.py  #   Anthropic 兼容协议（消息转换 / 思考回传）
 │   ├── retry.py              #   重试分类与退避
+│   ├── cancelable.py         #   可取消等待原语（请求发送期的取消检查点）
 │   └── runtime.py            #   流哨兵 / 队列泵 / 共享状态
 ├── messages/                 # 消息域
 │   ├── store.py              #   消息唯一所有者（只读视图 / 受控修改 / 中断修复）
@@ -401,6 +402,7 @@ narnat_agent/
 │   ├── store.py              #   持久化（原子写 / 树形展示 / 删除）
 │   ├── commands.py           #   交互命令实现与可用性表
 │   ├── manager.py            #   会话管理服务
+│   ├── goal.py               #   目标模式开关（会话侧）
 │   ├── model_state.py        #   模型 / 思考状态（写回配置）
 │   └── theme.py              #   会话侧显示
 ├── stats/                    # 统计与费用
@@ -438,6 +440,21 @@ narnat_agent/
     ├── manager.py            #   连接管理（热注册 / 进程生命周期）
     └── tool.py               #   MCP 工具（connect / disconnect）
 ```
+
+### 测试与验证
+
+行为规格（`openspec/specs/`，215 条需求）是行为金标准；实现与规格逐条对照。
+
+```cmd
+:: 单元测试（1600+ 用例）
+python -m pytest tests/unit -q
+
+:: 结构护栏：import 分层 / 跨模块私有访问 / 模块级可变状态
+python tests/check_layering.py
+```
+
+- `tests/baseline/` 保存旧实现（重构前版本）固化的行为输出，单测据此做**等价对照**；提取脚本面向旧实现，请勿在新代码上重跑（详见 `tests/baseline/README.md`）。
+- 重构记录、现状调研与 ESC 打断修复的探索/验证证据见 `docs/recast/`（进度总览 `docs/recast/PROGRESS.md`）。
 
 ### 内置工具
 

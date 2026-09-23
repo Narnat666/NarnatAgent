@@ -1,0 +1,873 @@
+{
+  "cases": [
+    {
+      "name": "C01 纯 Esc（采集启动前已在缓冲，基线）",
+      "escape_immediate": false,
+      "schedule": [
+        [
+          0.0,
+          "<Esc>"
+        ]
+      ],
+      "interrupted": true,
+      "raised_at_ms": 20.6,
+      "delivered": [
+        [
+          0.4,
+          "<Esc>"
+        ]
+      ],
+      "delivered_bytes": "<Esc>",
+      "swallowed_bytes": "",
+      "undelivered": [],
+      "read_trace": [
+        "    0.4ms  read(timeout=None) -> <Esc>",
+        "   20.6ms  read(timeout=0.0) -> <none>"
+      ],
+      "subscriber_calls": 1
+    },
+    {
+      "name": "C02 错键在前：` 先 100ms，Esc 后",
+      "escape_immediate": false,
+      "schedule": [
+        [
+          0.0,
+          "`"
+        ],
+        [
+          0.1,
+          "<Esc>"
+        ]
+      ],
+      "interrupted": true,
+      "raised_at_ms": 141.9,
+      "delivered": [
+        [
+          0.2,
+          "`"
+        ],
+        [
+          121.1,
+          "<Esc>"
+        ]
+      ],
+      "delivered_bytes": "`<Esc>",
+      "swallowed_bytes": "",
+      "undelivered": [],
+      "read_trace": [
+        "    0.2ms  read(timeout=None) -> `",
+        "   30.6ms  read(timeout=0.03) -> <none>",
+        "   60.9ms  read(timeout=0.03) -> <none>",
+        "   90.9ms  read(timeout=0.03) -> <none>",
+        "  121.1ms  read(timeout=None) -> <Esc>",
+        "  141.8ms  read(timeout=0.0) -> <none>"
+      ],
+      "subscriber_calls": 1
+    },
+    {
+      "name": "C03 错键紧邻在前：` 先 15ms，Esc 后",
+      "escape_immediate": false,
+      "schedule": [
+        [
+          0.0,
+          "`"
+        ],
+        [
+          0.015,
+          "<Esc>"
+        ]
+      ],
+      "interrupted": true,
+      "raised_at_ms": 51.0,
+      "delivered": [
+        [
+          0.2,
+          "`"
+        ],
+        [
+          30.7,
+          "<Esc>"
+        ]
+      ],
+      "delivered_bytes": "`<Esc>",
+      "swallowed_bytes": "",
+      "undelivered": [],
+      "read_trace": [
+        "    0.2ms  read(timeout=None) -> `",
+        "   30.7ms  read(timeout=None) -> <Esc>",
+        "   51.0ms  read(timeout=0.0) -> <none>"
+      ],
+      "subscriber_calls": 1
+    },
+    {
+      "name": "C04 Esc 后 10ms 来错键（落入 20ms 判定窗口）",
+      "escape_immediate": false,
+      "schedule": [
+        [
+          0.0,
+          "<Esc>"
+        ],
+        [
+          0.01,
+          "`"
+        ]
+      ],
+      "interrupted": false,
+      "raised_at_ms": null,
+      "delivered": [
+        [
+          0.1,
+          "<Esc>"
+        ],
+        [
+          20.2,
+          "`"
+        ]
+      ],
+      "delivered_bytes": "<Esc>`",
+      "swallowed_bytes": "<Esc>`",
+      "undelivered": [],
+      "read_trace": [
+        "    0.1ms  read(timeout=None) -> <Esc>",
+        "   20.2ms  read(timeout=None) -> `",
+        "   20.2ms  read(timeout=0.0) -> <none>",
+        "   50.4ms  read(timeout=0.03) -> <none>",
+        "   80.5ms  read(timeout=0.03) -> <none>",
+        "  110.9ms  read(timeout=0.03) -> <none>",
+        "  141.3ms  read(timeout=0.03) -> <none>",
+        "  171.6ms  read(timeout=0.03) -> <none>",
+        "  202.0ms  read(timeout=0.03) -> <none>",
+        "  232.2ms  read(timeout=0.03) -> <none>",
+        "  262.5ms  read(timeout=0.03) -> <none>",
+        "  293.0ms  read(timeout=0.03) -> <none>",
+        "  323.1ms  read(timeout=0.03) -> <none>",
+        "  353.7ms  read(timeout=0.03) -> <none>",
+        "  384.3ms  read(timeout=0.03) -> <none>",
+        "  414.8ms  read(timeout=0.03) -> <none>",
+        "  445.0ms  read(timeout=0.03) -> <none>",
+        "  475.4ms  read(timeout=0.03) -> <none>",
+        "  505.5ms  read(timeout=0.03) -> <none>",
+        "  535.8ms  read(timeout=0.03) -> <none>",
+        "  566.0ms  read(timeout=0.03) -> <none>",
+        "  596.3ms  read(timeout=0.03) -> <none>",
+        "  626.5ms  read(timeout=0.03) -> <none>",
+        "  656.6ms  read(timeout=0.03) -> <none>"
+      ],
+      "subscriber_calls": 0
+    },
+    {
+      "name": "C05 Esc 后 5ms 错键、再 5ms 第二个 Esc（窗口内出现 Esc）",
+      "escape_immediate": false,
+      "schedule": [
+        [
+          0.0,
+          "<Esc>"
+        ],
+        [
+          0.005,
+          "`"
+        ],
+        [
+          0.01,
+          "<Esc>"
+        ]
+      ],
+      "interrupted": true,
+      "raised_at_ms": 20.3,
+      "delivered": [
+        [
+          0.1,
+          "<Esc>"
+        ],
+        [
+          20.3,
+          "`"
+        ],
+        [
+          20.3,
+          "<Esc>"
+        ]
+      ],
+      "delivered_bytes": "<Esc>`<Esc>",
+      "swallowed_bytes": "",
+      "undelivered": [],
+      "read_trace": [
+        "    0.1ms  read(timeout=None) -> <Esc>",
+        "   20.3ms  read(timeout=None) -> `",
+        "   20.3ms  read(timeout=None) -> <Esc>",
+        "   20.3ms  read(timeout=0.0) -> <none>"
+      ],
+      "subscriber_calls": 1
+    },
+    {
+      "name": "C06 两次 Esc 间隔 100ms（> 20ms 窗口）",
+      "escape_immediate": false,
+      "schedule": [
+        [
+          0.0,
+          "<Esc>"
+        ],
+        [
+          0.1,
+          "<Esc>"
+        ]
+      ],
+      "interrupted": true,
+      "raised_at_ms": 20.6,
+      "delivered": [
+        [
+          0.3,
+          "<Esc>"
+        ]
+      ],
+      "delivered_bytes": "<Esc>",
+      "swallowed_bytes": "",
+      "undelivered": [
+        [
+          0.1,
+          "<Esc>"
+        ]
+      ],
+      "read_trace": [
+        "    0.3ms  read(timeout=None) -> <Esc>",
+        "   20.6ms  read(timeout=0.0) -> <none>"
+      ],
+      "subscriber_calls": 1
+    },
+    {
+      "name": "C07 两次 Esc 间隔 10ms（< 20ms 窗口）",
+      "escape_immediate": false,
+      "schedule": [
+        [
+          0.0,
+          "<Esc>"
+        ],
+        [
+          0.01,
+          "<Esc>"
+        ]
+      ],
+      "interrupted": true,
+      "raised_at_ms": 20.6,
+      "delivered": [
+        [
+          0.2,
+          "<Esc>"
+        ],
+        [
+          20.6,
+          "<Esc>"
+        ]
+      ],
+      "delivered_bytes": "<Esc><Esc>",
+      "swallowed_bytes": "",
+      "undelivered": [],
+      "read_trace": [
+        "    0.2ms  read(timeout=None) -> <Esc>",
+        "   20.6ms  read(timeout=None) -> <Esc>",
+        "   20.6ms  read(timeout=0.0) -> <none>"
+      ],
+      "subscriber_calls": 1
+    },
+    {
+      "name": "C08 Esc + 5 个非 Esc 字符（间隔 2ms 批量）",
+      "escape_immediate": false,
+      "schedule": [
+        [
+          0.0,
+          "<Esc>"
+        ],
+        [
+          0.002,
+          "a"
+        ],
+        [
+          0.004,
+          "b"
+        ],
+        [
+          0.006,
+          "c"
+        ],
+        [
+          0.008,
+          "d"
+        ],
+        [
+          0.01,
+          "e"
+        ]
+      ],
+      "interrupted": false,
+      "raised_at_ms": null,
+      "delivered": [
+        [
+          0.3,
+          "<Esc>"
+        ],
+        [
+          20.7,
+          "a"
+        ],
+        [
+          20.7,
+          "b"
+        ],
+        [
+          20.7,
+          "c"
+        ],
+        [
+          20.7,
+          "d"
+        ],
+        [
+          20.7,
+          "e"
+        ]
+      ],
+      "delivered_bytes": "<Esc>abcde",
+      "swallowed_bytes": "<Esc>abcde",
+      "undelivered": [],
+      "read_trace": [
+        "    0.3ms  read(timeout=None) -> <Esc>",
+        "   20.7ms  read(timeout=None) -> a",
+        "   20.7ms  read(timeout=None) -> b",
+        "   20.7ms  read(timeout=None) -> c",
+        "   20.7ms  read(timeout=None) -> d",
+        "   20.7ms  read(timeout=None) -> e",
+        "   51.2ms  read(timeout=0.03) -> <none>",
+        "   81.5ms  read(timeout=0.03) -> <none>",
+        "  111.9ms  read(timeout=0.03) -> <none>",
+        "  142.0ms  read(timeout=0.03) -> <none>",
+        "  172.2ms  read(timeout=0.03) -> <none>",
+        "  202.5ms  read(timeout=0.03) -> <none>",
+        "  232.7ms  read(timeout=0.03) -> <none>",
+        "  263.4ms  read(timeout=0.03) -> <none>",
+        "  293.6ms  read(timeout=0.03) -> <none>",
+        "  323.8ms  read(timeout=0.03) -> <none>",
+        "  354.0ms  read(timeout=0.03) -> <none>",
+        "  384.2ms  read(timeout=0.03) -> <none>",
+        "  414.5ms  read(timeout=0.03) -> <none>",
+        "  444.6ms  read(timeout=0.03) -> <none>",
+        "  474.6ms  read(timeout=0.03) -> <none>",
+        "  504.8ms  read(timeout=0.03) -> <none>",
+        "  535.0ms  read(timeout=0.03) -> <none>",
+        "  565.5ms  read(timeout=0.03) -> <none>",
+        "  596.0ms  read(timeout=0.03) -> <none>",
+        "  626.3ms  read(timeout=0.03) -> <none>",
+        "  656.5ms  read(timeout=0.03) -> <none>"
+      ],
+      "subscriber_calls": 0
+    },
+    {
+      "name": "C09 Esc + 6 个非 Esc 字符（5 字节消费上限边界）",
+      "escape_immediate": false,
+      "schedule": [
+        [
+          0.0,
+          "<Esc>"
+        ],
+        [
+          0.002,
+          "a"
+        ],
+        [
+          0.004,
+          "b"
+        ],
+        [
+          0.006,
+          "c"
+        ],
+        [
+          0.008,
+          "d"
+        ],
+        [
+          0.01,
+          "e"
+        ],
+        [
+          0.012,
+          "f"
+        ]
+      ],
+      "interrupted": false,
+      "raised_at_ms": null,
+      "delivered": [
+        [
+          0.3,
+          "<Esc>"
+        ],
+        [
+          21.0,
+          "a"
+        ],
+        [
+          21.0,
+          "b"
+        ],
+        [
+          21.0,
+          "c"
+        ],
+        [
+          21.0,
+          "d"
+        ],
+        [
+          21.0,
+          "e"
+        ],
+        [
+          21.0,
+          "f"
+        ]
+      ],
+      "delivered_bytes": "<Esc>abcdef",
+      "swallowed_bytes": "<Esc>abcdef",
+      "undelivered": [],
+      "read_trace": [
+        "    0.3ms  read(timeout=None) -> <Esc>",
+        "   21.0ms  read(timeout=None) -> a",
+        "   21.0ms  read(timeout=None) -> b",
+        "   21.0ms  read(timeout=None) -> c",
+        "   21.0ms  read(timeout=None) -> d",
+        "   21.0ms  read(timeout=None) -> e",
+        "   21.0ms  read(timeout=None) -> f",
+        "   51.5ms  read(timeout=0.03) -> <none>",
+        "   82.0ms  read(timeout=0.03) -> <none>",
+        "  112.4ms  read(timeout=0.03) -> <none>",
+        "  142.9ms  read(timeout=0.03) -> <none>",
+        "  173.3ms  read(timeout=0.03) -> <none>",
+        "  203.7ms  read(timeout=0.03) -> <none>",
+        "  234.0ms  read(timeout=0.03) -> <none>",
+        "  264.5ms  read(timeout=0.03) -> <none>",
+        "  294.6ms  read(timeout=0.03) -> <none>",
+        "  324.9ms  read(timeout=0.03) -> <none>",
+        "  355.4ms  read(timeout=0.03) -> <none>",
+        "  386.0ms  read(timeout=0.03) -> <none>",
+        "  416.1ms  read(timeout=0.03) -> <none>",
+        "  446.7ms  read(timeout=0.03) -> <none>",
+        "  476.9ms  read(timeout=0.03) -> <none>",
+        "  507.0ms  read(timeout=0.03) -> <none>",
+        "  537.2ms  read(timeout=0.03) -> <none>",
+        "  567.7ms  read(timeout=0.03) -> <none>",
+        "  597.9ms  read(timeout=0.03) -> <none>",
+        "  628.3ms  read(timeout=0.03) -> <none>",
+        "  658.8ms  read(timeout=0.03) -> <none>"
+      ],
+      "subscriber_calls": 0
+    },
+    {
+      "name": "C10 Esc + 6 个非 Esc 字符 + 第 8 字节才是 Esc（超出消费窗口）",
+      "escape_immediate": false,
+      "schedule": [
+        [
+          0.0,
+          "<Esc>"
+        ],
+        [
+          0.002,
+          "a"
+        ],
+        [
+          0.004,
+          "b"
+        ],
+        [
+          0.006,
+          "c"
+        ],
+        [
+          0.008,
+          "d"
+        ],
+        [
+          0.01,
+          "e"
+        ],
+        [
+          0.012,
+          "f"
+        ],
+        [
+          0.014,
+          "<Esc>"
+        ]
+      ],
+      "interrupted": true,
+      "raised_at_ms": 41.4,
+      "delivered": [
+        [
+          0.3,
+          "<Esc>"
+        ],
+        [
+          20.4,
+          "a"
+        ],
+        [
+          20.5,
+          "b"
+        ],
+        [
+          20.5,
+          "c"
+        ],
+        [
+          20.5,
+          "d"
+        ],
+        [
+          20.5,
+          "e"
+        ],
+        [
+          20.5,
+          "f"
+        ],
+        [
+          20.5,
+          "<Esc>"
+        ]
+      ],
+      "delivered_bytes": "<Esc>abcdef<Esc>",
+      "swallowed_bytes": "",
+      "undelivered": [],
+      "read_trace": [
+        "    0.3ms  read(timeout=None) -> <Esc>",
+        "   20.4ms  read(timeout=None) -> a",
+        "   20.5ms  read(timeout=None) -> b",
+        "   20.5ms  read(timeout=None) -> c",
+        "   20.5ms  read(timeout=None) -> d",
+        "   20.5ms  read(timeout=None) -> e",
+        "   20.5ms  read(timeout=None) -> f",
+        "   20.5ms  read(timeout=None) -> <Esc>",
+        "   41.4ms  read(timeout=0.0) -> <none>"
+      ],
+      "subscriber_calls": 1
+    },
+    {
+      "name": "C11 交替连按 Esc/` 间隔 15ms ×3 轮（Esc 在先）",
+      "escape_immediate": false,
+      "schedule": [
+        [
+          0.0,
+          "<Esc>"
+        ],
+        [
+          0.015,
+          "`"
+        ],
+        [
+          0.03,
+          "<Esc>"
+        ],
+        [
+          0.045,
+          "`"
+        ],
+        [
+          0.06,
+          "<Esc>"
+        ],
+        [
+          0.075,
+          "`"
+        ]
+      ],
+      "interrupted": true,
+      "raised_at_ms": 71.7,
+      "delivered": [
+        [
+          0.3,
+          "<Esc>"
+        ],
+        [
+          20.6,
+          "`"
+        ],
+        [
+          51.2,
+          "<Esc>"
+        ],
+        [
+          71.7,
+          "`"
+        ],
+        [
+          71.7,
+          "<Esc>"
+        ]
+      ],
+      "delivered_bytes": "<Esc>`<Esc>`<Esc>",
+      "swallowed_bytes": "",
+      "undelivered": [
+        [
+          0.075,
+          "`"
+        ]
+      ],
+      "read_trace": [
+        "    0.3ms  read(timeout=None) -> <Esc>",
+        "   20.6ms  read(timeout=None) -> `",
+        "   20.6ms  read(timeout=0.0) -> <none>",
+        "   51.2ms  read(timeout=None) -> <Esc>",
+        "   71.7ms  read(timeout=None) -> `",
+        "   71.7ms  read(timeout=None) -> <Esc>",
+        "   71.7ms  read(timeout=0.0) -> <none>"
+      ],
+      "subscriber_calls": 1
+    },
+    {
+      "name": "C12 交替连按 `/Esc 间隔 15ms ×3 轮（错键在先）",
+      "escape_immediate": false,
+      "schedule": [
+        [
+          0.0,
+          "`"
+        ],
+        [
+          0.015,
+          "<Esc>"
+        ],
+        [
+          0.03,
+          "`"
+        ],
+        [
+          0.045,
+          "<Esc>"
+        ],
+        [
+          0.06,
+          "`"
+        ],
+        [
+          0.075,
+          "<Esc>"
+        ]
+      ],
+      "interrupted": true,
+      "raised_at_ms": 51.2,
+      "delivered": [
+        [
+          0.3,
+          "`"
+        ],
+        [
+          30.7,
+          "<Esc>"
+        ],
+        [
+          51.2,
+          "`"
+        ],
+        [
+          51.2,
+          "<Esc>"
+        ]
+      ],
+      "delivered_bytes": "`<Esc>`<Esc>",
+      "swallowed_bytes": "",
+      "undelivered": [
+        [
+          0.06,
+          "`"
+        ],
+        [
+          0.075,
+          "<Esc>"
+        ]
+      ],
+      "read_trace": [
+        "    0.3ms  read(timeout=None) -> `",
+        "   30.7ms  read(timeout=None) -> <Esc>",
+        "   51.2ms  read(timeout=None) -> `",
+        "   51.2ms  read(timeout=None) -> <Esc>",
+        "   51.2ms  read(timeout=0.0) -> <none>"
+      ],
+      "subscriber_calls": 1
+    },
+    {
+      "name": "C13 交替连按 Esc/` 间隔 30ms ×3 轮（慢于判定窗口）",
+      "escape_immediate": false,
+      "schedule": [
+        [
+          0.0,
+          "<Esc>"
+        ],
+        [
+          0.03,
+          "`"
+        ],
+        [
+          0.06,
+          "<Esc>"
+        ],
+        [
+          0.09,
+          "`"
+        ],
+        [
+          0.12,
+          "<Esc>"
+        ],
+        [
+          0.15,
+          "`"
+        ]
+      ],
+      "interrupted": true,
+      "raised_at_ms": 20.7,
+      "delivered": [
+        [
+          0.3,
+          "<Esc>"
+        ]
+      ],
+      "delivered_bytes": "<Esc>",
+      "swallowed_bytes": "",
+      "undelivered": [
+        [
+          0.03,
+          "`"
+        ],
+        [
+          0.06,
+          "<Esc>"
+        ],
+        [
+          0.09,
+          "`"
+        ],
+        [
+          0.12,
+          "<Esc>"
+        ],
+        [
+          0.15,
+          "`"
+        ]
+      ],
+      "read_trace": [
+        "    0.3ms  read(timeout=None) -> <Esc>",
+        "   20.7ms  read(timeout=0.0) -> <none>"
+      ],
+      "subscriber_calls": 1
+    },
+    {
+      "name": "C14 Windows Terminal 事件源对照（escape_immediate）：Esc 与 ` 交错",
+      "escape_immediate": true,
+      "schedule": [
+        [
+          0.0,
+          "<Esc>"
+        ],
+        [
+          0.015,
+          "`"
+        ],
+        [
+          0.03,
+          "<Esc>"
+        ]
+      ],
+      "interrupted": true,
+      "raised_at_ms": 0.2,
+      "delivered": [
+        [
+          0.2,
+          "<Esc>"
+        ]
+      ],
+      "delivered_bytes": "<Esc>",
+      "swallowed_bytes": "",
+      "undelivered": [
+        [
+          0.015,
+          "`"
+        ],
+        [
+          0.03,
+          "<Esc>"
+        ]
+      ],
+      "read_trace": [
+        "    0.2ms  read(timeout=None) -> <Esc>"
+      ],
+      "subscriber_calls": 1
+    },
+    {
+      "name": "C15 采集启动前已积压：` (-500ms)、Esc (-300ms)（msvcrt 源不清缓冲）",
+      "escape_immediate": false,
+      "schedule": [
+        [
+          -0.5,
+          "`"
+        ],
+        [
+          -0.3,
+          "<Esc>"
+        ]
+      ],
+      "interrupted": true,
+      "raised_at_ms": 20.9,
+      "delivered": [
+        [
+          0.4,
+          "`"
+        ],
+        [
+          0.4,
+          "<Esc>"
+        ]
+      ],
+      "delivered_bytes": "`<Esc>",
+      "swallowed_bytes": "",
+      "undelivered": [],
+      "read_trace": [
+        "    0.4ms  read(timeout=None) -> `",
+        "    0.4ms  read(timeout=None) -> <Esc>",
+        "   20.9ms  read(timeout=0.0) -> <none>"
+      ],
+      "subscriber_calls": 1
+    }
+  ],
+  "stability_x5_C12": [
+    {
+      "interrupted": true,
+      "raised_at_ms": 51.0
+    },
+    {
+      "interrupted": true,
+      "raised_at_ms": 51.2
+    },
+    {
+      "interrupted": true,
+      "raised_at_ms": 51.1
+    },
+    {
+      "interrupted": true,
+      "raised_at_ms": 50.7
+    },
+    {
+      "interrupted": true,
+      "raised_at_ms": 50.8
+    }
+  ],
+  "silent_degrade": [
+    {
+      "case": "源构建抛异常",
+      "running_after_100ms": false,
+      "raise_logged": false
+    },
+    {
+      "case": "源返回 None",
+      "running_after_100ms": false,
+      "raise_logged": false
+    }
+  ]
+}

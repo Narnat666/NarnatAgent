@@ -1,0 +1,14 @@
+{
+ "run_id": "new_wt_wrong_then_esc_r2_20260923_171124",
+ "version": "new",
+ "plan": "wrong_then_esc",
+ "attempt": 2,
+ "console": "wt",
+ "target_dir": "D:\\desktop\\NarnatAgent",
+ "target_pid": 24788,
+ "driver_rc": 0,
+ "narnat_logs": [
+  "narnat_2026-09-23_17-11-25.log"
+ ],
+ "started": "2026-09-23 17:11:46"
+}
