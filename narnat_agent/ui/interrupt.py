@@ -117,53 +117,69 @@ class InterruptController:
             self._poll_esc_unix(stop)
 
     def _poll_esc_windows(self, stop: threading.Event) -> None:
-        """Windows下检测ESC键。优先msvcrt，非原生控制台回退ReadConsoleInput。"""
+        """Windows下检测ESC键。优先ReadConsoleInput事件源，句柄不可用时回退msvcrt。
+
+        msvcrt字节流走"ESC是否转义序列前缀"的猜测判定：ESC之后20ms内出现其他
+        字符（如 ` ）会被判为转义序列前缀而把这次ESC整个吞掉，按得再快也打不断；
+        ReadConsoleInput提供精确按键事件（只认"ESC键按下"），天然无此歧义。
+        句柄不可等待（管道输入、重定向）时降级msvcrt字节流，行为与旧版一致。
+        """
         try:
             import msvcrt
             import ctypes
             kernel32 = ctypes.windll.kernel32
             handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
-            mode = ctypes.c_ulong()
-            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-                # 原生控制台: 使用msvcrt
-                # 不清空输入缓冲："回车后立即按ESC"的ESC若被清掉将无法打断。
-                # prompt_toolkit退出后的残留转义序列由轮询线程按
+            # 可用性自检：WaitForSingleObject返回WAIT_FAILED(0xFFFFFFFF)说明句柄
+            # 无效/不可等待，只能用msvcrt；否则（WAIT_OBJECT_0/WAIT_TIMEOUT）可用
+            if kernel32.WaitForSingleObject(handle, 0) != 0xFFFFFFFF:
+                self._poll_esc_windows_coninput(stop, kernel32)
+            else:
+                # msvcrt降级路径：不清空输入缓冲，"回车后立即按ESC"的ESC若被清掉
+                # 将无法打断。prompt_toolkit退出后的残留转义序列由轮询线程按
                 # "ESC vs 转义序列"识别逻辑自然消费（单ESC→打断，序列→吞掉）。
                 self._poll_esc_windows_native(stop, msvcrt)
-            else:
-                # 非原生控制台(Windows Terminal等): 使用ReadConsoleInput
-                self._poll_esc_windows_coninput(stop, kernel32)
         except (ImportError, OSError, AttributeError):
             pass
 
     def _poll_esc_windows_native(self, stop: threading.Event, msvcrt) -> None:
-        """原生CMD下使用msvcrt检测ESC键。"""
+        """原生CMD下使用msvcrt检测ESC键（事件源不可用时的降级路径）。
+
+        判中中断后不退出循环：继续读取并丢弃按键直到停止（fired保证只触发一次）。
+        否则中断后无人消费按键，运行模式期间按键在控制台缓冲积压，回到输入态
+        会被输入框读走形成"幽灵输入"。
+        """
+        fired = False
         while not stop.is_set():
             try:
                 if msvcrt.kbhit():
                     ch = msvcrt.getch()
-                    if ch == b'\x1b':
+                    if ch == b'\x1b' and not fired:
                         time.sleep(0.02)
                         if not msvcrt.kbhit():
                             _on_esc_detected(self)
-                            break
-                        # 转义序列，消费掉后续字符（最长CSI序列约5字节，
-                        # 限制消费上限，防止连按ESC后用户新输入被当作序列尾巴吞掉）
-                        consumed = []
-                        for _ in range(5):
-                            if not msvcrt.kbhit():
-                                break
-                            consumed.append(msvcrt.getch())
-                        if b'\x1b' in consumed:
-                            # 窗口内出现第二个ESC：用户连按ESC，立即打断
-                            _on_esc_detected(self)
-                            break
+                            fired = True
+                        else:
+                            # 转义序列，消费掉后续字符（最长CSI序列约5字节，
+                            # 限制消费上限，防止连按ESC后用户新输入被当作序列尾巴吞掉）
+                            consumed = []
+                            for _ in range(5):
+                                if not msvcrt.kbhit():
+                                    break
+                                consumed.append(msvcrt.getch())
+                            if b'\x1b' in consumed:
+                                # 窗口内出现第二个ESC：用户连按ESC，立即打断
+                                _on_esc_detected(self)
+                                fired = True
             except OSError:
                 break
             stop.wait(0.03)
 
     def _poll_esc_windows_coninput(self, stop: threading.Event, kernel32) -> None:
-        """非原生控制台(Windows Terminal等)下使用ReadConsoleInput检测ESC键。"""
+        """非原生控制台(Windows Terminal等)下使用ReadConsoleInput检测ESC键。
+
+        按事件判定：只认"ESC键按下"事件，同时出现的其他字符键不影响判定；
+        判中中断后继续读取事件直到停止（fired保证只触发一次），避免按键积压。
+        """
         import ctypes
 
         handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
@@ -177,6 +193,7 @@ class InterruptController:
         buf = (ctypes.c_char * (INPUT_RECORD_SIZE * 8))()  # 一次读8条
         records_read = ctypes.c_ulong()
 
+        fired = False
         while not stop.is_set():
             try:
                 # WaitForSingleObject 等待控制台输入，超时50ms
@@ -207,9 +224,9 @@ class InterruptController:
                     vk_code = int.from_bytes(
                         buf[offset+10:offset+12], byteorder='little', signed=False
                     )
-                    if vk_code == VK_ESCAPE:
+                    if vk_code == VK_ESCAPE and not fired:
                         _on_esc_detected(self)
-                        return
+                        fired = True
             except (OSError, ValueError):
                 break
             stop.wait(0.02)
@@ -237,32 +254,34 @@ class InterruptController:
             return  # 无法设置终端模式（如管道输入）
 
         try:
+            fired = False
             while not stop.is_set():
                 try:
                     # 使用select检测stdin是否有数据，超时30ms
                     ready, _, _ = select.select([sys.stdin], [], [], 0.03)
                     if ready:
                         ch = os.read(fd, 1)
-                        if ch == b'\x1b':
+                        if ch == b'\x1b' and not fired:
                             # 等待短暂时间判断是否为转义序列
                             time.sleep(0.02)
                             ready2, _, _ = select.select([sys.stdin], [], [], 0.01)
                             if not ready2:
                                 _on_esc_detected(self)
-                                break
-                            # 转义序列，消费掉后续字符（最长CSI序列约5字节，
-                            # 限制消费上限，防止用户新输入被当作序列尾巴吞掉）
-                            consumed = []
-                            for _ in range(5):
-                                ready3, _, _ = select.select(
-                                    [sys.stdin], [], [], 0.005)
-                                if not ready3:
-                                    break
-                                consumed.append(os.read(fd, 1))
-                            if b'\x1b' in consumed:
-                                # 窗口内出现第二个ESC：用户连按ESC，立即打断
-                                _on_esc_detected(self)
-                                break
+                                fired = True
+                            else:
+                                # 转义序列，消费掉后续字符（最长CSI序列约5字节，
+                                # 限制消费上限，防止用户新输入被当作序列尾巴吞掉）
+                                consumed = []
+                                for _ in range(5):
+                                    ready3, _, _ = select.select(
+                                        [sys.stdin], [], [], 0.005)
+                                    if not ready3:
+                                        break
+                                    consumed.append(os.read(fd, 1))
+                                if b'\x1b' in consumed:
+                                    # 窗口内出现第二个ESC：用户连按ESC，立即打断
+                                    _on_esc_detected(self)
+                                    fired = True
                 except (OSError, ValueError):
                     break
         finally:

@@ -53,6 +53,79 @@ def retry_sleep(attempt: int, cancel_check=None) -> bool:
     return True
 
 
+_CANCEL_POLL_SECONDS = 0.05
+# 取消标记轮询间隔（秒），与流式接收的轮询粒度一致
+
+_SEND_THREAD_NAME = "narnat-llm-send"
+# 阻塞发送线程名（排障用：线程转储里可直接定位请求发送线程）
+
+_NO_RESULT = object()
+# 结果槽初值哨兵：区分"阻塞调用尚未产出结果"与"结果为 None"
+
+
+def safe_close(target) -> None:
+    """尽力关闭句柄（异常忽略）——中断路径不得因关闭失败影响收敛。"""
+    try:
+        target.close()
+    except Exception:
+        pass
+
+
+def run_cancelable(do_block, cancel_check, on_cancel=None,
+                   poll_seconds: float = _CANCEL_POLL_SECONDS):
+    """在子线程执行阻塞调用；主流程以 poll_seconds 粒度轮询取消标记。
+
+    请求发送（建连、等服务端响应头）阻塞期间生成器体卡在该调用上，流循环的取消
+    轮询还不可达；而中断触发的 close() 对"连接建立中"的在途请求是空操作，请求只能
+    自己跑到响应头到达才收敛（实测 5~11.5 秒）。本原语把阻塞调用移入子线程，主流程
+    轮询取消标记：取消命中即尽力掐断并立即返回，不再等阻塞调用自行结束。
+
+    返回 (cancelled, result, error)：
+    - cancelled=True：主流程立即返回（不等子线程）；on_cancel() 已调用（尽力掐断，
+      对已建立连接有效）；子线程在阻塞解除后自毁 result（close 幂等，双保险）。
+    - cancelled=False：result 或 error 二选一（阻塞调用的结果）。
+    正常完成即唤醒主流程返回，不引入固定延迟；cancel_check 为 None 时退化为纯等待，
+    与直接调用等价。
+    """
+    done = threading.Event()
+    cancelled = threading.Event()
+    box = {"result": _NO_RESULT, "error": None}
+
+    def _worker() -> None:
+        try:
+            box["result"] = do_block()
+        except BaseException as exc:  # 非 Exception 基类异常同样交回主流程上抛
+            box["error"] = exc
+        finally:
+            done.set()
+            # 兜底自毁：取消已置位且阻塞调用随后才产出结果时由子线程补关。
+            # close 幂等，任何时序下结果至多被关闭两次（主线程竞态窗口一次、此处一次）
+            if cancelled.is_set() and box["result"] is not _NO_RESULT:
+                safe_close(box["result"])
+
+    threading.Thread(target=_worker, name=_SEND_THREAD_NAME, daemon=True).start()
+
+    while True:
+        # 完成即唤醒（正常路径零额外延迟）；超时说明阻塞未结束，此时才查取消标记
+        if done.wait(poll_seconds):
+            break
+        if cancel_check is not None and cancel_check():
+            cancelled.set()
+            if on_cancel is not None:
+                try:
+                    on_cancel()
+                except Exception:
+                    pass
+            # 关闭竞态窗口：取消置位与阻塞完成同时发生时结果可能已产生，主线程补关一次
+            if box["result"] is not _NO_RESULT:
+                safe_close(box["result"])
+            return True, None, None
+
+    if box["error"] is not None:
+        return False, None, box["error"]
+    return False, box["result"], None
+
+
 def _retry_notice(attempt: int, max_retries: int, reason: str = "网络连接失败") -> Dict[str, str]:
     """重试的用户提示事件（与响应流中断重试提示风格一致）。
 
@@ -259,19 +332,62 @@ class LLMClient:
 # OpenAI 兼容后端
 # ═══════════════════════════════════════════════════════════════
 
+class _RequestScope:
+    """abort路径的请求级句柄：掐断在途请求（尽力）+ 标记客户端重建（不污染后续）。
+
+    旧实现把共享客户端自身当作中断句柄，中断即关闭共享客户端，导致打断一次后
+    整局对话全部失败（APIConnectionError）。本句柄把"关闭"变成请求级动作：中断
+    只掐断本次在途请求并把客户端标记为待重建，由后端在下次请求前换新。
+    """
+
+    def __init__(self, backend: "_OpenAIBackend", client) -> None:
+        self._backend = backend
+        self._client = client
+
+    def close(self) -> None:
+        """abort()调用：标记客户端待重建并尽力掐断在途请求。"""
+        self._backend._invalidate_client(self._client)
+
+
 class _OpenAIBackend:
     """OpenAI SDK 后端"""
 
     def __init__(self, config, tool_defs, logger):
-        from openai import OpenAI
         self._config = config
         self._tool_defs = tool_defs
         self._logger = logger
-        self._client = OpenAI(
-            api_key=config.api_key,
-            base_url=config.base_url,
+        self._client_lock = threading.Lock()
+        # 中断标记：请求级scope被关闭后置位，下次请求前重建客户端
+        self._need_rebuild = False
+        self._client = self._build_client()
+
+    def _build_client(self):
+        """构造SDK客户端（底层自动重试关闭，重试自管）。"""
+        from openai import OpenAI
+        return OpenAI(
+            api_key=self._config.api_key,
+            base_url=self._config.base_url,
             max_retries=0,
         )
+
+    def _ensure_client(self):
+        """取本轮请求使用的客户端；中断标记了重建时先换新（共享客户端不被污染）。
+
+        上一轮请求被中断（abort/取消）时旧客户端已被关闭，此处重建使后续轮次继续
+        可用——旧实现中断关闭共享客户端后整局对话全部失败。
+        """
+        with self._client_lock:
+            if self._need_rebuild:
+                self._need_rebuild = False
+                safe_close(self._client)
+                self._client = self._build_client()
+            return self._client
+
+    def _invalidate_client(self, client) -> None:
+        """请求级中止：标记客户端待重建（后续请求换新）并尽力掐断在途请求。"""
+        with self._client_lock:
+            self._need_rebuild = True
+        safe_close(client)
 
     def _prepare_messages(self, messages):
         """内部消息 → OpenAI 协议请求消息。
@@ -300,6 +416,11 @@ class _OpenAIBackend:
         return out
 
     def chat_stream(self, messages, no_tools=False, no_thinking=False, cancel_check=None):
+        """流式请求并产出统一事件流（生成器；首次迭代才真正发请求）。
+
+        请求发送（建连/等响应头）与流式接收期间均以 0.05 秒粒度轮询取消标记，
+        取消命中即静默结束本轮：消除"中断后仍等服务端响应头到达才收敛"的慢路径。
+        """
         if self._logger:
             self._logger.info("core.llm", f"发送请求(OpenAI), messages={len(messages)}条")
 
@@ -312,7 +433,9 @@ class _OpenAIBackend:
         stream = None
 
         while True:
-            LLMClient._active_response = self._client
+            client = self._ensure_client()
+            # 句柄用请求级scope：abort掐断在途请求但不杀死共享客户端
+            LLMClient._active_response = _RequestScope(self, client)
             try:
                 # 动态构造 thinking 参数（不再硬编码）
                 think_body_top, think_extra = resolve_thinking_params(
@@ -339,7 +462,19 @@ class _OpenAIBackend:
                     kwargs["temperature"] = self._config.temperature
                 if self._config.max_tokens is not None:
                     kwargs["max_tokens"] = self._config.max_tokens
-                stream = self._client.chat.completions.create(**kwargs)
+                # 发送移入子线程 + 主流程轮询取消标记：建连/等响应头期间取消也能立即
+                # 收敛（直接调用时生成器体卡在create上，取消检查点不可达）；取消同样
+                # 标记客户端重建，避免下一轮复用已被关闭的客户端
+                cancelled, stream, err = run_cancelable(
+                    lambda: client.chat.completions.create(**kwargs),
+                    cancel_check,
+                    on_cancel=lambda: self._invalidate_client(client),
+                )
+                if cancelled:
+                    LLMClient._active_response = None
+                    return
+                if err is not None:
+                    raise err       # 交给下方既有异常分支处理（重试矩阵不变）
                 break
 
             except APIStatusError as e:
@@ -569,6 +704,12 @@ class _AnthropicBackend:
         }
 
     def chat_stream(self, messages, no_tools=False, no_thinking=False, cancel_check=None):
+        """流式请求并产出统一事件流（生成器；首次迭代才真正发请求）。
+
+        请求发送（建连/等响应头）与流式接收期间均以 0.05 秒粒度轮询取消标记，
+        取消命中即静默结束本轮并清理活跃请求句柄：消除"中断后仍等服务端响应头
+        到达才收敛"的慢路径。
+        """
         self._last_raw_sse.clear()
         if self._logger:
             self._logger.info("core.llm", f"发送请求(Anthropic), messages={len(messages)}条")
@@ -618,7 +759,20 @@ class _AnthropicBackend:
             try:
                 # 使用 stream 模式发送请求，先拿到 status_code 再决定是否读取流
                 req = client.build_request("POST", self._url, headers=self._headers, json=body)
-                resp = client.send(req, stream=True)
+                # 发送移入子线程 + 主流程轮询取消标记：建连/等响应头期间取消也能立即
+                # 收敛（直接调用时生成器体卡在send上，取消检查点不可达）；本路径每次
+                # 请求新建 httpx.Client，关闭不影响后续请求，无需请求级scope
+                cancelled, resp, err = run_cancelable(
+                    lambda: client.send(req, stream=True),
+                    cancel_check,
+                    on_cancel=lambda: safe_close(client),
+                )
+                if cancelled:
+                    safe_close(client)  # 兜底幂等：与 on_cancel 的关闭重复无副作用
+                    LLMClient._active_response = None
+                    return
+                if err is not None:
+                    raise err       # 交给下方既有异常分支处理（TransportError/Exception 全保留）
                 status = resp.status_code
 
                 # 不重试
