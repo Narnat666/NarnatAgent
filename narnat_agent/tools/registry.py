@@ -235,6 +235,7 @@ class ToolRegistry:
         return ToolResult(
             llm_text=self._truncate(text, env),
             ui_text=result.ui_text,
+            ui_text_kind=result.ui_text_kind,
             await_confirm=await_confirm,
             is_error=is_error,
         )

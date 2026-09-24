@@ -24,7 +24,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from typing import Any, Protocol
 
 from ..contracts.interrupt import InterruptSignal
-from ..contracts.tool import ToolEnv, ToolResult
+from ..contracts.tool import UI_TEXT_DIFF, UI_TEXT_LINES, ToolEnv, ToolResult
 
 __all__ = [
     "ERROR_PREFIX",
@@ -491,7 +491,7 @@ class ToolDispatcher:
                     f"结果: {result.llm_text[:200] if result.llm_text else '(空)'}",
                 )
             if result.ui_text:
-                self._show_diff(result.ui_text)
+                self._show_diff(result.ui_text, result.ui_text_kind)
             elif self._is_failed(name, result):
                 self._show_tool_failed(name)
             return result
@@ -685,13 +685,23 @@ class ToolDispatcher:
             return f"close{sid_str}"
         return f"{action}{sid_str}"
 
-    def _show_diff(self, ui_text: str) -> None:
-        """展示着色差异（逐行前置两个空格缩进；静默模式下跳过）。"""
+    def _show_diff(self, ui_text: str, kind: str = UI_TEXT_DIFF) -> None:
+        """展示着色差异 / 状态行（逐行前置两个空格缩进；静默模式下跳过）。
+
+        尾随规则（对齐旧实现的两条显示通道）：
+        - 差异块（`kind=diff`，旧 `_show_diff` 通道）：多行以空行收尾与后续输出分隔；
+          单行 `[无差异]` 提示其后不加空行；
+        - 状态行列表（`kind=lines`，旧 `ui_callback` 通道，如 TodoWrite 计划）：
+          逐行输出、不以空行收尾，直接接后续输出。
+        """
         if self._console.is_quiet_tools():
             return
         buffer = "\n".join(f"  {line}" for line in ui_text.split("\n"))
-        # 空编辑的"[无差异]"是单行提示，其后不再加空行，直接接后续输出
-        tail = "\n" if "\n" not in ui_text and "[无差异]" in ui_text else "\n\n"
+        if kind == UI_TEXT_LINES:
+            tail = "\n"
+        else:
+            # 空编辑的"[无差异]"是单行提示，其后不再加空行，直接接后续输出
+            tail = "\n" if "\n" not in ui_text and "[无差异]" in ui_text else "\n\n"
         self._console.write(buffer + tail)
 
     def _show_tool_failed(self, name: str) -> None:

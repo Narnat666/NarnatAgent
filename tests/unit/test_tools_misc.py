@@ -78,7 +78,7 @@ from pathlib import Path
 
 import pytest
 
-from narnat_agent.contracts.tool import Tool, ToolEnv
+from narnat_agent.contracts.tool import UI_TEXT_LINES, Tool, ToolEnv
 from narnat_agent.tools import plan, websearch
 from narnat_agent.tools.env import (
     GoalStateImpl,
@@ -696,6 +696,8 @@ def test_display_lines_three_states():
         "<OK>✓<RST> <DIM>做完了<RST>\n"
         "<WARN>●<RST> <BOLD>正在做一半<RST>\n"
         "<MUTED>○<RST> <DIM>还没做<RST>")
+    # 显示类别为「状态行列表」：逐行输出、不以空行收尾（旧 ui_callback 通道等价）
+    assert result.ui_text_kind == UI_TEXT_LINES
 
 
 def test_in_progress_prefix_not_duplicated():

@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import Protocol
 
-from ..contracts.tool import ToolDefinition, ToolEnv, ToolResult
+from ..contracts.tool import UI_TEXT_LINES, ToolDefinition, ToolEnv, ToolResult
 from .registry import ToolRegistry
 
 __all__ = [
@@ -248,7 +248,8 @@ class TodoWriteTool:
         if demoted:
             fix_note = (f"[已自动修正: 检测到多个in_progress，保留第一个，"
                         f"其余{demoted}项调整为待处理]\n")
-        return ToolResult(llm_text=build_unfinished_list(todos, fix_note), ui_text=ui_text)
+        return ToolResult(llm_text=build_unfinished_list(todos, fix_note),
+                          ui_text=ui_text, ui_text_kind=UI_TEXT_LINES)
 
 
 # ═══════════════════════════════════════════════════════════════

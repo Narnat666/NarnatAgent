@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-09-24
+goal: ui_text 按显示类别渲染：差异块空行收尾，状态行列表不补空行

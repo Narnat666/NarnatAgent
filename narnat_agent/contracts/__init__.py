@@ -76,6 +76,9 @@ from .tool import (
     ToolFunctionDef,
     ToolResult,
     ToolSettings,
+    UI_DISPLAY_KIND,
+    UI_TEXT_DIFF,
+    UI_TEXT_LINES,
 )
 
 __all__ = [
@@ -147,6 +150,9 @@ __all__ = [
     "ToolFunctionDef",
     "ToolResult",
     "ToolSettings",
+    "UI_DISPLAY_KIND",
+    "UI_TEXT_DIFF",
+    "UI_TEXT_LINES",
     # output
     "Animator",
     "InteractionPort",

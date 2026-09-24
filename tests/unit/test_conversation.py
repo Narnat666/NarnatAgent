@@ -69,7 +69,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from narnat_agent.contracts.tool import AWAIT_CONFIRM, ToolResult
+from narnat_agent.contracts.tool import AWAIT_CONFIRM, UI_TEXT_LINES, ToolResult
 from narnat_agent.conversation import (
     BG_REMINDER_TEMPLATE,
     CONTINUE_TEMPLATE,
@@ -1535,6 +1535,36 @@ def test_dispatch_plan_tool_summary_and_display(pool):
 
     assert "  [更新计划] 1项\n" in parts.console.joined
     assert "  ● 任务甲" in parts.console.joined
+
+
+def test_dispatch_plan_lines_no_tail_blank(pool):
+    """计划状态行列表：逐行缩进渲染、不以空行收尾（旧 ui_callback 通道等价）。
+
+    回归守护：重构后计划显示曾借道差异渲染（差异块以空行收尾），计划块后多出
+    一个空行（用户实测：计划与后续 AI 文本之间出现不应有的空行）。
+    """
+    env = ToolEnvImpl()
+    todos = [{"content": "甲", "status": "completed"},
+             {"content": "乙", "status": "in_progress"}]
+    loop, parts = build_loop(
+        [[{"tool_calls": [tool_call("t", "TodoWrite", todos=todos)],
+           "finish_reason": "tool_calls"}], plain_round("ok")],
+        env=env,
+        results={"TodoWrite": ToolResult(llm_text="清单", ui_text="✓ 甲\n● 乙",
+                                         ui_text_kind=UI_TEXT_LINES)},
+        pool=pool,
+    )
+    loop.run(FakeSink())
+
+    text = parts.console.joined
+    assert "  ✓ 甲\n  ● 乙\n" in text
+    assert "  ✓ 甲\n  ● 乙\n\n" not in text  # 行列表不补尾随空行
+
+    # 对照：差异块（默认类别）仍以空行收尾（旧行为保持）
+    _loop, parts2 = build_loop(
+        [], results={"Edit": ToolResult(llm_text="ok", ui_text="--- a\n+++ b")}, pool=pool)
+    parts2.dispatcher.execute([tool_call("e", "Edit", file_path="a.txt")], FakeSink())
+    assert "  --- a\n  +++ b\n\n" in parts2.console.joined
 
 
 def test_dispatch_diff_tail_rules(pool):

@@ -46,6 +46,8 @@ from narnat_agent.contracts.tool import (
     ToolEnv,
     ToolResult,
     ToolSettings,
+    UI_TEXT_DIFF,
+    UI_TEXT_LINES,
 )
 
 CONTRACTS_DIR = Path(__file__).resolve().parents[2] / "narnat_agent" / "contracts"
@@ -285,18 +287,22 @@ def test_tool_result_fields_and_defaults():
     assert [f.name for f in fields(ToolResult)] == [
         "llm_text",
         "ui_text",
+        "ui_text_kind",
         "await_confirm",
         "is_error",
     ]
     result = ToolResult(llm_text="ok")
     assert result.ui_text is None
+    assert result.ui_text_kind == UI_TEXT_DIFF  # 差异块为默认显示类别
     assert result.await_confirm is False
     assert result.is_error is False
 
     failure = ToolResult(llm_text="[错误: …]", is_error=True)
     assert failure.is_error is True and failure.await_confirm is False
-    assert ToolResult("t", "@@ diff", True, True) == ToolResult(
-        llm_text="t", ui_text="@@ diff", await_confirm=True, is_error=True)
+    assert ToolResult("t", "@@ diff", UI_TEXT_LINES,
+                      await_confirm=True, is_error=True) == ToolResult(
+        llm_text="t", ui_text="@@ diff", ui_text_kind=UI_TEXT_LINES,
+        await_confirm=True, is_error=True)
 
 
 def test_await_confirm_literal():

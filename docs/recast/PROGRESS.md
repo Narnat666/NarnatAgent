@@ -66,6 +66,7 @@
 4. token 估算双实现：唯一实现归 `messages/tokens.py`，两处消费方改转发（T3.11）。
 5. 审计经验：spec 中"含否定/例外/顺序语义"的断言是偏差高发区（如"不覆盖""优先于"）；已抽查全 spec 此类断言。
 6. **工具行显示顺序回归**（2026-09-23 修复）：重构后 `conversation/dispatch.py` 丢失了旧实现的 `pause+flush` 接线——AI 文本悬于渲染缓冲时工具行抢先生出（用户实测：工具行全部显示后文本才最后出现）。已按 change `fix-tool-line-flush` 修复（工具行显示前停动画 + 落定缓冲，显示后恢复动画；`contracts.OutputSink` 补齐 `flush/pause/resume` 声明）。三份真机证据：`flush_verify_broken.txt`（复现错序）/ `flush_verify_new.txt`（修复后正确）/ `flush_verify_old.txt`（旧实现同序）。
+7. **计划显示多余空行**（2026-09-24 修复）：重构后计划显示借道差异渲染通道（差异块以空行收尾），计划与后续 AI 文本之间多出一个空行。旧实现为两条通道（差异 `_show_diff` 空行收尾 / 计划 `ui_callback` 无空行）。已按 change `fix-plan-tail-blank` 修复：`ToolResult` 增加 `ui_text_kind` 显示类别（`UI_TEXT_DIFF`/`UI_TEXT_LINES`），TodoWrite 计划声明为行列表、渲染层按类别决定尾随空行。真机对照：`plan_display_broken.txt`（含空行）vs `plan_display_new.txt`（无空行）。
 
 ## ESC 打断"不丝滑"问题：探索与修复（已闭环）
 

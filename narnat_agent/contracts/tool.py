@@ -46,6 +46,9 @@ __all__ = [
     "ToolFunctionDef",
     "ToolResult",
     "ToolSettings",
+    "UI_DISPLAY_KIND",
+    "UI_TEXT_DIFF",
+    "UI_TEXT_LINES",
 ]
 
 AWAIT_CONFIRM = "__AWAIT_CONFIRM__"
@@ -55,6 +58,17 @@ AWAIT_CONFIRM = "__AWAIT_CONFIRM__"
 传递或识别该标记的路径（如内循环扫描工具结果）一律引用本常量，禁止再出现散落的
 `"__AWAIT_CONFIRM__"` 字面量（消灭现状双轨）。
 """
+
+UI_TEXT_DIFF = "diff"
+"""`ui_text` 显示类别：差异块——多行时以空行收尾（与后续输出分隔），单行 `[无差异]`
+提示除外（specs/tools-file「着色 diff 展示」；对齐旧 `_show_diff` 通道）。"""
+
+UI_TEXT_LINES = "lines"
+"""`ui_text` 显示类别：状态行列表——逐行输出、**不以空行收尾**、直接接后续输出
+（specs/tools-todo「终端显示」；对齐旧 `ui_callback` 通道，如 TodoWrite 计划）。"""
+
+UI_DISPLAY_KIND = Literal["diff", "lines"]
+"""`ui_text` 的显示类别（取值 `UI_TEXT_DIFF` / `UI_TEXT_LINES`）。"""
 
 # ═══════════════════════════════════════════════════════════════
 # 工具实现面（Tool / ToolDefinition / ToolResult）
@@ -84,7 +98,11 @@ class ToolResult:
     """工具执行结果（`Tool.execute` 的返回契约）。
 
     - `llm_text`：交给模型的文本（框架随机标签已剥离）；
-    - `ui_text`：UI 展示文本（如着色 diff、额外的终端提示）；None 表示无差异输出；
+    - `ui_text`：UI 展示文本（如着色 diff、状态行列表、额外的终端提示）；
+      None 表示无差异输出；
+    - `ui_text_kind`：`ui_text` 的显示类别（`UI_TEXT_DIFF` 差异块，多行以空行收尾；
+      `UI_TEXT_LINES` 状态行列表，不以空行收尾）——对齐旧实现的两条显示通道
+      （`_show_diff` 与 TodoWrite 的 `ui_callback`），消费方按此决定尾随空行；
     - `await_confirm`：挂起确认请求（工具返回 True 时命令未执行，等待内循环在
       提示符下确认后重新执行，见 specs/tools-shell「非 Windows 挂起确认」）；
     - `is_error`：执行失败标记（供调度层判定 UI 失败显示）。按 specs/tools-shell
@@ -94,6 +112,7 @@ class ToolResult:
 
     llm_text: str
     ui_text: str | None = None
+    ui_text_kind: UI_DISPLAY_KIND = UI_TEXT_DIFF
     await_confirm: bool = False
     is_error: bool = False
 
