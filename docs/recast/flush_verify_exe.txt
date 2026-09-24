@@ -1,0 +1,9 @@
+  计划：先用一句话说清目标，再通过 Shell 统计 D:\desktop\NarnatAgent\README.md 的行数并汇报结果。
+  计划：直接用 Shell 统计该文件的行数并报告数值。
+  [执行命令] powershell -NoProfile -Command "(Get-Content -LiteralPath 'D:\desktop\NarnatAgent\README.md').Count"
+  README.md 共有 408 行。
+  任务已完成：计划已用一句话说明，Shell 统计结果为 README.md 共 408 行，并已向用户汇报。
+  [声明完成]
+  任务完成：README.md 行数统计结果为 408 行，已按要求报告。
+
+[NN_DONE] reason=goal_complete rounds=2
