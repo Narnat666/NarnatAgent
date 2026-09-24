@@ -63,6 +63,13 @@ class BashRuntime:
 
     PLATFORM_LABEL = "Windows(cmd)" if sys.platform == "win32" else "Linux/macOS(bash)"
 
+    # Windows 子进程使用独立（无窗口）控制台：否则子进程内 chcp/cls 等直写
+    # 控制台的命令会清掉用户终端屏幕（WT 清可见区、conhost 清全缓冲）；
+    # 独立后这类直写只落在子进程自己的隐藏缓冲区。非 Windows 恒为 0
+    # （CREATE_NO_WINDOW 属性 Unix 的 subprocess 模块不存在；creationflags
+    # 传非 0 亦会 ValueError）
+    WIN_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 
 def _scan_code_suffix(tail: str):
     """扫描 tail（以引号开头的 -c 载荷），定位引号闭合处并剥离后缀。
@@ -790,6 +797,7 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=os.getcwd(),
+            creationflags=BashRuntime.WIN_NO_WINDOW,
             env=BashRuntime.utf8_env,
         )
     except FileNotFoundError as e:
@@ -819,6 +827,7 @@ def _execute_py_direct(exe: str, flags: str, tail: str,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=os.getcwd(),
+            creationflags=BashRuntime.WIN_NO_WINDOW,
             env=BashRuntime.utf8_env,
         )
     except (OSError, ValueError) as e:
@@ -876,6 +885,7 @@ def _execute_py_pipe(exe: str, flags: str, tail: str, pipe_cmd: str,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=os.getcwd(),
+            creationflags=BashRuntime.WIN_NO_WINDOW,
             env=BashRuntime.utf8_env,
         )
     except (OSError, ValueError) as e:
@@ -991,7 +1001,10 @@ def _execute_segments(segments: list, timeout: int,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=os.getcwd(),
+                # 共用路径：Unix 用 start_new_session，Windows 忽略之，改用独立
+                # 无窗口控制台（WIN_NO_WINDOW 在 Unix 恒为 0，不影响 Unix 路径）
                 start_new_session=True,
+                creationflags=BashRuntime.WIN_NO_WINDOW,
                 env=BashRuntime.utf8_env,
             )
         except (OSError, ValueError) as e:

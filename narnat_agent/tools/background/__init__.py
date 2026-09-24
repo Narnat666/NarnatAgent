@@ -284,6 +284,8 @@ def submit(command: str) -> str:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=os.getcwd(),
+                # 独立（无窗口）控制台：后台命令的 chcp/cls 等直写不再清用户终端屏幕
+                creationflags=BashRuntime.WIN_NO_WINDOW,
                 env=BashRuntime.utf8_env,
             )
         else:
