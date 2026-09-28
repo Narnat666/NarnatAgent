@@ -41,10 +41,17 @@ class _CommandCompleter(Completer):
         "/rm":       "on_list_rm_names",
         "/thinking": "on_list_thinking_options",
         "/mode":     "on_list_model_names",
+        "/plugin":   "on_list_plugin_names",
     }
 
     _STATIC_OPTIONS = {
-        "/ls": ["--all"],
+        "/ls":   ["--all"],
+        "/goal": ["on", "off"],
+    }
+
+    # 二级固定值（_NAME_COMMANDS 内命令的第二个参数）
+    _VALUE_OPTIONS = {
+        "/plugin": ["on", "off"],
     }
 
     def __init__(self, mgr):
@@ -101,6 +108,15 @@ class _CommandCompleter(Completer):
                                     name[len(prefix):],
                                     start_position=0,
                                 )
+                elif num_parts == 2 and text.endswith(" "):
+                    # 第二参数为固定值（如 /plugin <名称> <on|off>）
+                    for opt in self._VALUE_OPTIONS.get(cmd, []):
+                        yield Completion(opt, start_position=0)
+                elif num_parts == 3 and not text.endswith(" "):
+                    prefix = parts[2]
+                    for opt in self._VALUE_OPTIONS.get(cmd, []):
+                        if opt.startswith(prefix):
+                            yield Completion(opt[len(prefix):], start_position=0)
             elif num_parts == 1 and text.endswith(" "):
                 for opt in self._STATIC_OPTIONS.get(cmd, []):
                     yield Completion(opt, start_position=0)
@@ -262,14 +278,19 @@ def _cmd_goal(args: str, mgr) -> CommandResult:
         else:
             _stdout_write(f"  {CMD_MUTED}目标模式已是关闭状态{R}\n")
         return CommandResult.HANDLED
-    # 无参数：查看状态
-    if mgr._goal_enabled:
-        # 实际生效轮数：临时覆盖 > 配置默认值 > 兜底"默认"
-        limit = mgr._goal_max_rounds or getattr(mgr, '_goal_default_rounds', 0) or "默认"
-        _stdout_write(f"  {CMD_HIGHLIGHT}目标模式: 已开启{R}  "
-                      f"{CMD_MUTED}(轮数上限: {CMD_HIGHLIGHT}{limit}{R}{CMD_MUTED}){R}\n")
-    else:
-        _stdout_write(f"  {CMD_MUTED}目标模式: 已关闭{R}\n")
+    # 无参数：查看状态（含用法提示）
+    if not arg:
+        if mgr._goal_enabled:
+            # 实际生效轮数：临时覆盖 > 配置默认值 > 兜底"默认"
+            limit = mgr._goal_max_rounds or getattr(mgr, '_goal_default_rounds', 0) or "默认"
+            _stdout_write(f"  {CMD_HIGHLIGHT}目标模式: 已开启{R}  "
+                          f"{CMD_MUTED}(轮数上限: {CMD_HIGHLIGHT}{limit}{R}{CMD_MUTED})"
+                          f"（用法: /goal off）{R}\n")
+        else:
+            _stdout_write(f"  {CMD_MUTED}目标模式: 已关闭（用法: /goal on [轮数] | off）{R}\n")
+        return CommandResult.HANDLED
+    # 其它无效值：明确报错，不再静默落入查看状态分支
+    _stdout_write(f"  {CMD_ERROR}无效值: {arg}（可用: on / off）{R}\n")
     return CommandResult.HANDLED
 
 
@@ -350,6 +371,16 @@ def _cmd_thinkback(args: str, mgr) -> CommandResult:
     return CommandResult.HANDLED
 
 
+@_register("plugin")
+def _cmd_plugin(args: str, mgr) -> CommandResult:
+    """插件工具开关：/plugin 查看状态，/plugin <名称> <on|off> 切换（下轮对话即生效）"""
+    status, text = mgr.on_plugin(args.strip() if args else "")
+    color = {"ok": CMD_SUCCESS, "info": CMD_HIGHLIGHT,
+             "hint": CMD_MUTED, "error": CMD_ERROR}.get(status, CMD_MUTED)
+    _stdout_write(f"{color}{text}{R}\n")
+    return CommandResult.HANDLED
+
+
 @_register("mode")
 def _cmd_mode(args: str, mgr) -> CommandResult:
     result = mgr.on_mode(args.strip() if args else "")
@@ -394,6 +425,8 @@ def _dispatch_command(cmd: str, args: str, mgr) -> CommandResult:
         return CommandResult.UNKNOWN
     if cmd == "goal":
         return _cmd_goal(args, mgr)
+    if cmd == "plugin":
+        return _cmd_plugin(args, mgr)
     available = mgr.available_commands()
 
 

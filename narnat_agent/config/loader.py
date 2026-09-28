@@ -24,6 +24,7 @@ from .defaults import (
     DEFAULT_REQUIRE_PLAN, DEFAULT_MIN_TOOLS,
     DEFAULT_MAX_TOOL_OUTPUT_KB,
     DEFAULT_MAX_TIMEOUT_SECONDS,
+    DEFAULT_PLUGIN_TOOLS,
     DEFAULT_MCP_STARTUP_TIMEOUT,
     DEFAULT_MCP_TOOL_TIMEOUT,
     DEFAULT_AUTO_SAVE,
@@ -73,6 +74,9 @@ class ToolConfig:
     max_output_chars: int = DEFAULT_MAX_TOOL_OUTPUT_KB * 1024  # 工具输出上限(字符数)
     max_timeout_seconds: int = DEFAULT_MAX_TIMEOUT_SECONDS     # 工具超时上限(秒)，0=不限制
     ignore_dirs: tuple = ()                             # 忽略目录（唯一来源narnat.json"忽略目录"键，空=不忽略）
+    # 插件工具开关（narnat.json "工具"."插件"，值字符串 "on"/"off"，缺项默认 on）
+    plugin_tools: Dict[str, bool] = field(
+        default_factory=lambda: {name: True for name in DEFAULT_PLUGIN_TOOLS})
 
 
 @dataclass(frozen=True)
@@ -806,6 +810,16 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
     max_output_kb = int(data.get("工具", {}).get("输出上限KB", DEFAULT_MAX_TOOL_OUTPUT_KB))
     max_output_chars = max_output_kb * 1024 if max_output_kb > 0 else 0
 
+    # 插件工具开关（"工具"."插件"）：值用字符串 "on"/"off"，仅 "off" 视为关闭；
+    # 缺项/其它值一律按默认 on（不认 true/false）
+    plugin_raw = data.get("工具", {}).get("插件")
+    if not isinstance(plugin_raw, dict):
+        plugin_raw = {}
+    plugin_tools = {
+        name: str(plugin_raw.get(name, "on")).strip().lower() != "off"
+        for name in DEFAULT_PLUGIN_TOOLS
+    }
+
     # 压缩保留尾部：0 是合法值（关闭保留），不能用 `or` 兜底；负数按 0 处理
     _retain_raw = _coerce(data.get("压缩", {}).get("保留尾部"), int)
     compress_retain = (DEFAULT_COMPRESS_RETAIN_TOKENS if _retain_raw is None
@@ -844,6 +858,7 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
             max_output_chars=max_output_chars,
             max_timeout_seconds=int(data.get("工具", {}).get("超时上限秒", DEFAULT_MAX_TIMEOUT_SECONDS)),
             ignore_dirs=tuple(data.get("忽略目录") or []),
+            plugin_tools=plugin_tools,
         ),
         safety=SafetyConfig(
             git_skip_confirm=bool(data.get("工具", {}).get("git免确认", DEFAULT_GIT_SKIP)),

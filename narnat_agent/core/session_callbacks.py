@@ -41,6 +41,15 @@ def _format_messages_text(messages: list) -> str:
     return "\n".join(lines)
 
 
+# 插件工具名称 → 说明（/plugin 状态表展示用；名称与顺序来源 registry.PLUGIN_TOOL_NAMES）
+_PLUGIN_TOOL_LABELS = {
+    "Terminal": "多终端持久 SSH",
+    "WebSearch": "网页搜索",
+    "Serial": "多终端持久串口",
+    "MCP": "MCP 服务器管理",
+}
+
+
 class SessionState:
     """状态基类 —— 定义可用命令接口"""
 
@@ -105,6 +114,7 @@ class NoSession(SessionState):
             "/thinkback": "思考回传开关",
             "/mode":     "切换模型",
             "/goal":     "目标模式开关",
+            "/plugin":   "插件开关",
             "/exit":     "退出程序",
         }
 
@@ -212,6 +222,7 @@ class RootSession(SessionState):
             "/thinkback": "思考回传开关",
             "/mode":     "切换模型",
             "/goal":     "目标模式开关",
+            "/plugin":   "插件开关",
             "/explore":  "创建探索分支",
             "/exit":     "退出会话",
         }
@@ -414,6 +425,7 @@ class ChildSession(SessionState):
             "/thinkback": "思考回传开关",
             "/mode":     "切换模型",
             "/goal":     "目标模式开关",
+            "/plugin":   "插件开关",
             "/done":     "完成探索分支",
             "/exit":     "暂离探索分支",
         }
@@ -587,6 +599,7 @@ class SessionManager:
                  cancel_check: Callable[[], bool] = None,
                  name_func: Callable[[List[Dict[str, Any]]], str] = None,
                  goal_tool_setter: Callable[[bool], None] = None,
+                 plugin_setter: Callable[[str, bool], bool] = None,
                  goal_max_rounds: int = 0,
                  project_skill_roots=None,
                  skill_ignore_dirs: tuple = ()):
@@ -609,6 +622,8 @@ class SessionManager:
         # 手动压缩（/compact）：由 Assembly 注入 CompressionCoordinator.compress_manual
         self.compact_func: Optional[Callable[[], Tuple[str, str]]] = None
         self._set_goal_tool = goal_tool_setter
+        # 插件工具开关（/plugin）：由 Assembly 注入 llm.set_plugin_enabled（注册表 + LLM工具表同步）
+        self._set_plugin_enabled = plugin_setter
         # 项目技能根目录: None=自动发现（扫描所有名为 skills 的目录）；空元组=关闭；非空=显式
         self._project_skill_roots = project_skill_roots
         # 自动发现时跳过的目录名（narnat.json "忽略目录"，默认含 node_modules/.git 等）
@@ -845,6 +860,65 @@ class SessionManager:
 
     def on_list_model_names(self) -> list:
         return list(self._model_options or [])
+
+    def on_plugin(self, action: str) -> Tuple[str, str]:
+        """插件工具开关：/plugin 查看状态，/plugin <名称> <on|off> 切换并持久化。
+
+        关闭 = 该工具定义下一轮请求起不再发给 LLM（省token）；不做执行层拦截，
+        已建立的 SSH/串口/MCP 连接保持存活。
+        返回 (status, text)：status ∈ {"info","ok","hint","error"}，命令层据此着色。
+        """
+        from ..tools import registry as _registry
+        if not action:
+            states = _registry.get_plugin_states()
+            on_count = sum(1 for enabled in states.values() if enabled)
+            lines = [f"  插件开关: {on_count}/{len(states)} 开启  用法: /plugin <名称> <on|off>"]
+            for name, enabled in states.items():
+                lines.append(f"    {name.ljust(9)} {'on ' if enabled else 'off'}  "
+                             f"{_PLUGIN_TOOL_LABELS.get(name, '')}")
+            return "info", "\n".join(lines)
+        parts = action.split()
+        name = _registry.resolve_plugin_name(parts[0])
+        if name is None:
+            available = " / ".join(_registry.PLUGIN_TOOL_NAMES)
+            return "error", f"  无效插件名: {parts[0]}（可用: {available}）"
+        value = " ".join(parts[1:]).strip().lower()
+        if not value:
+            return "error", f"  参数不完整（用法: /plugin {name} on|off）"
+        if value not in ("on", "off"):
+            return "error", f"  无效值: {value}（可用: on / off，例如 /plugin {name} off）"
+        target = value == "on"
+        current = _registry.get_plugin_states()[name]
+        if self._set_plugin_enabled is None or not self._set_plugin_enabled(name, target):
+            return "error", "  插件开关不可用"
+        self._persist_plugin_states()
+        if current == target:
+            return "hint", f"  {name} 已是{'开启' if target else '关闭'}状态"
+        if target:
+            return "ok", f"  {name} 已开启  (下轮请求起恢复向 AI 提供该工具)"
+        return "ok", f"  {name} 已关闭  (下轮请求起不再向 AI 提供该工具)"
+
+    def _persist_plugin_states(self) -> None:
+        """把全部插件开关状态写回 narnat.json（同 on_thinkback 写盘模式，失败静默）"""
+        if not self._config_dir:
+            return
+        from ..tools import registry as _registry
+        config_path = os.path.join(self._config_dir, "narnat.json")
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data.setdefault("工具", {})["插件"] = {
+                name: "on" if enabled else "off"
+                for name, enabled in _registry.get_plugin_states().items()
+            }
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def on_list_plugin_names(self) -> list:
+        from ..tools import registry as _registry
+        return list(_registry.PLUGIN_TOOL_NAMES)
 
     def on_list_names(self) -> list:
         tree = list_sessions_tree(self.narnat_dir)

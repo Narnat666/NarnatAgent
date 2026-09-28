@@ -16,6 +16,11 @@ DEFAULT_MAX_TOOL_OUTPUT_KB = 64
 # ── 工具超时全局上限（秒），0=不限制 ──
 DEFAULT_MAX_TIMEOUT_SECONDS = 1800
 
+# ── 插件工具（可开关分组）默认名单 ──
+# 常驻工具（Read/Glob/Grep/Edit/Write/Shell/TodoWrite）不可开关；
+# 下列工具可在 narnat.json "工具"."插件" 中用 "on"/"off" 开关（缺项默认 on）。
+DEFAULT_PLUGIN_TOOLS = ("Terminal", "WebSearch", "Serial", "MCP")
+
 # ── MCP 服务器默认值（对标 codex：DEFAULT_STARTUP_TIMEOUT / DEFAULT_TOOL_TIMEOUT）──
 DEFAULT_MCP_STARTUP_TIMEOUT = 30   # 启动 + 握手 + 列工具超时（秒）
 DEFAULT_MCP_TOOL_TIMEOUT = 300     # MCP 工具调用超时（秒）

@@ -6,8 +6,9 @@
 """
 
 import re
-from typing import Dict, List, Any, Callable, Optional
+from typing import Dict, List, Any, Callable, Optional, Set
 
+from ..config.defaults import DEFAULT_PLUGIN_TOOLS
 from .exec_signal import error_line
 from .tool_context import ToolContext
 from .token_estimate import estimate_text_tokens
@@ -187,11 +188,91 @@ def _friendly_type_error(name: str, impl: Callable, err: TypeError) -> str:
     return msg
 
 
+# ═══════════════════════════════════════════════════════════════
+# 插件工具开关（Terminal/WebSearch/Serial/MCP）
+#
+# 关闭的语义只有一件事：该工具定义不再随请求发给 LLM（省token + 精简聚焦）。
+# 不做执行层拦截；已连接的 SSH/串口/MCP 子进程保持存活，重开后工具立刻回来。
+# ═══════════════════════════════════════════════════════════════
+
+# 名单唯一来源：config.defaults.DEFAULT_PLUGIN_TOOLS（此处只做别名，不再重复定义）
+PLUGIN_TOOL_NAMES: tuple = DEFAULT_PLUGIN_TOOLS
+
+_disabled_plugins: Set[str] = set()
+
+
+def _definition_name(definition: Dict) -> str:
+    return definition.get("function", {}).get("name") or ""
+
+
+def resolve_plugin_name(name: str) -> Optional[str]:
+    """插件名规范化（大小写不敏感）；非插件名返回 None"""
+    target = (name or "").strip().lower()
+    for plugin in PLUGIN_TOOL_NAMES:
+        if plugin.lower() == target:
+            return plugin
+    return None
+
+
+def set_plugin_enabled(name: str, enabled: bool) -> bool:
+    """设置插件工具开关。命中已知插件名返回 True，否则 False（不改动任何状态）"""
+    canonical = resolve_plugin_name(name)
+    if canonical is None:
+        return False
+    if enabled:
+        _disabled_plugins.discard(canonical)
+    else:
+        _disabled_plugins.add(canonical)
+    return True
+
+
+def is_plugin_enabled(name: str) -> bool:
+    canonical = resolve_plugin_name(name)
+    return canonical is not None and canonical not in _disabled_plugins
+
+
+def get_plugin_states() -> Dict[str, bool]:
+    """全部插件工具的开关状态（顺序同 PLUGIN_TOOL_NAMES）"""
+    return {name: name not in _disabled_plugins for name in PLUGIN_TOOL_NAMES}
+
+
+def apply_plugin_config(states: Dict[str, bool]) -> None:
+    """启动时批量应用配置开关（assembly 注入，须早于 get_tool_definitions()）"""
+    for name, enabled in (states or {}).items():
+        set_plugin_enabled(name, enabled)
+
+
+def plugin_definition_names(name: str) -> List[str]:
+    """该插件在 LLM 工具表中的全部定义名（MCP 含 mcp__ 动态工具）。非插件名返回 []"""
+    canonical = resolve_plugin_name(name)
+    if canonical is None:
+        return []
+    if canonical != "MCP":
+        return [canonical]
+    names = [canonical]
+    names += [n for n in (_definition_name(d) for d in _DYNAMIC_DEFINITIONS) if n]
+    return names
+
+
+def get_plugin_definitions(name: str) -> List[Dict]:
+    """取该插件相关定义（不受开关状态过滤），供开启时热恢复到 LLM 工具表"""
+    canonical = resolve_plugin_name(name)
+    if canonical is None:
+        return []
+    defs = [d for d in TOOL_DEFINITIONS if _definition_name(d) == canonical]
+    if canonical == "MCP":
+        defs += list(_DYNAMIC_DEFINITIONS)
+    return defs
+
+
 def get_tool_names() -> List[str]:
     """返回所有工具名称（含运行时动态注册的工具）"""
     return list(_TOOL_IMPLEMENTATIONS.keys()) + list(_DYNAMIC_IMPLEMENTATIONS.keys())
 
 
 def get_tool_definitions() -> List[Dict]:
-    """返回LLM工具定义列表（含运行时动态注册的工具）"""
-    return TOOL_DEFINITIONS + _DYNAMIC_DEFINITIONS
+    """返回LLM工具定义列表（含运行时动态注册的工具；不含已关闭的插件工具）"""
+    defs = [d for d in TOOL_DEFINITIONS if _definition_name(d) not in _disabled_plugins]
+    if "MCP" in _disabled_plugins:
+        return defs
+    return defs + list(_DYNAMIC_DEFINITIONS)
