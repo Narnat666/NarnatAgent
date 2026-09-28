@@ -29,7 +29,7 @@ def _no_session_msg(host: str = "") -> str:
 
 def _get_sftp(session: SSHSession):
     """从SSH会话获取SFTP客户端"""
-    return session._client.open_sftp()
+    return session.open_sftp()
 
 
 # ── 远程Read ──

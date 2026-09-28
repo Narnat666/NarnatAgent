@@ -13,6 +13,7 @@ import threading
 import time
 from typing import Optional
 
+from . import truncate_store
 from ..exec_signal import rc_line, error_line, tag_error, safe_cut_points
 from ..token_estimate import estimate_text_tokens
 
@@ -203,7 +204,10 @@ DEFINITION = {
                 },
                 "max_output_chars": {
                     "type": "integer",
-                    "description": "最大输出字符数（正整数，默认4000，仅前台命令生效）",
+                    "description": (
+                        "最大输出字符数（正整数，默认4000，仅前台命令生效；"
+                        "超出时保留首尾，完整输出落盘并在提示中给出文件路径）"
+                    ),
                 },
                 "background": {
                     "type": "boolean",
@@ -326,6 +330,13 @@ def _is_cd_command(cmd: str) -> bool:
     # 但这类写法在 cmd 下本就不是合法cd，放行到子进程执行同样合理
     if "&" in cmd or "|" in cmd or ";" in cmd:
         return False
+    # 重定向不是纯cd：`cd /tmp > f` 的目标是重定向文件，不是目录
+    if ">" in cmd or "<" in cmd:
+        return False
+    # 多行命令不是纯cd：换行在 cmd/bash 下是命令分隔符（cmd 执行首行、
+    # bash 逐行执行）。误判会让整条多行命令被拦截、一行未执行
+    if "\n" in cmd or "\r" in cmd:
+        return False
     # cmd 无空格简写: cd..(父目录)、cd...(祖父目录)、cd\(根目录)
     if lower in ("cd..", "cd...", "chdir..", "chdir...", "cd\\", "chdir\\"):
         return True
@@ -393,10 +404,12 @@ def _drain_readers(*threads) -> None:
 
 
 def _truncate_output(text: str, max_chars: int) -> str:
-    """截断输出：保留头部和尾部（尾部含提示符，对AI判断shell状态至关重要），中段提示。
+    """截断输出：保留头部和尾部（尾部常含命令最后输出，对AI判断执行结果至关重要），中段提示。
 
     切点先做标签吸附（safe_cut_points）：框架标签不允许被切开——残缺
     片段无法被 strip_tags 匹配，会泄漏给AI并让失败判定失效。
+    截断发生时完整输出落盘（truncate_store，进程专属临时目录），提示中
+    给出文件路径供AI用 Read/Grep 查询完整内容；落盘失败退回原提示文案。
     """
     if max_chars <= 0:
         return error_line("max_output_chars需为正整数")
@@ -405,26 +418,17 @@ def _truncate_output(text: str, max_chars: int) -> str:
     head = max_chars * 2 // 3
     head_end, tail_start = safe_cut_points(text, head, len(text) - (max_chars - head))
     est = estimate_text_tokens(text)  # ≈token（AI预算单位，混合密度估算）
+    full_path = truncate_store.store_output(text)
+    tip = (
+        f"完整输出已落盘，用 Read/Grep 读取: {full_path}"
+        if full_path
+        else "增大max_output_chars可获取完整输出"
+    )
     return (
         text[:head_end]
-        + f"\n...[中间截断: 输出共{len(text)}字符, 已保留首{head_end}字符+尾{len(text) - tail_start}字符(≈{est}token)。增大max_output_chars可获取完整输出]\n"
+        + f"\n...[中间截断: 输出共{len(text)}字符, 已保留首{head_end}字符+尾{len(text) - tail_start}字符(≈{est}token)。{tip}]\n"
         + text[tail_start:]
     )
-
-
-def _format_prompt() -> str:
-    """返回当前路径提示符，仿终端显示。"""
-    cwd = os.getcwd()
-    if sys.platform == "win32":
-        return f"{cwd}>"
-    else:
-        home = os.path.expanduser("~")
-        if cwd == home:
-            return "~$ "
-        elif cwd.startswith(home + os.sep):
-            return "~" + cwd[len(home):] + "$ "
-        else:
-            return f"{cwd}$ "
 
 
 def execute(
@@ -469,6 +473,11 @@ def execute(
         max_output_chars = int(max_output_chars) if max_output_chars is not None else 4000
     except (TypeError, ValueError):
         return error_line("timeout/max_output_chars需为整数")
+    # 参数校验前置：max_output_chars<=0 时若放到 _truncate_output 才报错，
+    # 命令已执行、输出却被替换成参数错误（副作用已发生但结果不可见）——与
+    # Terminal/Read 的"执行前拦截"保持一致
+    if max_output_chars <= 0:
+        return error_line("max_output_chars需为正整数")
     # ── 安全检查：删除命令和git命令根据配置决定是否需要确认 ──
     # 后台提交与前台同一套确认（bg 管理操作无 command 自然跳过）
     need_confirm = False
@@ -479,10 +488,13 @@ def execute(
         need_confirm = True
 
     if need_confirm:
-        if sys.platform == "win32":
-            if tc and tc.confirm_callback and not tc.confirm_callback(command):
+        if sys.platform == "win32" and tc and tc.confirm_callback:
+            # Windows 交互模式：同步弹确认框
+            if not tc.confirm_callback(command):
                 return "[操作已取消: 此命令需用户确认]"
         else:
+            # 无回调（Windows headless）或 Linux/macOS：暂存命令由 agent 主循环
+            # 在 # 提示符下等用户确认后重放；headless 下读不到输入 → 取消执行
             if tc and tc._delete_confirmed:
                 tc._delete_confirmed = False
             else:
@@ -521,18 +533,9 @@ def execute(
         # 入口清零：上轮残留的ESC中断标志不污染本轮（覆盖单段/多段全部子路径）
         BashRuntime.interrupted = False
 
-        # cd 命令：同步更新 Python 进程的 CWD（供 Read/Glob 等工具使用）
-        if _is_cd_command(command):
-            path = _extract_cd_path(command)
-            if path is None:
-                # 无参数cd：仅显示当前目录（与cmd.exe行为一致）
-                return f"{rc_line(0)}\n{_format_prompt()}"
-            try:
-                os.chdir(path)
-            except OSError as e:
-                # 带上退出码标记：与普通命令失败形态一致，AI一眼识别失败
-                return f"cd: {e}\n{rc_line(1)}\n{_format_prompt()}"
-            return f"{rc_line(0)}\n{_format_prompt()}"
+        # 单段 cd：子进程内 cd 无副作用（执行完即退出），照常执行并附提示引导。
+        # 不拦截：误判会让整条命令不执行，代价大于收益
+        cd_hint = _is_cd_command(command)
 
         # 多段命令(&&/||)由Python端拆分后逐段执行
         segments = _split_commands(command)
@@ -554,7 +557,8 @@ def execute(
                 )
             return _format_result(rc, out, err, status, timeout, max_output_chars)
 
-        return _execute_win32(command, timeout, max_output_chars)
+        result = _execute_win32(command, timeout, max_output_chars)
+        return _with_cd_hint(result, cd_hint)
 
     # ═════════════════════════════════════════════════════════════
     # Linux/macOS: bash -c 子进程（原有逻辑）
@@ -563,19 +567,8 @@ def execute(
     if shell is None:
         return error_line("未找到shell，请安装bash或sh后重试")
 
-    # cd 命令：同步更新 Python 进程的 CWD（与 Windows 分支一致）。
-    # 此前 cd 走 bash -c 子进程执行，目录切换不持久且无任何提示，
-    # AI 会误以为已切换目录（DEFINITION 承诺"单独执行 cd 可改变后续调用的当前目录"）
-    if _is_cd_command(command):
-        path = _extract_cd_path(command)
-        if path is None:
-            # 无参数cd：bash 语义是回到 $HOME（cmd 是显示当前目录，已在 Windows 分支处理）
-            path = os.path.expanduser("~")
-        try:
-            os.chdir(path)
-        except OSError as e:
-            return f"cd: {e}\n{rc_line(1)}\n{_format_prompt()}"
-        return f"{rc_line(0)}\n{_format_prompt()}"
+    # 单段 cd：子进程内 cd 无副作用，照常执行并附提示引导（不拦截）
+    cd_hint = _is_cd_command(command)
 
     # 多段命令(&&/||)由Python端拆分后逐段执行
     segments = _split_commands(command)
@@ -666,7 +659,7 @@ def execute(
             if err.strip():
                 parts.append(f"[stderr]\n{err.strip()}")
             parts.append("[用户中断]")
-            return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
+            return _truncate_output("\n".join(parts), max_output_chars)
 
         if timed_out:
             parts = []
@@ -677,7 +670,7 @@ def execute(
             if err.strip():
                 parts.append(f"[stderr]\n{err.strip()}")
             parts.append(tag_error(f"[超时: 命令执行超过{timeout:.0f}秒，已终止]"))
-            return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
+            return _truncate_output("\n".join(parts), max_output_chars)
 
         parts = [rc_line(proc.returncode)]
         out = _decode_output(stdout)
@@ -686,10 +679,20 @@ def execute(
         err = _decode_output(stderr)
         if err.strip():
             parts.append(f"[stderr]\n{err.strip()}")
-        return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
+        return _with_cd_hint(_truncate_output("\n".join(parts), max_output_chars), cd_hint)
     finally:
         with BashRuntime.active_proc_lock:
             BashRuntime.active_proc = None
+
+
+def _with_cd_hint(result: str, cd_hint: bool) -> str:
+    """单段 cd 命令的结果附提示：命令已照常执行，仅引导 AI 改用 cd X && 命令。
+
+    不拦截：判断正则一旦误判，整条命令不执行（代价远大于收益）。
+    """
+    if not cd_hint:
+        return result
+    return f"{result}\n[提示: 单通道执行下 cd 不影响后续命令，当前目录: {os.getcwd()}。请用 'cd X && 命令' 形式]"
 
 
 def _collect_proc_output(proc: subprocess.Popen, timeout: int, max_output_chars: int):
@@ -781,7 +784,7 @@ def _format_result(rc: int, out: str, err: str, status: str,
             parts.append(out.strip())
         if err.strip():
             parts.append(f"[stderr]\n{err.strip()}")
-    return _truncate_output("\n".join(parts) + "\n" + _format_prompt(), max_output_chars)
+    return _truncate_output("\n".join(parts), max_output_chars)
 
 
 def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
@@ -811,7 +814,7 @@ def _execute_win32(command: str, timeout: int, max_output_chars: int) -> str:
 
 
 def _execute_py_direct(exe: str, flags: str, tail: str,
-                       timeout: int, max_output_chars: int):
+                       timeout: int, max_output_chars: int, cwd: str = ""):
     """绕过cmd直接CreateProcess执行 python -c 载荷（shell=False）。
 
     载荷由 CommandLineToArgvW 规则解析：双引号内的换行/%/&/|/<等一律字面
@@ -826,7 +829,7 @@ def _execute_py_direct(exe: str, flags: str, tail: str,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            cwd=os.getcwd(),
+            cwd=cwd or os.getcwd(),
             creationflags=BashRuntime.WIN_NO_WINDOW,
             env=BashRuntime.utf8_env,
         )
@@ -837,16 +840,16 @@ def _execute_py_direct(exe: str, flags: str, tail: str,
 
 
 def _execute_py_suffixed(exe: str, flags: str, tail: str, spec,
-                         timeout: int, max_output_chars: int):
+                         timeout: int, max_output_chars: int, cwd: str = ""):
     """直执行 python -c 并处理尾随后缀（|管道 / >重定向）。
 
     spec: ('pipe', cmd) | ('w'|'a', path) | ('discard',)
     返回 (rc, out, err, status)，格式与 _collect_proc_output 一致。
     """
     if spec[0] == "pipe":
-        return _execute_py_pipe(exe, flags, tail, spec[1], timeout, max_output_chars)
+        return _execute_py_pipe(exe, flags, tail, spec[1], timeout, max_output_chars, cwd=cwd)
 
-    rc, out, err, status = _execute_py_direct(exe, flags, tail, timeout, max_output_chars)
+    rc, out, err, status = _execute_py_direct(exe, flags, tail, timeout, max_output_chars, cwd=cwd)
     if status != "ok" or spec[0] == "discard":
         # 中断/超时不写文件；>nul 直接丢弃 stdout（stderr 仍展示）
         return rc, "", err, status
@@ -862,7 +865,7 @@ def _execute_py_suffixed(exe: str, flags: str, tail: str, spec,
 
 
 def _execute_py_pipe(exe: str, flags: str, tail: str, pipe_cmd: str,
-                     timeout: int, max_output_chars: int):
+                     timeout: int, max_output_chars: int, cwd: str = ""):
     """直执行 python -c，stdout 经 cmd 管道命令过滤后合并展示。
 
     先直执行 python（超时/ESC语义不变）；成功后把 stdout 字节喂给管道命令，
@@ -870,7 +873,7 @@ def _execute_py_pipe(exe: str, flags: str, tail: str, pipe_cmd: str,
     """
     start = time.time()
     rc_py, out_py, err_py, status_py = _execute_py_direct(
-        exe, flags, tail, timeout, max_output_chars
+        exe, flags, tail, timeout, max_output_chars, cwd=cwd
     )
     elapsed = time.time() - start
     if status_py != "ok":
@@ -916,13 +919,14 @@ def _execute_segments(segments: list, timeout: int,
     虽然 cmd /c 本身支持 &&，但 Python 端拆分为逐段执行以获得：
     1. 每段独立的超时控制（超时时强杀整棵进程树）
     2. ESC 可在段内/段间打断
-    3. cd 命令作用到 os.chdir() 而非子进程
+    3. cd 命令作用于本次调用内的局部工作目录（不修改 agent 进程 cwd）
     """
     BashRuntime.interrupted = False  # 入口清零：上轮残留的中断标志不污染本轮
     all_parts = []
     prev_rc = 0
     remaining_timeout = timeout
     was_interrupted = False
+    local_cwd = os.getcwd()
 
     for i, (op, seg) in enumerate(segments):
         # 短路求值
@@ -933,18 +937,22 @@ def _execute_segments(segments: list, timeout: int,
             all_parts.append(f"[跳过: 前一命令成功] {seg}")
             continue
 
-        # cd 命令直接作用于 Python 进程
+        # cd 段：作用于本次调用内的局部工作目录（不修改 agent 进程 cwd）
         if _is_cd_command(seg):
             path = _extract_cd_path(seg)
             if path is None:
-                prev_rc = 0  # 无参数cd仅显示，不切换
+                all_parts.append(local_cwd)  # 无参数cd：显示当前（局部）目录
+                prev_rc = 0
             else:
+                target = path if os.path.isabs(path) else os.path.normpath(os.path.join(local_cwd, path))
                 try:
-                    os.chdir(path)
-                    prev_rc = 0
+                    os.stat(target)
                 except OSError as e:
                     all_parts.append(f"cd: {e}")
                     prev_rc = 1
+                else:
+                    local_cwd = target
+                    prev_rc = 0
             continue
 
         # python -c 载荷绕过cmd直执行：换行/%/&/|等不再被cmd吞掉
@@ -956,11 +964,11 @@ def _execute_segments(segments: list, timeout: int,
             seg_start = time.time()
             if spec is None:
                 rc, out, err, status = _execute_py_direct(
-                    exe, flags, code_tail, seg_budget, max_output_chars
+                    exe, flags, code_tail, seg_budget, max_output_chars, cwd=local_cwd
                 )
             else:
                 rc, out, err, status = _execute_py_suffixed(
-                    exe, flags, code_tail, spec, seg_budget, max_output_chars
+                    exe, flags, code_tail, spec, seg_budget, max_output_chars, cwd=local_cwd
                 )
             seg_elapsed = time.time() - seg_start
             remaining_timeout = max(0, remaining_timeout - seg_elapsed)
@@ -1000,7 +1008,7 @@ def _execute_segments(segments: list, timeout: int,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                cwd=os.getcwd(),
+                cwd=local_cwd,
                 # 共用路径：Unix 用 start_new_session，Windows 忽略之，改用独立
                 # 无窗口控制台（WIN_NO_WINDOW 在 Unix 恒为 0，不影响 Unix 路径）
                 start_new_session=True,
@@ -1098,4 +1106,4 @@ def _execute_segments(segments: list, timeout: int,
     if prev_rc >= 0 and not was_interrupted:
         all_parts.append(rc_line(prev_rc))
 
-    return _truncate_output("\n".join(all_parts) + "\n" + _format_prompt(), max_output_chars)
+    return _truncate_output("\n".join(all_parts), max_output_chars)

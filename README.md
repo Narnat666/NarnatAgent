@@ -121,7 +121,7 @@ $p = [Environment]::GetEnvironmentVariable('Path','User')
 | C 编译器 | MSVC cl 14.3 |
 
 ```bash
-pip install nuitka==4.1.2 httpx openai paramiko prompt_toolkit zstandard
+pip install nuitka==4.1.2 httpx openai paramiko prompt_toolkit pyserial zstandard
 python -m nuitka --onefile --output-dir=output --output-filename=narnat.exe \
   --jobs=16 --lto=yes --python-flag=no_docstrings --follow-imports \
   --include-module=openai \
@@ -155,10 +155,12 @@ tar xzf Python-3.12.9.tgz && cd Python-3.12.9
 make -j$(nproc) && sudo make install
 
 # Nuitka + 依赖
-/usr/local/python3.12/bin/pip3.12 install nuitka==4.1.2 httpx openai paramiko prompt_toolkit zstandard
+/usr/local/python3.12/bin/pip3.12 install nuitka==4.1.2 httpx openai paramiko prompt_toolkit pyserial zstandard
 ```
 
 编译命令与 Windows 相同（将 `python` 替换为 `/usr/local/python3.12/bin/python3.12`），耗时约 28 分钟。产物约 35MB，仅依赖 glibc ≥ 2.35。
+
+> 依赖须全部装齐（尤其 `pyserial`）：Serial 工具在模块顶层 `import serial`，构建环境缺 pyserial 时 Nuitka 不报错、静默跳过该模块，产物启动即崩 `No module named 'serial'`。
 
 ## 运行
 

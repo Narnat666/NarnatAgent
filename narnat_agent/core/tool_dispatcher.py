@@ -239,7 +239,7 @@ class ToolDispatcher:
         # MCP 工具(mcp__*)结果含"服务端任意文本"（可能自带"[错误"开头的中文文本），
         #   与命令类工具同源：只认框架不可伪造标签，避免服务端文本被误判为工具失败。
         # 框架标签只服务于判定，不给AI看（strip_tags剥离后AI看到的内容与无标签一致）
-        tagged_judge = name in ("Shell", "Terminal") or name.startswith("mcp__")
+        tagged_judge = name in ("Shell", "Terminal", "Serial") or name.startswith("mcp__")
         exec_failed = (
             tagged_judge
             and isinstance(llm_result, str)

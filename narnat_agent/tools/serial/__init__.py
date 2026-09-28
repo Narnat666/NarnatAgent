@@ -3,7 +3,8 @@
 核心设计:
 - 支持最多 max_sessions(5) 个并发串口会话，每个会话有唯一 session_id(0-4)
 - AI 通过 session_id 指定在哪个串口操作
-- 提示符检测: 字符集匹配 + 稳定性采样
+- 提示符检测: 字符集匹配 + 稳定性采样；wait_for 正则命中即返回
+- 支持 DTR/RTS 信号线控制(signal action)与文本编码配置(encoding)
 - 超时默认 120s，超时返回已收集数据
 """
 
@@ -13,6 +14,7 @@ import threading
 from typing import Optional
 
 from .serial_session import SerialSession
+from ..exec_signal import error_line
 from ..tool_context import AWAIT_CONFIRM
 
 __all__ = ["execute", "DEFINITION", "kill_active_exec", "cleanup", "SerialRuntime"]
@@ -61,7 +63,7 @@ DEFINITION = {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["scan", "connect", "exec", "raw_exec", "input", "status", "close"],
+                    "enum": ["scan", "connect", "exec", "raw_exec", "input", "signal", "status", "close"],
                     "description": (
                         "操作类型（默认exec）。"
                         "scan 扫描本机可用串口；"
@@ -69,6 +71,7 @@ DEFINITION = {
                         "exec 发送命令，等待提示符或超时返回；"
                         "raw_exec 发送命令，纯超时返回（不检测提示符，适合裸机/AT固件等无标准提示符设备）；"
                         "input 发送交互输入；"
+                        "signal 设置DTR/RTS信号线（ESP32进bootloader等复位场景）；"
                         "status 查看所有串口会话状态；"
                         "close 关闭指定会话（省略session_id/port时关闭全部会话）"
                     ),
@@ -106,13 +109,28 @@ DEFINITION = {
                 },
                 "prompt_pattern": {
                     "type": "string",
-                    "description": "自定义提示符正则（给定时替代默认字符集 $#%>:❯=@~）",
+                    "description": "自定义提示符正则（给定时替代默认字符集 $#%>:❯~）",
+                },
+                "encoding": {
+                    "type": "string",
+                    "description": (
+                        "串口文本编码（可选，默认utf-8）。国产设备/GBK输出场景可设gbk；"
+                        "解码失败时自动回退到utf-8 replace"
+                    ),
                 },
                 "command": {
                     "type": "string",
                     "description": (
                         "发送的命令（action=exec/raw_exec时使用）；"
                         "raw_exec时为空则纯监听：不发送，仅在timeout内收集设备主动输出"
+                    ),
+                },
+                "wait_for": {
+                    "type": "string",
+                    "description": (
+                        "等待输出中出现的正则（可选，exec/raw_exec时使用）。"
+                        "命中即返回，适合'等待设备启动完成/等待特定响应'场景；"
+                        "非法正则自动按字面量匹配；未指定时按提示符检测判断命令结束。"
                     ),
                 },
                 "input": {
@@ -122,6 +140,22 @@ DEFINITION = {
                         "发送 ^C 可中断设备上仍在运行的命令；"
                         "其他文本追加行结束符发送，空闲时等同 exec 执行命令"
                     ),
+                },
+                "dtr": {
+                    "type": "string",
+                    "description": (
+                        "DTR信号线状态（action=signal时使用）：high/low/pulse（pulse=脉冲后恢复原状）"
+                    ),
+                },
+                "rts": {
+                    "type": "string",
+                    "description": (
+                        "RTS信号线状态（action=signal时使用）：high/low/pulse"
+                    ),
+                },
+                "pulse_ms": {
+                    "type": "integer",
+                    "description": "脉冲时长毫秒（action=signal且值为pulse时使用，默认100，上限5000）",
                 },
                 "timeout": {
                     "type": "integer",
@@ -172,8 +206,13 @@ def execute(
     flow_control: str = "none",
     line_ending: str = "\n",
     prompt_pattern: str = "",
+    encoding: str = "utf-8",
     command: str = "",
+    wait_for: str = "",
     input: str = "",  # 参数名 "input" 与 DEFINITION 对齐，不可改名（LLM 通过 **arguments 传参）
+    dtr: str = "",
+    rts: str = "",
+    pulse_ms: int = 100,
     timeout: int = 120,
     session_id: int = -1,
     max_output_chars: int = 8000,
@@ -188,25 +227,29 @@ def execute(
         timeout = int(timeout) if timeout is not None else 120
         session_id = int(session_id) if session_id is not None else -1
         max_output_chars = int(max_output_chars) if max_output_chars is not None else 8000
+        pulse_ms = int(pulse_ms) if pulse_ms is not None else 100
     except (TypeError, ValueError):
-        return "[错误: baudrate/databits/stopbits/timeout/session_id/max_output_chars需为数值]"
+        return error_line("baudrate/databits/stopbits/timeout/session_id/max_output_chars/pulse_ms需为数值")
 
     if action == "scan":
         return _scan()
     elif action == "connect":
-        return _connect(port, baudrate, databits, parity, stopbits, flow_control, line_ending, prompt_pattern, session_id)
+        return _connect(port, baudrate, databits, parity, stopbits, flow_control,
+                        line_ending, prompt_pattern, session_id, encoding)
     elif action == "exec":
-        return _exec(session_id, port, command, timeout, max_output_chars, _tool_context)
+        return _exec(session_id, port, command, timeout, max_output_chars, _tool_context, wait_for)
     elif action == "raw_exec":
-        return _raw_exec(session_id, port, command, timeout, max_output_chars, _tool_context)
+        return _raw_exec(session_id, port, command, timeout, max_output_chars, _tool_context, wait_for)
     elif action == "input":
         return _input(session_id, port, input, timeout, max_output_chars, _tool_context)
+    elif action == "signal":
+        return _signal(session_id, port, dtr, rts, pulse_ms)
     elif action == "status":
         return _status()
     elif action == "close":
         return _close(session_id, port)
     else:
-        return f"[错误: 未知action '{action}'，可选: scan/connect/exec/raw_exec/input/status/close]"
+        return error_line(f"未知action '{action}'，可选: scan/connect/exec/raw_exec/input/signal/status/close")
 
 
 # ── 内部实现 ──
@@ -217,9 +260,9 @@ def _scan() -> str:
         from serial.tools.list_ports import comports
         ports = list(comports())
     except ImportError:
-        return "[错误: 无法导入 pyserial，请确认已安装]"
+        return error_line("无法导入 pyserial，请确认已安装")
     except Exception as e:
-        return f"[错误: 扫描串口失败: {e}]"
+        return error_line(f"扫描串口失败: {e}")
     if not ports:
         return "[未检测到串口设备]"
 
@@ -239,10 +282,10 @@ def _scan() -> str:
 def _connect(port: str, baudrate: int = 115200, databits: int = 8,
              parity: str = "N", stopbits: float = 1, flow_control: str = "none",
              line_ending: str = "\n", prompt_pattern: str = "",
-             session_id: int = -1) -> str:
+             session_id: int = -1, encoding: str = "utf-8") -> str:
     """打开串口连接"""
     if not port:
-        return "[错误: connect 需要提供 port（串口设备名）]"
+        return error_line("connect 需要提供 port（串口设备名）")
 
     # 规范化 line_ending（LLM 可能传 "\\n" 转义字符串）
     _LE_ESCAPED = {"\\n": "\n", "\\r\\n": "\r\n", "\\r": "\r"}
@@ -261,12 +304,12 @@ def _connect(port: str, baudrate: int = 115200, databits: int = 8,
                 continue
             existing_port = s.port.upper() if sys.platform == "win32" else s.port
             if existing_port == port_key and s.is_alive:
-                return f"[错误: {port} 已被终端{sid}占用，请先 close 终端{sid}]"
+                return error_line(f"{port} 已被终端{sid}占用，请先 close 终端{sid}")
 
 
         if session_id >= 0:
             if session_id >= SerialRuntime.max_sessions:
-                return f"[错误: session_id 范围 0-{SerialRuntime.max_sessions - 1}]"
+                return error_line(f"session_id 范围 0-{SerialRuntime.max_sessions - 1}")
             if session_id in SerialRuntime.sessions:
                 old = SerialRuntime.sessions[session_id]
                 if old is not None and old.is_alive:
@@ -280,7 +323,7 @@ def _connect(port: str, baudrate: int = 115200, databits: int = 8,
             alloc_id = _allocate_session_id()
             if alloc_id < 0:
                 active = list(SerialRuntime.sessions.keys())
-                return f"[错误: 已达最大会话数({SerialRuntime.max_sessions})，当前终端: {active}，请先 close 释放]"
+                return error_line(f"已达最大会话数({SerialRuntime.max_sessions})，当前终端: {active}，请先 close 释放")
 
         # 预留 slot（置 None），防止锁外构造期间其他线程抢占同一 alloc_id
         SerialRuntime.sessions[alloc_id] = None
@@ -291,19 +334,22 @@ def _connect(port: str, baudrate: int = 115200, databits: int = 8,
             port=port, baudrate=baudrate, databits=databits,
             parity=parity, stopbits=stopbits, flow_control=flow_control,
             line_ending=le, prompt_pattern=prompt_pattern,
+            encoding=encoding,
         )
     except Exception as e:
         # 构造失败 → 释放预留 slot
         with SerialRuntime.sessions_lock:
             if SerialRuntime.sessions.get(alloc_id) is None:
                 del SerialRuntime.sessions[alloc_id]
-        return f"[错误: 无法打开串口 {port}: {e}]"
+        return error_line(f"无法打开串口 {port}: {e}")
 
     # ── 阶段3: 锁内存储正式 session ──
     with SerialRuntime.sessions_lock:
         SerialRuntime.sessions[alloc_id] = session
 
     parts = [f"[已连接终端{alloc_id}: {session.prompt_info}]"]
+    if session.encoding_fallback:
+        parts.append(session.encoding_fallback)
     if session.initial_output:
         parts.append(session.initial_output)
     return "\n".join(parts)
@@ -316,12 +362,15 @@ def _check_delete_safety(command: str, session_id: int, port: str, timeout: int,
     if not (_tool_context and not _tool_context.rm_skip_confirm and SerialRuntime.RE_DELETE.search(command)):
         return None
 
-    if sys.platform == "win32":
-        if _tool_context.confirm_callback and not _tool_context.confirm_callback(command):
+    if sys.platform == "win32" and _tool_context.confirm_callback:
+        # Windows 交互模式：同步弹确认框
+        if not _tool_context.confirm_callback(command):
             return "[操作已取消: 此命令需用户确认]"
         return None
 
-    # Linux/macOS: 终端被 prompt_toolkit 占用，无法在子线程读取输入
+    # 无回调（Windows headless）或 Linux/macOS：终端被 prompt_toolkit 占用
+    # 或本无交互终端，暂存命令由 agent 主循环等用户确认后重放；
+    # headless 下读不到输入 → 取消执行（fail-closed，与 Linux 行为一致）
     if _tool_context._delete_confirmed:
         _tool_context._delete_confirmed = False
         return None
@@ -338,12 +387,13 @@ def _check_delete_safety(command: str, session_id: int, port: str, timeout: int,
 
 
 def _exec(session_id: int, port: str, command: str, timeout: int = 120,
-          max_output_chars: int = 8000, _tool_context=None) -> str:
+          max_output_chars: int = 8000, _tool_context=None,
+          wait_for: str = "") -> str:
     """在指定会话中发送命令"""
     if not command:
-        return "[错误: exec 需要提供 command]"
+        return error_line("exec 需要提供 command")
     if timeout <= 0:
-        return "[错误: timeout 需为正整数（秒）]"
+        return error_line("timeout 需为正整数（秒）")
 
     if _tool_context and _tool_context.max_timeout_seconds > 0:
         timeout = min(timeout, _tool_context.max_timeout_seconds)
@@ -356,28 +406,31 @@ def _exec(session_id: int, port: str, command: str, timeout: int = 120,
     try:
         sid, session = _resolve_session_id(session_id, port)
     except ValueError as e:
-        return f"[错误: {e}]"
+        return error_line(str(e))
 
     if not session.is_alive:
         with SerialRuntime.sessions_lock:
             SerialRuntime.sessions.pop(sid, None)
-        return f"[错误: 终端{sid}串口已断开，请重新 connect]"
+        return error_line(f"终端{sid}串口已断开，请重新 connect")
 
     try:
         with SerialRuntime.active_exec_lock:
             SerialRuntime.active_exec_sids.add(sid)
         try:
-            result = session.execute(command, timeout=timeout, max_output_chars=max_output_chars)
+            result = session.execute(command, timeout=timeout,
+                                     max_output_chars=max_output_chars,
+                                     wait_for=wait_for)
         finally:
             with SerialRuntime.active_exec_lock:
                 SerialRuntime.active_exec_sids.discard(sid)
         return f"[终端{sid}] {result}"
     except Exception as e:
-        return f"[错误: 终端{sid}命令执行失败: {e}]"
+        return error_line(f"终端{sid}命令执行失败: {e}")
 
 
 def _raw_exec(session_id: int, port: str, command: str, timeout: int = 120,
-              max_output_chars: int = 8000, _tool_context=None) -> str:
+              max_output_chars: int = 8000, _tool_context=None,
+              wait_for: str = "") -> str:
     """在指定会话中发送命令，纯超时返回，不检测提示符。
 
     适用场景:
@@ -387,7 +440,7 @@ def _raw_exec(session_id: int, port: str, command: str, timeout: int = 120,
       设备主动输出（boot日志、登录提示、刷屏日志等）
     """
     if timeout <= 0:
-        return "[错误: timeout 需为正整数（秒）]"
+        return error_line("timeout 需为正整数（秒）")
 
     if _tool_context and _tool_context.max_timeout_seconds > 0:
         timeout = min(timeout, _tool_context.max_timeout_seconds)
@@ -402,33 +455,35 @@ def _raw_exec(session_id: int, port: str, command: str, timeout: int = 120,
     try:
         sid, session = _resolve_session_id(session_id, port)
     except ValueError as e:
-        return f"[错误: {e}]"
+        return error_line(str(e))
 
     if not session.is_alive:
         with SerialRuntime.sessions_lock:
             SerialRuntime.sessions.pop(sid, None)
-        return f"[错误: 终端{sid}串口已断开，请重新 connect]"
+        return error_line(f"终端{sid}串口已断开，请重新 connect")
 
     try:
         with SerialRuntime.active_exec_lock:
             SerialRuntime.active_exec_sids.add(sid)
         try:
-            result = session.raw_execute(command, timeout=timeout, max_output_chars=max_output_chars)
+            result = session.raw_execute(command, timeout=timeout,
+                                         max_output_chars=max_output_chars,
+                                         wait_for=wait_for)
         finally:
             with SerialRuntime.active_exec_lock:
                 SerialRuntime.active_exec_sids.discard(sid)
         return f"[终端{sid}] {result}"
     except Exception as e:
-        return f"[错误: 终端{sid}命令执行失败: {e}]"
+        return error_line(f"终端{sid}命令执行失败: {e}")
 
 
 def _input(session_id: int, port: str, text: str, timeout: int = 120,
            max_output_chars: int = 8000, _tool_context=None) -> str:
     """向串口发送交互输入（密码、y/n 确认、^C 中断等）"""
     if not text:
-        return "[错误: input 需要提供 input 内容]"
+        return error_line("input 需要提供 input 内容")
     if timeout <= 0:
-        return "[错误: timeout 需为正整数（秒）]"
+        return error_line("timeout 需为正整数（秒）")
 
     if _tool_context and _tool_context.max_timeout_seconds > 0:
         timeout = min(timeout, _tool_context.max_timeout_seconds)
@@ -441,12 +496,12 @@ def _input(session_id: int, port: str, text: str, timeout: int = 120,
     try:
         sid, session = _resolve_session_id(session_id, port)
     except ValueError as e:
-        return f"[错误: {e}]"
+        return error_line(str(e))
 
     if not session.is_alive:
         with SerialRuntime.sessions_lock:
             SerialRuntime.sessions.pop(sid, None)
-        return f"[错误: 终端{sid}串口已断开，请重新 connect]"
+        return error_line(f"终端{sid}串口已断开，请重新 connect")
 
     try:
         with SerialRuntime.active_exec_lock:
@@ -458,7 +513,42 @@ def _input(session_id: int, port: str, text: str, timeout: int = 120,
                 SerialRuntime.active_exec_sids.discard(sid)
         return f"[终端{sid}] {result}"
     except Exception as e:
-        return f"[错误: 终端{sid}输入发送失败: {e}]"
+        return error_line(f"终端{sid}输入发送失败: {e}")
+
+
+def _signal(session_id: int, port: str, dtr: str = "", rts: str = "",
+            pulse_ms: int = 100) -> str:
+    """设置 DTR/RTS 信号线（high/low/pulse，pulse=脉冲后恢复原状）
+
+    典型用法（由AI自行组合时序）: ESP32 进 bootloader = DTR=low, RTS=low。
+    """
+    dtr = (dtr or "").strip().lower()
+    rts = (rts or "").strip().lower()
+    if not dtr and not rts:
+        return error_line("signal 需要至少提供 dtr 或 rts 之一（high/low/pulse）")
+    for name, val in (("dtr", dtr), ("rts", rts)):
+        if val and val not in ("high", "low", "pulse"):
+            return error_line(f"{name} 取值需为 high/low/pulse，收到 '{val}'")
+
+    # 钳制 pulse 时长（上限5000ms，防误传大值长时间阻塞；下限1ms）
+    clamp_hint = ""
+    if pulse_ms < 1 or pulse_ms > 5000:
+        clamped = max(1, min(pulse_ms, 5000))
+        clamp_hint = f"\n[提示: pulse_ms 超出范围1-5000，已钳制为{clamped}]"
+        pulse_ms = clamped
+
+    try:
+        sid, session = _resolve_session_id(session_id, port)
+    except ValueError as e:
+        return error_line(str(e))
+
+    if not session.is_alive:
+        with SerialRuntime.sessions_lock:
+            SerialRuntime.sessions.pop(sid, None)
+        return error_line(f"终端{sid}串口已断开，请重新 connect")
+
+    result = session.set_signals(dtr=dtr, rts=rts, pulse_ms=pulse_ms)
+    return f"[终端{sid}] {result}{clamp_hint}"
 
 
 def _status() -> str:
@@ -475,7 +565,10 @@ def _status() -> str:
                 continue
             alive = "活跃" if session.is_alive else "已断开"
             busy = "忙" if session.busy else "闲"
-            lines.append(f"  终端{sid}: {session.prompt_info} [{alive}|{busy}]")
+            line = f"  终端{sid}: {session.prompt_info} [{alive}|{busy}]"
+            if session.dropped_chars > 0:
+                line += f" [累计丢弃{session.dropped_chars}字符(背压)]"
+            lines.append(line)
         free = SerialRuntime.max_sessions - len(SerialRuntime.sessions)
         if free > 0:
             lines.append(f"  [{free}个空闲]")
@@ -505,7 +598,7 @@ def _close(session_id: int, port: str = "") -> str:
                 )
             ]
             if not matched:
-                return f"[错误: 端口 {port} 未连接]"
+                return error_line(f"端口 {port} 未连接")
             session_id = matched[0]
 
         if session_id not in SerialRuntime.sessions:
