@@ -286,7 +286,10 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
     "SSH最大会话数": 5,                         // 可选，默认 5
     "最大传输文件MB": 100,                      // 可选，默认 100
     "git免确认": false,                         // 可选，默认 false（git 命令需二次确认）
-    "rm免确认": false                           // 可选，默认 false（rm 命令需二次确认）
+    "rm免确认": false,                          // 可选，默认 false（rm 命令需二次确认）
+    "插件": {                                   // 可选，缺项默认全 on；值 "on"/"off"（不认 true/false），/plugin 可切换
+      "Terminal": "on", "WebSearch": "on", "Serial": "on", "MCP": "on"
+    }
   },
 
   // ── 会话 ──
@@ -437,9 +440,10 @@ narnat_agent/
 | WebSearch | 网页搜索 |
 | TodoWrite | 任务列表管理（计划同步） |
 | GoalComplete | 声明任务完成（仅 `/goal` 目标模式开启时注入给 AI） |
-| mcp__… | MCP 服务器工具（由 `"MCP服务器"` 配置动态注册，命名 `mcp__<服务器名>__<工具名>`，详见「MCP 服务器」） |
+| mcp__… | MCP 服务器工具（由 `MCP` 工具 connect 时动态注册，命名 `mcp__<服务器名>__<工具名>`，详见「MCP 服务器」） |
 
-- 工具输出受「输出上限KB」全局硬截断（保留首尾），超时受「超时上限秒」约束；Read 例外——按行截断并提示续读 offset，保证行号连续
+- 可开关的插件工具为 Terminal / WebSearch / Serial / MCP：在 `"工具"."插件"` 配置或 `/plugin` 命令中开关，关闭后该工具定义不再随请求发给 AI（省 token、聚焦任务），不做执行层拦截——已建立的 SSH / 串口 / MCP 连接保持存活，重新开启后立即可用；常驻工具（Read / Glob / Grep / Edit / Write / Shell / TodoWrite）不可关闭
+- 工具输出受「输出上限KB」全局硬截断（保留首尾），超时受「超时上限秒」约束；Read 例外——按行截断并提示续读 offset，保证行号连续；Shell 输出被截断时完整输出自动落盘（进程专属临时目录），截断提示给出文件路径，可用 Read / Grep 读取全文
 - Shell 后台任务：`background=true` 提交后立即返回 `bgN` 编号，结果落盘到会话专属临时目录（可 Read/Grep 读取）；`bg="status"/"wait"/"cancel"` 管理，并发上限 8 个，会话结束自动清理
 - 参数错误返回对 AI 友好的中文提示（未知参数 / 缺失参数直接列出有效参数名）
 - 编辑类工具返回着色 diff，终端同步展示改动
@@ -464,6 +468,8 @@ narnat_agent/
 | `/goal on [N]` | 开启目标模式（N=临时轮数上限） | 全部 |
 | `/goal off` | 关闭目标模式 | 全部 |
 | `/goal` | 查看目标模式状态 | 全部 |
+| `/plugin` | 查看插件工具开关状态 | 全部 |
+| `/plugin <名称> <on \| off>` | 切换插件工具（Terminal / WebSearch / Serial / MCP，大小写不敏感），写入 narnat.json，下一轮请求即生效 | 全部 |
 | `/clear` | 清屏 | 全部 |
 | `/compact` | 手动压缩上下文：AI 摘要全部历史（保留近期尾部逐字内容），过程中可按 `Esc` 取消 | 全部 |
 | `/exit` | 退出会话 / 退出程序 | 全部 |
