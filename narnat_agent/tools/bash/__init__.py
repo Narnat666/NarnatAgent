@@ -16,6 +16,7 @@ from typing import Optional
 from . import truncate_store
 from ..exec_signal import rc_line, error_line, tag_error, safe_cut_points
 from ..token_estimate import estimate_text_tokens
+from ..tool_context import AWAIT_CONFIRM
 
 
 class BashRuntime:
@@ -488,26 +489,21 @@ def execute(
         need_confirm = True
 
     if need_confirm:
-        if sys.platform == "win32" and tc and tc.confirm_callback:
-            # Windows 交互模式：同步弹确认框
-            if not tc.confirm_callback(command):
-                return "[操作已取消: 此命令需用户确认]"
+        # 暂存命令由 agent 主循环在 # 提示符下等用户确认后重放；
+        # headless 下读不到输入 → 取消执行（fail-closed）
+        if tc and tc._delete_confirmed:
+            tc._delete_confirmed = False
         else:
-            # 无回调（Windows headless）或 Linux/macOS：暂存命令由 agent 主循环
-            # 在 # 提示符下等用户确认后重放；headless 下读不到输入 → 取消执行
-            if tc and tc._delete_confirmed:
-                tc._delete_confirmed = False
-            else:
-                if tc is not None:
-                    tc.pending_delete = ("Shell", {
-                        "command": command,
-                        "timeout": timeout,
-                        "max_output_chars": max_output_chars,
-                        "background": background,
-                        "bg": bg,
-                        "id": id,
-                    })
-                return "__AWAIT_CONFIRM__"
+            if tc is not None:
+                tc.pending_delete = ("Shell", {
+                    "command": command,
+                    "timeout": timeout,
+                    "max_output_chars": max_output_chars,
+                    "background": background,
+                    "bg": bg,
+                    "id": id,
+                })
+            return AWAIT_CONFIRM
 
     # ── 后台任务分发（bg 参数）：独立模块实现，前台逻辑不变 ──
     if background or bg:

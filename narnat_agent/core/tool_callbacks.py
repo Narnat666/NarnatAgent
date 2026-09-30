@@ -1,26 +1,10 @@
 """
-工具回调实现 —— 删除确认 + TodoWrite UI更新
+工具回调实现 —— TodoWrite UI更新
 
 从agent.py中提取，Agent只负责组装。
 """
 
-import sys
-
 from ..output import write as _stdout_write, B, D, E, G, R, Y, is_quiet_tools
-
-
-class SafetyCallbacks:
-    """安全相关回调：删除命令确认（仅Windows使用）"""
-
-    @staticmethod
-    def confirm_delete(command: str) -> bool:
-        if sys.platform != "win32":
-            return False
-        try:
-            response = input("  确认执行此命令? [y/N]: ")
-            return response.strip().lower() in ("y", "yes")
-        except (EOFError, KeyboardInterrupt):
-            return False
 
 
 class TodoCallbacks:

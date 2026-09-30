@@ -16,9 +16,6 @@ AWAIT_CONFIRM = "__AWAIT_CONFIRM__"
 class ToolContext:
     """工具运行时上下文"""
 
-    # 删除确认回调（仅Windows使用，Linux/macOS通过AWAIT_CONFIRM机制处理）
-    confirm_callback: Optional[Callable[[str], bool]] = None
-
     # TodoWrite UI更新回调
     ui_callback: Optional[Callable[[Any], None]] = None
 
@@ -67,12 +64,6 @@ class ToolContext:
     # 后台任务软提醒标志：结束回合时仍有running任务提醒一次，置True后放行不再提醒。
     # 每次用户新输入时由agent.py复位（与todo_reminded一致）
     bg_reminded: bool = field(default=False, repr=False)
-
-    def confirm_delete(self, command: str) -> bool:
-        """调用删除确认回调（仅Windows使用）"""
-        if self.confirm_callback:
-            return self.confirm_callback(command)
-        return False
 
     def on_todo_update(self, todos):
         """调用TodoWrite UI回调"""

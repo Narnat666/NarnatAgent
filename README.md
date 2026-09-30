@@ -386,7 +386,7 @@ narnat_agent/
 │   ├── session_callbacks.py  #   会话状态机（三态）与命令回调
 │   ├── auto_save_manager.py  #   自动保存 / 自动命名
 │   ├── tool_dispatcher.py    #   工具调度（只读并行 / 写入按文件分组 / 串行）
-│   ├── tool_callbacks.py     #   工具回调（安全确认、Todo 同步）
+│   ├── tool_callbacks.py     #   工具回调（Todo 同步）
 │   ├── summarizer.py         #   探索分支总结
 │   ├── billing.py            #   费用 / 余额
 │   ├── stats.py              #   统计、费用日志

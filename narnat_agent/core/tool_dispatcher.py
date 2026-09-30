@@ -220,57 +220,60 @@ class ToolDispatcher:
         """执行单个工具调用，处理UI和日志"""
         # UI: 暂停spinner，flush渲染缓冲区，显示工具调用摘要
         stream.pause_spinner()
-        stream.flush_renderer()
-        self._show_tool_call(name, arguments)
+        try:
+            stream.flush_renderer()
+            self._show_tool_call(name, arguments)
 
-        # 执行工具
-        llm_result, color_diff = tool_execute(name, arguments, self._tool_context)
-        # ── UI失败显示判定（从根上杜绝误判）──
-        # 命令类工具(Shell/Terminal): 只认框架错误标签(has_error)。
-        #   标签是进程级随机值，只有框架自身生成的错误消息携带，命令输出
-        #   无法伪造 → 100%确定才显示失败。
-        #   - 非零退出码: 不显示（grep无匹配/diff有差异/测试脚本exit 1等
-        #     都是合法命令结果，退出码信息本身已进AI上下文）
-        #   - 输出文本含"[错误"/"[超时"字样: 不显示（那是数据不是框架错误）
-        #   - Shell超时杀进程/工具层错误(连接失败/参数非法): 带标签 → 显示
-        #   - Terminal设计内超时(仍在后台运行)/密码提示/繁忙提示: 不带标签 → 不显示
-        # 其他工具(Read/Edit/Write/Serial等): 结果纯框架文本、绝无命令输出，
-        #   startswith("[错误")即100%确定，沿用。
-        # MCP 工具(mcp__*)结果含"服务端任意文本"（可能自带"[错误"开头的中文文本），
-        #   与命令类工具同源：只认框架不可伪造标签，避免服务端文本被误判为工具失败。
-        # 框架标签只服务于判定，不给AI看（strip_tags剥离后AI看到的内容与无标签一致）
-        tagged_judge = name in ("Shell", "Terminal", "Serial") or name.startswith("mcp__")
-        exec_failed = (
-            tagged_judge
-            and isinstance(llm_result, str)
-            and has_error(llm_result)
-        )
-        if isinstance(llm_result, str):
-            llm_result = strip_tags(llm_result)
-        self._logger.info(
-            f"tools.{name.lower()}",
-            f"调用: {json.dumps(arguments, ensure_ascii=False)[:200]}",
-        )
-        self._logger.info(
-            f"tools.{name.lower()}",
-            f"结果: {llm_result[:200] if llm_result else '(空)'}",
-        )
+            # 执行工具
+            llm_result, color_diff = tool_execute(name, arguments, self._tool_context)
+            # ── UI失败显示判定（从根上杜绝误判）──
+            # 命令类工具(Shell/Terminal): 只认框架错误标签(has_error)。
+            #   标签是进程级随机值，只有框架自身生成的错误消息携带，命令输出
+            #   无法伪造 → 100%确定才显示失败。
+            #   - 非零退出码: 不显示（grep无匹配/diff有差异/测试脚本exit 1等
+            #     都是合法命令结果，退出码信息本身已进AI上下文）
+            #   - 输出文本含"[错误"/"[超时"字样: 不显示（那是数据不是框架错误）
+            #   - Shell超时杀进程/工具层错误(连接失败/参数非法): 带标签 → 显示
+            #   - Terminal设计内超时(仍在后台运行)/密码提示/繁忙提示: 不带标签 → 不显示
+            # 其他工具(Read/Edit/Write/Serial等): 结果纯框架文本、绝无命令输出，
+            #   startswith("[错误")即100%确定，沿用。
+            # MCP 工具(mcp__*)结果含"服务端任意文本"（可能自带"[错误"开头的中文文本），
+            #   与命令类工具同源：只认框架不可伪造标签，避免服务端文本被误判为工具失败。
+            # 框架标签只服务于判定，不给AI看（strip_tags剥离后AI看到的内容与无标签一致）
+            tagged_judge = name in ("Shell", "Terminal", "Serial") or name.startswith("mcp__")
+            exec_failed = (
+                tagged_judge
+                and isinstance(llm_result, str)
+                and has_error(llm_result)
+            )
+            if isinstance(llm_result, str):
+                llm_result = strip_tags(llm_result)
+            self._logger.info(
+                f"tools.{name.lower()}",
+                f"调用: {json.dumps(arguments, ensure_ascii=False)[:200]}",
+            )
+            self._logger.info(
+                f"tools.{name.lower()}",
+                f"结果: {llm_result[:200] if llm_result else '(空)'}",
+            )
 
-        # 展示着色diff
-        if color_diff:
-            self._show_diff(color_diff)
-        elif exec_failed:
-            # Shell/Terminal框架错误（带不可伪造标签）：终端补一行失败提示，原因只进AI上下文
-            self._show_tool_failed(name)
-        elif (not tagged_judge
-              and isinstance(llm_result, str)
-              and llm_result.startswith("[错误")):
-            # 非命令类工具(Read/Edit/Write/Serial等)：结果纯框架文本、绝无命令输出，
-            # startswith("[错误")即100%确定的工具错误
-            self._show_tool_failed(name)
+            # 展示着色diff
+            if color_diff:
+                self._show_diff(color_diff)
+            elif exec_failed:
+                # Shell/Terminal框架错误（带不可伪造标签）：终端补一行失败提示，原因只进AI上下文
+                self._show_tool_failed(name)
+            elif (not tagged_judge
+                  and isinstance(llm_result, str)
+                  and llm_result.startswith("[错误")):
+                # 非命令类工具(Read/Edit/Write/Serial等)：结果纯框架文本、绝无命令输出，
+                # startswith("[错误")即100%确定的工具错误
+                self._show_tool_failed(name)
 
-        stream.resume_spinner()
-        return llm_result
+            return llm_result
+        finally:
+            # 工具抛异常也必须成对恢复，否则 pause 计数泄漏 → spinner 永久不再显示
+            stream.resume_spinner()
 
     def _run_parallel(self, group, results, stream) -> None:
         """并行执行一组工具调用"""

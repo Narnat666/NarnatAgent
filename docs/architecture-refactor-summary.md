@@ -661,7 +661,7 @@ ContextTracker.need_compress() == True
               "已进入会话: feature-refactor"
 ```
 
-#### 4.5.4 删除确认（Linux/macOS）
+#### 4.5.4 删除确认（全平台统一）
 
 ```
 工具执行: Shell("rm -rf /tmp/test")

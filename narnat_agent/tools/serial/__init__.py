@@ -362,15 +362,8 @@ def _check_delete_safety(command: str, session_id: int, port: str, timeout: int,
     if not (_tool_context and not _tool_context.rm_skip_confirm and SerialRuntime.RE_DELETE.search(command)):
         return None
 
-    if sys.platform == "win32" and _tool_context.confirm_callback:
-        # Windows 交互模式：同步弹确认框
-        if not _tool_context.confirm_callback(command):
-            return "[操作已取消: 此命令需用户确认]"
-        return None
-
-    # 无回调（Windows headless）或 Linux/macOS：终端被 prompt_toolkit 占用
-    # 或本无交互终端，暂存命令由 agent 主循环等用户确认后重放；
-    # headless 下读不到输入 → 取消执行（fail-closed，与 Linux 行为一致）
+    # 终端被 prompt_toolkit 占用或本无交互终端：暂存命令由 agent 主循环
+    # 等用户确认后重放；headless 下读不到输入 → 取消执行（fail-closed）
     if _tool_context._delete_confirmed:
         _tool_context._delete_confirmed = False
         return None

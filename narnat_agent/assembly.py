@@ -4,7 +4,6 @@
 依赖顺序就是代码顺序，Python的顺序执行特性使依赖链一目了然。
 """
 
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
@@ -17,7 +16,7 @@ from .core.message_manager import MessageManager
 from .core.message_list import MessageList
 from .core.stats import StatsTracker
 from .core.session_callbacks import SessionManager
-from .core.tool_callbacks import SafetyCallbacks, TodoCallbacks
+from .core.tool_callbacks import TodoCallbacks
 from .core.agent_loop import AgentLoop
 from .core.summarizer import Summarizer
 from .core.auto_save_manager import AutoSaveManager
@@ -96,13 +95,9 @@ class Assembly:
         summarizer = Summarizer(llm, config, logger)
 
         # 9.5 工具上下文
-        # headless：不注册删除确认回调（无交互终端，命令按未确认处理），
+        # 删除确认统一走 AWAIT_CONFIRM + agent 主循环（headless 读不到输入 → 取消执行），
         # 权限与交互模式一致（配置"rm免确认/git免确认"仍生效）。
-        confirm_cb = None
-        if not headless and sys.platform == "win32":
-            confirm_cb = SafetyCallbacks.confirm_delete
         tool_context = ToolContext(
-            confirm_callback=confirm_cb,
             ui_callback=TodoCallbacks.on_todo_update,
             api_keys=config.api_keys,
             ignore_dirs=list(config.tools.ignore_dirs),

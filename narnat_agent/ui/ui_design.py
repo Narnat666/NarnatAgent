@@ -55,6 +55,11 @@ from .session_commands import _CommandCompleter, _dispatch_command, CommandResul
 
 _ANIMATION_FRAME_INTERVAL = 0.15  # 动画帧间隔（秒）
 
+# 输入模式标志：输入框活跃期间置位，所有动画线程（思考中/正在压缩/正在合并）
+# 每帧写前检查，一旦处于输入模式立即停写并退出线程。
+# 正常路径下输入前已 finish/停 spinner，此处是兜底，用于兜住任何漏网动画。
+_input_mode_active = threading.Event()
+
 def show_header(msg: str) -> None:
     _stdout_write(f"  {UI_HEADER}{msg}{R}\n")
     _sep()
@@ -68,19 +73,26 @@ def _join_thread(t: threading.Thread, max_wait: float = 1.0) -> None:
 
 
 def _animation_thread(stop: threading.Event, label: str,
-                      delay: float = 0.0) -> None:
+                      delay: float = 0.0, valid=None) -> None:
     """通用动画线程：4帧循环 * label → * label. → * label.. → * label...
 
     Args:
         stop: 停止信号
         label: 动画标签文本（如 "思考中"、"正在压缩"）
         delay: 可选延迟启动秒数，期间每50ms检查stop。0表示立即启动。
+        valid: 可选有效性回调，返回False表示本动画已作废（如spinner代次过期），
+               立即退出线程；None表示不校验（压缩/合并动画保持原行为）。
     """
+    def _should_exit() -> bool:
+        return (stop.is_set()
+                or _input_mode_active.is_set()
+                or (valid is not None and not valid()))
+
     if delay > 0:
         elapsed = 0.0
         tick = 0.05
         while elapsed < delay:
-            if stop.is_set():
+            if _should_exit():
                 return
             time.sleep(tick)
             elapsed += tick
@@ -94,7 +106,7 @@ def _animation_thread(stop: threading.Event, label: str,
         f"{D}{UI_SPINNER}* {R}{UI_SPINNER}{label}...{R}",
     )
     i = 0
-    while not stop.is_set():
+    while not _should_exit():
         _stdout_try_write(f"\r  {frames[i]}\x1b[K")
         i = (i + 1) % 4
         stop.wait(_ANIMATION_FRAME_INTERVAL)
@@ -103,9 +115,9 @@ def _animation_thread(stop: threading.Event, label: str,
     _stdout_write("\x1b[?25h")
 
 
-def _spinner_thread(stop: threading.Event) -> None:
+def _spinner_thread(stop: threading.Event, valid=None) -> None:
     """思考中动画。延迟666ms启动，避免串行工具间短暂空白闪烁。"""
-    _animation_thread(stop, "思考中", 0.666)
+    _animation_thread(stop, "思考中", 0.666, valid)
 
 
 def _compress_thread(stop: threading.Event) -> None:
@@ -173,30 +185,53 @@ class UIStreamSession:
         self._renderer = StreamingRenderer()
         self._spinner_stop = threading.Event()
         self._spinner_thread: Optional[threading.Thread] = None
+        self._spinner_gen = 0  # 代次号：每次启动+1，旧线程凭代次失效而自行退出
+        self._join_timeouts = 0  # _stop_spinner 里 join 超时（线程未及时退出）计数，仅内部统计
         self._started = False  # 仅用于flush_renderer守卫，不干预spinner
         self._aborted = False  # abort后resume_spinner不应再启动新spinner
+        self._finished = False  # finish/abort后流已终结，任何路径都不得再启动spinner
         self._spinner_pause_count = 0  # 并行工具pause计数，归零才恢复spinner
         self._spinner_lock = threading.Lock()  # 并行工具线程并发pause/resume的计数保护
 
     def _start_spinner(self) -> None:
-        """启动spinner线程（带666ms延迟），如果已有则不重复启动"""
-        if self._spinner_thread is not None:
-            return
-        self._spinner_stop.clear()
-        self._spinner_thread = threading.Thread(
-            target=_spinner_thread,
-            args=(self._spinner_stop,), daemon=True)
-        self._spinner_thread.start()
+        """启动spinner线程（带666ms延迟），如果已有则不重复启动。
+
+        终结位复检与代次号在同一临界区内完成：迟到调用既不会越过 finish/abort
+        的保护，也不会复活上一代尚未退出的旧线程（每代独立 Event + 代次校验）。
+        """
+        with self._spinner_lock:
+            if self._finished or self._aborted:
+                return
+            if self._spinner_thread is not None:
+                return
+            self._spinner_gen += 1
+            gen = self._spinner_gen
+            stop = threading.Event()
+            self._spinner_stop = stop
+            t = threading.Thread(
+                target=_spinner_thread,
+                args=(stop, lambda: self._spinner_gen == gen),
+                daemon=True)
+            self._spinner_thread = t
+        t.start()
 
     def _stop_spinner(self) -> None:
         """停止spinner线程并等待其退出，主动清理避免竞态残留"""
-        t = self._spinner_thread
-        if t is None:
-            return
-        self._spinner_stop.set()
+        with self._spinner_lock:
+            t = self._spinner_thread
+            if t is None:
+                return
+            stop = self._spinner_stop
+        stop.set()
         if t.is_alive():
             _join_thread(t)
-        self._spinner_thread = None
+            if t.is_alive():
+                # 写阻塞超时：线程仍存活，仅计数（不打印），由代次号保证它醒来即退出
+                with self._spinner_lock:
+                    self._join_timeouts += 1
+        with self._spinner_lock:
+            if self._spinner_thread is t:
+                self._spinner_thread = None
         # 清理：擦除动画行 + 恢复光标
         _stdout_write("\r\x1b[K")
         _stdout_write("\x1b[?25h")
@@ -210,6 +245,8 @@ class UIStreamSession:
         return self._aborted
 
     def begin(self) -> None:
+        if self._finished or self._aborted:
+            return
         self._start_spinner()
 
     def feed(self, chunk: str) -> None:
@@ -241,10 +278,14 @@ class UIStreamSession:
         self._renderer.reset()
 
     def resume_spinner(self) -> None:
-        """恢复spinner（工具执行后调用），所有并行工具完成后才真正恢复"""
-        if self._aborted:
-            return
+        """恢复spinner（工具执行后调用），所有并行工具完成后才真正恢复
+
+        终结位检查与计数递减在同一临界区内（消除"检查-后使用"竞态），
+        且 _start_spinner 内部还会再复检一次，作为最后一道闸。
+        """
         with self._spinner_lock:
+            if self._aborted or self._finished:
+                return
             self._spinner_pause_count = max(0, self._spinner_pause_count - 1)
             restart = self._spinner_pause_count == 0
         if restart:
@@ -254,6 +295,8 @@ class UIStreamSession:
                cache_ratio: float = 0.0, cost: float = 0.0,
                balance: float = 0.0, thinking_effort: str = "高",
                with_stats: bool = True) -> None:
+        with self._spinner_lock:
+            self._finished = True  # 先行置终结位：此后任何 resume/begin 都不得再启动spinner
         _interrupt_ctrl.enter_input_mode()  # 立即停止ESC轮询，防止误触发
         self._stop_spinner()
         self._renderer.flush(final=True)
@@ -263,7 +306,9 @@ class UIStreamSession:
     def abort(self, message: Optional[str] = None) -> None:
         """中止输出。message 非空时显示自定义提示（如程序异常），
         否则显示默认的"已打断"提示。"""
-        self._aborted = True  # 标记已打断，防止后台线程resume_spinner重启
+        with self._spinner_lock:
+            self._aborted = True  # 标记已打断，防止后台线程resume_spinner重启
+            self._finished = True  # 与 _aborted 同临界区置位，保证"检查-使用"原子
         _interrupt_ctrl.enter_input_mode()  # 立即停止ESC轮询
         self._stop_spinner()
         if message is None:
@@ -301,7 +346,11 @@ class UIInterface:
         assert self._session is not None
         _interrupt_ctrl.clear()
         _interrupt_ctrl.enter_input_mode()
-        line = read_input(self._session)
+        _input_mode_active.set()  # 兜底：输入框活跃期间禁止任何动画写终端
+        try:
+            line = read_input(self._session)
+        finally:
+            _input_mode_active.clear()
         if line is None:
             self._session = _create_session(self._mgr, self._data_dir)
         return line
@@ -313,7 +362,11 @@ class UIInterface:
         assert self._session is not None
         _interrupt_ctrl.clear()
         _interrupt_ctrl.enter_input_mode()
-        line = read_input_with_prompt(self._session, prompt_text)
+        _input_mode_active.set()  # 兜底：输入框活跃期间禁止任何动画写终端
+        try:
+            line = read_input_with_prompt(self._session, prompt_text)
+        finally:
+            _input_mode_active.clear()
         if line is None:
             self._session = _create_session(self._mgr, self._data_dir)
         return line
