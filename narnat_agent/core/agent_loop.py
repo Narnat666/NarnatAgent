@@ -22,6 +22,10 @@ from ..tools.exec_signal import strip_tags
 from ..logger import AgentLogger
 
 
+# 迟到提醒触发阈值：同一任务累计工具轮数达到此值仍无计划 → 温和提醒一次
+TODO_NUDGE_TOOL_ROUNDS = 6
+
+
 class AgentLoop:
     """工具调度内循环"""
 
@@ -270,6 +274,20 @@ class AgentLoop:
                 if call_usage:
                     self._stats.update(call_usage)
                     self._sync_ratio()
+
+                # ── 迟到提醒：多轮工具后仍未建立计划 → 温和提醒一次 ──
+                # 不阻塞、不重复；文案自带"可忽略"出口，单步任务/探索阶段
+                # 由AI自行判断。判据"未建立计划"= current_todos 为空，与
+                # 收尾软提醒/GoalComplete 交叉校验对计划的口径一致。
+                self._tool_context.tool_rounds_used += 1
+                if (not self._tool_context.current_todos
+                        and not self._tool_context.todo_nudge_sent
+                        and self._tool_context.tool_rounds_used >= TODO_NUDGE_TOOL_ROUNDS):
+                    self._tool_context.todo_nudge_sent = True
+                    self._msg_manager.append_user(
+                        "[系统提醒] 若这是多步任务且你尚未梳理步骤，可考虑用 TodoWrite 建立计划；"
+                        "单步任务或探索阶段可忽略本条。"
+                    )
 
                 continue
 

@@ -107,8 +107,6 @@ class Assembly:
             max_transfer_mb=config.tools.max_transfer_mb,
             max_tool_output_chars=config.tools.max_output_chars,
             max_timeout_seconds=config.tools.max_timeout_seconds,
-            require_plan=config.plan.require_plan,
-            min_tools=config.plan.min_tools,
             mcp_manager=mcp_manager,
         )
 
@@ -177,6 +175,7 @@ class Assembly:
         # 16. 压缩协调器
         compression_coordinator = CompressionCoordinator(
             config, msg_manager, llm, context, ui, logger,
+            tool_context=tool_context,
         )
 
         # 手动压缩命令（/compact）接线：session_mgr 转发给压缩协调器

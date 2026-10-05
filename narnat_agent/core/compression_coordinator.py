@@ -36,13 +36,30 @@ class CompressionCoordinator:
     def __init__(self, config: Config, msg_manager: MessageManager,
                  llm: LLMClient, context: ContextManager,
                  ui: UIInterface,
-                 logger: AgentLogger):
+                 logger: AgentLogger, tool_context=None):
         self._config = config
         self._msg_manager = msg_manager
         self._llm = llm
         self._context = context
         self._ui = ui
         self._logger = logger
+        self._tool_context = tool_context
+
+    def _append_plan_reminder(self):
+        """压缩后重注入当前计划：TodoWrite 调用历史被压缩吞掉后模型会忘记
+        计划，而收尾软提醒/GoalComplete 交叉校验仍以计划为准；此处把当前
+        未完成计划还给模型。无计划或全部完成时不注入。"""
+        ctx = self._tool_context
+        if ctx is None:
+            return
+        unfinished = [t for t in ctx.current_todos if t.get("status") != "completed"]
+        if not unfinished:
+            return
+        lines = ["[系统提醒] 上下文已压缩。当前计划（未完成）："]
+        for i, t in enumerate(unfinished, 1):
+            label = "进行中" if t.get("status") == "in_progress" else "待处理"
+            lines.append(f"{i}. [{label}] {t.get('content', '')}")
+        self._msg_manager.append_user("\n".join(lines))
 
     def compress(self, pending_input: str) -> bool:
         """处理上下文压缩。成功=True，失败/中断=False。"""
@@ -70,6 +87,7 @@ class CompressionCoordinator:
         if res.ok:
             self._ui.end_compressing()
             self._context.reset()
+            self._append_plan_reminder()
         return res.ok
 
     def compress_no_input(self) -> bool:
@@ -100,6 +118,7 @@ class CompressionCoordinator:
         if res.ok:
             self._ui.end_compressing()
             self._context.reset()
+            self._append_plan_reminder()
         return res.ok
 
     def compress_manual(self) -> Tuple[str, str]:
@@ -141,6 +160,7 @@ class CompressionCoordinator:
 
         if res.ok:
             self._context.reset()
+            self._append_plan_reminder()
             self._logger.info(
                 "compressor",
                 f"手动压缩完成: 替换{res.replaced}条, 约{res.tokens}tokens",

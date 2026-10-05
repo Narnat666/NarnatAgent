@@ -6,7 +6,7 @@
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple
 
 from ..tools.registry import execute as tool_execute
 from ..tools.bash import kill_active as _kill_bash
@@ -93,11 +93,6 @@ class ToolDispatcher:
 
         三组之间串行执行：只读 → 写入 → 串行，保证写入看到最新文件状态。
         """
-        # 计划优先拦截
-        blocked = self._check_plan_required(tool_calls)
-        if blocked is not None:
-            return blocked
-
         # 解析所有tool_call
         parsed: List[Tuple[str, str, dict]] = []
         for tc in tool_calls:
@@ -123,7 +118,7 @@ class ToolDispatcher:
             else:
                 serial_group.append((idx, tc_id, name, arguments))
 
-        # 计划优先：批内 TodoWrite 须在其他串行工具前执行（先定计划再动工具）。
+        # 批内 TodoWrite 须在其他串行工具前执行：UI 先呈现计划，再展示后续工具执行。
         # 稳定排序：TodoWrite 提到最前，其余保持原始顺序。
         serial_group.sort(key=lambda item: item[2] != "TodoWrite")
 
@@ -330,61 +325,6 @@ class ToolDispatcher:
                 break
             result = self._run_single(tc_id, name, arguments, stream)
             results[idx] = (tc_id, result)
-
-    def _check_plan_required(self, tool_calls: List[Dict[str, Any]]) -> Optional[List[Tuple[str, str]]]:
-        """计划优先拦截：require_plan开启时，非TodoWrite工具需先有in_progress的todo"""
-        ctx = self._tool_context
-        if not ctx.require_plan:
-            return None
-
-        # 批内已含TodoWrite：计划要求在本批内即可满足（TodoWrite在串行组中优先执行），
-        # 不拦截。否则TodoWrite会被连坐吞掉，其tool_call结果缺失还会触发消息repair，
-        # 伪造"[用户中断]"并埋下后续请求400的隐患。
-        if any(tc["function"]["name"] == "TodoWrite" for tc in tool_calls):
-            return None
-
-        non_todo_names = []
-        non_todo_ids = []
-        for tc in tool_calls:
-            name = tc["function"]["name"]
-            if name != "TodoWrite":
-                non_todo_names.append(name)
-                non_todo_ids.append(tc["id"])
-
-        if not non_todo_names:
-            return None
-
-        if len(non_todo_names) < ctx.min_tools:
-            return None
-
-        has_active = any(
-            t.get("status") == "in_progress"
-            for t in ctx.current_todos
-        )
-        if has_active:
-            return None
-
-        if self._logger:
-            self._logger.info("dispatcher", f"计划优先拦截: {non_todo_names}")
-        hint = (
-            f"[计划优先模式已开启: 请先使用TodoWrite制定计划（至少1项in_progress），"
-            f"再执行其他工具。当前尝试调用的工具: {', '.join(non_todo_names)}]"
-        )
-        # 被拦的工具：终端显示 [标签] 摘要 + 失败提示（具体原因只进AI上下文）
-        for tc in tool_calls:
-            name = tc["function"]["name"]
-            if name == "TodoWrite":
-                continue
-            try:
-                args = json.loads(tc["function"].get("arguments") or "{}")
-            except json.JSONDecodeError:
-                args = {}
-            self._show_tool_call(name, args)
-            self._show_tool_failed(name)
-        results = []
-        for i, tc_id in enumerate(non_todo_ids):
-            results.append((tc_id, hint if i == 0 else "[计划优先拦截，详见上方]"))
-        return results
 
     @staticmethod
     def _fmt_cmd(raw: str, empty_label: str = "(空命令)") -> str:

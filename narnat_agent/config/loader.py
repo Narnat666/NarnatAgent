@@ -21,7 +21,6 @@ from .defaults import (
     DEFAULT_CONTEXT_WINDOW, DEFAULT_SHOW_RATIO, DEFAULT_WARN_RATIO, DEFAULT_COMPRESS_RATIO,
     DEFAULT_COMPRESS_RETAIN_TOKENS,
     DEFAULT_GIT_SKIP, DEFAULT_RM_SKIP,
-    DEFAULT_REQUIRE_PLAN, DEFAULT_MIN_TOOLS,
     DEFAULT_MAX_TOOL_OUTPUT_KB,
     DEFAULT_MAX_TIMEOUT_SECONDS,
     DEFAULT_PLUGIN_TOOLS,
@@ -107,13 +106,6 @@ class McpServerConfig:
     tool_timeout: int = DEFAULT_MCP_TOOL_TIMEOUT         # 工具调用超时（秒）
     enabled_tools: tuple = ()               # 工具白名单（服务端原始工具名），空=全部
     disabled_tools: tuple = ()              # 工具黑名单（在白名单之后生效）
-
-
-@dataclass(frozen=True)
-class PlanConfig:
-    """计划优先配置（只读）"""
-    require_plan: bool = DEFAULT_REQUIRE_PLAN
-    min_tools: int = DEFAULT_MIN_TOOLS
 
 
 @dataclass(frozen=True)
@@ -203,7 +195,6 @@ class Config:
     paths: PathConfig = field(default_factory=PathConfig)
     tools: ToolConfig = field(default_factory=ToolConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
-    plan: PlanConfig = field(default_factory=PlanConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
     skills: SkillConfig = field(default_factory=SkillConfig)
     pricing: PricingConfig = field(default_factory=PricingConfig)
@@ -875,10 +866,6 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
         safety=SafetyConfig(
             git_skip_confirm=bool(data.get("工具", {}).get("git免确认", DEFAULT_GIT_SKIP)),
             rm_skip_confirm=bool(data.get("工具", {}).get("rm免确认", DEFAULT_RM_SKIP)),
-        ),
-        plan=PlanConfig(
-            require_plan=bool(data.get("计划", {}).get("计划优先", DEFAULT_REQUIRE_PLAN)),
-            min_tools=int(data.get("计划", {}).get("计划最低工具数", DEFAULT_MIN_TOOLS)),
         ),
         session=SessionConfig(
             auto_save=bool(data.get("会话", {}).get("自动保存", DEFAULT_AUTO_SAVE)),

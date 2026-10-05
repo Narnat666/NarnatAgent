@@ -79,7 +79,6 @@ AppConfig(扁平30字段)
       ├── paths: PathConfig     # 所有路径（frozen）
       ├── tools: ToolConfig     # SSH会话/传输上限/输出上限/忽略目录（frozen）
       ├── safety: SafetyConfig  # git/rm确认开关（frozen）
-      ├── plan: PlanConfig      # 计划优先开关（frozen）
       ├── session: SessionConfig# 自动保存/压缩阈值（frozen）
       ├── pricing, balance, ui  # 保持原结构（frozen）
       ├── api_keys: dict
@@ -450,24 +449,13 @@ llm = LLMClient(..., tool_definitions=get_tool_definitions())
          │ ToolDispatcher.execute(tool_calls)  │
          └────────────────┬────────────────────┘
                           ▼
-         ┌─────────────────────────────────────┐
-         │ 1. 计划优先检查                       │
-         │    PlanConfig.require_plan == True?  │
-         │    且 工具数 >= min_tools?            │
-         │    且 TodoTracker.has_active == False?│
-         └────────┬────────────────────────────┘
-                  │
-            需要   │   不需要
-        拦截 ◄────┴────► 继续
-            │                │
-            ▼                ▼
-     ┌────────────┐  ┌──────────────────────────┐
-     │返回拦截提示 │  │ 2. 解析tool_calls         │
-     │给所有工具   │  │    提取 id, name, args    │
-     └────────────┘  └────────────┬─────────────┘
+                    ┌──────────────────────────┐
+                    │ 1. 解析tool_calls         │
+                    │    提取 id, name, args    │
+                    └────────────┬─────────────┘
                                    ▼
                     ┌──────────────────────────────┐
-                    │ 3. 按分类分组                  │
+                    │ 2. 按分类分组                  │
                     └──┬──────────┬────────────┬───┘
                        │          │            │
               只读工具  │   写入工具 │    串行工具 │

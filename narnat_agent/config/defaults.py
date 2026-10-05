@@ -25,10 +25,6 @@ DEFAULT_PLUGIN_TOOLS = ("Terminal", "WebSearch", "Serial", "MCP")
 DEFAULT_MCP_STARTUP_TIMEOUT = 30   # 启动 + 握手 + 列工具超时（秒）
 DEFAULT_MCP_TOOL_TIMEOUT = 300     # MCP 工具调用超时（秒）
 
-# ── 计划优先默认值 ──
-DEFAULT_REQUIRE_PLAN = False  # 是否强制AI先制定计划再执行工具
-DEFAULT_MIN_TOOLS = 2         # 单轮工具调用数≥此值时才强制要求先写计划
-
 # ── 目标模式默认值 ──
 # 单一预算：续跑轮数与验证打回合并计数（每轮续跑消耗1；轮内验证打回每次额外消耗1）
 DEFAULT_GOAL_MAX_ROUNDS = 10   # /goal 开启后单个任务的自动续跑轮数上限（总预算）

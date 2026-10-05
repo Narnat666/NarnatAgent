@@ -203,6 +203,8 @@ class Agent:
         tc.goal_forced = False
         tc.goal_suspect = False
         tc.todo_reminded = False
+        tc.todo_nudge_sent = False
+        tc.tool_rounds_used = 0
         tc.bg_reminded = False
         tc.current_todos = []
 

@@ -7,8 +7,9 @@ DEFINITION = {
     "function": {
         "name": "TodoWrite",
         "description": (
-            "创建并管理任务列表。"
-            "多步任务开始前先与用户同步计划。"
+            "创建并管理当前任务的计划清单。多步任务开始前先建计划："
+            "每步一条、用祈使句、可验证；同时只保留一个进行中的项；"
+            "完成一步立即勾选。"
         ),
         "parameters": {
             "type": "object",
@@ -39,7 +40,6 @@ DEFINITION = {
 }
 
 
-
 def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
     """
     创建/更新任务列表。
@@ -49,7 +49,7 @@ def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
         _tool_context: 工具运行时上下文（内部参数，由registry注入）
 
     Returns:
-        未完成任务清单（全部完成时返回"[任务全部完成]"）
+        计数状态提示（全部完成时返回"[任务全部完成]"）
     """
     # 校验非空
     if not todos:
@@ -64,6 +64,16 @@ def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
                 return f"[错误: 第{i+1}项缺少必填字段: {field}]"
         if todo["status"] not in ("pending", "in_progress", "completed"):
             return f"[错误: 第{i+1}项status非法: {todo['status']}]"
+        if not str(todo["content"]).strip():
+            return f"[错误: 第{i+1}项content为空，请补全后重新提交]"
+
+    # 校验重复content（strip后比较）
+    seen = set()
+    for i, todo in enumerate(todos):
+        key = str(todo["content"]).strip()
+        if key in seen:
+            return f"[错误: 重复的content \"{key}\"，请合并或改写]"
+        seen.add(key)
 
     # in_progress 自动容错：保留第一个，其余降级为 pending。
     # （AI 偶发传多个 in_progress，硬报错会导致计划整体丢失、AI 不再同步；
@@ -82,23 +92,20 @@ def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
     if _tool_context and _tool_context.ui_callback:
         _tool_context.ui_callback(todos)
 
-    # 同步todo状态到上下文（供计划优先拦截使用）
+    # 同步todo状态到上下文（供收尾软提醒/压缩重注入/完成校验使用）
     if _tool_context is not None:
         _tool_context.current_todos = list(todos)
 
-    # ── 构建返回给 LLM 的状态提示 ──
+    # ── 构建返回给 LLM 的状态提示（中性计数，不催跑）──
     fix_note = ""
     if demoted:
         fix_note = f"[已自动修正: 检测到多个in_progress，保留第一个，其余{demoted}项调整为待处理]\n"
 
-    unfinished = [t for t in todos if t["status"] != "completed"]
+    pending = sum(1 for t in todos if t["status"] == "pending")
+    in_progress = sum(1 for t in todos if t["status"] == "in_progress")
+    completed = sum(1 for t in todos if t["status"] == "completed")
 
-    if not unfinished:
+    if completed == len(todos):
         return fix_note + "[任务全部完成]"
 
-    lines = ["[你有未完成的任务，请继续:]", ""]
-    for i, t in enumerate(unfinished, 1):
-        status_label = "进行中" if t["status"] == "in_progress" else "待处理"
-        lines.append(f"{i}. [{status_label}] {t['content']}")
-
-    return fix_note + "\n".join(lines)
+    return fix_note + f"[计划已更新] {pending} 待处理 / {in_progress} 进行中 / {completed} 已完成"

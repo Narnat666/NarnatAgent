@@ -37,10 +37,6 @@ class ToolContext:
     # 工具超时全局上限（秒），0=不限制。由配置"工具超时上限秒"驱动
     max_timeout_seconds: int = 1800
 
-    # 计划优先开关（由配置驱动）
-    require_plan: bool = False       # True=强制AI先写TodoWrite再执行其他工具
-    min_tools: int = 2               # 单轮工具调用数≥此值时才强制要求先写计划
-
     # MCP 服务器管理器（由 assembly 注入；MCP 工具用它做运行时连接/断开）
     mcp_manager: Any = None
 
@@ -80,6 +76,13 @@ class ToolContext:
     # 收尾软提醒标志：任务收尾时计划未全部勾选会提醒一次，置True后放行不再提醒。
     # 每次用户新输入时由agent.py复位（与goal_complete一致）
     todo_reminded: bool = field(default=False, repr=False)
+
+    # 迟到提醒标志：多轮工具后仍未建计划会温和提醒一次，置True后不再提醒。
+    # 每次用户新输入时由agent.py复位（与todo_reminded一致）
+    todo_nudge_sent: bool = field(default=False, repr=False)
+
+    # 本任务累计工具轮数（迟到提醒的触发计数；每任务复位）
+    tool_rounds_used: int = field(default=0, repr=False)
 
     # 后台任务软提醒标志：结束回合时仍有running任务提醒一次，置True后放行不再提醒。
     # 每次用户新输入时由agent.py复位（与todo_reminded一致）
