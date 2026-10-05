@@ -29,33 +29,42 @@ from ..tools.exec_signal import error_line, strip_tags
 from ..tools.read import DEFINITION as _READ_DEF
 from ..tools.glob import DEFINITION as _GLOB_DEF
 from ..tools.grep import DEFINITION as _GREP_DEF
+from ..tools.bash import DEFINITION as _BASH_DEF, BashRuntime
 
 # ── 常量 ──
-VERIFY_MAX_ROUNDS = 12       # 验证器 mini 循环最大轮数（防失控）
+VERIFY_MAX_ROUNDS = 100      # 验证器 mini 循环最大轮数（防失控）
 _VERDICTS = ("pass", "fail", "uncertain")
 # 验证器可用裁决外的异常信息截断长度（错误文本进 summary，不泄漏任何凭证）
 _ERR_TEXT_MAX = 200
 
 VERIFY_SYSTEM_PROMPT = (
-    "你是独立完成验证员。只做核实与裁决：拿任务要求逐条核对 AI 的完成清单与最终答复，"
-    "判定任务是否真的完成，不参与完成任务。\n"
+    "你现在是完成验证员。拿任务要求逐条核对 AI 的完成清单与最终答复，判定任务是否真的完成。"
+    "不重做任务，只对关键证据做抽查式核实。\n"
     "\n"
-    "核心规则：\n"
-    "1. 把完成当作未证实：AI 自报完成不可信，只依据可检查证据（文件内容、命令输出、实际现象）。\n"
-    "2. 证据不确定或无法核实，不算完成；「已处理」「已验证」这类空泛表述不算证据。\n"
-    "3. 应当用只读工具（Read/Glob/Grep）实地核实：证据提到文件就打开确认，提到内容就搜索确认。\n"
-    "4. 不得添加任务要求之外的新要求。\n"
-    "5. 不得因 AI 的措辞自信或篇幅长而放行。\n"
+    "规则：\n"
+    "- 先立要求再核对：先从任务原文列出全部要求（同类可归并，只以任务原文为准，不新增），"
+    "再逐项对照完成清单与最终答复；任何要求没有对应的证据与状态，即为漏项。\n"
+    "- 把完成当作未证实。AI 自报完成不可信，只依据可核验的证据。\n"
+    '- 证据必须具体：可复现的命令与输出、文件路径、实际现象。"已处理""已验证"这类空泛表述不算证据。\n'
+    "- 抽查关键证据：证据涉及本地文件或命令结果时，用 Read/Glob/Grep/Shell 实地核对。"
+    "Shell 只用于查看：不得修改任何文件或系统状态，不得执行删除类命令，不得提交后台任务。\n"
+    "- 证据涉及远程设备、串口或硬件的，本地查不到不构成未完成，按证据本身判断："
+    "命令、路径、结果齐全且自洽，视为有效证据。\n"
+    "- 只有四种情况判不通过：任务要求未被完成清单覆盖（漏项）；证据空泛无法核验；"
+    "证据自相矛盾；用工具直接证伪。\n"
+    "- 不得添加任务要求之外的新要求。\n"
+    "- 不得因 AI 的措辞自信或篇幅长而放行。\n"
     "\n"
     "输出（严格 JSON，仅此格式）：\n"
     '{"verdict":"pass|fail|uncertain","gaps":["..."],"continue_prompt":"...","summary":"..."}\n'
-    "- pass：全部要求都有直接证据支撑；gaps/continue_prompt 可为空。\n"
-    "- fail：存在可修复缺口；gaps 逐条列明未通过项；continue_prompt 是给主 AI 的可直接执行的"
-    "返工指令（缺什么、怎么补、如何自证；结尾提示「完成后重新提交完成清单并调用 GoalComplete」）。\n"
-    "- uncertain：证据根本性不足且工具无法查证；summary 说明原因。\n"
+    "- pass：全部要求都有有效证据支撑；gaps 与 continue_prompt 可为空。\n"
+    '- fail：存在可修复缺口。gaps 逐条列明未通过项（漏项写明"任务要求 X 未被清单覆盖"）；'
+    'continue_prompt 是给主 AI 的可直接执行的返工指令（缺什么、怎么补、如何自证），'
+    '结尾提示"完成后重新提交完成清单并调用 GoalComplete"。\n'
+    "- uncertain：证据形式合规但无法核实真伪；summary 说明原因。\n"
+    '- summary 结尾附一句覆盖结论，如"任务共 4 项要求，清单覆盖 4 项"。\n'
     "\n"
-    "只输出 JSON，不要输出任何其他文字（可用 ```json 代码块包裹）。\n"
-    "工具使用约束：只读、少而精（建议 ≤5 次工具调用）；不修改任何文件。"
+    "只输出 JSON，不要输出任何其他文字（可用 ```json 代码块包裹）。"
 )
 
 # JSON 解析失败时回给验证器的一次性纠正提示（再失败即判 uncertain）
@@ -154,6 +163,71 @@ def _build_result(parsed: dict) -> VerifyResult:
                         continue_prompt=continue_prompt, summary=summary)
 
 
+# ── Shell 抽查策略（验证器 Shell 只用于查看：删除类、写文件、后台、危险 git 一律拒绝）──
+
+# 只读 git 子命令白名单。收窄原则：位置参数即写语义的子命令（branch/tag/remote/reflog）、
+# 可写对象的（fsck --lost-found）一律不收——它们的只读用法各有平替
+# （列分支/标签用 show-ref；当前分支看 status），从白名单层面消灭整类绕过。
+_GIT_READONLY = {"status", "diff", "log", "show", "rev-parse", "ls-files",
+                 "ls-tree", "cat-file", "describe", "blame", "shortlog",
+                 "show-ref", "name-rev", "merge-base", "grep",
+                 "diff-tree", "whatchanged", "count-objects"}
+
+# git 词元识别 / 文件重定向识别（`>` 后跟 `&` 的 2>&1、1>&2 属合流，放行）
+_RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
+_RE_REDIRECT = re.compile(r">(?!\s*&)")
+
+
+def _check_shell_policy(arguments: dict) -> str:
+    """验证器 Shell 抽查策略：返回 "" 放行，否则返回拒绝原因文本。
+
+    规则（按序）：无 command 放行（交给 bash 层报参数错）→ 删除类命令拒绝 →
+    含 git 时逐段解析子命令，只放行只读白名单，且拒绝 --output 写文件参数 →
+    向文件重定向拒绝 → 后台提交拒绝。
+    """
+    command = arguments.get("command") or ""
+    if not isinstance(command, str) or not command.strip():
+        return ""
+    if BashRuntime.RE_DELETE.search(command):
+        return f"验证器不执行删除类命令: {command[:60]}"
+    if _RE_GIT.search(command):
+        # 拆段符含单个 `&`（cmd 的顺序执行分隔符）：`git status & git push` 必须逐段检查
+        for segment in re.split(r"&&|\|\||[;|\n&]", command):
+            if not _RE_GIT.search(segment):
+                continue
+            tokens = segment.split()
+            idx = next((i for i, t in enumerate(tokens)
+                        if _RE_GIT.search(t)), None)
+            if idx is None:
+                continue
+            sub = ""
+            i = idx + 1
+            while i < len(tokens):
+                tok = tokens[i]
+                if tok in ("-C", "-c"):
+                    i += 2  # 旗标各吃掉紧随的一个参数（如 -C <路径>）
+                    continue
+                if tok.startswith("-"):
+                    i += 1  # 其余旗标不吞参数
+                    continue
+                sub = tok
+                break
+            if not sub:
+                return "验证器无法确认 git 子命令是否只读，拒绝执行"
+            if sub.lower() not in _GIT_READONLY:
+                return (f"验证器只放行只读 git 子命令（如 status/diff/log/show），"
+                        f"拒绝: git {sub}")
+            # --output 写文件参数拒绝（git 的缩写匹配在有歧义前缀时会报错，只能写全称）
+            for tok in tokens[i + 1:]:
+                if tok.startswith("--output"):
+                    return f"验证器只放行只读 git 查看，拒绝写输出参数: {tok}"
+    if _RE_REDIRECT.search(command):
+        return "验证器查看命令不得重定向输出到文件"
+    if arguments.get("background") or arguments.get("bg"):
+        return "验证器不提交后台任务"
+    return ""
+
+
 class GoalVerifier:
     """独立完成验证器：全新会话 + 只读工具复核 + 三态裁决"""
 
@@ -161,13 +235,16 @@ class GoalVerifier:
         self._llm = llm
         self._config = config
         self._logger = logger
-        # 只读三工具定义（从各工具模块 DEFINITION 取，顺序固定）
-        self._tool_defs = [_READ_DEF, _GLOB_DEF, _GREP_DEF]
+        # 验证器工具定义（从各工具模块 DEFINITION 取，顺序固定；Shell 走策略检查）
+        self._tool_defs = [_READ_DEF, _GLOB_DEF, _GREP_DEF, _BASH_DEF]
         self._tool_names = {d["function"]["name"] for d in self._tool_defs}
-        # 轻量独立 ToolContext：只填 ignore_dirs 与输出硬上限，不触碰主上下文状态
+        # 轻量独立 ToolContext：只填 ignore_dirs/输出硬上限，不触碰主上下文状态；
+        # git_skip_confirm 让白名单 git 命令不被 bash 层确认拦下，超时上限收紧到 300 秒
         self._tool_context = ToolContext(
             ignore_dirs=list(getattr(config.tools, "ignore_dirs", ()) or ()),
             max_tool_output_chars=getattr(config.tools, "max_output_chars", 0) or 0,
+            git_skip_confirm=True,      # 白名单 git 命令不被 bash 层 git 确认拦下
+            max_timeout_seconds=300,    # Shell 抽查命令超时上限
         )
 
     def verify(self, task: str, checklist: list, final_answer: str,
@@ -312,7 +389,7 @@ class GoalVerifier:
         return content, tool_calls, None
 
     def _execute_tools(self, tool_calls):
-        """依次执行本轮工具调用（白名单只读三工具）；返回 (名称列表, [(id, 结果)])"""
+        """依次执行本轮工具调用（白名单工具；Shell 先过抽查策略）；返回 (名称列表, [(id, 结果)])"""
         names = []
         results = []
         for tc in tool_calls or []:
@@ -328,8 +405,14 @@ class GoalVerifier:
                 args = {}
             if name not in self._tool_names:
                 results.append((tc_id, strip_tags(error_line(
-                    f"验证器只允许只读工具(Read/Glob/Grep)，拒绝执行: {name}"))))
+                    f"验证器只允许只读工具(Read/Glob/Grep/Shell)，拒绝执行: {name}"))))
                 continue
+            if name == "Shell":
+                reason = _check_shell_policy(args)
+                if reason:
+                    results.append((tc_id, strip_tags(error_line(
+                        "验证器策略拒绝: " + reason))))
+                    continue
             llm_result, _color = registry.execute(name, args, self._tool_context)
             if isinstance(llm_result, str):
                 llm_result = strip_tags(llm_result)

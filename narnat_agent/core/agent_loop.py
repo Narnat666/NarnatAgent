@@ -421,9 +421,18 @@ class AgentLoop:
                 final_answer = "".join(content_parts)
                 stream.feed("\n  ⚙ 正在验证完成声明（独立复核）…\n")
                 stream.flush_renderer()
-                result = self._goal_verifier.verify(
-                    goal_task, self._tool_context.goal_checklist, final_answer,
-                    cancel_check=lambda: stream.cancelled)
+                # 验证动画为可选 UI 能力（轻量 UI/测试替身可缺省）→ 缺失时静默跳过
+                begin_verify = getattr(self._ui, "begin_verifying", None)
+                end_verify = getattr(self._ui, "end_verifying", None)
+                if begin_verify:
+                    begin_verify()
+                try:
+                    result = self._goal_verifier.verify(
+                        goal_task, self._tool_context.goal_checklist, final_answer,
+                        cancel_check=lambda: stream.cancelled)
+                finally:
+                    if end_verify:
+                        end_verify()
                 if stream.cancelled or result.verdict == "interrupted":
                     stream.abort()
                     self._ui.on_interrupted()
@@ -440,16 +449,18 @@ class AgentLoop:
                     # 记录本轮一次验证打回（本轮内第 k 次）；预算结算统一在 agent.py：
                     # 未声明完成时本轮消耗 = 1（续跑）+ k（验证打回次数）
                     self._last_round_blocks += 1
+                    # 打回计数展示分母：本任务续跑总预算（剩余预算 + 已消耗轮数）
+                    limit = round_budget_left + self._tool_context.goal_rounds_used
                     # 预算耗尽判定：本次打回后本轮消耗（1+k）将超出剩余预算 →
                     # 打回已无力再跑（没有下一轮空间）→ 强制放行（未通过质检），不空转。
                     # round_budget_left < 0 表示不限制（未提供预算）
                     if 0 <= round_budget_left < 1 + self._last_round_blocks:
                         self._tool_context.goal_forced = True
-                        stream.feed("  ⚠ 验证未通过且续跑预算已耗尽，强制放行（未通过质检）\n")
+                        stream.feed(f"  ⚠ 验证未通过（{result.summary}）且续跑预算已耗尽，强制放行（未通过质检）\n")
                         stream.flush_renderer()
                     else:
                         self._tool_context.goal_complete = False
-                        stream.feed(f"  ✗ 验证未通过（本轮第{self._last_round_blocks}次打回），已打回继续工作\n")
+                        stream.feed(f"  ✗ 验证未通过（第{self._last_round_blocks}/{limit}次打回）：{result.summary}\n")
                         stream.flush_renderer()
                         self._msg_manager.append_user(result.continue_prompt)
                         stream.begin()

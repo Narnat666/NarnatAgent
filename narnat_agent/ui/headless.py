@@ -85,3 +85,9 @@ class HeadlessUI:
 
     def end_summarizing(self):
         pass
+
+    def begin_verifying(self):
+        pass
+
+    def end_verifying(self):
+        pass

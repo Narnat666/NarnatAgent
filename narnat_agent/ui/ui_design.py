@@ -130,6 +130,11 @@ def _summary_thread(stop: threading.Event) -> None:
     _animation_thread(stop, "正在合并")
 
 
+def _verify_thread(stop: threading.Event) -> None:
+    """验证动画。"""
+    _animation_thread(stop, "正在验证")
+
+
 def show_interrupted() -> None:
     _stdout_write(f"\n  {UI_INTERRUPTED}已打断{R}\n  {UI_INTERRUPTED_HINT}继续...{R}\n")
 
@@ -334,6 +339,8 @@ class UIInterface:
         self._compress_thread: Optional[threading.Thread] = None
         self._summary_stop: Optional[threading.Event] = None
         self._summary_thread_var: Optional[threading.Thread] = None
+        self._verify_stop: Optional[threading.Event] = None
+        self._verify_thread_var: Optional[threading.Thread] = None
 
     def start(self) -> None:
         _interrupt_ctrl.enter_input_mode()
@@ -414,6 +421,22 @@ class UIInterface:
             _join_thread(self._summary_thread_var)
         self._summary_stop = None
         self._summary_thread_var = None
+
+    def begin_verifying(self) -> None:
+        self._verify_stop = threading.Event()
+        self._verify_thread_var = threading.Thread(
+            target=_verify_thread,
+            args=(self._verify_stop,), daemon=True)
+        self._verify_thread_var.start()
+
+    def end_verifying(self) -> None:
+        if self._verify_stop is None:
+            return
+        self._verify_stop.set()
+        if self._verify_thread_var is not None:
+            _join_thread(self._verify_thread_var)
+        self._verify_stop = None
+        self._verify_thread_var = None
 
 
 # ═══════════════════════════════════════════════════════════════
