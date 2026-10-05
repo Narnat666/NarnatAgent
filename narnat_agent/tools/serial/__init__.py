@@ -368,14 +368,14 @@ def _check_delete_safety(command: str, session_id: int, port: str, timeout: int,
         _tool_context._delete_confirmed = False
         return None
 
-    _tool_context.pending_delete = ("Serial", {
+    _tool_context.pending_delete.append(("Serial", {
         "action": action_name,
         "session_id": session_id,
         "port": port,
         "command": command,
         "timeout": timeout,
         "max_output_chars": max_output_chars,
-    })
+    }))
     return AWAIT_CONFIRM
 
 

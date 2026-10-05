@@ -585,14 +585,14 @@ def _check_exec_safety(command: str, session_id: int, host: str,
         tc._delete_confirmed = False
         return None
 
-    tc.pending_delete = ("Terminal", {
+    tc.pending_delete.append(("Terminal", {
         "action": "exec",
         "session_id": session_id,
         "host": host,
         "command": command,
         "timeout": timeout,
         "max_output_chars": max_output_chars,
-    })
+    }))
     return AWAIT_CONFIRM
 
 

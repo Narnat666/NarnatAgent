@@ -19,9 +19,11 @@ class AgentLogger:
     - 自动脱敏
     """
 
-    # 敏感信息脱敏：匹配 sk-xxx / api_key=xxx / key=xxx 等
+    # 敏感信息脱敏：匹配 sk-xxx / api_key=xxx / key=xxx / password=xxx 等
+    # （password/passwd/pwd/secret/token 键名形态统一按"键名+分隔符+值"脱敏；_replace 分组编号不变）
     RE_SECRET = re.compile(
-        r'(api_key["\s:=]+["\s]*)([^\s",\}]{4,})([^\s",\}]*?)'
+        r'((?:api_key|password|passwd|pwd|secret|token)["\s:=]+["\s]*)'
+        r'([^\s",\}]{4,})([^\s",\}]*?)'
         r'|((?:sk-|key-|token-)([a-zA-Z0-9]{4})[a-zA-Z0-9]*)',
         re.IGNORECASE,
     )
@@ -31,10 +33,15 @@ class AgentLogger:
         """脱敏：保留前4位，其余用***替代"""
         def _replace(m):
             full = m.group(0)
-            # sk-xxxx... 格式
+            # sk-/key-/token- 前缀形态：保留前缀+值前4位（如 "sk-13e4***"）
             if m.group(5):
-                prefix = m.group(4)[:len(m.group(4)) - len(m.group(5)) + 4]
-                return prefix + "***"
+                head = m.group(4)
+                keep = 4
+                for p in ("token-", "key-", "sk-"):
+                    if head.lower().startswith(p):
+                        keep = len(p) + 4
+                        break
+                return head[:keep] + "***"
             # api_key=xxx 格式
             if m.group(2):
                 return m.group(1) + m.group(2)[:4] + "***"

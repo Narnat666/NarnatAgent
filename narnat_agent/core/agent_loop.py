@@ -248,19 +248,18 @@ class AgentLoop:
                     self._ui.on_interrupted()
                     return
 
-                # Linux/macOS: 拦截删除确认标记，在#提示符下等待用户确认
-                if self._tool_context.pending_delete is not None:
-                    pending = self._tool_context.pending_delete
-                    self._tool_context.pending_delete = None
-                    # 找到返回AWAIT_CONFIRM的那个tool_call_id
-                    confirm_tc_id = None
-                    for tc_id, result in tool_results:
-                        if result == AWAIT_CONFIRM:
-                            confirm_tc_id = tc_id
-                            break
-                    if confirm_tc_id is not None:
+                # 拦截待确认命令标记（删除/git）：在#提示符下等用户确认后按序逐条重放
+                if self._tool_context.pending_delete:
+                    pendings = list(self._tool_context.pending_delete)
+                    self._tool_context.pending_delete.clear()
+                    # 收集本批全部待确认命令的 tool_call_id；
+                    # 工具执行器串行执行（Shell/Terminal/Serial 均在串行组），
+                    # 收集顺序与 pendings 追加顺序一致，可一一配对。
+                    confirm_ids = [tc_id for tc_id, result in tool_results
+                                   if result == AWAIT_CONFIRM]
+                    if confirm_ids:
                         # 结束当前流式输出，回到#提示符等用户确认
-                        new_stream = self._handle_delete_confirm(stream, confirm_tc_id, pending, tool_results)
+                        new_stream = self._handle_delete_confirm(stream, confirm_ids, pendings, tool_results)
                         if new_stream is not None:
                             stream = new_stream
                             continue
@@ -491,24 +490,24 @@ class AgentLoop:
             )
             break
 
-    def _handle_delete_confirm(self, stream, confirm_tc_id, pending_delete, tool_results):
-        """处理Linux/macOS下的删除确认：结束流式输出，在#提示符下等用户确认。
+    def _handle_delete_confirm(self, stream, confirm_ids, pendings, tool_results):
+        """处理待确认命令（删除/git）：结束流式输出，在#提示符下等用户确认后按序逐条重放。
 
         Args:
             stream: 当前流式输出会话
-            confirm_tc_id: 返回AWAIT_CONFIRM的tool_call_id
-            pending_delete: (tool_name, arguments_dict) 暂存的删除命令
+            confirm_ids: 返回AWAIT_CONFIRM的tool_call_id列表（按原始顺序）
+            pendings: 暂存的待确认命令 [(tool_name, arguments_dict), ...]（与 confirm_ids 一一对应）
             tool_results: 所有工具结果列表 [(tc_id, result), ...]
 
         Returns:
             新的UIStreamSession - 用户已确认/取消，结果已回传，继续agent_loop
             None - 流已结束，调用方应return
         """
-        tool_name, arguments = pending_delete
+        confirm_set = set(confirm_ids)
 
         # 先回传非确认的工具结果
         for tc_id, result in tool_results:
-            if tc_id != confirm_tc_id:
+            if tc_id not in confirm_set:
                 self._msg_manager.append_tool_result(tc_id, result)
 
         # 结束当前流式输出（本轮还没结束，不显示stats，等确认后最终finish再显示）
@@ -523,25 +522,33 @@ class AgentLoop:
         )
 
         # 在#提示符下显示确认信息，等待用户输入
-        user_input = self._ui.read_input_with_prompt("  确认执行此命令? [y/N]: ")
+        prompt = ("  确认执行此命令? [y/N]: " if len(confirm_ids) == 1
+                  else f"  确认执行这{len(confirm_ids)}条命令? [y/N]: ")
+        user_input = self._ui.read_input_with_prompt(prompt)
         if user_input is None:
             user_input = ""
 
         confirmed = user_input.strip().lower() in ("y", "yes")
 
-        if confirmed:
-            # 用户确认：设置标志跳过删除检测，重新执行命令
-            self._tool_context._delete_confirmed = True
+        if confirmed and len(pendings) == len(confirm_ids):
+            # 用户确认：逐条重放。每条重放前设置确认标志，工具消费该标志后跳过
+            # 确认检测直接执行（标志一次性）；结果回填到各自的 tool_call_id。
             from ..tools.registry import execute as tool_execute
-            llm_result, color_diff = tool_execute(tool_name, arguments, self._tool_context)
-            # 框架退出码标签只服务于判定，不给AI看
-            llm_result = strip_tags(llm_result)
-            self._msg_manager.append_tool_result(confirm_tc_id, llm_result)
-            if color_diff:
-                _stdout_write("\n".join(f"  {line}" for line in color_diff.split("\n")) + "\n\n")
+            for tc_id, (tool_name, arguments) in zip(confirm_ids, pendings):
+                self._tool_context._delete_confirmed = True
+                llm_result, color_diff = tool_execute(tool_name, arguments, self._tool_context)
+                # 框架退出码标签只服务于判定，不给AI看
+                llm_result = strip_tags(llm_result)
+                self._msg_manager.append_tool_result(tc_id, llm_result)
+                if color_diff:
+                    _stdout_write("\n".join(f"  {line}" for line in color_diff.split("\n")) + "\n\n")
+            # 重放结束无条件复位：防止异常输入（未消费标志的命令）把"跳过确认"
+            # 标志残留到后续命令，导致删除命令跳过确认直接执行（fail-open）
+            self._tool_context._delete_confirmed = False
         else:
-            # 用户取消
-            self._msg_manager.append_tool_result(confirm_tc_id, "[操作已取消: 此命令需用户确认]")
+            # 用户取消（或配对异常，安全侧按取消处理）：全部按取消回填
+            for tc_id in confirm_ids:
+                self._msg_manager.append_tool_result(tc_id, "[操作已取消: 此命令需用户确认]")
 
         # 创建新的流式输出会话，继续agent_loop
         return self._ui.create_stream()

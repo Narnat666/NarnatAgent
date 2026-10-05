@@ -127,9 +127,12 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
     Returns:
         带行号的文件内容字符串，格式 "  行号→内容"
     """
-    # AI可能传字符串类型的数值参数，确保类型正确并处理None
-    offset = int(offset) if offset is not None else 0
-    limit = int(limit) if limit is not None else 2000
+    # AI可能传字符串类型的数值参数，统一转int（与Grep/Shell容错风格一致）
+    try:
+        offset = int(offset) if offset is not None else 0
+        limit = int(limit) if limit is not None else 2000
+    except (TypeError, ValueError):
+        return "[错误: offset/limit需为整数]"
     if limit <= 0:
         return "[错误: limit需为正整数]"
 

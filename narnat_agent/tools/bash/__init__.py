@@ -495,14 +495,14 @@ def execute(
             tc._delete_confirmed = False
         else:
             if tc is not None:
-                tc.pending_delete = ("Shell", {
+                tc.pending_delete.append(("Shell", {
                     "command": command,
                     "timeout": timeout,
                     "max_output_chars": max_output_chars,
                     "background": background,
                     "bg": bg,
                     "id": id,
-                })
+                }))
             return AWAIT_CONFIRM
 
     # ── 后台任务分发（bg 参数）：独立模块实现，前台逻辑不变 ──

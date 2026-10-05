@@ -5,7 +5,7 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Any, Dict, List, Tuple
+from typing import Optional, Callable, Any, Dict, List
 
 
 # 删除确认标记：bash/terminal检测到删除命令时返回此值，由agent主循环拦截处理
@@ -43,9 +43,9 @@ class ToolContext:
     # 当前todo状态（由TodoWrite工具更新）
     current_todos: list = field(default_factory=list)
 
-    # 暂存的删除命令（Linux/macOS下，用户确认后由agent主循环重新执行）
-    # 格式: (tool_name, arguments_dict) 或 None
-    pending_delete: Optional[Tuple[str, dict]] = None
+    # 暂存的待确认命令（用户确认后由agent主循环按序逐条重放；每批处理完清空）
+    # 格式: [(tool_name, arguments_dict), ...]
+    pending_delete: list = field(default_factory=list)
 
     # 用户已确认删除，下次执行删除命令时跳过确认直接执行
     _delete_confirmed: bool = field(default=False, repr=False)
