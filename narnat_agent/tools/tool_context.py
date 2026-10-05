@@ -57,6 +57,26 @@ class ToolContext:
     # 目标模式完成标记：GoalComplete工具调用时置True，主循环据此停止自动续跑
     goal_complete: bool = field(default=False, repr=False)
 
+    # 目标模式完成清单（GoalComplete 提交：[{"要求","证据","状态"}, ...]）
+    goal_checklist: list = field(default_factory=list)
+
+    # 诚实收尾标记：清单含"未完成/受阻"项（允许收尾，用户会看到未完成项）
+    goal_honest: bool = field(default=False, repr=False)
+
+    # 目标模式预算内已消耗的回合数（agent.py 每轮结算时累加：
+    # 本轮续跑消耗1 + 本轮验证打回次数k，合计 1+k）；机械拒绝不计入
+    goal_rounds_used: int = field(default=0, repr=False)
+
+    # 连续机械拒绝计数（GoalComplete 机械校验拒绝路径累计；放行时清零）。
+    # 与续跑预算无关，仅用于连续拒绝超限兜底放行防死循环
+    goal_mech_rejects: int = field(default=0, repr=False)
+
+    # 强制放行标记：验证打回预算耗尽 / 连续机械拒绝超限
+    goal_forced: bool = field(default=False, repr=False)
+
+    # 验证存疑放行标记
+    goal_suspect: bool = field(default=False, repr=False)
+
     # 收尾软提醒标志：任务收尾时计划未全部勾选会提醒一次，置True后放行不再提醒。
     # 每次用户新输入时由agent.py复位（与goal_complete一致）
     todo_reminded: bool = field(default=False, repr=False)

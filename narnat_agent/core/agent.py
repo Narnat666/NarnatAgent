@@ -14,6 +14,7 @@ import os
 from typing import Optional
 
 from ..assembly import Assembly, AssemblyResult
+from ..config.defaults import GOAL_AUDIT_HINT
 from ..output import write as _stdout_write, X, R
 
 
@@ -79,16 +80,8 @@ class Agent:
                 self._stats.fetch_balance(api_key, self._round)
 
                 # 3. 压缩检查
-                # 每次用户新输入都复位目标模式完成标记：防止普通模式下AI调用过
-                # GoalComplete（或收尾轮调用）后残留，导致下个任务首轮被误判完成
-                self._parts.tool_context.goal_complete = False
-                # 收尾软提醒标志同步复位：新任务允许再次提醒一次
-                self._parts.tool_context.todo_reminded = False
-                # 后台任务软提醒标志同步复位：新任务允许再次提醒一次
-                self._parts.tool_context.bg_reminded = False
-                # 新任务翻篇：清空上一任务的计划状态。旧计划未勾选项属于已结案任务
-                # （AI已向用户说明无法完成/跳过原因），不清空会在新任务收尾时误触发提醒
-                self._parts.tool_context.current_todos = []
+                # 任务级状态复位：防止上一任务的完成标记/清单/预算/计划残留泄漏到新任务
+                self._reset_goal_state()
                 compress_ok = False
                 if self._context.need_compress():
                     compress_ok = self._compression.compress(stripped)
@@ -117,8 +110,11 @@ class Agent:
                     stream = self._ui.create_stream()
 
                     try:
-                        # 6. 工具调度内循环（目标模式传入goal_mode：中间轮不显示统计栏）
-                        self._agent_loop.run(stream, goal_mode=goal_enabled)
+                        # 6. 工具调度内循环（目标模式传入goal_mode：中间轮不显示统计栏；
+                        #    剩余预算供验证打回前判断是否已耗尽）
+                        self._agent_loop.run(stream, goal_mode=goal_enabled, goal_task=goal_task,
+                                             round_budget_left=(goal_limit - goal_round)
+                                             if goal_enabled else -1)
                     except KeyboardInterrupt:
                         self._ui.on_interrupted()
                         stream.abort()
@@ -133,7 +129,9 @@ class Agent:
                             self._mgr.on_auto_save()
                             self._auto_save.try_save()
 
-                    goal_round += 1
+                    # ── 统一预算结算：本轮续跑消耗1 + 本轮验证打回次数k ──
+                    goal_round += 1 + self._agent_loop._last_round_blocks
+                    self._parts.tool_context.goal_rounds_used = goal_round
 
                     # ── 目标模式自动续跑判断 ──
                     if not goal_enabled:
@@ -155,16 +153,19 @@ class Agent:
                         )
                         stream = self._ui.create_stream()
                         # 强制收尾轮：无论AI是否声明完成，正常结束时都显示统计栏
-                        self._agent_loop.run(stream, goal_mode=goal_enabled, force_final=True)
+                        self._agent_loop.run(stream, goal_mode=goal_enabled, force_final=True,
+                                             goal_task=goal_task,
+                                             round_budget_left=goal_limit - goal_round)
                         if not stream.aborted:
                             self._mgr.on_auto_save()
                             self._auto_save.try_save()
                         break
-                    # 任务未完成：注入继续消息，再跑一轮
+                    # 任务未完成：注入继续消息（含完成审计提示），再跑一轮
                     self._logger.info("core.agent", f"目标模式自动续跑: 第{goal_round}轮完成，继续")
                     self._msg_manager.append_user(
                         f"【自动续跑】已完成{goal_round}轮，任务：{goal_task}\n"
-                        "请继续推进任务。若任务已完成，请调用GoalComplete工具声明完成。"
+                        "请继续推进任务。\n"
+                        + GOAL_AUDIT_HINT
                     )
 
                 # 7. 回复结束：更新窗口占比 + 告警提示（中断/异常时统计沿用上一轮值）
@@ -174,23 +175,47 @@ class Agent:
                     _stdout_write(f"  ⚠ {warn}\n")
 
         finally:
-            self._parts.dispatcher._executor.shutdown(wait=False)
+            # 线程池不做任务级 shutdown：Agent 支持同进程复用（批处理/多次运行），
+            # 池一旦停用，下次运行的工具提交会抛 cannot schedule new futures；
+            # 进程退出时由解释器统一回收线程池（threading._register_atexit）。
             from ..tools.terminal import cleanup as _terminal_cleanup
             from ..tools.serial import cleanup as _serial_cleanup
             from ..tools.background import cleanup_all as _bg_cleanup
             _terminal_cleanup()
             _serial_cleanup()
             _bg_cleanup()
-            self._parts.mcp_manager.cleanup()
+            # MCP 连接不做任务级 cleanup：cleanup 会把 McpManager 置为终态（_closed），
+            # 复用后 connect/call_tool 抛"程序正在退出"；/exit 路径显式回收，
+            # 异常退出由 atexit 兜底（连接成功时已注册）。
+
+    def _reset_goal_state(self):
+        """复位任务级状态：完成标记/清单/预算计数/提醒标志/计划。
+
+        普通模式下 AI 误调 GoalComplete 的残留、子代理同进程复用时的上一任务
+        残留，都会让新任务被误判（跳过验证/误拒清单），故每个任务起手必须复位。
+        """
+        tc = self._parts.tool_context
+        tc.goal_complete = False
+        tc.goal_checklist = []
+        tc.goal_honest = False
+        tc.goal_rounds_used = 0
+        tc.goal_mech_rejects = 0
+        tc.goal_forced = False
+        tc.goal_suspect = False
+        tc.todo_reminded = False
+        tc.bg_reminded = False
+        tc.current_todos = []
 
     def run_headless(self, task: str, max_rounds: int = 0):
         """headless 一次性任务执行（nn -p 入口）。
 
-        注入任务 → 目标模式自动续跑 → GoalComplete/轮数上限收尾 → 退出。
+        带 -g N（N≥1）→ 目标模式：注入 GoalComplete、自动续跑 + 完成验证，
+        预算 N 轮；不带 -g → 普通模式：单轮执行（AI 一口气干到停手），
+        不注入 GoalComplete、无验证，跑完即退。
         与 run() 的区别：不读用户输入、不自动保存会话、不查余额、不显示统计栏。
         输出经 HeadlessStream（纯文本，无颜色）。
 
-        max_rounds: 自动续跑轮数上限，>0 时覆盖配置默认值（nn -g 参数）。
+        max_rounds: 续跑预算轮数（nn -g 参数）；>0 才开启目标模式。
         """
         self._logger.info("core.agent", f"Agent启动(headless), model={self._config.ai.model}")
 
@@ -202,13 +227,18 @@ class Agent:
         goal_round = 0
         end_reason = "unknown"
 
+        goal_enabled = max_rounds > 0
+
         try:
-            # 开启目标模式：注入 GoalComplete 工具（max_rounds>0 临时覆盖，否则用配置默认值）
-            self._mgr._goal_enabled = True
-            self._mgr._goal_max_rounds = max_rounds
-            if getattr(self._mgr, '_set_goal_tool', None):
-                self._mgr._set_goal_tool(True)
-            goal_limit = max_rounds or self._config.ai.goal_max_rounds
+            # 任务级状态复位：同进程复用（批处理/测试脚手架）时上一任务残留会跳过验证
+            self._reset_goal_state()
+            if goal_enabled:
+                # 开启目标模式：注入 GoalComplete 工具（预算 = -g N）
+                self._mgr._goal_enabled = True
+                self._mgr._goal_max_rounds = max_rounds
+                if getattr(self._mgr, '_set_goal_tool', None):
+                    self._mgr._set_goal_tool(True)
+            goal_limit = max_rounds if goal_enabled else 0
             goal_task = task.strip()
 
             # 注入任务
@@ -225,24 +255,40 @@ class Agent:
 
                 stream = self._ui.create_stream()
                 try:
-                    self._agent_loop.run(stream, goal_mode=True)
+                    self._agent_loop.run(
+                        stream, goal_mode=goal_enabled, goal_task=goal_task,
+                        round_budget_left=(goal_limit - goal_round) if goal_enabled else -1)
                 except Exception as e:
                     self._logger.error("core.agent", f"异常: {e}")
                     stream.abort(message=f"⚠ 程序异常，本轮回复已停止: {e}")
                     end_reason = "aborted"
                     break
 
-                goal_round += 1
+                # ── 统一预算结算：本轮续跑消耗1 + 本轮验证打回次数k ──
+                goal_round += 1 + self._agent_loop._last_round_blocks
+                self._parts.tool_context.goal_rounds_used = goal_round
                 if stream.aborted:
                     end_reason = "aborted"
                     break  # 程序异常等非正常结束：保持现状退出
                 if not self._agent_loop._last_round_ok:
                     end_reason = "round_failed"
                     break  # 出错/空回复等非正常结束：保持现状退出
+                if not goal_enabled:
+                    # 普通模式（不带 -g）：单轮执行完毕即退出（不续跑、不验证）
+                    end_reason = "done"
+                    break
                 if self._parts.tool_context.goal_complete:
-                    # AI已调用GoalComplete声明完成：复位标记，结束续跑
+                    # AI已调用GoalComplete声明完成：复位标记，结束续跑。
+                    # 结束原因细分（优先级）：强制放行 > 诚实收尾 > 验证存疑 > 正常完成
                     self._parts.tool_context.goal_complete = False
-                    end_reason = "goal_complete"
+                    if self._parts.tool_context.goal_forced:
+                        end_reason = "goal_forced"
+                    elif self._parts.tool_context.goal_honest:
+                        end_reason = "goal_honest"
+                    elif self._parts.tool_context.goal_suspect:
+                        end_reason = "goal_suspect"
+                    else:
+                        end_reason = "goal_complete"
                     break
                 if goal_round >= goal_limit:
                     # 达到轮数上限：注入收尾指令，让AI总结后结束
@@ -252,25 +298,28 @@ class Agent:
                         "请向用户总结当前进度、已完成工作和未完成原因，无需继续执行新任务。"
                     )
                     stream = self._ui.create_stream()
-                    self._agent_loop.run(stream, goal_mode=True, force_final=True)
+                    self._agent_loop.run(stream, goal_mode=True, force_final=True,
+                                         goal_task=goal_task,
+                                         round_budget_left=goal_limit - goal_round)
                     end_reason = "round_limit"
                     break
-                # 任务未完成：注入继续消息，再跑一轮
+                # 任务未完成：注入继续消息（含完成审计提示），再跑一轮
                 self._logger.info("core.agent", f"目标模式自动续跑: 第{goal_round}轮完成，继续")
                 self._msg_manager.append_user(
                     f"【自动续跑】已完成{goal_round}轮，任务：{goal_task}\n"
-                    "请继续推进任务。若任务已完成，请调用GoalComplete工具声明完成。"
+                    "请继续推进任务。\n"
+                    + GOAL_AUDIT_HINT
                 )
         finally:
             # 完成信号哨兵：所有退出路径必经此处。父代理轮询结果文件时
             # 以该行为准判定"子代理已结束"及结束原因（goal_complete/round_limit/aborted等）。
             _stdout_write(f"\n[NN_DONE] reason={end_reason} rounds={goal_round}\n")
-            self._parts.dispatcher._executor.shutdown(wait=False)
+            # 线程池不做任务级 shutdown（同 run()：Agent 支持同进程复用）
             from ..tools.terminal import cleanup as _terminal_cleanup
             from ..tools.serial import cleanup as _serial_cleanup
             from ..tools.background import cleanup_all as _bg_cleanup
             _terminal_cleanup()
             _serial_cleanup()
             _bg_cleanup()
-            self._parts.mcp_manager.cleanup()
+            # MCP 连接不做任务级 cleanup（同 run()：终态不可恢复，atexit 兜底回收）
             self._logger.close()

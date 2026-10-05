@@ -18,6 +18,7 @@ from .core.stats import StatsTracker
 from .core.session_callbacks import SessionManager
 from .core.tool_callbacks import TodoCallbacks
 from .core.agent_loop import AgentLoop
+from .core.goal_verifier import GoalVerifier
 from .core.summarizer import Summarizer
 from .core.auto_save_manager import AutoSaveManager
 from .core.compression_coordinator import CompressionCoordinator
@@ -181,11 +182,15 @@ class Assembly:
         # 手动压缩命令（/compact）接线：session_mgr 转发给压缩协调器
         session_mgr.compact_func = compression_coordinator.compress_manual
 
-        # 17. AgentLoop
+        # 17. 目标完成验证器（独立复核 AI 的完成声明：全新会话 + 只读工具）
+        goal_verifier = GoalVerifier(llm, config, logger)
+
+        # 18. AgentLoop
         agent_loop = AgentLoop(
             llm, msg_manager, dispatcher, tool_context,
             stats, ui, config, logger,
             compression=compression_coordinator,
+            goal_verifier=goal_verifier,
         )
 
         return AssemblyResult(

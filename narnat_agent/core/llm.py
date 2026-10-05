@@ -273,9 +273,15 @@ class LLMClient:
             self._backend = _OpenAIBackend(config, self._tool_defs, logger)
 
     def chat_stream(self, messages: List[Dict[str, Any]], no_tools: bool = False,
-                    no_thinking: bool = False, cancel_check=None) -> Iterator:
+                    no_thinking: bool = False, cancel_check=None,
+                    tool_defs: Optional[list] = None,
+                    model: Optional[str] = None) -> Iterator:
+        """流式对话。tool_defs/model 为请求级覆盖（None=用实例默认）：
+        验证器等独立请求可不触碰主会话工具表与模型配置，只影响本次请求。
+        """
         return self._backend.chat_stream(_strip_surrogates(messages), no_tools=no_tools,
-                                         no_thinking=no_thinking, cancel_check=cancel_check)
+                                         no_thinking=no_thinking, cancel_check=cancel_check,
+                                         tool_defs=tool_defs, model=model)
 
     def set_goal_tool(self, enabled: bool) -> None:
         """动态注入/移除 GoalComplete 工具定义。
@@ -409,7 +415,7 @@ class _OpenAIBackend:
             self._need_rebuild = True
         safe_close(client)
 
-    def _prepare_messages(self, messages):
+    def _prepare_messages(self, messages, model=None):
         """内部消息 → OpenAI 协议请求消息。
 
         内部 assistant 消息可携带 thinking 字段（思考回传的通用内部表示）。
@@ -418,11 +424,13 @@ class _OpenAIBackend:
         - reasoning_content（DeepSeek/Kimi/GLM 查表命中）：assistant 含 tool_calls
           时才 thinking → 顶层 reasoning_content 字段
         - 其余（none / 纯文本轮 / 开关关闭）：剥离 thinking 字段
+        model: 本次请求实际生效模型（请求级覆盖），查表用
         """
+        model = model or self._config.model
         use_rc = (
             self._config.thinking_enabled
             and getattr(self._config, "thinking_passback", True)
-            and resolve_thinking_passback("openai", self._config.model) == "reasoning_content"
+            and resolve_thinking_passback("openai", model) == "reasoning_content"
         )
         out = []
         for m in messages:
@@ -435,16 +443,21 @@ class _OpenAIBackend:
             out.append(m)
         return out
 
-    def chat_stream(self, messages, no_tools=False, no_thinking=False, cancel_check=None):
+    def chat_stream(self, messages, no_tools=False, no_thinking=False, cancel_check=None,
+                    tool_defs=None, model=None):
         """流式请求并产出统一事件流（生成器；首次迭代才真正发请求）。
 
         请求发送（建连/等响应头）与流式接收期间均以 0.05 秒粒度轮询取消标记，
         取消命中即静默结束本轮：消除"中断后仍等服务端响应头到达才收敛"的慢路径。
+
+        tool_defs/model：请求级覆盖（None=用实例默认）——本次请求单独指定工具表
+        与模型（含 thinking 参数查表），不改动实例状态。
         """
+        request_model = model or self._config.model
         if self._logger:
             self._logger.info("core.llm", f"发送请求(OpenAI), messages={len(messages)}条")
 
-        messages = self._prepare_messages(messages)
+        messages = self._prepare_messages(messages, model=request_model)
 
         from openai import APIStatusError, APIConnectionError, APITimeoutError
 
@@ -459,12 +472,12 @@ class _OpenAIBackend:
             try:
                 # 动态构造 thinking 参数（不再硬编码）
                 think_body_top, think_extra = resolve_thinking_params(
-                    "openai", self._config.model,
+                    "openai", request_model,
                     self._config.thinking_enabled and not no_thinking,
                     self._config.thinking_effort,
                 )
                 kwargs = dict(
-                    model=self._config.model,
+                    model=request_model,
                     messages=messages,
                     stream=True,
                     stream_options={"include_usage": True},
@@ -476,7 +489,7 @@ class _OpenAIBackend:
                 if think_extra:
                     kwargs["extra_body"] = think_extra
                 if not no_tools:
-                    kwargs["tools"] = self._tool_defs
+                    kwargs["tools"] = self._tool_defs if tool_defs is None else tool_defs
                 # thinking 模式下 temperature 不生效，传入会误导用户
                 if self._config.temperature is not None:
                     kwargs["temperature"] = self._config.temperature
@@ -663,7 +676,7 @@ class _OpenAIBackend:
                     rc_on = (
                         self._config.thinking_enabled
                         and getattr(self._config, "thinking_passback", True)
-                        and resolve_thinking_passback("openai", self._config.model) == "reasoning_content"
+                        and resolve_thinking_passback("openai", request_model) == "reasoning_content"
                     )
                     thinking_out = "".join(reasoning_buffer) if rc_on else None
                     if tool_calls_buffer:
@@ -723,33 +736,38 @@ class _AnthropicBackend:
             "Content-Type": "application/json",
         }
 
-    def chat_stream(self, messages, no_tools=False, no_thinking=False, cancel_check=None):
+    def chat_stream(self, messages, no_tools=False, no_thinking=False, cancel_check=None,
+                    tool_defs=None, model=None):
         """流式请求并产出统一事件流（生成器；首次迭代才真正发请求）。
 
         请求发送（建连/等响应头）与流式接收期间均以 0.05 秒粒度轮询取消标记，
         取消命中即静默结束本轮并清理活跃请求句柄：消除"中断后仍等服务端响应头
         到达才收敛"的慢路径。
+
+        tool_defs/model：请求级覆盖（None=用实例默认）——本次请求单独指定工具表
+        与模型（含 thinking 参数查表），不改动实例状态。
         """
+        request_model = model or self._config.model
         self._last_raw_sse.clear()
         if self._logger:
             self._logger.info("core.llm", f"发送请求(Anthropic), messages={len(messages)}条")
 
         # 转换消息格式
         try:
-            system, anthropic_msgs = self._convert_messages(messages)
-            anthropic_tools = self._convert_tools(self._tool_defs)
+            system, anthropic_msgs = self._convert_messages(messages, model=request_model)
+            anthropic_tools = self._convert_tools(self._tool_defs if tool_defs is None else tool_defs)
         except Exception as e:
             yield {"content": f"[错误: 消息格式转换失败: {e}]", "finish_reason": "error"}
             return
 
         # 动态构造 thinking 参数
         think_body_top, think_extra = resolve_thinking_params(
-            "anthropic", self._config.model,
+            "anthropic", request_model,
             self._config.thinking_enabled and not no_thinking,
             self._config.thinking_effort,
         )
         body = {
-            "model": self._config.model,
+            "model": request_model,
             "messages": anthropic_msgs,
             "max_tokens": self._max_output_tokens,
             "stream": True,
@@ -1159,7 +1177,8 @@ class _AnthropicBackend:
 
     # ── 消息格式转换：OpenAI → Anthropic ──
 
-    def _convert_messages(self, messages):
+    def _convert_messages(self, messages, model=None):
+        model = model or self._config.model
         system_parts = []
         anthropic_msgs = []
 
@@ -1201,7 +1220,7 @@ class _AnthropicBackend:
                 thinking = None
                 sig = None
                 if self._config.thinking_enabled and getattr(self._config, "thinking_passback", True):
-                    mode = resolve_thinking_passback("anthropic", self._config.model)
+                    mode = resolve_thinking_passback("anthropic", model)
                     if mode in ("thinking_block", "thinking_block_signed"):
                         t = msg.get("thinking")
                         if t is not None:

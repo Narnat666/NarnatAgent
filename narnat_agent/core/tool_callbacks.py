@@ -16,7 +16,7 @@ class TodoCallbacks:
             return
         for t in todos:
             status = t["status"]
-            content = t.get("content", "")
+            content = str(t.get("content", ""))
 
             if status == "completed":
                 icon = f"{E}✓{R}"

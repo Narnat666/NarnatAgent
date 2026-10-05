@@ -70,7 +70,7 @@ AgentByNarnat/
 
 ### 第 5 步 · 将 narnat 加入 PATH
 
-加入 PATH 后，可在任意目录直接执行 `narnat`。子代理功能依赖该设置：`.narnat\config\narnat.md` 的「narnat 子代理」段中，AI 会以命令名调用 `narnat -p "任务" -g N`；未加入 PATH 时该命令会报「'narnat' 不是内部或外部命令」，子代理无法启动。
+加入 PATH 后，可在任意目录直接执行 `narnat`。子代理功能依赖该设置：`.narnat\config\narnat.md` 的「narnat 子代理」段中，AI 会以命令名调用 `narnat -p "任务"`（多步任务加 `-g N` 开启自动续跑）；未加入 PATH 时该命令会报「'narnat' 不是内部或外部命令」，子代理无法启动。
 
 **方式一：图形界面**
 
@@ -105,6 +105,7 @@ $p = [Environment]::GetEnvironmentVariable('Path','User')
   - 报认证失败 / 401：按第 3 步确认 `"接口密钥"` 已替换为自己的密钥且有效。
   - `narnat.json` 被误改损坏：删除该文件，重新启动会自动生成默认配置（密钥需重新填写）。
   - 命令行报「'narnat' 不是内部或外部命令」，或子代理无法启动：按第 5 步将解压目录加入 PATH，并重新打开终端。
+  - C 盘空间紧张：老版本或异常退出的程序可能在 `%TEMP%` 残留 `onefile_*` 解压目录（每个约 157MB），可直接删除；按上文编译参数打包的版本运行时解压在 exe 旁 `narnat_runtime/`，不受 C 盘清理影响。
 
 ## 快速上手
 
@@ -123,6 +124,7 @@ $p = [Environment]::GetEnvironmentVariable('Path','User')
 ```bash
 pip install nuitka==4.1.2 httpx openai paramiko prompt_toolkit pyserial zstandard
 python -m nuitka --onefile --output-dir=output --output-filename=narnat.exe \
+  --onefile-tempdir-spec="{PROGRAM_DIR}/narnat_runtime/{VERSION}" --product-version=16.3.7 \
   --jobs=16 --lto=yes --python-flag=no_docstrings --follow-imports \
   --include-module=openai \
   --nofollow-import-to=tkinter --nofollow-import-to=unittest --nofollow-import-to=unittest.mock \
@@ -131,7 +133,14 @@ python -m nuitka --onefile --output-dir=output --output-filename=narnat.exe \
   main.py
 ```
 
+> 首次编译会提示下载 Dependency Walker（Python 扩展模块依赖分析工具，下载一次后缓存）；无人值守环境可在命令中加 `--assume-yes-for-downloads` 自动确认。
+
 产物 `output/narnat.exe`，约 39MB。
+
+> **运行时解压目录（重要）**：onefile 程序每次启动会解压约 157MB 运行时文件。Nuitka 默认解压到 `%TEMP%\onefile_<PID>_...`、退出即删——**运行期间该目录被清理（清 C 盘 / 清临时文件）会导致程序立刻崩溃**，被强杀时还会把整个目录残留在 C 盘。上面命令中的 `--onefile-tempdir-spec="{PROGRAM_DIR}/narnat_runtime/{VERSION}"` 把解压目录固定到 **exe 同级的 `narnat_runtime\<版本>\`**（Nuitka 对固定路径启用缓存复用：不删除、同版本后续启动免解压，且目录被整体误删后下次启动会自动重新解压）：
+> - C 盘/TEMP 清理不会命中它，解压目录与系统临时文件彻底隔离；
+> - 升级版本会生成新的版本目录，旧目录可手动删除；exe 所在目录需可写；
+> - `--product-version` 即目录名中的版本号，请与 `main.py` 的 `__version__` 保持一致。
 
 **Ubuntu**
 
@@ -158,7 +167,7 @@ make -j$(nproc) && sudo make install
 /usr/local/python3.12/bin/pip3.12 install nuitka==4.1.2 httpx openai paramiko prompt_toolkit pyserial zstandard
 ```
 
-编译命令与 Windows 相同（将 `python` 替换为 `/usr/local/python3.12/bin/python3.12`），耗时约 28 分钟。产物约 35MB，仅依赖 glibc ≥ 2.35。
+编译命令与 Windows 相同（将 `python` 替换为 `/usr/local/python3.12/bin/python3.12`；`--onefile-tempdir-spec` 在 Linux 同样生效，解压目录落在可执行文件旁的 `narnat_runtime/<版本>/`），耗时约 28 分钟。产物约 35MB，仅依赖 glibc ≥ 2.35。
 
 > 依赖须全部装齐（尤其 `pyserial`）：Serial 工具在模块顶层 `import serial`，构建环境缺 pyserial 时 Nuitka 不报错、静默跳过该模块，产物启动即崩 `No module named 'serial'`。
 
@@ -171,10 +180,10 @@ make -j$(nproc) && sudo make install
 | `-d, --debug` | 调试模式，日志写入 `.narnat/logs/` |
 | `-v, --version` | 显示版本号 |
 | `-p, --prompt <任务>` | headless 模式：执行一次性任务后退出（纯文本输出） |
-| `-g, --goal-rounds N` | headless 模式：自动续跑轮数上限（`-p` 时生效） |
+| `-g, --goal-rounds N` | headless 模式：开启目标模式并设置续跑预算轮数（≥1，如 `-g 10`）；不带则单轮执行（不注入 GoalComplete、无完成验证） |
 | `-l, --tool-log` | headless 模式：显示详细工具调度日志（默认仅输出 AI 最终答复） |
 
-headless（`-p`）行为：注入任务 → 目标模式自动续跑 → AI 调用 GoalComplete 声明完成或达轮数上限收尾 → 退出；不读用户输入、不保存会话、不查余额、不显示统计栏，适合脚本化与父代理调度（如派发子代理任务）。输出为纯文本（全局去色，表格/列表结构保留），末行输出哨兵 `[NN_DONE] reason=… rounds=…` 供程序判定结束与结束原因（reason：`goal_complete` / `round_limit` / `aborted` / `round_failed` / `compress_failed` / `unknown`）。
+headless（`-p`）行为：注入任务后执行，**不带 `-g` 为单轮执行**（AI 一口气干到停手即退出，不注入 GoalComplete、无完成验证）；**带 `-g N` 开启目标模式**：自动续跑 + AI 调用 GoalComplete 提交完成清单（经独立验证器复核）或达预算上限收尾 → 退出。不读用户输入、不保存会话、不查余额、不显示统计栏，适合脚本化与父代理调度（如派发子代理任务）。输出为纯文本（全局去色，表格/列表结构保留），末行输出哨兵 `[NN_DONE] reason=… rounds=…` 供程序判定结束与结束原因（reason：`done` / `goal_complete` / `goal_honest` / `goal_forced` / `goal_suspect` / `round_limit` / `aborted` / `round_failed` / `compress_failed` / `unknown`）。
 
 ## 界面预览
 
@@ -224,7 +233,9 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
     "温度": null,
     "最大输出token数": 128000,
     "上下文窗口大小": 1000000,                   // 模型上下文窗口 token 数，≤0 视为无效（占比显示 --）
-    "目标模式最大轮数": 100,                     // /goal 开启后单个任务自动续跑轮数上限
+    "目标模式最大轮数": 10,                      // /goal 开启后单个任务的续跑总预算（每轮续跑消耗1，每次验证打回额外消耗1）
+    "完成验证": true,                            // 可选，默认 true；GoalComplete 提交清单后由独立 AI 验证器（只读工具实地复核）验证
+    "验证模型": "",                              // 可选，默认空=当前模型；验证器使用的模型
     "思考": {
       "启用": true,                             // 关闭则不传 thinking 参数
       "强度": "high",                           // 当前生效值
@@ -439,7 +450,7 @@ narnat_agent/
 | MCP | MCP 服务器管理：按需连接外部 MCP 服务（connect 连接 / disconnect 断开，详见「MCP 服务器」） |
 | WebSearch | 网页搜索 |
 | TodoWrite | 任务列表管理（计划同步） |
-| GoalComplete | 声明任务完成（仅 `/goal` 目标模式开启时注入给 AI） |
+| GoalComplete | 声明任务完成并提交结构化完成清单（要求→证据→状态），触发独立验证器复核（仅 `/goal` 目标模式开启时注入给 AI） |
 | mcp__… | MCP 服务器工具（由 `MCP` 工具 connect 时动态注册，命名 `mcp__<服务器名>__<工具名>`，详见「MCP 服务器」） |
 
 - 可开关的插件工具为 Terminal / WebSearch / Serial / MCP：在 `"工具"."插件"` 配置或 `/plugin` 命令中开关，关闭后该工具定义不再随请求发给 AI（省 token、聚焦任务），不做执行层拦截——已建立的 SSH / 串口 / MCP 连接保持存活，重新开启后立即可用；常驻工具（Read / Glob / Grep / Edit / Write / Shell / TodoWrite）不可关闭
@@ -492,7 +503,15 @@ NoSession ──/save──▶ RootSession ──/explore──▶ ChildSession
 
 ### 目标模式
 
-`/goal on` 开启后，AI 完成任务时调用 GoalComplete 工具声明完成；若一轮对话结束仍未声明完成，则自动以「续跑提示」发起下一轮，直至 AI 声明完成或达到轮数上限（`/goal on N` 临时覆盖 > `智能体.目标模式最大轮数` 默认 100）。达到上限后注入收尾指令，由 AI 总结当前进度后结束。普通模式下 GoalComplete 不暴露给 AI。
+`/goal on` 开启后，AI 完成任务时须调用 GoalComplete 提交**结构化完成清单**（逐条列出 任务要求 → 可检查证据 → 状态）；若一轮对话结束仍未声明完成，则自动以「续跑提示」（含完成审计要求）发起下一轮。续跑与验证打回共用**单一预算**（`/goal on N` 临时覆盖 > `智能体.目标模式最大轮数` 默认 10）：每续跑一轮消耗 1，每发生一次验证打回额外消耗 1；预算耗尽后注入收尾指令，由 AI 总结当前进度并标注未通过质检后结束。普通模式下 GoalComplete 不暴露给 AI。
+
+AI 自报完成不可信——声明完成后由**独立验证器**复核：用全新会话（不带对话历史）+ 只读工具（Read/Glob/Grep）实地核实清单证据（打开文件、搜索内容），输出三态裁决：
+
+- **通过**：全部要求都有直接证据支撑 → 正常结案（不占预算）；
+- **未通过**：存在可修复缺口 → 注入返工提示词打回继续工作（每次打回消耗 1 点预算）；打回将超出剩余预算时直接强制放行并标注"未通过质检"；
+- **存疑**：证据根本性不足且工具也无法查证（或验证过程本身不可用）→ 放行并标注待核查（不占预算）。
+
+机械校验拒绝（清单格式不符）只是格式纠正、**不占预算**；同一清单连续被拒超 10 次兜底强制放行。清单含"未完成/受阻"项时走**诚实通道**：允许收尾，用户可见未完成项与原因，不再强制验证。可用 `"完成验证"` 关闭独立复核、`"验证模型"` 指定验证用模型（默认同当前模型）。
 
 ### 上下文压缩
 

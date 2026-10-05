@@ -6,7 +6,7 @@ import argparse
 import sys
 import os
 
-__version__ = "16.3.7"
+__version__ = "16.4.0"
 
 
 def main():
@@ -16,7 +16,8 @@ def main():
     parser.add_argument("-v", "--version", action="store_true", help="显示版本号")
     parser.add_argument("-p", "--prompt", help="headless模式：执行一次性任务后退出（纯文本输出）")
     parser.add_argument("-g", "--goal-rounds", type=int, default=0,
-                        help="headless模式：自动续跑轮数上限（默认用配置值，-p 时生效）")
+                        help="headless模式：开启目标模式并设置续跑预算轮数（≥1，如 -g 10）；"
+                             "不带则单轮执行（不注入 GoalComplete、无完成验证）")
     parser.add_argument("-l", "--tool-log", action="store_true",
                         help="headless模式：显示详细工具调度日志（默认仅输出AI最终答复文本，-p 时生效）")
     args = parser.parse_args()
