@@ -5,6 +5,7 @@
 设备语义: device=dev0或省略 → 本机(dev0)；device=dev1..devn → 被控设备(需先Terminal connect)。
 """
 
+import errno
 import os
 import re
 
@@ -111,6 +112,40 @@ def _detect_text_encoding(head: bytes) -> str:
     return "gbk"
 
 
+# Windows 传统路径长度上限（MAX_PATH）：超过后普通 API 一律报"找不到路径"，
+# 无法与"确实不存在"区分，需按长度识别并给出可执行的提示。
+_MAX_LEGACY_PATH_LEN = 260
+
+
+def _isfile_miss_reason(file_path: str) -> str:
+    """os.path.isfile 为 False 时细分真实原因（Read/Edit 共用）。
+
+    返回 ""=确实不存在（调用方保持原文案）；非空=替代错误文案。
+    isdir/isfile 内部的 stat 异常被吞成 False，系统保护文件（权限不足）、
+    超长路径都会误报"文件不存在"；此处用 os.stat 探测按异常分类区分。
+    """
+    try:
+        os.stat(file_path)
+    except PermissionError as e:
+        return f"[错误: 权限不足或路径无法访问: {file_path}（{e}）]"
+    except OSError as e:
+        if getattr(e, "errno", None) in (errno.ENOENT, errno.ENOTDIR):
+            try:
+                over_len = (os.name == "nt"
+                            and len(os.path.abspath(file_path)) >= _MAX_LEGACY_PATH_LEN)
+            except (OSError, ValueError):
+                over_len = False
+            if over_len:
+                return (f"[错误: 路径过长无法访问: {file_path}"
+                        f"（绝对路径达到 Windows {_MAX_LEGACY_PATH_LEN} 字符传统上限，"
+                        f"可缩短路径，或用 Shell 以 \\\\?\\ 前缀访问）]")
+            return ""
+        return f"[错误: 权限不足或路径无法访问: {file_path}（{e}）]"
+    except ValueError:
+        return ""
+    return ""
+
+
 def execute(file_path: str, offset: int = 0, limit: int = 2000,
             device: str = "",
             _tool_context=None) -> str:
@@ -128,10 +163,12 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
         带行号的文件内容字符串，格式 "  行号→内容"
     """
     # AI可能传字符串类型的数值参数，统一转int（与Grep/Shell容错风格一致）
+    # OverflowError：LLM 输出 JSON 里的 1e999 会被 json.loads 解析成 float('inf')，
+    # int(inf) 抛 OverflowError（ArithmeticError 子类），漏捕会逃出工具层
     try:
         offset = int(offset) if offset is not None else 0
         limit = int(limit) if limit is not None else 2000
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "[错误: offset/limit需为整数]"
     if limit <= 0:
         return "[错误: limit需为正整数]"
@@ -153,6 +190,10 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
         return f"[错误: {file_path} 是目录，请用 Glob 匹配或 Shell 查看目录内容]"
 
     if not os.path.isfile(file_path):
+        # 先细分真实原因：权限不足/超长路径会被 isfile 吞成 False 误报"不存在"
+        miss_reason = _isfile_miss_reason(file_path)
+        if miss_reason:
+            return miss_reason
         # 相对路径解析依赖当前目录（Shell cd会改变它），报错时带上cwd帮AI一次定位
         return f"[错误: 文件不存在: {file_path}（当前目录: {os.getcwd()}）]"
 

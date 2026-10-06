@@ -71,6 +71,28 @@ def safe_close(target) -> None:
         pass
 
 
+# ── SSL 上下文惰性单例：每请求新建 Client，但复用同一 SSLContext ──
+# httpx 默认 verify=True 时每个 Client 构造都重新加载证书（certifi CA bundle
+# 实测 1.0~1.3s/次、无缓存）；预构建一次后 Client 构造开销 ≈ 0.001s。
+# 信任集 = 系统默认证书 + certifi（与 httpx 默认信任行为一致）。
+_SSL_CONTEXT = None
+
+
+def _get_ssl_context():
+    """惰性构建并复用全局 SSLContext（首次调用构建，之后直接返回）。"""
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        import ssl
+        ctx = ssl.create_default_context()
+        try:
+            import certifi
+            ctx.load_verify_locations(certifi.where())
+        except Exception:
+            pass
+        _SSL_CONTEXT = ctx
+    return _SSL_CONTEXT
+
+
 def run_cancelable(do_block, cancel_check, on_cancel=None,
                    poll_seconds: float = _CANCEL_POLL_SECONDS):
     """在子线程执行阻塞调用；主流程以 poll_seconds 粒度轮询取消标记。
@@ -191,6 +213,23 @@ def _is_context_overflow(text: str) -> bool:
     """
     lowered = text.lower()
     return any(hint in lowered for hint in _CONTEXT_OVERFLOW_HINTS)
+
+
+# ── 认证类失败特征（401 响应归类，供错误消息附带中文排查引导）──
+_AUTH_HINT = " —— 请检查 .narnat/config/narnat.json 的「接口密钥」是否已填写/有效"
+_AUTH_ERROR_HINTS = ("401", "authentication", "unauthorized")
+
+
+def _auth_error_hint(status, text: str = "") -> str:
+    """认证类失败（HTTP 401 / 报文含认证特征）返回中文引导，其余返回空串。
+
+    新用户默认配置的接口密钥为空，首个任务必然拿到服务端 401 英文原文而
+    无从下手；仅认证类失败追加引导，其余错误文案保持原样。
+    """
+    if status == 401:
+        return _AUTH_HINT
+    lowered = str(text).lower()
+    return _AUTH_HINT if any(h in lowered for h in _AUTH_ERROR_HINTS) else ""
 
 
 def _user_has_tool_result(user_msg: Dict[str, Any]) -> bool:
@@ -524,7 +563,9 @@ class _OpenAIBackend:
                         return
                     if self._logger:
                         self._logger.error("core.llm", f"API调用失败(不可重试): {e}")
-                    yield {"content": f"[错误: API调用失败({type(e).__name__}): {e}]", "finish_reason": "error"}
+                    # 认证类失败（401）附中文引导，其余错误文案不变
+                    label = "401" if status == 401 else type(e).__name__
+                    yield {"content": f"[错误: API调用失败({label}): {e}{_auth_error_hint(status, str(e))}]", "finish_reason": "error"}
                     return
                 if cancel_check and cancel_check():
                     return
@@ -547,7 +588,7 @@ class _OpenAIBackend:
                 if self._logger:
                     self._logger.error("core.llm", f"API调用失败(重试耗尽): {e}")
                 _used = rate_retries if status == 429 else network_retries
-                yield {"content": f"[错误: API调用失败({type(e).__name__}，重试{_used}次): {e}]", "finish_reason": "error"}
+                yield {"content": f"[错误: API调用失败({type(e).__name__}，重试{_used}次): {e}{_auth_error_hint(status, str(e))}]", "finish_reason": "error"}
                 return
 
             except (APIConnectionError, APITimeoutError) as e:
@@ -564,7 +605,7 @@ class _OpenAIBackend:
                     continue
                 if self._logger:
                     self._logger.error("core.llm", f"网络错误(重试耗尽): {e}")
-                yield {"content": f"[错误: API调用失败({type(e).__name__}，重试{network_retries}次): {e}]", "finish_reason": "error"}
+                yield {"content": f"[错误: API调用失败({type(e).__name__}，重试{network_retries}次): {e}{_auth_error_hint(None, str(e))}]", "finish_reason": "error"}
                 return
 
             except Exception as e:
@@ -573,7 +614,7 @@ class _OpenAIBackend:
                     return
                 if self._logger:
                     self._logger.error("core.llm", f"API调用失败: {e}")
-                yield {"content": f"[错误: API调用失败({type(e).__name__}): {e}]", "finish_reason": "error"}
+                yield {"content": f"[错误: API调用失败({type(e).__name__}): {e}{_auth_error_hint(None, str(e))}]", "finish_reason": "error"}
                 return
 
         LLMClient._active_response = stream
@@ -794,8 +835,10 @@ class _AnthropicBackend:
 
         while True:
             # read 放宽到 300s：思考期可能长时间无字节输出，大上下文 prefill 也会挤占读超时；
-            # 流中静默挂死由看门狗（LLMClient._STREAM_STALL_SECONDS）主动断连触发重试
-            client = httpx.Client(timeout=httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=30.0))
+            # 流中静默挂死由看门狗（LLMClient._STREAM_STALL_SECONDS）主动断连触发重试。
+            # verify 复用模块级 SSLContext：消除每请求重建（certifi 加载 ~1.2s）的固定开销
+            client = httpx.Client(timeout=httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=30.0),
+                                  verify=_get_ssl_context())
             LLMClient._active_response = client
             try:
                 # 使用 stream 模式发送请求，先拿到 status_code 再决定是否读取流
@@ -831,8 +874,8 @@ class _AnthropicBackend:
                         yield {"finish_reason": "context_overflow"}
                         return
                     if self._logger:
-                        self._logger.error("core.llm", f"API调用失败(不可重试): {status} {err_text[:200]}")
-                    yield {"content": f"[错误: API调用失败({status}): {err_text[:200]}]", "finish_reason": "error"}
+                        self._logger.error("core.llm", f"API调用失败(不可重试): {status} {err_text[:500]}")
+                    yield {"content": f"[错误: API调用失败({status}): {err_text[:500]}{_auth_error_hint(status, err_text)}]", "finish_reason": "error"}
                     return
 
                 # 429 速率限制
@@ -852,7 +895,7 @@ class _AnthropicBackend:
                             return
                         continue
                     LLMClient._active_response = None
-                    yield {"content": f"[错误: API返回429速率限制(已重试{LLMClient._max_rate_retries}次): {err_text[:200]}]", "finish_reason": "error"}
+                    yield {"content": f"[错误: API返回429速率限制(已重试{LLMClient._max_rate_retries}次): {err_text[:500]}]", "finish_reason": "error"}
                     return
 
                 # 可重试服务端错误
@@ -872,7 +915,7 @@ class _AnthropicBackend:
                             return
                         continue
                     LLMClient._active_response = None
-                    yield {"content": f"[错误: API返回{status}错误(已重试{LLMClient._max_network_retries}次): {err_text[:200]}]", "finish_reason": "error"}
+                    yield {"content": f"[错误: API返回{status}错误(已重试{LLMClient._max_network_retries}次): {err_text[:500]}]", "finish_reason": "error"}
                     return
 
                 # 成功
@@ -883,8 +926,8 @@ class _AnthropicBackend:
                     client.close()
                     LLMClient._active_response = None
                     if self._logger:
-                        self._logger.error("core.llm", f"API调用失败: {status} {err_text[:200]}")
-                    yield {"content": f"[错误: API调用失败({status}): {err_text[:200]}]", "finish_reason": "error"}
+                        self._logger.error("core.llm", f"API调用失败: {status} {err_text[:500]}")
+                    yield {"content": f"[错误: API调用失败({status}): {err_text[:500]}{_auth_error_hint(status, err_text)}]", "finish_reason": "error"}
                     return
                 break
 
@@ -905,7 +948,7 @@ class _AnthropicBackend:
                     continue
                 if self._logger:
                     self._logger.error("core.llm", f"网络错误(重试耗尽): {e}")
-                yield {"content": f"[错误: API调用失败({type(e).__name__}，重试{network_retries}次): {e}]", "finish_reason": "error"}
+                yield {"content": f"[错误: API调用失败({type(e).__name__}，重试{network_retries}次): {e}{_auth_error_hint(None, str(e))}]", "finish_reason": "error"}
                 return
 
             except Exception as e:
@@ -915,7 +958,7 @@ class _AnthropicBackend:
                     return
                 if self._logger:
                     self._logger.error("core.llm", f"API调用失败: {e}")
-                yield {"content": f"[错误: API调用失败({type(e).__name__}): {e}]", "finish_reason": "error"}
+                yield {"content": f"[错误: API调用失败({type(e).__name__}): {e}{_auth_error_hint(None, str(e))}]", "finish_reason": "error"}
                 return
 
         # 解析 Anthropic SSE 流（resp 已是 stream=True 模式）

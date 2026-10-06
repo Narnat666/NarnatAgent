@@ -11,12 +11,13 @@ SessionManager 持有共享资源，状态对象通过 manager 引用访问。
 
 import json
 import os
+import time
 from typing import Optional, List, Dict, Any, Callable, Set, Tuple
 
 from ..config.session_store import (
     save_session, load_session, delete_session,
     list_sessions_tree, format_session_tree,
-    format_session_summary, load_session_meta,
+    format_session_summary, load_session_meta, session_exists,
 )
 from ..config.skill_store import load_skill, list_skill_tree
 from .message_list import MessageList
@@ -48,6 +49,54 @@ _PLUGIN_TOOL_LABELS = {
     "Serial": "多终端持久串口",
     "MCP": "MCP 服务器管理",
 }
+
+
+def _persist_config(config_dir: str, mutate) -> str:
+    """读 narnat.json → mutate(data) → 原子写回。返回 ""=成功；非空=错误信息（改动仅本次会话有效）。
+
+    原子性：写临时文件（含 pid 防并发互撞）后 os.replace——并发写不会产生半个 JSON。
+    Windows 下 replace 偶发瞬态拒绝访问（并发写回/外部读取者的共享窗口），
+    按 60ms 退避重试 2 次，仍失败才回报错误。
+    """
+    if not config_dir:
+        return ""
+    config_path = os.path.join(config_dir, "narnat.json")
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        return f"配置读取失败({e})"
+    mutate(data)
+    tmp_path = f"{config_path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        for attempt in range(3):
+            try:
+                os.replace(tmp_path, config_path)
+                return ""
+            except OSError:
+                if attempt >= 2:
+                    raise
+                time.sleep(0.06)
+    except OSError as e:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return f"配置写回失败({e})"
+
+
+# 会话名保留字：与 /rm 的"全部删除"哨兵值同名（见 session_store.delete_session）。
+# 一旦允许保存/改名为该名称，删除它就会清空整个会话库——入口处直接拒绝（大小写不敏感）
+_RESERVED_SESSION_NAMES = frozenset(["--all"])
+
+
+def _check_reserved_session_name(name: str) -> str:
+    """会话名保留字校验；命中返回错误文案，否则返回""。"""
+    if name.strip().lower() in _RESERVED_SESSION_NAMES:
+        return f"[错误: '{name}' 为保留名称（/rm --all 表示全部删除），请换一个名称]"
+    return ""
 
 
 class SessionState:
@@ -127,6 +176,12 @@ class NoSession(SessionState):
                 name = self._mgr.name_func(msgs)
             if not name:
                 return "自动命名失败，请手动指定: /save <名称>"
+        err = _check_reserved_session_name(name)
+        if err:
+            return err
+        if session_exists(self._mgr.narnat_dir, name):
+            return (f"[错误: 会话 '{name}' 已存在，请换名保存，或 /cd {name} 进入已有会话"
+                    f"（如需覆盖请先 /rm {name} 删除）]")
         err = save_session(self._mgr.narnat_dir, name, msgs)
         if err:
             return err
@@ -243,8 +298,16 @@ class RootSession(SessionState):
         if name == self._name:
             self._persist()
         else:
+            err = _check_reserved_session_name(name)
+            if err:
+                return err
+            if session_exists(self._mgr.narnat_dir, name):
+                return (f"[错误: 会话 '{name}' 已存在，请换名保存，或 /cd {name} 进入已有会话"
+                        f"（如需覆盖请先 /rm {name} 删除）]")
             msgs = self._mgr.get_messages()
-            save_session(self._mgr.narnat_dir, name, msgs)
+            err = save_session(self._mgr.narnat_dir, name, msgs)
+            if err:
+                return err
             new_state = self._mgr.create_root_state(name)
             self._mgr.switch_state(new_state)
         return ""
@@ -316,14 +379,25 @@ class RootSession(SessionState):
     def explore(self, name: str) -> str:
         if not name:
             return "[错误: 请指定分支名称]"
+        err = _check_reserved_session_name(name)
+        if err:
+            return err
         if name == self._name:
             return f"[错误: 分支名不可与父会话同名（'{name}'），请换一个名称]"
+        if session_exists(self._mgr.narnat_dir, name, parent=self._name):
+            meta = load_session_meta(self._mgr.narnat_dir, name, parent=self._name)
+            if meta.get("status") != "completed":
+                return (f"[错误: 分支 '{name}' 已存在且尚未完成。请换名，"
+                        f"或 /cd {self._name}/{name} 进入该分支继续]")
+            # completed：允许重开（第二轮探索的既有工作流）
         self._persist()
         msgs = [dict(m) for m in self._mgr.get_messages()]
         parent_msg_count = len(msgs)
-        save_session(self._mgr.narnat_dir, name, msgs, parent=self._name,
-                     status="new", parent_msg_count=parent_msg_count,
-                     last_summarized_at=parent_msg_count)
+        err = save_session(self._mgr.narnat_dir, name, msgs, parent=self._name,
+                           status="new", parent_msg_count=parent_msg_count,
+                           last_summarized_at=parent_msg_count)
+        if err:
+            return err
         new_msgs, err = load_session(self._mgr.narnat_dir, name, parent=self._name)
         if err:
             return err
@@ -785,17 +859,13 @@ class SessionManager:
             return f"无效值: {effort_lower}（可用: {available}）"
         if self._set_thinking_effort:
             self._set_thinking_effort(effort_lower)
-        if self._config_dir:
-            config_path = os.path.join(self._config_dir, "narnat.json")
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                data.setdefault("智能体", {}).setdefault("思考", {})["强度"] = effort_lower
-                with open(config_path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-            except Exception:
-                pass
-        return f"思考强度已切换为: {options[effort_lower]}"
+
+        def _mutate(data):
+            data.setdefault("智能体", {}).setdefault("思考", {})["强度"] = effort_lower
+
+        err = _persist_config(self._config_dir, _mutate)
+        text = f"思考强度已切换为: {options[effort_lower]}"
+        return f"{text}（{err}，仅本次会话有效）" if err else text
 
     def on_list_thinking_options(self) -> list:
         return list(self._thinking_options.keys())
@@ -815,19 +885,15 @@ class SessionManager:
             target = act == "on"
             if self._set_thinking_passback:
                 self._set_thinking_passback(target)
-            if self._config_dir:
-                config_path = os.path.join(self._config_dir, "narnat.json")
-                try:
-                    with open(config_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    data.setdefault("智能体", {}).setdefault("思考", {})["回传"] = target
-                    with open(config_path, "w", encoding="utf-8") as f:
-                        json.dump(data, f, indent=2, ensure_ascii=False)
-                except Exception:
-                    pass
+
+            def _mutate(data):
+                data.setdefault("智能体", {}).setdefault("思考", {})["回传"] = target
+
+            err = _persist_config(self._config_dir, _mutate)
+            suffix = f"（{err}，仅本次会话有效）" if err else ""
             if current == target:
-                return f"思考回传已是{'开启' if target else '关闭'}状态"
-            return f"思考回传已{'开启' if target else '关闭'}"
+                return f"思考回传已是{'开启' if target else '关闭'}状态{suffix}"
+            return f"思考回传已{'开启' if target else '关闭'}{suffix}"
         return f"无效值: {act}（可用: on / off）"
 
     def on_mode(self, name: str) -> str:
@@ -846,16 +912,14 @@ class SessionManager:
             return f"无效值: {target}（可用: {available}）"
         if self._set_model:
             self._set_model(matched)
-        if self._config_dir:
-            config_path = os.path.join(self._config_dir, "narnat.json")
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                data.setdefault("智能体", {}).setdefault("模型", {})["当前"] = matched
-                with open(config_path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-            except Exception:
-                pass
+
+        def _mutate(data):
+            data.setdefault("智能体", {}).setdefault("模型", {})["当前"] = matched
+
+        err = _persist_config(self._config_dir, _mutate)
+        if err:
+            # 写回失败时不得显示"设置成功"误导：本次会话已切换，但配置未持久化
+            return f"已切换为 {matched}，但{err}，仅本次会话有效"
         return f"设置成功：{matched}"
 
     def on_list_model_names(self) -> list:
@@ -891,30 +955,27 @@ class SessionManager:
         current = _registry.get_plugin_states()[name]
         if self._set_plugin_enabled is None or not self._set_plugin_enabled(name, target):
             return "error", "  插件开关不可用"
-        self._persist_plugin_states()
+        err = self._persist_plugin_states()
+        suffix = f"（{err}，仅本次会话有效）" if err else ""
         if current == target:
-            return "hint", f"  {name} 已是{'开启' if target else '关闭'}状态"
+            return "hint", f"  {name} 已是{'开启' if target else '关闭'}状态{suffix}"
         if target:
-            return "ok", f"  {name} 已开启  (下轮请求起恢复向 AI 提供该工具)"
-        return "ok", f"  {name} 已关闭  (下轮请求起不再向 AI 提供该工具)"
+            return "ok", f"  {name} 已开启  (下轮请求起恢复向 AI 提供该工具){suffix}"
+        return "ok", f"  {name} 已关闭  (下轮请求起不再向 AI 提供该工具){suffix}"
 
-    def _persist_plugin_states(self) -> None:
-        """把全部插件开关状态写回 narnat.json（同 on_thinkback 写盘模式，失败静默）"""
+    def _persist_plugin_states(self) -> str:
+        """把全部插件开关状态原子写回 narnat.json；返回 ""=成功，非空=错误信息"""
         if not self._config_dir:
-            return
+            return ""
         from ..tools import registry as _registry
-        config_path = os.path.join(self._config_dir, "narnat.json")
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+
+        def _mutate(data):
             data.setdefault("工具", {})["插件"] = {
                 name: "on" if enabled else "off"
                 for name, enabled in _registry.get_plugin_states().items()
             }
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
+
+        return _persist_config(self._config_dir, _mutate)
 
     def on_list_plugin_names(self) -> list:
         from ..tools import registry as _registry

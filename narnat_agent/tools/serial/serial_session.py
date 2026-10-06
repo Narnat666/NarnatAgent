@@ -267,7 +267,7 @@ class SerialSession:
             return error_line(f"串口 {self.port} 已断开")
         try:
             pulse_ms = max(1, min(int(pulse_ms), 5000))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             pulse_ms = 100
 
         parts = []

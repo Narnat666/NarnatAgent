@@ -316,6 +316,13 @@ class Agent:
             # 完成信号哨兵：所有退出路径必经此处。父代理轮询结果文件时
             # 以该行为准判定"子代理已结束"及结束原因（goal_complete/round_limit/aborted等）。
             _stdout_write(f"\n[NN_DONE] reason={end_reason} rounds={goal_round}\n")
+            # 目标模式状态复位（无条件）：同进程复用（批处理/测试脚手架）时，
+            # 上一任务 -g 残留的 _goal_enabled/GoalComplete 工具会污染后续任务
+            # （普通模式任务被注入 GoalComplete 并触发验证器）
+            self._mgr._goal_enabled = False
+            self._mgr._goal_max_rounds = 0
+            if getattr(self._mgr, '_set_goal_tool', None):
+                self._mgr._set_goal_tool(False)
             # 线程池不做任务级 shutdown（同 run()：Agent 支持同进程复用）
             from ..tools.terminal import cleanup as _terminal_cleanup
             from ..tools.serial import cleanup as _serial_cleanup
@@ -325,3 +332,4 @@ class Agent:
             _bg_cleanup()
             # MCP 连接不做任务级 cleanup（同 run()：终态不可恢复，atexit 兜底回收）
             self._logger.close()
+        return end_reason

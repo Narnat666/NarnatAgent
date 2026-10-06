@@ -21,6 +21,27 @@ def _strip_surrogates(obj):
 from .defaults import DATA_SUBDIR, SESSIONS_SUBDIR
 
 
+def _safe_timestamp(value) -> float:
+    """会话 timestamp 类型校验：非数值（字符串/None/对象）一律视作 0。
+
+    手工编辑/半写文件会把 timestamp 写成字符串或 null，此前会让排序比较
+    抛 TypeError（str 与 float 不可比），一条坏文件瘫痪整个会话列表。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return value
+
+
+def _format_ts(ts, fmt: str) -> str:
+    """时间格式化（安全版）：越界时间戳（如 1e18）会让 time.localtime 抛
+    OSError/OverflowError，降级为占位符，避免一条坏文件让整个列表渲染崩溃。
+    """
+    try:
+        return time.strftime(fmt, time.localtime(ts))
+    except (OSError, OverflowError, ValueError):
+        return "未知时间"
+
+
 def _safe_filename(name: str) -> str:
     safe_name = name.replace("/", "_").replace("\\", "_")
     safe_name = safe_name.replace(":", "_").replace("<", "_").replace(">", "_")
@@ -47,6 +68,10 @@ def _session_path(narnat_dir: str, name: str, parent: Optional[str] = None) -> s
     return os.path.join(_sessions_dir(narnat_dir), f"{safe_name}.json")
 
 
+def session_exists(narnat_dir: str, name: str, parent: Optional[str] = None) -> bool:
+    return os.path.isfile(_session_path(narnat_dir, name, parent=parent))
+
+
 def save_session(narnat_dir: str, name: str,
                  messages: List[Dict[str, Any]],
                  parent: Optional[str] = None,
@@ -60,8 +85,15 @@ def save_session(narnat_dir: str, name: str,
         try:
             with open(path, "r", encoding="utf-8") as f:
                 existing = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError, RecursionError):
+            existing = {}
+        # 顶层非对象（手工编辑/半写文件）视作无既有元数据，不能直接 .get()
+        if not isinstance(existing, dict):
+            existing = {}
+    # 归一化碰撞检测：特殊字符被替换后映射到同一文件，静默覆盖会清掉另一会话
+    if existing.get("name") and existing["name"] != name:
+        return (f"保存失败: 会话名 '{name}' 与已有会话 '{existing['name']}' 冲突"
+                f"（名称中的 / \\ : < > | ? * 等字符在存储时会被替换，导致两者映射到同一文件），请换一个名称")
     data = {
         "name": name,
         "timestamp": time.time(),
@@ -72,14 +104,31 @@ def save_session(narnat_dir: str, name: str,
         "parent_msg_count": parent_msg_count if parent_msg_count is not None else existing.get("parent_msg_count"),
         "last_summarized_at": last_summarized_at if last_summarized_at is not None else existing.get("last_summarized_at"),
     }
+    # 临时文件名带进程号：同名会话被多进程并发保存时，固定 ".tmp" 名会互相
+    # 抢占（Windows WinError 32/5），各进程写自己的临时文件后 os.replace 原子
+    # 替换，语义不变
+    tmp_path = f"{path}.{os.getpid()}.tmp"
+    last_err = None
+    # os.replace 仍可能与另一进程的替换瞬间撞车（共享冲突）→ 短暂退避重试
+    for attempt in range(3):
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(_strip_surrogates(data), f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, path)
+            return ""
+        except UnicodeEncodeError as e:
+            # 编码失败与并发无关，重试无意义
+            last_err = e
+            break
+        except OSError as e:
+            last_err = e
+            time.sleep(0.02 * (attempt + 1))
+    # 失败路径清掉本次的临时文件，不留残骸（成功路径已被 os.replace 消费）
     try:
-        tmp_path = path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(_strip_surrogates(data), f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, path)
-        return ""
-    except (OSError, UnicodeEncodeError) as e:
-        return f"保存失败: {e}"
+        os.remove(tmp_path)
+    except OSError:
+        pass
+    return f"保存失败: {last_err}"
 
 
 def load_session(narnat_dir: str, name: str, parent: Optional[str] = None) -> tuple:
@@ -89,7 +138,8 @@ def load_session(narnat_dir: str, name: str, parent: Optional[str] = None) -> tu
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError, RecursionError) as e:
+        # RecursionError：json.load 对超深嵌套（约1000层起）抛递归异常，属"文件损坏"
         return [], f"加载失败: {e}"
     # 字段类型校验：手工编辑/半写文件可能造成顶层非对象或 messages 非列表
     if not isinstance(data, dict):
@@ -110,14 +160,15 @@ def list_sessions(narnat_dir: str) -> List[Dict[str, Any]]:
         try:
             with open(fpath, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError, RecursionError):
+            # 损坏文件（含超深嵌套）一律跳过，不影响其余会话
             continue
         if not isinstance(data, dict):
             continue
         messages = data.get("messages")
         result.append({
             "name": data.get("name", fname[:-5]),
-            "timestamp": data.get("timestamp", 0),
+            "timestamp": _safe_timestamp(data.get("timestamp", 0)),
             "message_count": len(messages) if isinstance(messages, list) else 0,
         })
     result.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
@@ -179,14 +230,15 @@ def list_sessions_tree(narnat_dir: str) -> List[Dict[str, Any]]:
             try:
                 with open(fpath, "r", encoding="utf-8") as f:
                     data = json.load(f)
-            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError, RecursionError):
+                # 损坏文件（含超深嵌套）一律跳过，不影响其余会话
                 continue
             if not isinstance(data, dict):
                 continue
             messages = data.get("messages")
             info = {
                 "name": data.get("name", fname[:-5]),
-                "timestamp": data.get("timestamp", 0),
+                "timestamp": _safe_timestamp(data.get("timestamp", 0)),
                 "message_count": len(messages) if isinstance(messages, list) else 0,
                 "parent": data.get("parent"),
                 "status": data.get("status", "active"),
@@ -234,7 +286,7 @@ def format_session_tree(tree: List[Dict[str, Any]],
     for i, root in enumerate(tree):
         is_last_root = (i == len(tree) - 1)
         prefix = "└──" if is_last_root else "├──"
-        ts = time.strftime("%m-%d %H:%M", time.localtime(root["timestamp"]))
+        ts = _format_ts(root["timestamp"], "%m-%d %H:%M")
         is_current_root = (root["name"] == active_name and active_parent is None)
         delete_mark = f"  ✘ 退出后删除" if root.get("_delete_marked") else ""
         current_mark = "  ◀ 当前" if is_current_root else ""
@@ -244,7 +296,7 @@ def format_session_tree(tree: List[Dict[str, Any]],
         for j, child in enumerate(children):
             is_last_child = (j == len(children) - 1)
             connector = "└──" if is_last_child else "├──"
-            child_ts = time.strftime("%m-%d %H:%M", time.localtime(child["timestamp"]))
+            child_ts = _format_ts(child["timestamp"], "%m-%d %H:%M")
             if child.get("status") == "completed":
                 status_str = f"✓ 已完成 ({child_ts})"
             elif child.get("status") == "new":
@@ -302,7 +354,7 @@ def format_session_summary(tree: List[Dict[str, Any]],
 
     def _render(entry, ts_fmt, is_last):
         lines = []
-        ts = time.strftime(ts_fmt, time.localtime(entry["timestamp"]))
+        ts = _format_ts(entry["timestamp"], ts_fmt)
         marks = ""
         if entry["deleted"]:
             marks += "  ✘ 退出后删除"
@@ -314,7 +366,7 @@ def format_session_summary(tree: List[Dict[str, Any]],
         for j, child in enumerate(entry["children"]):
             is_last_child = (j == len(entry["children"]) - 1)
             c_connector = "└──" if is_last_child else "├──"
-            child_ts = time.strftime("%m-%d %H:%M", time.localtime(child["timestamp"]))
+            child_ts = _format_ts(child["timestamp"], "%m-%d %H:%M")
             if child["status"] == "completed":
                 status_str = f"✓ 已完成 ({child_ts})"
             elif child["status"] == "new":
@@ -360,9 +412,12 @@ def load_session_meta(narnat_dir: str, name: str, parent: Optional[str] = None) 
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return {k: v for k, v in data.items() if k != "messages"}
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError, RecursionError):
         return {}
+    # 顶层类型防御（与 load_session 同构）：手工编辑/半写文件可能是数组/字符串
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if k != "messages"}
 
 
 def format_session_list(sessions: List[Dict[str, Any]]) -> str:
@@ -370,6 +425,6 @@ def format_session_list(sessions: List[Dict[str, Any]]) -> str:
         return ""
     lines = []
     for s in sessions:
-        ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(s["timestamp"]))
+        ts = _format_ts(s["timestamp"], "%Y-%m-%d %H:%M")
         lines.append(f"  {s['name']}  ({ts}, {s['message_count']}条消息)")
     return "\n".join(lines)

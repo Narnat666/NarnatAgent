@@ -103,7 +103,7 @@ class AgentLoop:
                 if self._compression.mid_run_guard():
                     stream.feed("  压缩完成，继续任务…\n")
                 else:
-                    stream.feed("  自动压缩失败，继续尝试本次请求…\n")
+                    stream.feed("  未执行压缩（无可压缩历史或压缩失败），继续本次请求…\n")
                 stream.flush_renderer()
                 stream.begin()  # 压缩动画已停止，重启"思考中"spinner
 

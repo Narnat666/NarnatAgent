@@ -6,7 +6,7 @@ import argparse
 import sys
 import os
 
-__version__ = "16.4.8"
+__version__ = "16.6.0"
 
 
 def main():
@@ -37,10 +37,15 @@ def main():
         if not args.prompt.strip():
             print("错误: -p 任务内容不能为空")
             sys.exit(1)
-        # headless：stdout 显式 UTF-8（重定向/管道下中文与emoji不乱码）
+        # headless：stdout/stderr 显式 UTF-8（重定向/管道下中文与emoji不乱码；
+        # stderr 同设避免 2>&1 合并日志时两种编码混杂）
         if sys.platform == "win32":
             try:
                 sys.stdout.reconfigure(encoding="utf-8")
+            except (AttributeError, OSError):
+                pass
+            try:
+                sys.stderr.reconfigure(encoding="utf-8")
             except (AttributeError, OSError):
                 pass
         from narnat_agent.output import set_plain, set_quiet_tools
@@ -53,7 +58,9 @@ def main():
         # （narnat_bg_<随机>），父/子、同项目多 agent 天然互不干扰，
         # 无需额外环境变量。
         agent = Agent(debug=args.debug, headless=True)
-        agent.run_headless(args.prompt, max_rounds=args.goal_rounds)
+        reason = agent.run_headless(args.prompt, max_rounds=args.goal_rounds)
+        if reason in ("round_failed", "aborted", "compress_failed", "unknown"):
+            sys.exit(2)
         return
 
     agent = Agent(debug=args.debug)
@@ -68,7 +75,8 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n程序异常退出: {e}")
         try:
-            input("按回车键退出...")
+            if sys.stdin and sys.stdin.isatty():
+                input("按回车键退出...")
         except (KeyboardInterrupt, EOFError):
             pass
         sys.exit(1)

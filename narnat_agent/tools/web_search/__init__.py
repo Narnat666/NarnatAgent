@@ -479,7 +479,7 @@ def execute(query: str, num: int = 5, _tool_context=None) -> str:
     # AI可能传字符串类型的数值参数，统一转int（与Grep/Read容错风格一致）
     try:
         num = int(num) if num is not None else 5
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "[错误: num需为正整数]"
     if num <= 0:
         return "[错误: num需为正整数]"

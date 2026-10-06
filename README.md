@@ -30,7 +30,7 @@ AgentByNarnat/
     │   ├── narnat.md     # 用户级提示词，可自定义
     │   └── skills/       # 技能文件（/skill 加载）
     └── data/
-        └── sessions/     # 历史会话；费用日志 cost_log.csv 在首次使用后生成
+        └── sessions/     # 历史会话；费用日志 cost_log.csv 在开启「费用日志.启用」后生成
 ```
 
 解压后目录中应同时存在 `narnat.exe` 与 `.narnat`：
@@ -66,7 +66,7 @@ AgentByNarnat/
 | `/goal on` | 目标模式：任务没完成自动续跑 |
 | `/exit` | 退出 |
 
-> 关于工作目录：文件操作以启动目录为基准；配置与会话始终保存在程序目录的 `.narnat/` 中，与启动位置无关。如需处理某个项目，在项目目录打开终端并运行 `D:\AgentByNarnat\narnat.exe`（替换为实际解压路径）。
+> 关于工作目录：文件操作以启动目录为基准；配置与会话始终保存在程序目录的 `.narnat/` 中，与启动位置无关（源码运行/开发模式时 `.narnat` 从当前目录向上查找；编译版为 exe 所在目录）。如需处理某个项目，在项目目录打开终端并运行 `D:\AgentByNarnat\narnat.exe`（替换为实际解压路径）。
 
 ### 第 5 步 · 将 narnat 加入 PATH
 
@@ -96,7 +96,7 @@ $p = [Environment]::GetEnvironmentVariable('Path','User')
 
   ![narnat.md 用户级提示词](img/narnat.md里是用户级promit,可以自定义.png)
 
-- **会话与费用**：历史对话保存在 `.narnat\data\sessions\`；每次 API 调用的费用明细记录在 `.narnat\data\cost_log.csv`，可用 Excel 打开：
+- **会话与费用**：历史对话保存在 `.narnat\data\sessions\`；开启配置中的「费用日志.启用」后，每次 API 调用的费用明细记录在 `.narnat\data\cost_log.csv`，可用 Excel 打开：
 
   ![sessions 与 cost_log](img/sesions里存储着所有历史对话，cost_log.csv记录每次api调度的详细费用.png)
 
@@ -105,7 +105,7 @@ $p = [Environment]::GetEnvironmentVariable('Path','User')
   - 报认证失败 / 401：按第 3 步确认 `"接口密钥"` 已替换为自己的密钥且有效。
   - `narnat.json` 被误改损坏：删除该文件，重新启动会自动生成默认配置（密钥需重新填写）。
   - 命令行报「'narnat' 不是内部或外部命令」，或子代理无法启动：按第 5 步将解压目录加入 PATH，并重新打开终端。
-  - C 盘空间紧张：老版本或异常退出的程序可能在 `%TEMP%` 残留 `onefile_*` 解压目录（每个约 157MB），可直接删除；按上文编译参数打包的版本运行时解压在 exe 旁 `narnat_runtime/`，不受 C 盘清理影响。
+  - C 盘空间紧张：老版本或异常退出的程序可能在 `%TEMP%` 残留 `onefile_*` 解压目录（每个约 157MB），可直接删除；按上文编译参数打包的版本运行时解压在启动目录下的 `narnat_runtime/`（在 exe 所在目录启动即为 exe 旁），不受 C 盘清理影响。
 
 ## 快速上手
 
@@ -124,7 +124,7 @@ $p = [Environment]::GetEnvironmentVariable('Path','User')
 ```bash
 pip install nuitka==4.1.2 httpx openai paramiko prompt_toolkit pyserial zstandard
 python -m nuitka --onefile --output-dir=output --output-filename=narnat.exe \
-  --onefile-tempdir-spec="{PROGRAM_DIR}/narnat_runtime/{VERSION}" --product-version=16.3.7 \
+  --onefile-tempdir-spec="{PROGRAM_DIR}/narnat_runtime/{VERSION}" --product-version=16.4.8 \
   --jobs=16 --lto=yes --python-flag=no_docstrings --follow-imports \
   --include-module=openai \
   --nofollow-import-to=tkinter --nofollow-import-to=unittest --nofollow-import-to=unittest.mock \
@@ -137,9 +137,9 @@ python -m nuitka --onefile --output-dir=output --output-filename=narnat.exe \
 
 产物 `output/narnat.exe`，约 39MB。
 
-> **运行时解压目录（重要）**：onefile 程序每次启动会解压约 157MB 运行时文件。Nuitka 默认解压到 `%TEMP%\onefile_<PID>_...`、退出即删——**运行期间该目录被清理（清 C 盘 / 清临时文件）会导致程序立刻崩溃**，被强杀时还会把整个目录残留在 C 盘。上面命令中的 `--onefile-tempdir-spec="{PROGRAM_DIR}/narnat_runtime/{VERSION}"` 把解压目录固定到 **exe 同级的 `narnat_runtime\<版本>\`**（Nuitka 对固定路径启用缓存复用：不删除、同版本后续启动免解压，且目录被整体误删后下次启动会自动重新解压）：
-> - C 盘/TEMP 清理不会命中它，解压目录与系统临时文件彻底隔离；
-> - 升级版本会生成新的版本目录，旧目录可手动删除；exe 所在目录需可写；
+> **运行时解压目录（重要）**：onefile 程序每次启动会解压约 157MB 运行时文件。Nuitka 默认解压到 `%TEMP%\onefile_<PID>_...`、退出即删——**运行期间该目录被清理（清 C 盘 / 清临时文件）会导致程序立刻崩溃**，被强杀时还会把整个目录残留在 C 盘。上面命令中的 `--onefile-tempdir-spec="{PROGRAM_DIR}/narnat_runtime/{VERSION}"` 把解压目录固定到 `narnat_runtime\<版本>\`（Nuitka 对固定路径启用缓存复用：不删除、同版本后续启动免解压，且目录被整体误删后下次启动会自动重新解压）。注意 Nuitka 4.1.2 将 `{PROGRAM_DIR}` 按相对路径解析：**解压目录创建于启动时的当前目录**（在 exe 所在目录启动即为 exe 同级；从其它目录启动则在该目录下生成，且不与该缓存互复用）——建议在 exe 所在目录启动以获得 exe 同级解压与免解压复用：
+> - 目录始终创建在启动目录下，C 盘/TEMP 清理不会命中它，与系统临时文件彻底隔离；
+> - 升级版本会生成新的版本目录，旧目录可手动删除；启动目录需可写；
 > - `--product-version` 即目录名中的版本号，请与 `main.py` 的 `__version__` 保持一致。
 
 **Ubuntu**
@@ -167,7 +167,7 @@ make -j$(nproc) && sudo make install
 /usr/local/python3.12/bin/pip3.12 install nuitka==4.1.2 httpx openai paramiko prompt_toolkit pyserial zstandard
 ```
 
-编译命令与 Windows 相同（将 `python` 替换为 `/usr/local/python3.12/bin/python3.12`；`--onefile-tempdir-spec` 在 Linux 同样生效，解压目录落在可执行文件旁的 `narnat_runtime/<版本>/`），耗时约 28 分钟。产物约 35MB，仅依赖 glibc ≥ 2.35。
+编译命令与 Windows 相同（将 `python` 替换为 `/usr/local/python3.12/bin/python3.12`；`--onefile-tempdir-spec` 在 Linux 同样生效，解压目录创建于启动时的当前目录下 `narnat_runtime/<版本>/`——在可执行文件所在目录启动即为文件旁），耗时约 28 分钟。产物约 35MB，仅依赖 glibc ≥ 2.35。
 
 > 依赖须全部装齐（尤其 `pyserial`）：Serial 工具在模块顶层 `import serial`，构建环境缺 pyserial 时 Nuitka 不报错、静默跳过该模块，产物启动即崩 `No module named 'serial'`。
 
@@ -184,6 +184,8 @@ make -j$(nproc) && sudo make install
 | `-l, --tool-log` | headless 模式：显示详细工具调度日志（默认仅输出 AI 最终答复） |
 
 headless（`-p`）行为：注入任务后执行，**不带 `-g` 为单轮执行**（AI 一口气干到停手即退出，不注入 GoalComplete、无完成验证）；**带 `-g N` 开启目标模式**：自动续跑 + AI 调用 GoalComplete 提交完成清单（经独立验证器复核）或达预算上限收尾 → 退出。不读用户输入、不保存会话、不查余额、不显示统计栏，适合脚本化与父代理调度（如派发子代理任务）。输出为纯文本（全局去色，表格/列表结构保留），末行输出哨兵 `[NN_DONE] reason=… rounds=…` 供程序判定结束与结束原因（reason：`done` / `goal_complete` / `goal_honest` / `goal_forced` / `goal_suspect` / `round_limit` / `aborted` / `round_failed` / `compress_failed` / `unknown`）。
+
+headless 退出码对照：`0`=正常收尾（`done` / `goal_*` / `round_limit` 等）；`1`=参数错误（如空任务、负轮数）或启动异常；`2`=任务级失败（`round_failed` / `aborted` / `compress_failed` / `unknown`）或参数解析错误（argparse）。注意 `round_limit`（任务未完成）退出码为 `0`——判定结束与结果以末行哨兵为准，退出码仅作辅助。进程被外部强制终止（如 `taskkill`）时退出码同样为 `1`，且可能没有任何输出与哨兵行——父代理应将"自己发起的终止"单独记账（超时兜底建议 `taskkill /F /T`，避免孙进程残留）。已开启「费用日志.启用」时，headless 的每次 API 调用照常记账（写入 `.narnat/data/cost_log.csv`）。
 
 ## 界面预览
 
@@ -329,7 +331,7 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
     "项目技能目录": []                          // 可选，缺省=自动扫描工作目录下所有 skills 目录；[] = 关闭；写目录列表则仅用指定目录
   },
 
-  // ── 文件操作忽略目录（Glob/Grep/Read 跳过；键缺失或为空 = 不忽略任何目录）──
+  // ── 文件操作忽略目录（Glob/Grep 跳过；键缺失或为空 = 不忽略任何目录）──
   "忽略目录": [
     ".git", "__pycache__", "node_modules", ".svn", ".hg",
     "venv", ".venv", ".pytest_cache", ".mypy_cache", ".ruff_cache",
@@ -350,7 +352,7 @@ thinking 参数按 `(协议, 模型前缀)` 由内置映射表自动翻译为对
 
 ### narnat.md
 
-`config/narnat.md` 的 Markdown 内容会作为自定义系统指令，追加到系统 prompt 末尾。首次运行生成空文件，直接编辑即可。
+`config/narnat.md` 的 Markdown 内容会作为自定义系统指令，追加到系统 prompt 末尾。首次运行生成空文件，直接编辑即可。可用 `<!-- subagent:hide --> … <!-- /subagent:hide -->` 包裹仅主会话可见的指令：headless（`-p` 子代理）运行时该区块整块剥离（子代理继承其余全部内容、唯独不感知被包裹的调度说明），交互模式不受影响。
 
 ### 技能
 
@@ -448,7 +450,7 @@ narnat_agent/
 | Edit | 字符串替换编辑，自动保持编码与换行符 |
 | Write | 创建新文件或全量覆盖 |
 | Shell | 本地命令行执行（平台自适应：Windows cmd / Linux·macOS bash，支持超时/输出上限/后台任务） |
-| Terminal | 多终端持久 SSH（最多 5 个），支持交互输入、sudo 密码回填、设备间文件传输 |
+| Terminal | 多终端持久 SSH（最多 5 个），支持远程命令执行、设备间文件传输 |
 | Serial | 多终端持久串口（最多 5 个），扫描/连接/交互 |
 | MCP | MCP 服务器管理：按需连接外部 MCP 服务（connect 连接 / disconnect 断开，详见「MCP 服务器」） |
 | WebSearch | 联网搜索（任意 MCP 搜索服务器；工具名/参数名在 `联网搜索` 段按服务器配置） |
@@ -457,22 +459,22 @@ narnat_agent/
 | mcp__… | MCP 服务器工具（由 `MCP` 工具 connect 时动态注册，命名 `mcp__<服务器名>__<工具名>`，详见「MCP 服务器」） |
 
 - 可开关的插件工具为 Terminal / WebSearch / Serial / MCP：在 `"工具"."插件"` 配置或 `/plugin` 命令中开关，关闭后该工具定义不再随请求发给 AI（省 token、聚焦任务），不做执行层拦截——已建立的 SSH / 串口 / MCP 连接保持存活，重新开启后立即可用；常驻工具（Read / Glob / Grep / Edit / Write / Shell / TodoWrite）不可关闭
-- 工具输出受「输出上限KB」全局硬截断（保留首尾），超时受「超时上限秒」约束；Read 例外——按行截断并提示续读 offset，保证行号连续；Shell 输出被截断时完整输出自动落盘（进程专属临时目录），截断提示给出文件路径，可用 Read / Grep 读取全文
-- Shell 后台任务：`background=true` 提交后立即返回 `bgN` 编号，结果落盘到会话专属临时目录（可 Read/Grep 读取）；`bg="status"/"wait"/"cancel"` 管理，并发上限 8 个，会话结束自动清理
+- 工具输出受「输出上限KB」全局硬截断（保留首尾），超时受「超时上限秒」约束；Read 例外——按行截断并提示续读 offset，保证行号连续；Shell 输出被截断时完整输出自动落盘（进程专属临时目录），截断提示给出文件路径，可用 Read / Grep 读取全文（落盘文件首行为框架标签行，读取时可忽略）
+- Shell 后台任务：`background=true` 提交后立即返回 `bgN` 编号，结果落盘到会话专属临时目录（可 Read/Grep 读取；结果文件在会话（进程）存活期间可读，进程退出后目录被自动清理，父代理需在退出前读取；单个后台日志 50MB 封顶，超出部分滚动保留最近 1MB 至 `bgN.log.tail`——错误信息通常在尾部；槽位复用时旧结果归档为 `bgN.log.<序号>.prev`）；`bg="status"/"wait"/"cancel"` 管理，并发上限 8 个，会话结束自动清理
 - 参数错误返回对 AI 友好的中文提示（未知参数 / 缺失参数直接列出有效参数名）
 - 编辑类工具返回着色 diff，终端同步展示改动
 - 工具执行失败/退出码经进程级随机标签协议传递，命令自身输出无法伪造失败状态（UI 判定 100% 准确）
 
 ### 交互命令
 
-`#` 提示符下输入 `/` 开头命令，支持 Tab 补全；命令可用性随会话状态变化：
+`#` 提示符下输入 `/` 开头命令，支持 Tab 补全；命令可用性随会话状态变化。不在命令表中的 `/` 开头输入会作为对话内容交给 AI：
 
 | 命令 | 说明 | 可用状态 |
 |------|------|----------|
-| `/save <名称>` | 保存当前会话（无名称自动命名） | 全部 |
+| `/save <名称>` | 保存当前会话（无名称自动命名） | NoSession / RootSession |
 | `/ls [--all]` | 列出会话。默认精简（今天全部 + 更早最多 3 个父会话）；`--all` 树形展开全部 | 全部 |
 | `/cd <名称>` | 进入历史会话 | 全部 |
-| `/rm <名称 \| --all>` | 删除会话（退出时生效） | 全部 |
+| `/rm <名称 \| --all>` | 删除会话（退出时生效） | NoSession（任意会话）/ RootSession（仅子会话） |
 | `/explore <名称>` | 从当前会话创建探索分支 | RootSession |
 | `/done` | 完成分支探索，AI 总结后合并回父会话 | ChildSession |
 | `/skill <名称 \| 目录/文件.md>` | 加载技能文件（系统技能或项目技能） | 全部 |
@@ -506,9 +508,9 @@ NoSession ──/save──▶ RootSession ──/explore──▶ ChildSession
 
 ### 目标模式
 
-`/goal on` 开启后，AI 完成任务时须调用 GoalComplete 提交**结构化完成清单**（逐条列出 任务要求 → 可检查证据 → 状态）；若一轮对话结束仍未声明完成，则自动以「续跑提示」（含完成审计要求）发起下一轮。续跑与验证打回共用**单一预算**（`/goal on N` 临时覆盖 > `智能体.目标模式最大轮数` 默认 10）：每续跑一轮消耗 1，每发生一次验证打回额外消耗 1；预算耗尽后注入收尾指令，由 AI 总结当前进度并标注未通过质检后结束。普通模式下 GoalComplete 不暴露给 AI。
+`/goal on` 开启后，AI 完成任务时须调用 GoalComplete 提交**结构化完成清单**（逐条列出 任务要求 → 可检查证据 → 状态）；若一轮对话结束仍未声明完成，则自动以「续跑提示」（含完成审计要求）发起下一轮。续跑与验证打回共用**单一预算**（`/goal on N` 临时覆盖 > `智能体.目标模式最大轮数` 默认 10）：每续跑一轮消耗 1，每发生一次验证打回额外消耗 1；预算耗尽后注入收尾指令，由 AI 总结当前进度与未完成原因后结束。普通模式下 GoalComplete 不暴露给 AI。
 
-AI 自报完成不可信——声明完成后由**独立验证器**复核：用全新会话（不带对话历史）+ 只读工具（Read/Glob/Grep）实地核实清单证据（打开文件、搜索内容），输出三态裁决：
+AI 自报完成不可信——声明完成后由**独立验证器**复核：用全新会话（不带对话历史）+ 只读工具（Read/Glob/Grep）与仅限查看语义的 Shell 抽查（拒绝删除/重定向/后台等写操作）实地核实清单证据（打开文件、搜索内容），输出三态裁决：
 
 - **通过**：全部要求都有直接证据支撑 → 正常结案（不占预算）；
 - **未通过**：存在可修复缺口 → 注入返工提示词打回继续工作（每次打回消耗 1 点预算）；打回将超出剩余预算时直接强制放行并标注"未通过质检"；

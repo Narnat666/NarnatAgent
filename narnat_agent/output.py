@@ -200,7 +200,16 @@ def _ansi_color(code: str, r: int, g: int, b: int) -> str:
     return best[0]
 
 
+def _is_valid_hex(s: str) -> bool:
+    """6 位 #RRGGBB 格式校验（配置容错用：非法色值跳过，不使启动崩溃）"""
+    h = s.lstrip("#")
+    return len(h) == 6 and all(c in "0123456789abcdefABCDEF" for c in h)
+
+
 def _hex_to_ansi(hex_str: str, bg: bool = False) -> str:
+    if not _is_valid_hex(hex_str):
+        # 非法色值（如 "#GG0000"、3 位缩写）：返回无色，避免配置手误导致 apply_style 崩溃
+        return ""
     h = hex_str.lstrip("#")
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return _ansi_color("48" if bg else "38", r, g, b)
@@ -401,11 +410,18 @@ def apply_style(ui_config: dict) -> None:
     """加载 narnat.json "界面" 分组全部颜色配置。
 
     传入的 dict 即 UIConfig.raw，结构见 config/loader.py。
+    段/段内值为 null、数字、数组等非法形态时跳过并保留默认（同非法 hex 的
+    容错风格），确保对任意合法 JSON 值都不抛异常（配置手误不应使启动崩溃）。
     """
     global PTK_PROMPT_SYMBOL, PTK_PROMPT_TEXT, PTK_PROMPT_CUSTOM
 
+    if not isinstance(ui_config, dict):
+        ui_config = {}
+
     # 1. 基础色板（"颜色" 分区：纯调色板，只注册 hex 值。跳过 _ 开头的元数据 key）
     colors = ui_config.get("colors", {})
+    if not isinstance(colors, dict):
+        colors = {}
     # 先将所有基础色恢复默认hex，确保 apply_style({}) 能完整重置
     _DEFAULT_HEX = {n: h for n, h, _ in _BASE_DEFS}
     for name in list(_BASE_HEX):
@@ -413,6 +429,8 @@ def apply_style(ui_config: dict) -> None:
     for name, val in colors.items():
         if name.startswith("_") or not str(val).startswith("#"):
             continue
+        if not _is_valid_hex(str(val)):
+            continue  # 非法色值：保留默认色（配置手误不应导致启动崩溃）
         ansi = _hex_to_ansi(str(val), bg=_BG_LOOKUP.get(name, False))
         if name in _BASE_COLORS:
             _BASE_COLORS[name]._value = ansi
@@ -422,12 +440,14 @@ def apply_style(ui_config: dict) -> None:
 
     # 1b. "基础色" 分区：角色 → 调色板引用（如 "用户": "纯白" → C_USER = #FFFFFF）
     base_colors = ui_config.get("base_colors", {})
+    if not isinstance(base_colors, dict):
+        base_colors = {}
     for name, val in base_colors.items():
         if name.startswith("_") or str(val).startswith("#"):
             continue
         ref = str(val)
         ref_hex = str(colors.get(ref, ""))
-        if ref_hex.startswith("#"):
+        if ref_hex.startswith("#") and _is_valid_hex(ref_hex):
             ansi = _hex_to_ansi(ref_hex, bg=_BG_LOOKUP.get(name, False))
             _BASE_HEX[name] = ref_hex
         elif ref in _BASE_HEX:
@@ -445,10 +465,12 @@ def apply_style(ui_config: dict) -> None:
 
     # 1c. "代码块.背景" → C_CODE_BG（仅代码块使用，归入代码块区域）
     codeblock = ui_config.get("codeblock", {})
+    if not isinstance(codeblock, dict):
+        codeblock = {}
     if "background" in codeblock:
         ref = str(codeblock["background"])
         ref_hex = colors.get(ref, "")
-        if isinstance(ref_hex, str) and ref_hex.startswith("#"):
+        if isinstance(ref_hex, str) and ref_hex.startswith("#") and _is_valid_hex(ref_hex):
             _BASE_COLORS["code_bg"]._value = _hex_to_ansi(ref_hex, bg=True)
             _BASE_HEX["code_bg"] = ref_hex
         elif ref in _BASE_HEX:
@@ -462,15 +484,25 @@ def apply_style(ui_config: dict) -> None:
                     int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
     # 2. 派生 token（用户覆盖优先，未覆盖的用默认配方重解析以跟随基础色更新）
+    #    段内值为 null/数字/数组等非字符串时跳过，保留默认配方
     for _varname, full_key, default_recipe in _DERIVED_DEFS:
         section, short_key = full_key.split(".", 1)
-        user = ui_config.get(section, {}).get(short_key)
-        _DERIVED[full_key]._value = _parse_recipe(str(user) if user is not None else default_recipe)
+        sec = ui_config.get(section)
+        user = sec.get(short_key) if isinstance(sec, dict) else None
+        _DERIVED[full_key]._value = _parse_recipe(
+            user if isinstance(user, str) else default_recipe)
 
     # 3. prompt_toolkit 样式（解析配方 → ptk 兼容的 #hex 格式）
+    #    段内值为 null/非字符串时视为未设置，跳过并保留默认
     p = ui_config.get("prompt", {})
-    if "symbol" in p: PTK_PROMPT_SYMBOL = _resolve_ptk_style(p["symbol"])
-    if "text"   in p: PTK_PROMPT_TEXT   = _resolve_ptk_style(p["text"])
+    if not isinstance(p, dict):
+        p = {}
+    symbol_val = p.get("symbol")
+    if isinstance(symbol_val, str):
+        PTK_PROMPT_SYMBOL = _resolve_ptk_style(symbol_val)
+    text_val = p.get("text")
+    if isinstance(text_val, str):
+        PTK_PROMPT_TEXT = _resolve_ptk_style(text_val)
     else:
         # 未显式设置 prompt.text 时，默认跟随 C_USER（用户颜色），
         # 确保 "颜色.用户" 的修改能自动反映到用户输入文字颜色。
@@ -483,14 +515,22 @@ def apply_style(ui_config: dict) -> None:
             m = re.search(r"2;(\d+);(\d+);(\d+)", user_val)
             if m:
                 PTK_PROMPT_TEXT = f"#{int(m.group(1)):02x}{int(m.group(2)):02x}{int(m.group(3)):02x}"
-    if "custom" in p: PTK_PROMPT_CUSTOM = _resolve_ptk_style(p["custom"])
+    custom_val = p.get("custom")
+    if isinstance(custom_val, str):
+        PTK_PROMPT_CUSTOM = _resolve_ptk_style(custom_val)
 
-    # 4. 显示开关
+    # 4. 显示开关（值非法/null 时回落默认，不崩溃）
     DisplayState.show_cost    = bool(ui_config.get("show_cost", False))
     DisplayState.show_balance = bool(ui_config.get("show_balance", False))
-    DisplayState.max_tokens   = int(ui_config.get("max_output_tokens", 128000))
+    try:
+        DisplayState.max_tokens = int(ui_config.get("max_output_tokens", 128000))
+    except (TypeError, ValueError):
+        DisplayState.max_tokens = 128000
     DisplayState.show_ratio   = bool(ui_config.get("show_ratio", False))
-    DisplayState.context_window = int(ui_config.get("context_window", DEFAULT_CONTEXT_WINDOW))
+    try:
+        DisplayState.context_window = int(ui_config.get("context_window", DEFAULT_CONTEXT_WINDOW))
+    except (TypeError, ValueError):
+        DisplayState.context_window = DEFAULT_CONTEXT_WINDOW
 
 
 # ═══════════════════════════════════════════════════════════════

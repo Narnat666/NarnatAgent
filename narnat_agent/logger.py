@@ -19,12 +19,12 @@ class AgentLogger:
     - 自动脱敏
     """
 
-    # 敏感信息脱敏：匹配 sk-xxx / api_key=xxx / key=xxx / password=xxx 等
+    # 敏感信息脱敏：匹配 sk-xxx / as_sk_xxx / api_key=xxx / key=xxx / password=xxx 等
     # （password/passwd/pwd/secret/token 键名形态统一按"键名+分隔符+值"脱敏；_replace 分组编号不变）
     RE_SECRET = re.compile(
         r'((?:api_key|password|passwd|pwd|secret|token)["\s:=]+["\s]*)'
         r'([^\s",\}]{4,})([^\s",\}]*?)'
-        r'|((?:sk-|key-|token-)([a-zA-Z0-9]{4})[a-zA-Z0-9]*)',
+        r'|((?:as_sk_|sk[-_]|key-|token-)([a-zA-Z0-9]{4})[a-zA-Z0-9]*)',
         re.IGNORECASE,
     )
 
@@ -33,11 +33,11 @@ class AgentLogger:
         """脱敏：保留前4位，其余用***替代"""
         def _replace(m):
             full = m.group(0)
-            # sk-/key-/token- 前缀形态：保留前缀+值前4位（如 "sk-13e4***"）
+            # as_sk_/sk-/key-/token- 前缀形态：保留前缀+值前4位（如 "sk-13e4***"）
             if m.group(5):
                 head = m.group(4)
                 keep = 4
-                for p in ("token-", "key-", "sk-"):
+                for p in ("as_sk_", "token-", "key-", "sk-", "sk_"):
                     if head.lower().startswith(p):
                         keep = len(p) + 4
                         break
@@ -63,8 +63,17 @@ class AgentLogger:
 
         os.makedirs(self._logs_dir, exist_ok=True)
 
-        filename = time.strftime("%Y-%m-%d_%H-%M-%S") + ".log"
-        filepath = os.path.join(self._logs_dir, filename)
+        # 用 O_EXCL 原子占位探测占用：检查-创建两步存在竞态，同刻启动的多实例
+        # 会都通过 os.path.exists 判断而撞名（混写同一文件）
+        base = time.strftime("%Y-%m-%d_%H-%M-%S")
+        filepath = os.path.join(self._logs_dir, base + ".log")
+        try:
+            fd = os.open(filepath, os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                         | getattr(os, "O_BINARY", 0))
+            os.close(fd)   # 原子占位成功（空文件留给 FileHandler 追加写）
+        except FileExistsError:
+            # 同刻启动的多实例：文件名追加 pid 区分
+            filepath = os.path.join(self._logs_dir, f"{base}_{os.getpid()}.log")
 
         # 关闭旧handler
         if self._handler:

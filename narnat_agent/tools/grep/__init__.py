@@ -16,7 +16,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ..param_utils import to_bool
-from ..glob import _expand_braces, _unescape_braces
+from ..glob import _expand_braces, _unescape_braces, _ignored_dirs_hint
 
 class GrepLimits:
     """Grep 工具边界参数（原模块级常量收敛为类成员）"""
@@ -160,13 +160,22 @@ def execute(
         head_limit = aliases["head_limit"]
 
     # AI可能传字符串类型的数值参数，统一转int（A/B/C/head_limit）
+    # OverflowError：JSON 里的 1e999 → float('inf')，int(inf) 抛 OverflowError
     try:
         A = int(A) if A is not None else 0
         B = int(B) if B is not None else 0
         C = int(C) if C is not None else 0
         head_limit = int(head_limit) if head_limit is not None else None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "[错误: A/B/C/head_limit需为整数]"
+
+    # pattern=None 防御：必填参数传 null 时 len(None) 抛 TypeError 逃出工具层；
+    # 空串 "" 是合法 pattern（命中所有行），只拒 null（文案与 Glob 对齐）
+    if pattern is None:
+        return "[错误: pattern不能为空]"
+    # 非字符串类型（int/bool/list 等）同族防御：len()/re.compile() 会抛 TypeError 逃逸
+    if not isinstance(pattern, str):
+        return "[错误: pattern需为字符串]"
 
     # ── ReDoS 防护 ──
     if len(pattern) > GrepLimits.MAX_PATTERN_LENGTH:
@@ -192,7 +201,10 @@ def execute(
     if not paths or all(p is None for p in paths):
         paths = [""]
 
-    ignore_dirs = set(_tool_context.ignore_dirs) if _tool_context and _tool_context.ignore_dirs else set()
+    # str() 兜底：绕过 loader 直接构造 ToolContext 时元素可能是数字/对象，
+    # set() 对不可哈希元素抛 TypeError（配置侧已在 loader 过滤，此处仅防御）
+    ignore_dirs = ({str(d) for d in _tool_context.ignore_dirs}
+                   if _tool_context and _tool_context.ignore_dirs else set())
 
     # ── 收集搜索目标 (target, label, is_file)：去重、缺失警告但不中断 ──
     warnings = []
@@ -228,11 +240,14 @@ def execute(
         return msg
 
     # ── 全局预算上下文（跨所有 path 项共享）──
-    ctx = {"expanded": 0, "limit_hit": False, "seen_files": set()}
+    ctx = {"expanded": 0, "limit_hit": False, "seen_files": set(),
+           "skipped": _new_skip_stats()}
     results = []
     for target, label, is_file in entries:
         _search_target(target, label, is_file, regex, fast_searcher,
                        glob, A, B, head_limit, ignore_dirs, results, ctx)
+
+    skip_line = _skip_summary_line(ctx)
 
     # ── 无匹配：带搜索范围帮 AI 定位（Shell cd 会改变 cwd）──
     if not results:
@@ -246,7 +261,13 @@ def execute(
             no_match = f"[无匹配（搜索范围: {names}）]"
         if warnings:
             head = "、".join(warnings[:5]) + ("等" if len(warnings) > 5 else "")
-            return f"路径不存在，已跳过: {head}\n{no_match}"
+            no_match = f"路径不存在，已跳过: {head}\n{no_match}"
+        if skip_line:
+            no_match += f"\n{skip_line}"
+        # 忽略目录提示：无匹配时说明范围被配置收缩（有匹配时不加，避免噪音）
+        ignored_hint = _ignored_dirs_hint(ignore_dirs)
+        if ignored_hint:
+            no_match += f"\n{ignored_hint}"
         return no_match
 
     output = "\n".join(results)
@@ -255,6 +276,8 @@ def execute(
     if warnings:
         head = "、".join(warnings[:5]) + ("等" if len(warnings) > 5 else "")
         output = f"路径不存在，已跳过: {head}\n{output}"
+    if skip_line:
+        output += f"\n{skip_line}"
     return output
 
 
@@ -308,33 +331,35 @@ def _check_binary_first_chunk(first_chunk: bytes) -> bool:
 # ═══════════════════════════════════════════════════════════════
 
 def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
-    """全扫单个文件，返回 (count, blocks, in_file_trunc) 或 None（跳过）。
+    """全扫单个文件，返回 (count, blocks, in_file_trunc, aborted)；跳过时返回哨兵字符串
+    （"skip_oversize"/"skip_binary"/"skip_unreadable"，供上层汇总提示）。
 
     - count: 该文件全部匹配数（准确计数，供表头显示）
     - blocks: [ [before_lines, match_line, after_lines] ]，行元素为 (line_num, text)
     - in_file_trunc: 该文件还有未收集进 blocks 的匹配（collect_budget 受限）
+    - aborted: 扫描到超长行（> MAX_LINE_LENGTH）提前结束，剩余内容未搜索
     - collect_budget: 最多收集多少个匹配块（None=无限）；超过预算的匹配仅计数
 
-    二进制/超100MB/超长行异常的文件提前结束（与旧版语义一致）。
+    二进制/超100MB/不可读的文件跳过（与旧版语义一致）。
     """
     # ── 单次 I/O：rb 打开，检查二进制，文件大小 ──
     try:
         raw_f = open(file_path, "rb")
     except (PermissionError, OSError):
-        return None
+        return "skip_unreadable"
 
     try:
         raw_f.seek(0, 2)  # SEEK_END
         if raw_f.tell() > GrepLimits.MAX_FILE_SIZE:
-            return None
+            return "skip_oversize"
         raw_f.seek(0)
 
         first_chunk = raw_f.read(GrepLimits.BUFFER_SIZE)
         if _check_binary_first_chunk(first_chunk):
-            return None
+            return "skip_binary"
         encoding = _detect_text_encoding(first_chunk)
     except (PermissionError, OSError):
-        return None
+        return "skip_unreadable"
     finally:
         raw_f.close()
 
@@ -343,7 +368,7 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
     try:
         f = open(file_path, "r", encoding=encoding, errors="replace", newline="")
     except (PermissionError, OSError):
-        return None
+        return "skip_unreadable"
 
     count = 0
     blocks = []
@@ -368,7 +393,7 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
             lines = data.split("\n")
             leftover = lines.pop()
 
-            # ── 超长行防护：视为异常文件，提前结束 ──
+            # ── 超长行防护：视为异常文件，提前结束（aborted 上报给调用方汇总提示）──
             if len(leftover) > GrepLimits.MAX_LINE_LENGTH:
                 aborted = True
                 break
@@ -436,7 +461,43 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
     finally:
         f.close()
 
-    return count, blocks, count > len(blocks)
+    return count, blocks, count > len(blocks), aborted
+
+
+# ═══════════════════════════════════════════════════════════════
+# 跳过文件汇总（超100MB/二进制/不可读/超长行中止 → 提示而非静默）
+# ═══════════════════════════════════════════════════════════════
+
+_SKIP_KINDS = {"skip_oversize": "oversize",
+               "skip_binary": "binary",
+               "skip_unreadable": "unreadable",
+               "skip_longline": "longline"}
+_SKIP_MAX_SAMPLES = 3
+
+
+def _new_skip_stats() -> dict:
+    """跳过统计容器（跨 path 项共享，挂在 ctx 上）。"""
+    return {"oversize": 0, "binary": 0, "unreadable": 0, "longline": 0, "paths": []}
+
+
+def _record_skip(ctx, sentinel: str, rel: str):
+    """记录一个被跳过的文件（分类计数 + 最多 3 个示例路径）。"""
+    stats = ctx["skipped"]
+    stats[_SKIP_KINDS[sentinel]] += 1
+    if len(stats["paths"]) < _SKIP_MAX_SAMPLES:
+        stats["paths"].append(rel)
+
+
+def _skip_summary_line(ctx) -> str:
+    """跳过提示行；无跳过返回 ""。"""
+    stats = ctx["skipped"]
+    total = (stats["oversize"] + stats["binary"] + stats["unreadable"]
+             + stats["longline"])
+    if total <= 0:
+        return ""
+    return (f"[已跳过 {total} 个文件: 超100MB({stats['oversize']}) / "
+            f"二进制({stats['binary']}) / 不可读({stats['unreadable']}) / "
+            f"超长行中止({stats['longline']})（如 {'、'.join(stats['paths'])}）]")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -489,6 +550,20 @@ def _emit_file(label, count, blocks, in_file_trunc, head_limit, results, ctx):
 # 目标搜索 — 文件/目录统一入口
 # ═══════════════════════════════════════════════════════════════
 
+def _is_nt_reparse_dir(path: str) -> bool:
+    """路径是否 Windows 重解析点目录（junction 等）。
+
+    os.walk(followlinks=False) 只挡符号链接，junction 的 is_symlink() 为
+    False 会被递归进入（自反 junction 死循环），需查 st_reparse_tag。
+    非 Windows 无此属性，getattr 兜底 0 → 不跳过。
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return bool(getattr(st, "st_reparse_tag", 0))
+
+
 def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
                    A, B, head_limit, ignore_dirs, results, ctx):
     """搜索一个目标（文件或目录），结果按预算追加到 results。
@@ -500,7 +575,9 @@ def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
     else:
         file_items = []
         for dirpath, dirnames, filenames in os.walk(target):
-            dirnames[:] = [d for d in dirnames if d not in ignore_dirs]
+            dirnames[:] = [d for d in dirnames
+                           if d not in ignore_dirs
+                           and not _is_nt_reparse_dir(os.path.join(dirpath, d))]
             for fname in filenames:
                 full = os.path.join(dirpath, fname)
                 rel = os.path.relpath(full, target)
@@ -539,7 +616,12 @@ def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
             item = collected.get(rel)
             if item is None:
                 continue
-            count, blocks, in_file_trunc = item
+            if isinstance(item, str):
+                _record_skip(ctx, item, rel)
+                continue
+            count, blocks, in_file_trunc, aborted = item
+            if aborted:
+                _record_skip(ctx, "skip_longline", rel)
             _emit_file(rel, count, blocks, in_file_trunc, head_limit, results, ctx)
     else:
         for full, rel in file_items:
@@ -551,7 +633,12 @@ def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
                               _remaining_budget(head_limit, ctx))
             if item is None:
                 continue
-            count, blocks, in_file_trunc = item
+            if isinstance(item, str):
+                _record_skip(ctx, item, rel)
+                continue
+            count, blocks, in_file_trunc, aborted = item
+            if aborted:
+                _record_skip(ctx, "skip_longline", rel)
             _emit_file(rel, count, blocks, in_file_trunc, head_limit, results, ctx)
 
 

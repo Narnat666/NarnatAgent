@@ -184,7 +184,7 @@ def execute(
         timeout = int(timeout) if timeout is not None else None
         session_id = int(session_id) if session_id is not None else -1
         max_output_chars = int(max_output_chars) if max_output_chars is not None else 8000
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return error_line("port/timeout/session_id/max_output_chars需为整数")
 
     if action == "connect":

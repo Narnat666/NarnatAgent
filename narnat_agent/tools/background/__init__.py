@@ -686,7 +686,7 @@ def bg_execute(command, timeout, background, bg, task_id, tool_context) -> str:
         t = timeout if timeout else 120
         try:
             t = int(t)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return error_line("timeout需为整数")
         if t <= 0:
             return error_line("timeout需为正整数（秒）")
@@ -698,7 +698,7 @@ def bg_execute(command, timeout, background, bg, task_id, tool_context) -> str:
             return error_line("cancel 需指定任务编号 id（如 id=3 取消 bg3）")
         try:
             tid = int(task_id)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return error_line(f"id 需为整数: {task_id}")
         return cancel_task(tid)
     return error_line(f"未知 bg 操作: {bg or ''}（可用: status / wait / cancel）")

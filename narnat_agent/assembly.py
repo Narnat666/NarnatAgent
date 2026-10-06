@@ -172,10 +172,11 @@ class Assembly:
             config, message_list, session_mgr, summarizer, stats, logger,
         )
 
-        # 16. 压缩协调器
+        # 16. 压缩协调器（自动压缩成功后修正探索分支的 /done 增量基准）
         compression_coordinator = CompressionCoordinator(
             config, msg_manager, llm, context, ui, logger,
             tool_context=tool_context,
+            session_mgr=session_mgr,
         )
 
         # 手动压缩命令（/compact）接线：session_mgr 转发给压缩协调器

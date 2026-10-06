@@ -229,12 +229,19 @@ def _find_narnat_exe_dir() -> Optional[str]:
     """获取真实 exe 所在目录（Nuitka onefile 下指打包前的原始 exe 位置）。
 
     定位顺序（由可靠到不可靠）：
-    1. Windows: GetModuleFileNameW —— 内核返回模块真实路径，
+    1. Nuitka onefile: NUITKA_ONEFILE_DIRECTORY —— payload 子进程的
+       GetModuleFileNameW 指向运行时解压目录，须用 bootstrap 提供的
+       原始 exe 目录（否则 .narnat 会落在解压目录，用户配置被忽略）。
+    2. Windows: GetModuleFileNameW —— 内核返回模块真实路径，
        不受 argv[0] 影响。PATH 裸名调用（`nn`）时 argv[0]="nn"，
        仅靠它会把项目根错定位到 onefile 临时解压目录。
-    2. argv[0] 为存在的完整路径（直接 `D:\\x\\nn.exe` 调用）。
-    3. argv[0] 为裸名：用 PATH 搜索解析（shutil.which）。
+    3. argv[0] 为存在的完整路径（直接 `D:\\x\\nn.exe` 调用）。
+    4. argv[0] 为裸名：用 PATH 搜索解析（shutil.which）。
     """
+    env_dir = os.environ.get("NUITKA_ONEFILE_DIRECTORY")
+    if env_dir and os.path.isdir(env_dir):
+        return env_dir
+
     if sys.platform == "win32":
         try:
             import ctypes
@@ -452,20 +459,29 @@ def _parse_pricing(data: dict) -> Dict[str, Dict[str, float]]:
 
 
 def _load_json(config_dir: str) -> dict:
-    """读取 narnat.json，返回原始数据字典。解析失败发出警告并按默认配置继续"""
+    """读取 narnat.json，返回原始数据字典。解析失败或顶层非对象时警告并按默认配置继续"""
     path = os.path.join(config_dir, NARNAT_JSON)
     if not os.path.isfile(path):
         return {}
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except json.JSONDecodeError as e:
+            data = json.load(f)
+    except (json.JSONDecodeError, RecursionError) as e:
+        # RecursionError：超深嵌套（约1000层起）会在解析期抛递归异常，
+        # 按"坏 JSON 自愈"同类处理（警告 + 默认配置）
         _warn(f"narnat.json 解析失败（{e}），已按默认配置启动；"
               f"请检查 JSON 格式，或删除该文件重新生成（文件: {path}）")
         return {}
     except OSError as e:
         _warn(f"narnat.json 读取失败（{e}），已按默认配置启动（文件: {path}）")
         return {}
+    # 顶层类型防御：[]/"abc"/123/null 等非对象值会让下游 data.get() 启动崩溃，
+    # 且报错不指向配置文件——此处按"坏 JSON 自愈"同类处理（警告 + 默认配置）
+    if not isinstance(data, dict):
+        _warn(f"narnat.json 顶层应为对象（当前为 {type(data).__name__}），已按默认配置启动；"
+              f"请检查文件内容，或删除该文件重新生成（文件: {path}）")
+        return {}
+    return data
 
 
 # 顶层段类型规范：值必须为对象的段（非对象时警告并回落默认，防止启动崩溃）
@@ -479,9 +495,18 @@ def _sanitize_sections(data: dict) -> None:
         if name in data and not isinstance(data[name], dict):
             _warn(f"「{name}」段格式错误（应为对象），已按默认处理")
             data[name] = {}
-    if "忽略目录" in data and not isinstance(data["忽略目录"], list):
-        _warn("「忽略目录」格式错误（应为数组），已按默认处理")
-        data["忽略目录"] = []
+    if "忽略目录" in data:
+        if not isinstance(data["忽略目录"], list):
+            _warn("「忽略目录」格式错误（应为数组），已按默认处理")
+            data["忽略目录"] = []
+        else:
+            # 元素类型防御：数字/对象/null 元素会让 Glob/Grep 的 set() 与排序比较
+            # 抛 TypeError，且在真实 agent 中归因误导为"工具参数错误"（AI 参数无误，
+            # 问题在配置）——入口处过滤非字符串项，保证工具侧只收到字符串集合
+            cleaned = [v for v in data["忽略目录"] if isinstance(v, str)]
+            if len(cleaned) != len(data["忽略目录"]):
+                _warn("「忽略目录」含非字符串项，已忽略")
+                data["忽略目录"] = cleaned
 
 
 
@@ -703,15 +728,16 @@ def _build_cost_log_config(data: dict, data_dir: str) -> CostLogConfig:
         cfg = {}
     enabled = bool(cfg.get("启用", False))
     path = cfg.get("输出文件") or os.path.join(data_dir, "cost_log.csv")
-    # 最大容量MB：缺失/非法 → 50MB；显式 ≤0 → 不限制（不轮转）
+    # 最大容量MB：缺失/非法 → 50MB；显式 ≤0 → 不限制（不轮转）；小数按 MB 精度保留
     max_mb = cfg.get("最大容量MB")
     try:
-        max_mb = int(max_mb)
+        max_mb = float(max_mb)
     except (TypeError, ValueError):
-        max_mb = 50
-    if max_mb < 0:
-        max_mb = 0
-    max_bytes = max_mb * 1024 * 1024 if max_mb > 0 else 0
+        max_mb = 50.0
+    if max_mb <= 0:
+        max_bytes = 0
+    else:
+        max_bytes = max(1, int(max_mb * 1024 * 1024))
     return CostLogConfig(enabled=enabled, path=path, max_bytes=max_bytes)
 
 

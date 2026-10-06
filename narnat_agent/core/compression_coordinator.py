@@ -36,7 +36,8 @@ class CompressionCoordinator:
     def __init__(self, config: Config, msg_manager: MessageManager,
                  llm: LLMClient, context: ContextManager,
                  ui: UIInterface,
-                 logger: AgentLogger, tool_context=None):
+                 logger: AgentLogger, tool_context=None,
+                 session_mgr=None):
         self._config = config
         self._msg_manager = msg_manager
         self._llm = llm
@@ -44,6 +45,9 @@ class CompressionCoordinator:
         self._ui = ui
         self._logger = logger
         self._tool_context = tool_context
+        # 自动压缩成功后修正探索分支的 /done 增量基准（手动 /compact 由
+        # session_callbacks 负责，见 compress_manual）
+        self._session_mgr = session_mgr
 
     def _append_plan_reminder(self):
         """压缩后重注入当前计划：TodoWrite 调用历史被压缩吞掉后模型会忘记
@@ -59,7 +63,7 @@ class CompressionCoordinator:
         for i, t in enumerate(unfinished, 1):
             label = "进行中" if t.get("status") == "in_progress" else "待处理"
             lines.append(f"{i}. [{label}] {t.get('content', '')}")
-        self._msg_manager.append_user("\n".join(lines))
+        self._msg_manager.append_user_merged("\n".join(lines))
 
     def compress(self, pending_input: str) -> bool:
         """处理上下文压缩。成功=True，失败/中断=False。"""
@@ -88,6 +92,11 @@ class CompressionCoordinator:
             self._ui.end_compressing()
             self._context.reset()
             self._append_plan_reminder()
+            if self._session_mgr is not None:
+                # 自动压缩同手动 /compact：压缩把列表整体替换，探索分支的
+                # _parent_msg_count/_last_summarized_at 需重置到摘要边界，
+                # 否则 /done 静默丢增量（基类 no-op，仅 ChildSession 生效）
+                self._session_mgr.state.reset_after_compact()
         return res.ok
 
     def compress_no_input(self) -> bool:
@@ -96,6 +105,13 @@ class CompressionCoordinator:
         成功后消息以内部继续指令收尾（OpenAI 协议要求消息序列以
         user/assistant 收尾，system 兜底不可行），调用方随后重发请求。
         """
+        # 保留预算内无可压缩历史时：压缩重建 = 原历史全保留 + 摘要 + 继续指令
+        #（净增消息）、白耗一次压缩调用，且重发必然再溢出。直接拒绝，
+        # 由调用方走既有报错收尾（"请求仍超出模型上下文限制…"）。
+        if not self._msg_manager.has_compressible_history(self._config.session.retain_tokens):
+            self._logger.warning("compressor", "溢出恢复：保留预算内无可压缩历史，跳过压缩（避免净增与白耗）")
+            return False
+
         def on_interrupt():
             self._ui.end_compressing()
             self._context.reset()
@@ -119,6 +135,11 @@ class CompressionCoordinator:
             self._ui.end_compressing()
             self._context.reset()
             self._append_plan_reminder()
+            if self._session_mgr is not None:
+                # 自动压缩同手动 /compact：压缩把列表整体替换，探索分支的
+                # _parent_msg_count/_last_summarized_at 需重置到摘要边界，
+                # 否则 /done 静默丢增量（基类 no-op，仅 ChildSession 生效）
+                self._session_mgr.state.reset_after_compact()
         return res.ok
 
     def compress_manual(self) -> Tuple[str, str]:
@@ -195,6 +216,9 @@ class CompressionCoordinator:
         返回 True=执行了压缩且成功。
         """
         if not self._context.need_compress():
+            return False
+        if not self._msg_manager.has_compressible_history(self._config.session.retain_tokens):
+            self._logger.warning("compressor", "运行中占比超阈值，但保留预算内无可压缩历史，跳过本次压缩")
             return False
         self._logger.warning("compressor", "运行中占比超阈值，主动压缩历史")
         return self.compress_no_input()

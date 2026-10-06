@@ -228,7 +228,7 @@ def execute(
         session_id = int(session_id) if session_id is not None else -1
         max_output_chars = int(max_output_chars) if max_output_chars is not None else 8000
         pulse_ms = int(pulse_ms) if pulse_ms is not None else 100
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return error_line("baudrate/databits/stopbits/timeout/session_id/max_output_chars/pulse_ms需为数值")
 
     if action == "scan":

@@ -262,6 +262,19 @@ def _compile_pattern(pattern: str) -> re.Pattern[str]:
 
 # ── 目录遍历 & 匹配 ────────────────────────────────────────────
 
+def _is_nt_reparse(entry) -> bool:
+    """目录项是否 Windows 重解析点（junction 等）。
+
+    DirEntry.is_symlink() 对 junction 返回 False，防环仅靠它无效，
+    需查 st_reparse_tag 才能识别。非 Windows 无此属性，getattr 兜底 0。
+    """
+    try:
+        st = entry.stat(follow_symlinks=False)
+    except OSError:
+        return False
+    return bool(getattr(st, "st_reparse_tag", 0))
+
+
 def _collect(
     root: str,
     regexes: list[re.Pattern[str]],
@@ -300,6 +313,11 @@ def _collect(
                             is_dir = entry.is_dir()
                         except OSError:
                             continue
+
+                    # ── junction/重解析点目录：跳过（与符号链接目录同语义，防自反环无限递归）。
+                    #    仅目录形态需拦（文件形态的链接/占位文件照常处理） ──
+                    if is_dir and _is_nt_reparse(entry):
+                        continue
 
                     # ── 隐藏文件过滤（对齐 fd：pattern 以 . 开头则不过滤） ──
                     if skip_hidden_files and name.startswith("."):
@@ -399,6 +417,25 @@ def _hidden_files_hint(skip_hidden_files: bool) -> str:
     return "（注: 隐藏文件默认跳过；pattern中含以.开头的路径组件可匹配隐藏文件）"
 
 
+def _ignored_dirs_hint(ignore_dirs) -> str:
+    """无匹配时的忽略目录提示：把静默收缩的搜索范围变成可见路标。
+
+    忽略目录来自配置（Glob/Grep 默认跳过），无匹配时 AI 无从知道范围被收缩，
+    会误判"文件不存在/写入没生效"；此处对齐隐藏文件提示，附上清单与出路。
+    排序：非默认（用户自定义）条目优先，默认项补充在后；否则按字母序取前 5
+    时用户的 output 等自定义目录会被裁掉，AI 需多花试错回合。
+    """
+    if not ignore_dirs:
+        return ""
+    from ...config.defaults import DEFAULT_IGNORE_DIRS
+    defaults = set(DEFAULT_IGNORE_DIRS)
+    custom = sorted(n for n in ignore_dirs if n not in defaults)
+    builtin = sorted(n for n in ignore_dirs if n in defaults)
+    names = custom + builtin
+    head = "，".join(names[:5]) + ("等" if len(names) > 5 else "")
+    return f"（注: 已跳过忽略目录 {head}；如需搜索请显式传路径）"
+
+
 # ── 静态前缀拆分 ─────────────────────────────────────────────
 
 def _split_static_prefix(pattern: str) -> tuple:
@@ -423,6 +460,36 @@ def _split_static_prefix(pattern: str) -> tuple:
     if os.name == "nt" and len(static_dir) == 2 and static_dir[1] == ":":
         static_dir += "\\"
     return static_dir, pattern[sep + 1:]
+
+
+def _pattern_syntax_error(pattern: str) -> str:
+    """探测 glob pattern 的语法错误，返回错误描述（合法时为 ""）。
+
+    当前仅检测"未闭合的字符类"（如 "["、"a[bc"）：该形态此前被 _compile_pattern
+    静默降级为字面匹配，最终返回 [无匹配]，误导 AI 判定"文件不存在/内容没写入"。
+    转义 "\\[" 视为字面字符不参与配对；紧邻 "[" 的 "]" 可为字面量
+    （与 _compile_pattern 的解析一致）。
+    """
+    i = 0
+    n = len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if c == "[":
+            j = i + 1
+            if j < n and pattern[j] in ("!", "^"):
+                j += 1
+            if j < n and pattern[j] == "]":
+                j += 1
+            end = pattern.find("]", j)
+            if end == -1:
+                return f'未闭合的字符类 "{pattern[i:]}"'
+            i = end + 1
+            continue
+        i += 1
+    return ""
 
 
 # ── 公共接口 ────────────────────────────────────────────────────
@@ -470,9 +537,10 @@ def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=N
         return f"[错误: 目录不存在: {root}（当前目录: {os.getcwd()}）]"
 
     # AI可能传字符串类型的数值参数，统一转int（与Grep容错风格一致）
+    # OverflowError：JSON 里的 1e999 → float('inf')，int(inf) 抛 OverflowError
     try:
         max_results = int(max_results) if max_results is not None else 50
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "[错误: max_results需为正整数]"
 
     if max_results <= 0:
@@ -482,12 +550,22 @@ def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=N
     max_results = min(max_results, GlobLimits.MAX_HARD_LIMIT)
 
     # 忽略目录统一来自 narnat.json 配置（经 ToolContext 注入），工具内不再写死
+    # str() 兜底：绕过 loader 直接构造 ToolContext 时元素可能是数字/对象，
+    # set() 对不可哈希元素抛 TypeError（配置侧已在 loader 过滤，此处仅防御）
     extra = getattr(_tool_context, "ignore_dirs", None) if _tool_context is not None else None
-    ignore_dirs = set(extra) if extra else set()
+    ignore_dirs = {str(d) for d in extra} if extra else set()
 
     # 1. 展开花括号 + 去转义
     raw_patterns = _expand_braces(pattern)
     patterns = [_unescape_braces(p) for p in raw_patterns]
+
+    # 1b. 非法 pattern 明确报错（如未闭合的字符类 "["）：
+    #     静默降级为字面匹配会返回 [无匹配]，误导 AI 判定"文件不存在"
+    #     （对齐 Grep 的"非法正则"处理风格）
+    for p in patterns:
+        syntax_err = _pattern_syntax_error(p)
+        if syntax_err:
+            return f"[错误: 非法 pattern: {syntax_err}]"
 
     # 2. 隐藏文件过滤（对齐 fd：pattern 任意路径组件以 . 开头则不过滤隐藏文件）
     #    注: 不能用 p.lstrip("./")——会把 ".narnat" 开头的 . 误剥离导致判断失效
@@ -557,8 +635,8 @@ def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=N
         if missing_dirs:
             return f"[错误: 目录不存在: {missing_dirs[0]}（当前目录: {os.getcwd()}）]"
         # 带上实际搜索目录，帮 AI 一次定位（Shell cd 会改变当前目录，无匹配常因目录不对）
-        # 附隐藏文件提示：让静默的坑变成可见路标，AI 无需背规则
-        return f"[无匹配（搜索目录: {root}）]{hint}"
+        # 附隐藏文件/忽略目录提示：让静默的坑变成可见路标，AI 无需背规则
+        return f"[无匹配（搜索目录: {root}）]{hint}{_ignored_dirs_hint(ignore_dirs)}"
 
     results = sorted(merged.items(), key=lambda kv: (-kv[1], kv[0]))
     shown = [

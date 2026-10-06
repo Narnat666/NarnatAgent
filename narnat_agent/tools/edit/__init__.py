@@ -9,11 +9,16 @@
 """
 
 import os
+import shutil
+import tempfile
 import difflib
+
+from typing import Optional
 
 from ..diff_utils import colorize_diff
 from ..param_utils import to_bool
 from ..terminal import _normalize_device_for_tools, _file_tool_device_hint
+from ..write import _has_nt_ads_colon
 
 DEFINITION = {
     "type": "function",
@@ -38,7 +43,7 @@ DEFINITION = {
                     "description": "设备dev编号：默认dev0即编辑本地指定文件，设置dev1..devn则编辑指定远程设备文件",
                 },
             },
-            "required": ["file_path", "old_string"],
+            "required": ["file_path", "old_string", "new_string"],
         },
     },
 }
@@ -72,7 +77,7 @@ def _read_for_edit(file_path: str) -> tuple:
     return content, write_encoding
 
 
-def execute(file_path: str, old_string: str = "", new_string: str = "",
+def execute(file_path: str, old_string: str = "", new_string: Optional[str] = None,
             replace_all: bool = False,
             device: str = "") -> tuple:
     """
@@ -83,7 +88,7 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
     Args:
         file_path: 文件路径
         old_string: 要替换的原文（必须精确匹配）
-        new_string: 替换后的新文
+        new_string: 替换后的新文本（必填；删除匹配文本需显式传空字符串 ""）
         replace_all: 替换所有匹配（默认只替换第一个）
         device: 设备dev编号：dev0=本机（默认），dev1..devn=被控设备（需先Terminal connect）
 
@@ -92,6 +97,12 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
         - llm_result: 纯文本确认信息+diff，传给LLM
         - color_diff: 着色diff，传给终端展示
     """
+    # new_string 缺参/显式 null 防御：默认空串会把"漏传"静默变成"删除匹配文本"
+    # 且返回成功文案，造成不可回溯的数据破坏（LLM 偶发漏参/压缩后参数丢失）。
+    # 删除语义必须显式传空字符串。
+    if new_string is None:
+        return ('[错误: 缺少参数 new_string（如需清空匹配文本，请显式传入空字符串 ""）]', "")
+
     # 归一化布尔参数: LLM 偶发传 "false" 字符串，bool("false") 恒为 True
     # 会导致全量替换（与意图相反的危险行为），必须按字符串语义解析
     replace_all = to_bool(replace_all)
@@ -104,7 +115,22 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
         from ..terminal.remote import remote_edit
         return remote_edit(file_path, old_string, new_string, replace_all, device)
 
+    # 含 ':' 的路径是 NTFS 备用数据流语法（非普通文件）：原子替换必然 WinError 123，
+    # 此前只回原始系统错误、不说明原因（与 Write 的 ADS 拦截同款判据）
+    if _has_nt_ads_colon(file_path):
+        return ("[错误: 路径含非法字符 ':'（Windows 中冒号后的部分是备用数据流语法，"
+                "非普通文件路径），请使用普通文件名]", "")
+
     if not os.path.isfile(file_path):
+        # 目录路径单独给出准确文案（与 Read/Write 对齐）：报"不存在"会误导 AI
+        # 改用 Write 创建（Write 对目录同样拒绝），陷入二次错误
+        if os.path.isdir(file_path):
+            return (f"[错误: {file_path} 是目录，请使用正确的文件路径]", "")
+        # 先细分真实原因：权限不足/超长路径会被 isfile 吞成 False 误报"不存在"
+        from ..read import _isfile_miss_reason
+        miss_reason = _isfile_miss_reason(file_path)
+        if miss_reason:
+            return (miss_reason, "")
         return (f"[错误: 文件不存在: {file_path}，如需创建请用Write工具]", "")
 
     try:
@@ -113,11 +139,11 @@ def execute(file_path: str, old_string: str = "", new_string: str = "",
         return (f"[错误: 权限不足: {file_path}]", "")
     except OSError as e:
         return (f"[错误: 读取失败: {e}]", "")
-    except ValueError:
-        return ("[错误: 检测到二进制文件（含NUL字节），Edit仅支持文本文件。请使用Shell工具处理]", "")
     except UnicodeDecodeError:
         return ((f"[错误: 文件非UTF-8/GBK编码，为防止内容损坏已拒绝编辑: {file_path}。"
                  f"请用Shell工具处理（如转码为UTF-8后再编辑）]"), "")
+    except ValueError:
+        return ("[错误: 检测到二进制文件（含NUL字节），Edit仅支持文本文件。请使用Shell工具处理]", "")
 
     return _edit_by_string(content, old_string, new_string, replace_all, file_path,
                            write_encoding)
@@ -167,13 +193,36 @@ def _write_and_diff(old_content: str, new_content: str, file_path: str,
         - color_diff: 着色diff，传给终端展示；空串表示无差异
     """
     try:
-        with open(file_path, "w", encoding=write_encoding, newline='') as f:
-            f.write(new_content)
+        data = new_content.encode(write_encoding)
+    except UnicodeEncodeError:
+        # 新内容含文件编码无法表示的字符（如 GBK 文件中写入 emoji）：
+        # 先编码后写盘，编码失败时文件未被触碰
+        return (f"[错误: 新内容包含文件编码({write_encoding})无法表示的字符，写入失败: {file_path}]", "")
+    try:
+        # 临时文件 + 原子替换：任何写入中途的异常都不破坏原文件
+        directory = os.path.dirname(os.path.abspath(file_path)) or "."
+        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".narnat_edit_", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            # 保持原文件权限：mkstemp 在 POSIX 下创建 0600 文件，直接替换
+            # 会把受限权限带给原文件（如编辑可执行脚本后丢失 +x）。
+            # Windows 不做：只读属性复制到 tmp 会让 replace 与清理双双失败，
+            # 在"目标只读"场景残留只读 tmp（且 replace 失败语义与原 open("w") 一致）
+            if os.name != "nt":
+                try:
+                    shutil.copymode(file_path, tmp_path)
+                except OSError:
+                    pass  # 目标不存在或权限查询失败：按临时文件默认权限替换
+            os.replace(tmp_path, file_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
     except OSError as e:
         return (f"[错误: 写入失败: {e}]", "")
-    except UnicodeEncodeError:
-        # 新内容含文件编码无法表示的字符（如 GBK 文件中写入 emoji）
-        return (f"[错误: 新内容包含文件编码({write_encoding})无法表示的字符，写入失败: {file_path}]", "")
 
     if old_content == new_content:
         # 空编辑提醒：文件已照常写盘，但明确告知AI本次无实质修改

@@ -59,8 +59,12 @@ class AutoSaveManager:
         if not name:
             return
         from ..config.session_store import save_session
-        save_session(self._config.paths.narnat_dir, name,
-                     self._message_list.view().to_list())
+        err = save_session(self._config.paths.narnat_dir, name,
+                           self._message_list.view().to_list())
+        if err:
+            self._logger.warning("core.auto_save", f"自动保存失败: {err}")
+            _stdout_write(f"  {D}⚠ 自动保存失败: {err}{R}\n")
+            return   # 不设 pending：不切换状态、不误报已保存
         self._mgr._pending_auto_save_name = name
 
     def wait(self):

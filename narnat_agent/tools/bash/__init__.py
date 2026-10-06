@@ -100,7 +100,11 @@ def _scan_code_suffix(tail: str):
                 return tail[: j + 1], None  # 纯 code（仅空白/2>&1 尾随）
             if tail[k] in "|>":
                 return tail[: j + 1], tail[k:]
-            return tail, None  # 引号后有其他token（追加参数等）→ 回退
+            # 引号后有其他 token（追加参数/& 后续命令等）→ 回退。
+            # 返回空串后缀（而非 None）与"纯 code"出口区分：调用方的
+            # endswith('"') 兜底在追加 token 恰以引号结尾（如 `... & echo "x"`）
+            # 时会误放行，把整段当 -c 载荷直执行、后续命令被静默吞掉。
+            return tail, ""
         j += 1
     return tail, None
 
@@ -265,6 +269,38 @@ def _find_executable(*names: str) -> Optional[str]:
     return None
 
 
+def _decode_line(line: bytes) -> str:
+    """单行解码：utf-8 严格 → gbk 严格 → utf-8 replace 兜底。"""
+    if not line:
+        return ""
+    try:
+        return line.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return line.decode("gbk")
+    except UnicodeDecodeError:
+        pass
+    return line.decode("utf-8", errors="replace")
+
+
+def _decode_mixed_lines(raw: bytes) -> str:
+    """逐行解码混合编码流（行分隔保留原样）。
+
+    整段严格解码只适用于"单一编码"输出；同一 stdout 里 GBK 段（cmd 内建命令）
+    与 UTF-8 段（python 等）混排时两级严格解码必然全失败，replace 兜底会把
+    GBK 段整段变成乱码。此处按行各自判定编码，两段都能还原。
+    性能：线性扫描（按 \\n 切分 + 每行两次严格解码尝试），仅在整段解码已失败
+    时才走到这里，常规单编码输出不受影响。
+    """
+    out = []
+    for i, line in enumerate(raw.split(b"\n")):
+        if i:
+            out.append("\n")
+        out.append(_decode_line(line))
+    return "".join(out)
+
+
 def _decode_output(raw: bytes) -> str:
     """安全解码子进程输出。Windows下回退GBK，Unix下仅UTF-8。"""
     if not raw:
@@ -278,6 +314,9 @@ def _decode_output(raw: bytes) -> str:
             return raw.decode("gbk")
         except UnicodeDecodeError:
             pass
+        # GBK 与 UTF-8 段混排（如 `echo 中文 & python -c "print('中文')"`）：
+        # 整段两级严格解码全失败 → 逐行判定，避免 GBK 段被 replace 打烂
+        return _decode_mixed_lines(raw)
     return raw.decode("utf-8", errors="replace")
 
 
@@ -467,12 +506,13 @@ def execute(
     """
     # 函数内多分支读写该标志（BashRuntime.interrupted）
     # AI可能传字符串类型的数值参数，统一转int（与Grep/Read容错风格一致）
+    # OverflowError：JSON 里的 1e999 → float('inf')，int(inf) 抛 OverflowError
     try:
         timeout = int(timeout) if timeout is not None else 120
         if max_output_tokens is not None:
             max_output_chars = max_output_tokens  # 别名：归一化后统一走字符语义
         max_output_chars = int(max_output_chars) if max_output_chars is not None else 4000
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return error_line("timeout/max_output_chars需为整数")
     # 参数校验前置：max_output_chars<=0 时若放到 _truncate_output 才报错，
     # 命令已执行、输出却被替换成参数错误（副作用已发生但结果不可见）——与
@@ -554,7 +594,7 @@ def execute(
             return _format_result(rc, out, err, status, timeout, max_output_chars)
 
         result = _execute_win32(command, timeout, max_output_chars)
-        return _with_cd_hint(result, cd_hint)
+        return _with_multiline_hint(_with_cd_hint(result, cd_hint), command)
 
     # ═════════════════════════════════════════════════════════════
     # Linux/macOS: bash -c 子进程（原有逻辑）
@@ -689,6 +729,17 @@ def _with_cd_hint(result: str, cd_hint: bool) -> str:
     if not cd_hint:
         return result
     return f"{result}\n[提示: 单通道执行下 cd 不影响后续命令，当前目录: {os.getcwd()}。请用 'cd X && 命令' 形式]"
+
+
+def _with_multiline_hint(result: str, command: str) -> str:
+    """Windows 多行命令的结果附提示：cmd 仅执行首行，其余行被静默丢弃。
+
+    Linux/macOS（bash -c 多行逐行执行）与 python -c 直执行路径不加。
+    """
+    if sys.platform != "win32" or ("\n" not in command and "\r" not in command):
+        return result
+    return (f"{result}\n[提示: 命令含换行符，Windows cmd 仅执行首行（其余行被静默丢弃）。"
+            "多步命令请用 && 串联，或写入 .cmd 脚本后执行]")
 
 
 def _collect_proc_output(proc: subprocess.Popen, timeout: int, max_output_chars: int):
@@ -1089,7 +1140,7 @@ def _execute_segments(segments: list, timeout: int,
             if err.strip():
                 parts.append(f"[stderr]\n{err.strip()}")
             if parts:
-                all_parts.append("\n".join(parts))
+                all_parts.append(_with_multiline_hint("\n".join(parts), seg))
             prev_rc = proc.returncode
         finally:
             with BashRuntime.active_proc_lock:

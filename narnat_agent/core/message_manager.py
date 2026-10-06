@@ -49,6 +49,18 @@ class MessageManager:
     def append_user(self, content: str) -> None:
         self._messages.append_user(content)
 
+    def append_user_merged(self, content: str) -> None:
+        """追加 user 消息；末尾已是 user 时合并进该条（防连续 user，Anthropic 严格后端要求角色交替）"""
+        view = self._messages.view()
+        if len(view) > 0 and view[-1].get("role") == "user":
+            merged = dict(view[-1])
+            merged["content"] = (view[-1].get("content") or "") + "\n\n" + content
+            new = view.to_list()
+            new[-1] = merged
+            self._messages.replace_all(new)
+        else:
+            self._messages.append_user(content)
+
     def append_assistant(self, content: str, tool_calls: Optional[list] = None,
                          thinking: Optional[str] = None,
                          thinking_signature: Optional[str] = None) -> None:
@@ -99,6 +111,15 @@ class MessageManager:
 
     # ── 压缩方法（逻辑原样保留，通过 view/to_list 读取）──
 
+    def has_compressible_history(self, retain_tokens: int) -> bool:
+        """保留预算内是否存在可被摘要替换的历史对话（handle_compress 与运行中自查共用判定）"""
+        full_messages = self._messages.view().to_list()
+        start = 0
+        while start < len(full_messages) and full_messages[start].get("role") == "system":
+            start += 1
+        cut = select_cut_index(full_messages, retain_tokens)
+        return not (start >= len(full_messages) or (cut is not None and cut <= start))
+
     def handle_compress(self, pending_input: Optional[str], system_prompt: str,
                         llm_client, cancel_check, on_interrupt, on_llm_error,
                         retain_tokens: int = 0) -> CompressResult:
@@ -128,8 +149,7 @@ class MessageManager:
         # 总结请求前先拒绝。仅手动压缩（无新输入）启用；自动路径保持旧行为——
         # 其重建过程承担着把触发输入写入历史并收尾的职责，不能在此提前返回
         cut = select_cut_index(full_messages, retain_tokens)
-        if pending_input is None and (start >= len(full_messages)
-                                      or (cut is not None and cut <= start)):
+        if pending_input is None and not self.has_compressible_history(retain_tokens):
             self._logger.info("message_manager", "无历史可压缩，跳过")
             return CompressResult(False, reason="empty")
 

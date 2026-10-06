@@ -2,9 +2,10 @@
 技能加载 —— 系统技能(.narnat/config/skills/) + 项目技能(工作目录下自动发现的 skills 目录)
 
 技能来源（加载时按此顺序）:
-  1. 系统技能: <narnat_dir>/config/skills/  （exe 同目录，原有行为不变）
+  1. 系统技能: <narnat_dir>/config/skills/  （exe 同目录）
      - <name>.md 扁平文件
-     - <name>/ 目录（取目录下第一个 .md）
+     - <name>/ 目录（SKILL.md 优先，其次唯一 .md，多个则提示可选文件）
+     - 支持层级路径: /skill 目录/文件.md
   2. 项目技能: 当前工作目录下所有名为 skills 的目录（自动发现，无需写死列表），
      如 .agents/skills、.kimi-code/skills、xxx/skills、顶层 skills/。
      - 支持层级路径: /skill 目录1/XXX.md
@@ -50,14 +51,13 @@ def load_skill(narnat_dir: str, name: str,
     if _unsafe_name(name):
         return "", f"技能不存在: {name}", ""
 
-    # 1. 系统技能（名称不含 "/"，原有逻辑不变）
+    # 1. 系统技能（先查：同名系统技能优先于项目技能）
     empty_path = ""
-    if "/" not in name:
-        content, err, path = _load_system_skill(narnat_dir, name)
-        if content or err:
-            return content, err, path
-        if path:  # 文件找到了但内容为空：记录，继续找同名技能的其他来源
-            empty_path = path
+    content, err, path = _load_system_skill(narnat_dir, name)
+    if content or err:
+        return content, err, path
+    if path:  # 文件找到了但内容为空：记录，继续找同名技能的其他来源
+        empty_path = path
 
     # 2. 项目技能
     cwd = cwd or os.getcwd()
@@ -172,19 +172,20 @@ def _discover_skill_roots(cwd: str, narnat_dir: str,
 
 
 def _load_system_skill(narnat_dir: str, name: str) -> tuple:
-    """原有系统技能查找逻辑。未找到返回 ("", "", "")。"""
+    """系统技能查找：文件（支持省略 .md 后缀与层级路径），目录走 _resolve_project_dir。
+    未找到返回 ("", "", "")。"""
     skills_dir = os.path.join(narnat_dir, CONFIG_SUBDIR, "skills")
-    path = os.path.join(skills_dir, f"{name}.md")
-    if os.path.isfile(path):
-        return _read(os.path.realpath(path))
-    subdir = os.path.join(skills_dir, name)
-    if os.path.isdir(subdir):
-        try:
-            for f in os.listdir(subdir):
-                if f.endswith(".md"):
-                    return _read(os.path.realpath(os.path.join(subdir, f)))
-        except OSError:
-            pass
+    base = os.path.realpath(skills_dir)
+    candidates = [name]
+    if not name.lower().endswith(".md"):
+        candidates.append(name + ".md")
+    for rel in candidates:
+        p = os.path.realpath(os.path.join(skills_dir, rel))
+        if os.path.isfile(p) and p.lower().endswith(".md") and _within(base, p):
+            return _read(p)
+    d = os.path.realpath(os.path.join(skills_dir, name))
+    if os.path.isdir(d) and _within(base, d):
+        return _resolve_project_dir(d, name)
     return "", "", ""
 
 

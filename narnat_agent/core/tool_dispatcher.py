@@ -4,6 +4,7 @@
 """
 
 import json
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from typing import List, Dict, Any, Tuple
@@ -78,6 +79,21 @@ class ToolDispatcher:
         self._executor = executor
         self._logger = logger
 
+    @staticmethod
+    def _write_group_key(arguments: dict) -> str:
+        """写入工具分组键：file_path 规范化（相对/绝对、大小写、斜杠别名归一）+ device。
+        不归一化会让同一文件的多次 Edit 并发执行，写入互相覆盖（丢更新）。"""
+        raw = str(arguments.get("file_path", "") or "")
+        if raw:
+            try:
+                raw = os.path.normcase(os.path.abspath(raw))
+            except (OSError, ValueError):
+                pass
+        dev = str(arguments.get("device", "") or "").strip().lower()
+        if dev in ("", "dev0"):
+            dev = ""   # dev0 与缺省同为本机
+        return dev + "\x00" + raw
+
     def execute_tool_calls(
         self,
         tool_calls: List[Dict[str, Any]],
@@ -113,7 +129,7 @@ class ToolDispatcher:
             if name in ToolDispatcher.READONLY_TOOLS:
                 readonly_group.append((idx, tc_id, name, arguments))
             elif name in ToolDispatcher.WRITE_TOOLS:
-                fp = arguments.get("file_path", "")
+                fp = ToolDispatcher._write_group_key(arguments)
                 write_group.setdefault(fp, []).append((idx, tc_id, name, arguments))
             else:
                 serial_group.append((idx, tc_id, name, arguments))
