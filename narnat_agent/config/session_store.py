@@ -89,9 +89,15 @@ def load_session(narnat_dir: str, name: str, parent: Optional[str] = None) -> tu
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data.get("messages", []), ""
-    except (json.JSONDecodeError, OSError) as e:
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
         return [], f"加载失败: {e}"
+    # 字段类型校验：手工编辑/半写文件可能造成顶层非对象或 messages 非列表
+    if not isinstance(data, dict):
+        return [], f"加载失败: 会话文件格式非法（顶层应为对象）: {name}"
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return [], f"加载失败: 会话文件 messages 字段非法（应为数组）: {name}"
+    return messages, ""
 
 
 def list_sessions(narnat_dir: str) -> List[Dict[str, Any]]:
@@ -104,13 +110,16 @@ def list_sessions(narnat_dir: str) -> List[Dict[str, Any]]:
         try:
             with open(fpath, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            result.append({
-                "name": data.get("name", fname[:-5]),
-                "timestamp": data.get("timestamp", 0),
-                "message_count": len(data.get("messages", [])),
-            })
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             continue
+        if not isinstance(data, dict):
+            continue
+        messages = data.get("messages")
+        result.append({
+            "name": data.get("name", fname[:-5]),
+            "timestamp": data.get("timestamp", 0),
+            "message_count": len(messages) if isinstance(messages, list) else 0,
+        })
     result.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
     return result
 
@@ -170,16 +179,19 @@ def list_sessions_tree(narnat_dir: str) -> List[Dict[str, Any]]:
             try:
                 with open(fpath, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                info = {
-                    "name": data.get("name", fname[:-5]),
-                    "timestamp": data.get("timestamp", 0),
-                    "message_count": len(data.get("messages", [])),
-                    "parent": data.get("parent"),
-                    "status": data.get("status", "active"),
-                    "summary": data.get("summary"),
-                }
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
                 continue
+            if not isinstance(data, dict):
+                continue
+            messages = data.get("messages")
+            info = {
+                "name": data.get("name", fname[:-5]),
+                "timestamp": data.get("timestamp", 0),
+                "message_count": len(messages) if isinstance(messages, list) else 0,
+                "parent": data.get("parent"),
+                "status": data.get("status", "active"),
+                "summary": data.get("summary"),
+            }
             if info["parent"]:
                 orphans.append(info)
             else:

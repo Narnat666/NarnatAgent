@@ -117,7 +117,16 @@ class SSHSession:
         kwargs["look_for_keys"] = True
         kwargs["allow_agent"] = True
 
-        client.connect(**kwargs)
+        try:
+            client.connect(**kwargs)
+        except Exception:
+            # 认证/握手失败：显式关闭，回收 paramiko Transport 线程与 TCP 连接。
+            # 不 close 时半成品 Transport 线程持有引用，GC 无法回收，长跑重试会累积泄漏。
+            try:
+                client.close()
+            except Exception:
+                pass
+            raise
         transport = client.get_transport()
         if transport is not None:
             transport.set_keepalive(30)

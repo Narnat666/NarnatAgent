@@ -11,7 +11,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "MCP",
-        "description": "MCP 服务器连接通道（仅支持本地 stdio 型服务器）。",
+        "description": "MCP 服务器连接通道（本地 stdio 或远程 Streamable HTTP）。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -20,8 +20,8 @@ DEFINITION = {
                     "enum": ["connect", "disconnect"],
                     "description": (
                         "操作类型（默认connect）。"
-                        "connect 连接一个本地 MCP（stdio）服务器，连接后其工具以 "
-                        "mcp__<服务器名>__<工具名> 注册，后续轮次可直接调用；"
+                        "connect 连接一个 MCP 服务器（本地 stdio 或远程 HTTP），"
+                        "连接后其工具以 mcp__<服务器名>__<工具名> 注册，后续轮次可直接调用；"
                         "disconnect 断开并注销其工具"
                     ),
                 },
@@ -35,11 +35,12 @@ DEFINITION = {
                 "config": {
                     "type": "object",
                     "description": (
-                        "connect 的启动配置：\n"
-                        "{\"command\": \"python\", \"args\": [\"main.py\"], "
+                        "connect 的连接配置（中英文键均可）：\n"
+                        "本地：{\"command\": \"python\", \"args\": [\"main.py\"], "
                         "\"env\": {}, \"cwd\": \"\"}\n"
-                        "（中英文键均可；可选 startup_timeout_sec 启动超时、"
-                        "tool_timeout_sec 工具调用超时、"
+                        "远程：{\"url\": \"https://.../mcp\", "
+                        "\"headers\": {\"X-API-Key\": \"...\"}}（认证用自定义请求头）\n"
+                        "（可选 startup_timeout_sec 启动超时、tool_timeout_sec 工具调用超时、"
                         "enabled_tools/disabled_tools 工具白/黑名单）"
                     ),
                 },
@@ -77,12 +78,12 @@ def _connect(manager, name: str, config: dict) -> str:
     if not name:
         return error_line("connect 需要 name（服务器名）")
     if not isinstance(config, dict) or not config:
-        return error_line("connect 需要 config（启动配置：command/args/env/cwd）")
+        return error_line("connect 需要 config（连接配置：command/args/env/cwd 或 url/headers）")
 
     from ...config.loader import parse_mcp_server
     cfg = parse_mcp_server(name, config)
-    if cfg is None or not cfg.command.strip():
-        return error_line("config 缺少 command（启动命令）；仅支持 stdio 型 MCP 服务器")
+    if cfg is None or not (cfg.url.strip() or cfg.command.strip()):
+        return error_line("未配置启动命令（\"命令\"/\"command\"）或远程地址（\"地址\"/\"url\"）")
 
     count, tool_names = manager.connect(name, config)
     lines = [f"[已连接 MCP服务器 {name}：注册 {count} 个工具，后续轮次可直接调用]"]

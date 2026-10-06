@@ -20,6 +20,14 @@ COST_LOG_HEADER = [
 ]
 
 
+def _as_int(v) -> int:
+    """usage 字段容错：None/字符串/非法值 → 0（防第三方 API 异常 usage 崩溃统计）"""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
 class StatsTracker:
     """Token统计和费用追踪器"""
 
@@ -47,27 +55,26 @@ class StatsTracker:
         """更新token统计（每轮LLM返回后调用）
 
         usage: {"prompt_tokens": int, "completion_tokens": int, "cached_tokens": int}
+        字段缺失/类型异常（None/字符串）按 0 处理，不中断统计。
         """
-        prompt = usage["prompt_tokens"]
-        self._total_output_tokens += usage["completion_tokens"]
+        prompt = _as_int(usage.get("prompt_tokens"))
+        completion = _as_int(usage.get("completion_tokens"))
+        cached = _as_int(usage.get("cached_tokens"))
+        self._total_output_tokens += completion
         self._total_input_tokens = prompt  # 赋值：每轮已含全部历史（当前上下文快照）
         # 累计：用于计算全程 token 加权缓存命中率（小轮次不会被等权放大）
         self._total_prompt_tokens += prompt
-        self._total_cache_tokens += usage.get("cached_tokens", 0)
+        self._total_cache_tokens += cached
         self._total_cost += calculate_cost(
             self._model,
-            usage["prompt_tokens"],
-            usage["completion_tokens"],
-            usage.get("cached_tokens", 0),
+            prompt,
+            completion,
+            cached,
             self._user_pricing,
         )
         # 费用日志（配置开启时）：与上面同一分项口径落盘
         if self._cost_log_enabled:
-            self._append_cost_log(
-                usage["prompt_tokens"],
-                usage["completion_tokens"],
-                usage.get("cached_tokens", 0),
-            )
+            self._append_cost_log(prompt, completion, cached)
 
     def _append_cost_log(self, prompt: int, completion: int, cached: int) -> None:
         """追加一行费用记录到CSV（每次LLM请求调用一次）。
@@ -140,8 +147,6 @@ class StatsTracker:
             bal = fetch_balance(api_key, self._balance_cfg)
             if bal:
                 self._balance_to_show = bal["total"]
-        else:
-            self._balance_to_show = 0.0
 
     @property
     def input_tokens(self) -> int:

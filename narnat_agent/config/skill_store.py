@@ -51,17 +51,26 @@ def load_skill(narnat_dir: str, name: str,
         return "", f"技能不存在: {name}", ""
 
     # 1. 系统技能（名称不含 "/"，原有逻辑不变）
+    empty_path = ""
     if "/" not in name:
         content, err, path = _load_system_skill(narnat_dir, name)
         if content or err:
             return content, err, path
+        if path:  # 文件找到了但内容为空：记录，继续找同名技能的其他来源
+            empty_path = path
 
     # 2. 项目技能
     cwd = cwd or os.getcwd()
     for root in _project_roots(narnat_dir, project_roots, cwd, ignore_dirs, scan_depth):
         result = _load_project_skill(root, name)
         if result is not None:
-            return result
+            content, err, path = result
+            if not content and not err and path:
+                empty_path = path
+                continue
+            return content, err, path
+    if empty_path:
+        return "", f"技能文件为空: {name}", empty_path
     return "", f"技能不存在: {name}", ""
 
 

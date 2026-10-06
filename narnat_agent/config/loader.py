@@ -92,15 +92,20 @@ class SafetyConfig:
 class McpServerConfig:
     """单个 MCP 服务器配置（只读）。
 
-    stdio 服务器：command/args/env/cwd 启动本地进程；命名与字段对标 codex 的
-    [mcp_servers.<name>]（startup_timeout_sec / tool_timeout_sec /
-    enabled_tools / disabled_tools）。
+    两种传输，按 url 是否为空判别：
+    - 本地 stdio：command/args/env/cwd 启动本地子进程
+    - 远程 Streamable HTTP：url（MCP 端点地址）+ headers（认证等自定义请求头）
+
+    命名与字段对标 codex 的 [mcp_servers.<name>]（startup_timeout_sec /
+    tool_timeout_sec / enabled_tools / disabled_tools）。
     """
     name: str = ""
     command: str = ""
     args: tuple = ()                        # 命令行参数
     env: Dict[str, str] = field(default_factory=dict)   # 附加环境变量（继承本进程环境后覆盖）
     cwd: str = ""                           # 工作目录，空=本进程当前目录
+    url: str = ""                           # 远程 Streamable HTTP 地址（非空 = 远程服务器）
+    headers: Dict[str, str] = field(default_factory=dict)   # 远程请求头（认证等）
     enabled: bool = True                    # False=不启动
     startup_timeout: int = DEFAULT_MCP_STARTUP_TIMEOUT   # 启动+握手+列工具超时（秒）
     tool_timeout: int = DEFAULT_MCP_TOOL_TIMEOUT         # 工具调用超时（秒）
@@ -301,6 +306,17 @@ def _coerce(v, target_type):
         return None
 
 
+def _warn(msg: str) -> None:
+    """配置问题警告：输出到 stderr（不干扰 stdout 的界面输出流）"""
+    print(f"[警告] {msg}", file=sys.stderr)
+
+
+def _int_or(value, default: int) -> int:
+    """整数配置解析：缺失/非法 → default（0 保留为合法值）"""
+    v = _coerce(value, int)
+    return default if v is None else v
+
+
 def _parse_project_skill_roots(data: dict) -> Optional[tuple]:
     """解析 narnat.json 的 "技能"."项目技能目录"。
 
@@ -345,6 +361,12 @@ def parse_mcp_server(name: str, entry: dict) -> Optional[McpServerConfig]:
     if not isinstance(env, dict):
         env = {}
 
+    url = _pick("地址", "url", "server_url", default="")
+
+    headers = _pick("请求头", "headers", default={})
+    if not isinstance(headers, dict):
+        headers = {}
+
     startup_timeout = _coerce(_pick("启动超时秒", "startup_timeout_sec"), int)
     if not startup_timeout or startup_timeout <= 0:
         startup_timeout = DEFAULT_MCP_STARTUP_TIMEOUT
@@ -372,6 +394,8 @@ def parse_mcp_server(name: str, entry: dict) -> Optional[McpServerConfig]:
         args=tuple(args),
         env={str(k): str(v) for k, v in env.items()},
         cwd=str(_pick("工作目录", "cwd", default="")),
+        url=str(url),
+        headers={str(k): str(v) for k, v in headers.items()},
         enabled=bool(enabled),
         startup_timeout=startup_timeout,
         tool_timeout=tool_timeout,
@@ -408,29 +432,56 @@ def _parse_pricing(data: dict) -> Dict[str, Dict[str, float]]:
 
     用户配置格式: {"模型名": {"输入": x, "缓存命中": y, "输出": z}}
     内部格式: {"模型名": {"input": x, "cache_hit": y, "output": z}}
+    值统一转 float（"3.0" 这类带引号的数字也能识别）；非法值按 0 并警告。
     """
     result = {}
     for model, prices in data.items():
         if not isinstance(prices, dict):
             continue
-        result[model] = {
-            "input": prices.get("输入", 0),
-            "cache_hit": prices.get("缓存命中", 0),
-            "output": prices.get("输出", 0),
-        }
+        row = {}
+        for zh, en in (("输入", "input"), ("缓存命中", "cache_hit"), ("输出", "output")):
+            v = _coerce(prices.get(zh), float)
+            if v is None:
+                raw = prices.get(zh)
+                if raw not in (None, ""):
+                    _warn(f"「定价」{model}.{zh} 不是有效数字（{raw!r}），已按 0 处理")
+                v = 0.0
+            row[en] = v
+        result[model] = row
     return result
 
 
 def _load_json(config_dir: str) -> dict:
-    """读取 narnat.json，返回原始数据字典。解析失败返回空字典"""
+    """读取 narnat.json，返回原始数据字典。解析失败发出警告并按默认配置继续"""
     path = os.path.join(config_dir, NARNAT_JSON)
     if not os.path.isfile(path):
         return {}
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError as e:
+        _warn(f"narnat.json 解析失败（{e}），已按默认配置启动；"
+              f"请检查 JSON 格式，或删除该文件重新生成（文件: {path}）")
         return {}
+    except OSError as e:
+        _warn(f"narnat.json 读取失败（{e}），已按默认配置启动（文件: {path}）")
+        return {}
+
+
+# 顶层段类型规范：值必须为对象的段（非对象时警告并回落默认，防止启动崩溃）
+_DICT_SECTIONS = ("智能体", "余额查询", "联网搜索", "定价", "界面",
+                  "工具", "会话", "压缩", "费用日志", "技能")
+
+
+def _sanitize_sections(data: dict) -> None:
+    """顶层段类型防御（就地修正）：非预期类型时警告并回落默认"""
+    for name in _DICT_SECTIONS:
+        if name in data and not isinstance(data[name], dict):
+            _warn(f"「{name}」段格式错误（应为对象），已按默认处理")
+            data[name] = {}
+    if "忽略目录" in data and not isinstance(data["忽略目录"], list):
+        _warn("「忽略目录」格式错误（应为数组），已按默认处理")
+        data["忽略目录"] = []
 
 
 
@@ -438,17 +489,21 @@ def _parse_model_config(value) -> tuple:
     """解析 narnat.json 的 "模型" 配置，返回 (当前模型, 候选列表)。
 
     格式: {"当前": "deepseek-v4-pro", "列表": ["deepseek-v4-pro", "deepseek-v4-flash"]}
+    非该格式（如字符串）时警告并回落默认模型——不静默吞掉用户配置。
     """
-    if not isinstance(value, dict):
-        return DEFAULT_MODEL, [DEFAULT_MODEL]
-    options = value.get("列表")
-    if not isinstance(options, list):
-        options = []
-    options = [m for m in options if isinstance(m, str)]
-    current = value.get("当前") or (options[0] if options else DEFAULT_MODEL)
-    if current not in options:
-        options.insert(0, current)
-    return current, options
+    if isinstance(value, dict):
+        options = value.get("列表")
+        if not isinstance(options, list):
+            options = []
+        options = [m for m in options if isinstance(m, str)]
+        current = value.get("当前") or (options[0] if options else DEFAULT_MODEL)
+        if current not in options:
+            options.insert(0, current)
+        return current, options
+    if value not in (None, ""):
+        _warn('「智能体.模型」格式错误（应为对象 {"当前": ..., "列表": [...]}），'
+              f"已使用默认模型 {DEFAULT_MODEL}")
+    return DEFAULT_MODEL, [DEFAULT_MODEL]
 
 
 def _build_ai_config(data: dict) -> AIConfig:
@@ -460,10 +515,16 @@ def _build_ai_config(data: dict) -> AIConfig:
     model, model_options = _parse_model_config(ai.get("模型"))
 
     thinking_cfg = ai.get("思考", {})
+    if not isinstance(thinking_cfg, dict):
+        _warn("「智能体.思考」段格式错误（应为对象），已按默认处理")
+        thinking_cfg = {}
     thinking_enabled = bool(thinking_cfg.get("启用", DEFAULT_THINKING_ENABLED))
     thinking_effort = thinking_cfg.get("强度", DEFAULT_THINKING_EFFORT)
     thinking_passback = bool(thinking_cfg.get("回传", DEFAULT_THINKING_PASSBACK))
     thinking_options = thinking_cfg.get("强度选项", {"high": "高", "max": "全开"})
+    if not isinstance(thinking_options, dict):
+        _warn("「智能体.思考.强度选项」格式错误（应为对象），已按默认处理")
+        thinking_options = {"high": "高", "max": "全开"}
 
     # 上下文窗口：缺失/非法 → 默认；显式 ≤0 → 保留原值（下游视为无效，占比显示 --）
     parsed_cw = _coerce(ai.get("上下文窗口大小"), int)
@@ -505,12 +566,6 @@ def _build_ui_config(data: dict, max_output_tokens: int = 128000) -> UIConfig:
         "框架": "ui", "命令": "cmd", "提示符": "prompt",
     }
     _KEY_MAPS = {
-        "colors": {
-            # 仅保留旧格式兼容项（如 "成功色""警告色" 在配方值中可能出现）
-            "成功色": "success", "警告色": "warning",
-            "错误色": "error", "链接色": "link",
-            "装饰色": "decoration", "强调": "emphasis",
-        },
         "base_colors": {
             "用户": "user", "主色": "primary", "次色": "secondary",
             "强调色": "accent", "链接": "link", "链接色": "link",
@@ -551,6 +606,9 @@ def _build_ui_config(data: dict, max_output_tokens: int = 128000) -> UIConfig:
     }
 
     ui = data.get("界面", {})
+    if not isinstance(ui, dict):
+        _warn("「界面」段格式错误（应为对象），已按默认处理")
+        ui = {}
     raw = dict(ui)
 
     # 1. 顶层开关字段（中英均可，提取后从 raw 清理）
@@ -563,6 +621,14 @@ def _build_ui_config(data: dict, max_output_tokens: int = 128000) -> UIConfig:
         if zh in raw and en not in raw:
             raw[en] = raw.pop(zh)
 
+    # 2b. 已知 section 类型防御：非对象（字符串/数组等）时警告并回落默认，
+    #     防止 apply_style 侧 .items()/[] 取值崩溃
+    for name in ("colors", "base_colors", "markdown", "codeblock",
+                 "diff", "ui", "cmd", "prompt"):
+        if name in raw and not isinstance(raw[name], dict):
+            _warn(f"「界面.{name}」段格式错误（应为对象），已按默认处理")
+            raw[name] = {}
+
     # 3. 每个 section 内部 key 中→英
     for section, key_map in _KEY_MAPS.items():
         if section not in raw:
@@ -574,38 +640,19 @@ def _build_ui_config(data: dict, max_output_tokens: int = 128000) -> UIConfig:
             if zh in sec:
                 sec[en] = sec.pop(zh)
 
-    # 4. 兼容旧中文 key（扁平旧格式 "用户输入色" 等）
-    _OLD_COLOR_MAP = {
-        "用户输入色": ("base_colors", "user"),
-        "AI输出色": ("base_colors", "primary"),
-        "标题色": ("base_colors", "accent"),
-        "成功色": ("base_colors", "success"),
-        "行内代码色": ("base_colors", "warning"),
-        "错误色": ("base_colors", "error"),
-        "链接色": ("base_colors", "link"),
-        "装饰色": ("base_colors", "decoration"),
-        "加载动画色": ("base_colors", "emphasis"),
-        "次要文字色": ("base_colors", "secondary"),
-        "代码块背景色": ("codeblock", "background"),
-    }
-    for old_key, (section, new_key) in _OLD_COLOR_MAP.items():
-        if old_key in raw:
-            raw.setdefault(section, {})[new_key] = raw.pop(old_key)
-
-    # 5. 配方值中的中文色名 → 英文（如 "bold 强调色" → "bold accent"）
-    _COLOR_ZH_EN = {}
-    _COLOR_ZH_EN.update(_KEY_MAPS.get("colors", {}))
-    _COLOR_ZH_EN.update(_KEY_MAPS.get("base_colors", {}))
+    # 4. 配方值中的中文角色名 → 英文（如 "bold 强调色" → "bold accent"）；"_" 开头的元数据不改写
+    _COLOR_ZH_EN = dict(_KEY_MAPS.get("base_colors", {}))
     if _COLOR_ZH_EN:
         for section_name in ("colors", "markdown", "codeblock", "diff", "ui", "cmd", "prompt"):
             sec = raw.get(section_name)
             if not isinstance(sec, dict):
                 continue
             for k, v in list(sec.items()):
-                if isinstance(v, str):
-                    for zh, en in _COLOR_ZH_EN.items():
-                        v = v.replace(zh, en)
-                    sec[k] = v
+                if k.startswith("_") or not isinstance(v, str):
+                    continue
+                for zh, en in _COLOR_ZH_EN.items():
+                    v = v.replace(zh, en)
+                sec[k] = v
 
     return UIConfig(raw=raw, show_cost=show_cost, show_balance=show_balance,
                     max_output_tokens=max_tokens)
@@ -619,9 +666,11 @@ def _pop_bool_any(d: dict, *keys) -> bool:
 
 
 def _pop_int_any(d: dict, *, keys: tuple = (), default: int = 0) -> int:
+    """取首个存在的键并转 int；值非法时回落 default（不崩溃）"""
     for k in keys:
         if k in d:
-            return int(d.pop(k))
+            v = _coerce(d.pop(k), int)
+            return default if v is None else v
     return default
 
 
@@ -760,13 +809,21 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
                             "响应路径": "balance_infos.0.total_balance",
                             "货币路径": "balance_infos.0.currency",
                         },
-                        "接口密钥组": {"websearch": "", "websearch_url": "https://api.anysearch.com/mcp"},
+                        "联网搜索": {
+                            "key": "",
+                            "url": "https://api.anysearch.com/mcp",
+                            "auth": "x-api-key",
+                            "tool": "search",
+                            "query_params": ["query"],
+                            "count_param": "max_results",
+                            "args": {},
+                        },
                         "定价": {"模型": {}},
                         "费用日志": {"启用": False, "输出文件": "", "最大容量MB": 50},
                         "界面": {
-                            "show_cost": False,
-                            "show_balance": False,
-                            "max_output_tokens": 128000
+                            "显示费用": False,
+                            "显示余额": False,
+                            "最大输出token数": 128000,
                         },
                         "工具": {"输出上限KB": DEFAULT_MAX_TOOL_OUTPUT_KB, "超时上限秒": DEFAULT_MAX_TIMEOUT_SECONDS},
                         "会话": {"自动保存Token量": DEFAULT_AUTO_SAVE_TOKENS},
@@ -776,7 +833,6 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
                             "压缩": DEFAULT_COMPRESS_RATIO,
                             "保留尾部": DEFAULT_COMPRESS_RETAIN_TOKENS,
                         },
-                        "计划": {},
                         "忽略目录": DEFAULT_IGNORE_DIRS,
                     }, f, indent=2, ensure_ascii=False)
                 else:
@@ -784,10 +840,11 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
 
     # 读取配置
     data = _load_json(config_dir)
+    _sanitize_sections(data)
 
     # 构建各子配置
     ai_config = _build_ai_config(data)
-    api_keys = data.get("接口密钥组", {})
+    api_keys = data.get("联网搜索", {})
     pricing_config = _build_pricing_config(data)
     balance_config = _build_balance_config(data)
     cost_log_config = _build_cost_log_config(data, data_dir)
@@ -808,7 +865,7 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
     )
 
     # ── 单位转换在此完成 ──
-    max_output_kb = int(data.get("工具", {}).get("输出上限KB", DEFAULT_MAX_TOOL_OUTPUT_KB))
+    max_output_kb = _int_or(data.get("工具", {}).get("输出上限KB"), DEFAULT_MAX_TOOL_OUTPUT_KB)
     max_output_chars = max_output_kb * 1024 if max_output_kb > 0 else 0
 
     # 插件工具开关（"工具"."插件"）：值用字符串 "on"/"off"，仅 "off" 视为关闭；
@@ -840,7 +897,7 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
         thinking_passback=ai_config.thinking_passback,
         thinking_options=ai_config.thinking_options,
         context_window=ai_config.context_window,
-        retry_count=int(data.get("智能体", {}).get("LLM重试次数", 3)),
+        retry_count=_int_or(data.get("智能体", {}).get("LLM重试次数"), 3),
         goal_max_rounds=ai_config.goal_max_rounds,
         goal_verify=ai_config.goal_verify,
         goal_verify_model=ai_config.goal_verify_model,
@@ -856,10 +913,10 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
             logs_dir=logs_dir,
         ),
         tools=ToolConfig(
-            max_sessions=int(data.get("工具", {}).get("SSH最大会话数", 5)),
-            max_transfer_mb=int(data.get("工具", {}).get("最大传输文件MB", 100)),
+            max_sessions=_int_or(data.get("工具", {}).get("SSH最大会话数"), 5),
+            max_transfer_mb=_int_or(data.get("工具", {}).get("最大传输文件MB"), 100),
             max_output_chars=max_output_chars,
-            max_timeout_seconds=int(data.get("工具", {}).get("超时上限秒", DEFAULT_MAX_TIMEOUT_SECONDS)),
+            max_timeout_seconds=_int_or(data.get("工具", {}).get("超时上限秒"), DEFAULT_MAX_TIMEOUT_SECONDS),
             ignore_dirs=tuple(data.get("忽略目录") or []),
             plugin_tools=plugin_tools,
         ),

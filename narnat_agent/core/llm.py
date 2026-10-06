@@ -490,8 +490,9 @@ class _OpenAIBackend:
                     kwargs["extra_body"] = think_extra
                 if not no_tools:
                     kwargs["tools"] = self._tool_defs if tool_defs is None else tool_defs
-                # thinking 模式下 temperature 不生效，传入会误导用户
-                if self._config.temperature is not None:
+                # thinking 模式下 temperature 不生效（部分厂商契约下直接报错），不传
+                if (self._config.temperature is not None
+                        and not (think_body_top or think_extra)):
                     kwargs["temperature"] = self._config.temperature
                 if self._config.max_tokens is not None:
                     kwargs["max_tokens"] = self._config.max_tokens
@@ -545,7 +546,8 @@ class _OpenAIBackend:
                     continue
                 if self._logger:
                     self._logger.error("core.llm", f"API调用失败(重试耗尽): {e}")
-                yield {"content": f"[错误: API调用失败({type(e).__name__}，重试{network_retries}次): {e}]", "finish_reason": "error"}
+                _used = rate_retries if status == 429 else network_retries
+                yield {"content": f"[错误: API调用失败({type(e).__name__}，重试{_used}次): {e}]", "finish_reason": "error"}
                 return
 
             except (APIConnectionError, APITimeoutError) as e:
@@ -626,8 +628,8 @@ class _OpenAIBackend:
                             cached = (getattr(usage, 'model_extra', None) or {}).get('prompt_cache_hit_tokens', 0) or 0
                     yield {
                         "usage": {
-                            "prompt_tokens": usage.prompt_tokens,
-                            "completion_tokens": usage.completion_tokens,
+                            "prompt_tokens": getattr(usage, 'prompt_tokens', 0) or 0,
+                            "completion_tokens": getattr(usage, 'completion_tokens', 0) or 0,
                             "cached_tokens": cached,
                         }
                     }
@@ -779,8 +781,9 @@ class _AnthropicBackend:
             body["system"] = system
         if anthropic_tools and not no_tools:
             body["tools"] = anthropic_tools
-        # thinking 模式下 temperature 不生效，传入会误导用户
-        if self._config.temperature is not None:
+        # thinking 模式下 temperature 不生效（部分厂商契约下直接报错），不传
+        if (self._config.temperature is not None
+                and not (think_body_top or think_extra)):
             body["temperature"] = self._config.temperature
         if self._config.max_tokens is not None:
             body["max_tokens"] = self._config.max_tokens
@@ -834,6 +837,9 @@ class _AnthropicBackend:
 
                 # 429 速率限制
                 if status == 429:
+                    # 先读响应体片段供报错（stream 模式需 read() 后才能访问 text）
+                    resp.read()
+                    err_text = resp.text
                     resp.close()
                     client.close()
                     if rate_retries < LLMClient._max_rate_retries:
@@ -846,11 +852,14 @@ class _AnthropicBackend:
                             return
                         continue
                     LLMClient._active_response = None
-                    yield {"content": f"[错误: API返回429速率限制(已重试{LLMClient._max_rate_retries}次)]", "finish_reason": "error"}
+                    yield {"content": f"[错误: API返回429速率限制(已重试{LLMClient._max_rate_retries}次): {err_text[:200]}]", "finish_reason": "error"}
                     return
 
                 # 可重试服务端错误
                 if _is_retryable_http(status):
+                    # 先读响应体片段供报错（stream 模式需 read() 后才能访问 text）
+                    resp.read()
+                    err_text = resp.text
                     resp.close()
                     client.close()
                     if network_retries < LLMClient._max_network_retries:
@@ -863,7 +872,7 @@ class _AnthropicBackend:
                             return
                         continue
                     LLMClient._active_response = None
-                    yield {"content": f"[错误: API返回{status}错误(已重试{LLMClient._max_network_retries}次)]", "finish_reason": "error"}
+                    yield {"content": f"[错误: API返回{status}错误(已重试{LLMClient._max_network_retries}次): {err_text[:200]}]", "finish_reason": "error"}
                     return
 
                 # 成功
@@ -985,7 +994,7 @@ class _AnthropicBackend:
                         # DeepSeek 兼容层可能返回 cache_read_input_tokens 或 prompt_cache_hit_tokens，双兼容
                         cached = usage.get("cache_read_input_tokens", 0) or usage.get("prompt_cache_hit_tokens", 0) or 0
                         _start_usage = {
-                            "prompt_tokens": usage.get("input_tokens", 0) + cached,
+                            "prompt_tokens": (usage.get("input_tokens", 0) or 0) + cached,
                             "completion_tokens": 0,
                             "cached_tokens": cached,
                         }
@@ -1099,10 +1108,19 @@ class _AnthropicBackend:
                     # 捕获usage
                     usage = data.get("usage", {})
                     if usage:
-                        prompt = usage.get("input_tokens", 0)
-                        # DeepSeek 兼容层可能返回 cache_read_input_tokens 或 prompt_cache_hit_tokens，双兼容
-                        cached = usage.get("cache_read_input_tokens", 0) or usage.get("prompt_cache_hit_tokens", 0) or 0
-                        yield {"usage": {"prompt_tokens": prompt + cached, "completion_tokens": usage.get("output_tokens", 0), "cached_tokens": cached}}
+                        if usage.get("input_tokens") is None and _start_usage:
+                            # Claude 官方 message_delta 的 usage 只含 output_tokens：
+                            # input 缺失时采用 message_start 的输入口径（已含缓存合并，不再叠加）
+                            yield {"usage": {
+                                "prompt_tokens": _start_usage.get("prompt_tokens", 0),
+                                "completion_tokens": usage.get("output_tokens", 0) or 0,
+                                "cached_tokens": _start_usage.get("cached_tokens", 0),
+                            }}
+                        else:
+                            prompt = usage.get("input_tokens", 0) or 0
+                            # DeepSeek 兼容层可能返回 cache_read_input_tokens 或 prompt_cache_hit_tokens，双兼容
+                            cached = usage.get("cache_read_input_tokens", 0) or usage.get("prompt_cache_hit_tokens", 0) or 0
+                            yield {"usage": {"prompt_tokens": prompt + cached, "completion_tokens": usage.get("output_tokens", 0) or 0, "cached_tokens": cached}}
 
                 elif dtype == "error":
                     err_msg = data.get("error", {}).get("message", "未知错误")
@@ -1169,6 +1187,12 @@ class _AnthropicBackend:
                             "core.llm",
                             f"兜底: 未收到message_delta，但已有文字内容({len(''.join(content_buffer))}字符)",
                         )
+                else:
+                    # 全空兜底：流正常结束但既无内容也无完成标记（如网关 200+HTML、
+                    # SSE 帧全非法）：明确报错，避免上层把空响应当作正常空轮次
+                    if self._logger:
+                        self._logger.error("core.llm", "响应流为空或格式异常（未收到有效内容）")
+                    yield {"content": "[错误: API响应为空或格式异常（未收到有效内容）]", "finish_reason": "error"}
 
         finally:
             LLMClient._active_response = None

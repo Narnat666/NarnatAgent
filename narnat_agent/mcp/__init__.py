@@ -1,9 +1,10 @@
-"""MCP 集成 —— 连接通道（stdio 子进程 + JSON-RPC 2.0）
+"""MCP 集成 —— 连接通道（stdio 子进程 / Streamable HTTP，JSON-RPC 2.0）
 
 职责只有一个：把 AI 给的服务器配置变成可持续的通道，并保证断开与回收干净。
-- 连接：子进程 → initialize 握手 → tools/list → 注册为 mcp__<服务器名>__<工具名>
-- 通道保活：服务端进程中断时，用连接时记录的配置自动重连（要求 AI 重试，
-  不重复执行调用），AI 无需重新提供配置
+- 连接：本地子进程或远程 URL → initialize 握手 → tools/list → 注册为 mcp__<服务器名>__<工具名>
+- 传输选择：配置里 url 非空走远程 Streamable HTTP，否则启动本地 stdio 子进程
+- 通道保活：通道中断（服务端进程退出 / 请求失败）时，用连接时记录的配置自动重连
+  （要求 AI 重试，不重复执行调用），AI 无需重新提供配置
 - 回收：连接/断开、会话结束、异常退出（atexit）都保证子进程不残留
 """
 
@@ -13,6 +14,7 @@ import re
 import threading
 
 from .client import McpError, McpStdioClient
+from .http_client import McpHttpClient
 from ..config.loader import parse_mcp_server
 from ..tools.exec_signal import error_line
 
@@ -35,7 +37,7 @@ class McpManager:
 
     def __init__(self, logger=None):
         self._logger = logger
-        self._clients = {}                    # 服务器名 → McpStdioClient（供退出清理）
+        self._clients = {}                    # 服务器名 → 客户端（供退出清理）
         self._server_tools = {}               # 服务器名 → [注册的 LLM 工具名]
         self._specs = {}                      # 服务器名 → 连接时记录的配置（自动重连用）
         self._lock = threading.Lock()
@@ -84,7 +86,8 @@ class McpManager:
 
         Args:
             name: 服务器名（工具前缀 mcp__<name>__ 的来源）
-            spec: {"command","args","env","cwd","startup_timeout_sec","tool_timeout_sec",...}
+            spec: 本地 {"command","args","env","cwd",...} 或远程 {"url","headers",...}，
+                  另支持 startup_timeout_sec / tool_timeout_sec / 工具白黑名单等
         Returns: (注册工具数, [LLM 工具名, ...])
         """
         name = str(name or "").strip()
@@ -209,15 +212,15 @@ class McpManager:
             raise McpError("连接曾中断，已自动重连，请重试本次调用")
 
     def _reconnect(self, server_name: str) -> None:
-        """用连接时记录的配置重建通道（工具注册不变，只换进程）"""
+        """用连接时记录的配置重建通道（工具注册不变，只换连接）"""
         with self._lock:
             spec = dict(self._specs.get(server_name) or {})
         if not spec:
             raise McpError(f"服务器 {server_name} 无配置，无法自动重连")
         cfg = parse_mcp_server(server_name, dict(spec, 启用=True))
-        if cfg is None or not cfg.command.strip():
+        if cfg is None or not (cfg.url.strip() or cfg.command.strip()):
             raise McpError(f"服务器 {server_name} 配置不完整，无法自动重连")
-        client, _tools = self._connect(cfg)     # 新进程 + 握手 + 列工具
+        client, _tools = self._connect(cfg)     # 新通道 + 握手 + 列工具
         with self._lock:
             old = self._clients.get(server_name)
             if old is None:
@@ -245,13 +248,17 @@ class McpManager:
     # ═══════════════════════════════════════════════════════════
 
     def _connect(self, cfg):
-        """连接单个服务器：启动进程 → 握手 → 列工具"""
-        if not cfg.command.strip():
-            raise McpError("未配置启动命令（\"命令\"/\"command\"）")
-        client = McpStdioClient(
-            cfg.name, cfg.command, cfg.args,
-            env=cfg.env, cwd=cfg.cwd, logger=self._logger,
-        )
+        """连接单个服务器：建通道（本地子进程 / 远程 HTTP）→ 握手 → 列工具"""
+        if cfg.url.strip():
+            client = McpHttpClient(cfg.name, cfg.url, headers=cfg.headers,
+                                   logger=self._logger)
+        else:
+            if not cfg.command.strip():
+                raise McpError("未配置启动命令（\"命令\"/\"command\"）或远程地址（\"地址\"/\"url\"）")
+            client = McpStdioClient(
+                cfg.name, cfg.command, cfg.args,
+                env=cfg.env, cwd=cfg.cwd, logger=self._logger,
+            )
         try:
             info = client.initialize(cfg.startup_timeout)
             tools = client.list_tools(cfg.startup_timeout)

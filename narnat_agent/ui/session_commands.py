@@ -395,11 +395,17 @@ def _cmd_mode(args: str, mgr) -> CommandResult:
 
 @_register("exit")
 def _cmd_exit(args: str, mgr) -> CommandResult:
+    # 退出语义按状态机（README）：NoSession /exit=退出程序；
+    # RootSession /exit=退出会话回 NoSession；ChildSession /exit=暂离分支回 RootSession。
+    # 判据取"进入时是否已在 NoSession"——on_exit() 会先切换状态，不能在切换后再判。
+    was_no_session = mgr.should_exit_agent()
     was_child = mgr.is_child_session()
     result = mgr.on_exit()
     if result:
+        # 状态切换失败（如子会话父文件损坏）：只报错，不打印"已暂离/已退出"误导提示
         _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
-    if mgr.should_exit_agent():
+        return CommandResult.HANDLED
+    if was_no_session:
         return CommandResult.EXIT
     if was_child:
         _stdout_write(f"  {CMD_SUCCESS}已暂离探索分支{R}  "

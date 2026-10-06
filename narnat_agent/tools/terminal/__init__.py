@@ -188,6 +188,8 @@ def execute(
         return error_line("port/timeout/session_id/max_output_chars需为整数")
 
     if action == "connect":
+        if not 1 <= port <= 65535:
+            return error_line(f"port 范围应为 1-65535（当前 {port}）")
         # connect默认超时15秒（exec默认120秒）：连错IP/黑洞IP时快速失败
         connect_timeout = 15 if timeout is None else timeout
         if _tool_context and _tool_context.max_timeout_seconds > 0:

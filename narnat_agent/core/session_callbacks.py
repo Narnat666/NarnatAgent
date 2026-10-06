@@ -44,7 +44,7 @@ def _format_messages_text(messages: list) -> str:
 # 插件工具名称 → 说明（/plugin 状态表展示用；名称与顺序来源 registry.PLUGIN_TOOL_NAMES）
 _PLUGIN_TOOL_LABELS = {
     "Terminal": "多终端持久 SSH",
-    "WebSearch": "网页搜索",
+    "WebSearch": "联网搜索",
     "Serial": "多终端持久串口",
     "MCP": "MCP 服务器管理",
 }
