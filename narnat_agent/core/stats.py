@@ -95,6 +95,7 @@ class StatsTracker:
         self._total_cache_tokens = 0   # 累计缓存命中token
         self._total_cost = 0.0
         self._balance_to_show = 0.0
+        self._balance_fresh = False   # 本轮是否刚查询到余额（决定统计栏是否显示）
 
     def update(self, usage: dict) -> None:
         """更新token统计（每轮LLM返回后调用）
@@ -241,11 +242,17 @@ class StatsTracker:
             return False
 
     def fetch_balance(self, api_key: str, round_num: int, interval: int = 10) -> None:
-        """每N轮查询一次余额，其余轮次保留上次查询结果"""
+        """每N轮查询一次余额；仅查询成功那一轮的统计栏显示余额，其余轮次不显示。
+
+        每轮都会被调用（Agent.run 逐轮传入轮次），故在此重置本轮新鲜位：
+        非查询轮与查询失败轮均不显示，避免把陈旧余额当成当前值反复显示。
+        """
+        self._balance_fresh = False
         if api_key and round_num % interval == 0:
             bal = fetch_balance(api_key, self._balance_cfg)
             if bal:
                 self._balance_to_show = bal["total"]
+                self._balance_fresh = True
 
     @property
     def input_tokens(self) -> int:
@@ -268,4 +275,5 @@ class StatsTracker:
 
     @property
     def balance(self) -> float:
-        return self._balance_to_show
+        """统计栏余额：仅本轮刚查询到余额时返回数值，其余轮次返回 0（界面据此不显示）"""
+        return self._balance_to_show if self._balance_fresh else 0.0
