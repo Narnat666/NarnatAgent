@@ -14,9 +14,11 @@ import time
 from typing import Optional
 
 from . import truncate_store
-from ..exec_signal import rc_line, error_line, tag_error, safe_cut_points
+from .. import safety
+from ..exec_signal import rc_line, error_line, tag_error, safe_cut_points, strip_tags
 from ..token_estimate import estimate_text_tokens
 from ..tool_context import AWAIT_CONFIRM
+from ..param_utils import to_bool
 
 
 class BashRuntime:
@@ -26,17 +28,9 @@ class BashRuntime:
     - utf8_env: 子进程环境（导入时构建一次）
     - 正则/平台常量: 仅本模块使用
     """
-    # 删除命令正则
-    # 边界后跟空白或/：覆盖无空格变体（rd/s、del/f、rmdir/q）及erase/format；
-    # \b边界防止误伤 delphi、3rd、formatting 等普通词
-    RE_DELETE = re.compile(
-        r"\b(?:rm|del|rd|rmdir|erase|format)\b[\s/]"
-        r"|\bRemove-Item\b",
-        re.IGNORECASE,
-    )
-
-    # 匹配 git 命令的简单正则（出现 git 即命中）
-    RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
+    # 删除命令正则 / git 命令正则：共享定义源 tools/safety.py（安全判定语义恒等）
+    RE_DELETE = safety.RE_DELETE
+    RE_GIT = safety.RE_GIT
 
     # 识别 `python -c "code"` 形态（py/python3/pythonw及全路径），用于绕过cmd直执行。
     # exe: 解释器名或路径（可带盘符/空格，不可带引号）；flags: -c 前的真实旗标
@@ -243,6 +237,14 @@ DEFINITION = {
             "required": [],
         },
     },
+}
+
+
+CAPABILITY = {
+    "label": "执行命令",
+    "dispatch": "serial",
+    "summary": "command",
+    "trusted_output": False,
 }
 
 
@@ -458,7 +460,9 @@ def _truncate_output(text: str, max_chars: int) -> str:
     head = max_chars * 2 // 3
     head_end, tail_start = safe_cut_points(text, head, len(text) - (max_chars - head))
     est = estimate_text_tokens(text)  # ≈token（AI预算单位，混合密度估算）
-    full_path = truncate_store.store_output(text)
+    # 落盘前剥离进程级随机标签：标签是防伪协议的一部分，不得经落盘文件
+    # 泄漏（AI 已知标签后可伪造 has_error 判定；AI 视图本来也不含标签）
+    full_path = truncate_store.store_output(strip_tags(text))
     tip = (
         f"完整输出已落盘，用 Read/Grep 读取: {full_path}"
         if full_path
@@ -514,18 +518,30 @@ def execute(
         max_output_chars = int(max_output_chars) if max_output_chars is not None else 4000
     except (TypeError, ValueError, OverflowError):
         return error_line("timeout/max_output_chars需为整数")
+    # LLM 偶发把布尔值写成字符串（background="false"）：bool("false") 恒为 True，
+    # 会把前台命令意外转入后台（前台拿不到输出），必须按字符串语义解析
+    background = to_bool(background)
     # 参数校验前置：max_output_chars<=0 时若放到 _truncate_output 才报错，
     # 命令已执行、输出却被替换成参数错误（副作用已发生但结果不可见）——与
     # Terminal/Read 的"执行前拦截"保持一致
     if max_output_chars <= 0:
         return error_line("max_output_chars需为正整数")
+    # 与全局输出上限（"工具"."输出上限KB"）提前融合：registry 层的全局截断
+    # 对超限结果做首尾拼接（不落盘），若本层截断产物（正文+"完整输出已落盘"
+    # 提示行）总长仍超全局上限，位于中段的落盘路径提示会被二次截断吞掉，
+    # AI 拿不到路径、无法按 README 承诺用 Read/Grep 读回全文。此处按全局
+    # 上限收口并预留提示行空间（截断提示+hint 约几百字符），产出整体不超上限。
+    if _tool_context and _tool_context.max_tool_output_chars > 0:
+        max_output_chars = min(max_output_chars,
+                               max(300, _tool_context.max_tool_output_chars - 500))
     # ── 安全检查：删除命令和git命令根据配置决定是否需要确认 ──
     # 后台提交与前台同一套确认（bg 管理操作无 command 自然跳过）
+    # 判定走 safety.match_*（含 cmd 等价写法归一化：d^el、del.\x、del\x、!VAR! 拼接）
     need_confirm = False
     tc = _tool_context
-    if command and tc and not tc.rm_skip_confirm and BashRuntime.RE_DELETE.search(command):
+    if command and tc and not tc.rm_skip_confirm and safety.match_delete(command):
         need_confirm = True
-    elif command and tc and not tc.git_skip_confirm and BashRuntime.RE_GIT.search(command):
+    elif command and tc and not tc.git_skip_confirm and safety.match_git(command):
         need_confirm = True
 
     if need_confirm:
@@ -902,6 +918,11 @@ def _execute_py_suffixed(exe: str, flags: str, tail: str, spec,
         return rc, "", err, status
 
     mode, target = spec
+    # 相对重定向路径按段工作目录解析（`cd X && python -c "..." > out.txt`
+    # 的 out.txt 应落在 X 下，与 cmd 语义一致；此前落在 agent 进程 cwd，
+    # 返回 [exit code: 0] 静默成功、AI 反复重试）
+    if not os.path.isabs(target):
+        target = os.path.join(cwd or os.getcwd(), target)
     try:
         with open(target, mode + "b") as f:
             # PYTHONIOENCODING=utf-8 保证子进程输出UTF-8；\r\n 原样保留（与cmd一致）
@@ -934,7 +955,8 @@ def _execute_py_pipe(exe: str, flags: str, tail: str, pipe_cmd: str,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            cwd=os.getcwd(),
+            # 管道命令按段工作目录执行（与 python 段一致；cd 后的相对路径有效）
+            cwd=cwd or os.getcwd(),
             creationflags=BashRuntime.WIN_NO_WINDOW,
             env=BashRuntime.utf8_env,
         )
@@ -1032,7 +1054,9 @@ def _execute_segments(segments: list, timeout: int,
                 all_parts.append("\n".join(parts))
                 prev_rc = -1
                 break
-            # 与shell单段一致：成功段不输出[exit code: 0]，失败段保留退出码
+            # 逐段标注：成功段不输出[exit code: 0]，失败段保留各自退出码；
+            # 本次调用的总退出码在全部段结束后于末尾统一输出（单段路径的总码
+            # 在首行，属历史格式，位置差异为已知记录项）
             parts = []
             if rc != 0:
                 parts.append(rc_line(rc))
@@ -1148,6 +1172,25 @@ def _execute_segments(segments: list, timeout: int,
 
     if was_interrupted:
         all_parts.append("[用户中断]")
+
+    # set/export 段提示：多段命令逐段独立进程执行，前段的环境变量设置
+    # 不作用于后续段（与真实 cmd/bash 同行 && 的语义不同），静默失效会
+    # 误导 AI。不拦截、附提示引导用 `cmd /c "set X=Y && 命令"` 形式
+    # （引号内 && 不拆分，整条交给 shell，语义与真实终端一致）。
+    if any(re.match(r"(?i)\s*(?:set|export)\s", seg) for _op, seg in segments[:-1]):
+        all_parts.append(
+            "[提示: 各段独立进程执行，set/export 设置的环境变量不作用于后续段。"
+            "如需跨命令生效，请用 cmd /c \"set X=Y && 命令\" 形式（或 bash 前置赋值 X=Y 命令）]")
+
+    # 段内含 cd（非纯 cd 段）提示：`&`/`;` 混用段在独立子进程执行，段内 cd
+    # 不作用于后续段（与真实终端同会话语义不同），静默失效会让后续命令在
+    # 旧目录执行——附提示引导用独立 && cd 段形式（与 set/export 提示对齐）
+    if any((not _is_cd_command(seg))
+           and re.search(r"(?i)(?:^|[&|;(]\s*)cd(\s|$)", seg)
+           for _op, seg in segments[:-1]):
+        all_parts.append(
+            "[提示: 段内含 cd 的命令在独立子进程内执行，cd 不作用于后续段。"
+            "如需切换目录后继续执行，请用独立段形式：cd <目录> && <命令>]")
 
     # 总退出码（最后执行段的退出码；超时/中断时不显示，避免误导AI）
     if prev_rc >= 0 and not was_interrupted:

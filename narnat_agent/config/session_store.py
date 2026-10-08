@@ -54,8 +54,36 @@ def _safe_filename(name: str) -> str:
 
 def _sessions_dir(narnat_dir: str) -> str:
     d = os.path.join(narnat_dir, DATA_SUBDIR, SESSIONS_SUBDIR)
-    os.makedirs(d, exist_ok=True)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        # 目录不可用（被同名文件占位/权限拒绝/磁盘满）：此处不抛——调用方按
+        # 各自错误路径自然降级（保存返回可读错误、列举为空），避免一次目录
+        # 异常把整个进程带崩
+        pass
     return d
+
+
+def _load_json_with_shared_retry(path: str, attempts: int = 3):
+    """读取会话 JSON：对共享冲突（并发写方 os.replace 的毫秒窗口）短退避重试。
+
+    读端 open 在替换瞬间可能瞬时 Errno 13 / 文件暂时不可见（多进程或后台
+    自动保存线程与前台命令并发时实测存在的瞬态失败）；重试后基本消除。
+    重试耗尽仍失败时抛出最后一次 OSError，由调用方按既有语义处理
+    （列表跳过 / 加载报错）。解码类异常（JSON 损坏等）立即抛出，不重试。
+    """
+    last_err = None
+    for i in range(attempts):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except OSError as e:
+            last_err = e
+            if i < attempts - 1:
+                time.sleep(0.01 * (i + 1))
+        except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+            raise
+    raise last_err
 
 
 def _session_path(narnat_dir: str, name: str, parent: Optional[str] = None) -> str:
@@ -63,7 +91,10 @@ def _session_path(narnat_dir: str, name: str, parent: Optional[str] = None) -> s
     if parent:
         safe_parent = _safe_filename(parent)
         child_dir = os.path.join(_sessions_dir(narnat_dir), safe_parent)
-        os.makedirs(child_dir, exist_ok=True)
+        try:
+            os.makedirs(child_dir, exist_ok=True)
+        except OSError:
+            pass
         return os.path.join(child_dir, f"{safe_name}.json")
     return os.path.join(_sessions_dir(narnat_dir), f"{safe_name}.json")
 
@@ -90,8 +121,11 @@ def save_session(narnat_dir: str, name: str,
         # 顶层非对象（手工编辑/半写文件）视作无既有元数据，不能直接 .get()
         if not isinstance(existing, dict):
             existing = {}
-    # 归一化碰撞检测：特殊字符被替换后映射到同一文件，静默覆盖会清掉另一会话
-    if existing.get("name") and existing["name"] != name:
+    # 归一化碰撞检测：特殊字符被替换后映射到同一文件，静默覆盖会清掉另一会话。
+    # 判空用 is not None：空串 name（命名失败写入的文件）也是"已有名称"，
+    # falsy 短路会让它被 "unnamed" 静默覆盖（_safe_filename 把两者映射到同一
+    # 文件）。老格式（无 name 键）保持放行升级（get 返回 None）。
+    if existing.get("name") is not None and existing["name"] != name:
         return (f"保存失败: 会话名 '{name}' 与已有会话 '{existing['name']}' 冲突"
                 f"（名称中的 / \\ : < > | ? * 等字符在存储时会被替换，导致两者映射到同一文件），请换一个名称")
     data = {
@@ -120,6 +154,12 @@ def save_session(narnat_dir: str, name: str,
             # 编码失败与并发无关，重试无意义
             last_err = e
             break
+        except RecursionError as e:
+            # 深嵌套 messages（实测约 400 层即触发）在 _strip_surrogates/
+            # json.dump 递归时抛异常：load 端已按"损坏文件"防御，save 端
+            # 同样收敛为可读失败（不冒泡到主循环）
+            last_err = e
+            break
         except OSError as e:
             last_err = e
             time.sleep(0.02 * (attempt + 1))
@@ -136,8 +176,7 @@ def load_session(narnat_dir: str, name: str, parent: Optional[str] = None) -> tu
     if not os.path.isfile(path):
         return [], f"会话不存在: {name}"
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = _load_json_with_shared_retry(path)
     except (json.JSONDecodeError, UnicodeDecodeError, OSError, RecursionError) as e:
         # RecursionError：json.load 对超深嵌套（约1000层起）抛递归异常，属"文件损坏"
         return [], f"加载失败: {e}"
@@ -153,13 +192,16 @@ def load_session(narnat_dir: str, name: str, parent: Optional[str] = None) -> tu
 def list_sessions(narnat_dir: str) -> List[Dict[str, Any]]:
     sdir = _sessions_dir(narnat_dir)
     result = []
-    for fname in os.listdir(sdir):
+    try:
+        entries = os.listdir(sdir)
+    except OSError:
+        return result   # 会话库目录不可用：按空列表降级（与"无会话"同观感）
+    for fname in entries:
         if not fname.endswith(".json"):
             continue
         fpath = os.path.join(sdir, fname)
         try:
-            with open(fpath, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = _load_json_with_shared_retry(fpath)
         except (json.JSONDecodeError, UnicodeDecodeError, OSError, RecursionError):
             # 损坏文件（含超深嵌套）一律跳过，不影响其余会话
             continue
@@ -178,7 +220,11 @@ def list_sessions(narnat_dir: str) -> List[Dict[str, Any]]:
 def delete_session(narnat_dir: str, name: str, parent: Optional[str] = None) -> str:
     if name == "--all":
         sdir = _sessions_dir(narnat_dir)
-        for entry in os.listdir(sdir):
+        try:
+            entries = os.listdir(sdir)
+        except OSError as e:
+            return f"无法访问会话目录: {e}"
+        for entry in entries:
             entry_path = os.path.join(sdir, entry)
             if os.path.isdir(entry_path):
                 try:
@@ -197,8 +243,11 @@ def delete_session(narnat_dir: str, name: str, parent: Optional[str] = None) -> 
             return f"会话不存在: {name}"
         os.remove(path)
         safe_parent = _safe_filename(parent)
-        child_dir = os.path.join(_sessions_dir(narnat_dir), safe_parent)
-        if os.path.isdir(child_dir) and not os.listdir(child_dir):
+        sessions_root = _sessions_dir(narnat_dir)
+        child_dir = os.path.join(sessions_root, safe_parent)
+        # parent="." 时 child_dir 即会话库根自身的别名：rmdir 绝不能触及
+        if (os.path.normpath(child_dir) != os.path.normpath(sessions_root)
+                and os.path.isdir(child_dir) and not os.listdir(child_dir)):
             try:
                 os.rmdir(child_dir)
             except OSError:
@@ -209,8 +258,12 @@ def delete_session(narnat_dir: str, name: str, parent: Optional[str] = None) -> 
         return f"会话不存在: {name}"
     os.remove(path)
     safe_name = _safe_filename(name)
-    child_dir = os.path.join(_sessions_dir(narnat_dir), safe_name)
-    if os.path.isdir(child_dir):
+    sessions_root = _sessions_dir(narnat_dir)
+    child_dir = os.path.join(sessions_root, safe_name)
+    # "." 经文件名映射后仍是 "."（会话库根自身的别名）：rmtree 会连同
+    # 其它全部会话清空整个会话库，必须排除
+    if (os.path.normpath(child_dir) != os.path.normpath(sessions_root)
+            and os.path.isdir(child_dir)):
         try:
             shutil.rmtree(child_dir)
         except OSError:
@@ -228,8 +281,7 @@ def list_sessions_tree(narnat_dir: str) -> List[Dict[str, Any]]:
                 continue
             fpath = os.path.join(dirpath, fname)
             try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                data = _load_json_with_shared_retry(fpath)
             except (json.JSONDecodeError, UnicodeDecodeError, OSError, RecursionError):
                 # 损坏文件（含超深嵌套）一律跳过，不影响其余会话
                 continue

@@ -187,14 +187,23 @@ def _is_retryable_http(status: int) -> bool:
     return status in (408, 409) or status >= 500
 
 
+# ── Anthropic 转换层的"开放位置 assistant"占位思考块 ──
+# DeepSeek 思考模式校验：请求中处于"开放位置"的 assistant——尾部 assistant、
+# 或后面紧跟另一条 assistant（连续链前序）——必须携带 thinking 块，否则 400
+# "content[].thinking ... must be passed back"。正常对话的 assistant 后均跟
+# user（含 tool_result），不触发；触发时补非空占位（不补必 400；占位属协议
+# 合规填充，与"思考回传"开关的语义无关）。
+_PLACEHOLDER_THINKING = "（占位：该轮思考未回传）"
+
 # ── 上下文超限特征（400 响应归类，供 agent_loop 溢出恢复路径使用）──
+# 注意：不使用裸 "too long"——任何含该词的 400（如字段/参数过长）都会被
+# 误判为上下文超限并吞掉服务端真实错误，只保留上下文语境的短语匹配
 _CONTEXT_OVERFLOW_HINTS = (
     "context length",
     "context window",
     "context_length_exceeded",
     "context is too long",
     "prompt is too long",
-    "too long",
     "exceeds the maximum",
     "maximum context",
     "input length",
@@ -306,6 +315,8 @@ class LLMClient:
         protocol = config.protocol
         self._protocol = protocol
 
+        if protocol not in ("anthropic", "openai"):
+            raise ValueError(f"不支持的协议: {protocol}（可选: anthropic / openai）")
         if protocol == "anthropic":
             self._backend = _AnthropicBackend(config, self._tool_defs, logger, max_output_tokens)
         else:
@@ -733,7 +744,16 @@ class _OpenAIBackend:
                         yield {"tool_calls": completed_calls, "finish_reason": finish_reason,
                                "thinking": thinking_out}
                     else:
-                        yield {"finish_reason": finish_reason, "thinking": thinking_out}
+                        # 兜底：服务端只回 reasoning_content 不回 content（DeepSeek
+                        # 偶发；anthropic 后端同款兜底）——把思考内容作为正式输出，
+                        # 避免上层收到空回复（round_failed）
+                        if not content_buffer and reasoning_buffer:
+                            fallback_text = "".join(reasoning_buffer)
+                            content_buffer.append(fallback_text)
+                            yield {"content": fallback_text}
+                            yield {"finish_reason": finish_reason, "thinking": ""}
+                        else:
+                            yield {"finish_reason": finish_reason, "thinking": thinking_out}
 
                     if self._logger:
                         total_out = len("".join(content_buffer))
@@ -745,6 +765,14 @@ class _OpenAIBackend:
                 if self._logger:
                     self._logger.warning("core.llm", f"响应流中断: {stream_err[0]}")
                 yield {"stream_interrupted": _classify_stream_error(stream_err[0])}
+            # ── 兜底：流正常结束但未收到完成标记且无任何内容产出（如网关
+            # 200+HTML、无效 SSE 帧）：明确报错，避免上层空重试（anthropic
+            # 后端同款兜底；有内容/完成标记/中断的正常路径不受影响）
+            elif (not received_finish and not content_buffer
+                    and not tool_calls_buffer and not reasoning_buffer):
+                if self._logger:
+                    self._logger.error("core.llm", "响应流为空或格式异常（未收到有效内容）")
+                yield {"content": "[错误: API响应为空或格式异常（未收到有效内容）]", "finish_reason": "error"}
         finally:
             LLMClient._active_response = None
 
@@ -1345,6 +1373,27 @@ class _AnthropicBackend:
                     anthropic_msgs[-1]["content"].append(tool_result)
                 else:
                     anthropic_msgs.append({"role": "user", "content": [tool_result]})
+
+        # 开放位置 assistant 补占位思考块（见 _PLACEHOLDER_THINKING 注释）：
+        # 尾部 assistant 与连续 assistant 链前序缺 thinking 块会被 API 拒
+        # （400 must be passed back）；正常形态不触发（assistant 后均跟 user）
+        for i, m in enumerate(anthropic_msgs):
+            if m.get("role") != "assistant":
+                continue
+            is_open = (i == len(anthropic_msgs) - 1
+                       or anthropic_msgs[i + 1].get("role") == "assistant")
+            if not is_open:
+                continue
+            blocks = m.get("content")
+            if isinstance(blocks, list) and any(
+                    isinstance(b, dict) and b.get("type") == "thinking"
+                    for b in blocks):
+                continue
+            if isinstance(blocks, str):
+                blocks = [{"type": "text", "text": blocks}] if blocks else []
+            else:
+                blocks = list(blocks or [])
+            m["content"] = [{"type": "thinking", "thinking": _PLACEHOLDER_THINKING}] + blocks
 
         system_text = "\n\n".join(system_parts) if system_parts else ""
         return system_text, anthropic_msgs

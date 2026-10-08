@@ -76,7 +76,7 @@ AgentByNarnat/
 
 1. 按 `Win` 键搜索「环境变量」，打开「编辑系统环境变量」（也可搜索「编辑账户的环境变量」）
 2. 在「用户变量」中选中 `Path` → 点击「编辑」→「新建」→ 填入解压目录（如 `D:\AgentByNarnat`，只填目录，不含 `narnat.exe`）→ 逐级点击「确定」
-3. 关闭已打开的终端并重新打开，执行 `narnat -v`；能显示版本号（如 `narnat 16.2.1`）即配置生效
+3. 关闭已打开的终端并重新打开，执行 `narnat -v`；能显示版本号（如 `narnat 16.7.0`）即配置生效
 
 **方式二：PowerShell 命令**（将路径替换为实际解压路径）
 
@@ -124,7 +124,7 @@ $p = [Environment]::GetEnvironmentVariable('Path','User')
 ```bash
 pip install nuitka==4.1.2 httpx openai paramiko prompt_toolkit pyserial zstandard
 python -m nuitka --onefile --output-dir=output --output-filename=narnat.exe \
-  --onefile-tempdir-spec="{PROGRAM_DIR}/narnat_runtime/{VERSION}" --product-version=16.4.8 \
+  --onefile-tempdir-spec="{PROGRAM_DIR}/narnat_runtime/{VERSION}" --product-version=16.7.0 \
   --jobs=16 --lto=yes --python-flag=no_docstrings --follow-imports \
   --include-module=openai \
   --nofollow-import-to=tkinter --nofollow-import-to=unittest --nofollow-import-to=unittest.mock \
@@ -180,10 +180,10 @@ make -j$(nproc) && sudo make install
 | `-d, --debug` | 调试模式，日志写入 `.narnat/logs/` |
 | `-v, --version` | 显示版本号 |
 | `-p, --prompt <任务>` | headless 模式：执行一次性任务后退出（纯文本输出） |
-| `-g, --goal-rounds N` | headless 模式：开启目标模式并设置续跑预算轮数（≥1，如 `-g 10`）；不带则单轮执行（不注入 GoalComplete、无完成验证） |
+| `-g, --goal-rounds N` | headless 模式：开启目标模式并设置续跑预算轮数（如 `-g 10`；0 等同不开启）；不带则单轮执行（不注入 GoalComplete、无完成验证） |
 | `-l, --tool-log` | headless 模式：显示详细工具调度日志（默认仅输出 AI 最终答复） |
 
-headless（`-p`）行为：注入任务后执行，**不带 `-g` 为单轮执行**（AI 一口气干到停手即退出，不注入 GoalComplete、无完成验证）；**带 `-g N` 开启目标模式**：自动续跑 + AI 调用 GoalComplete 提交完成清单（经独立验证器复核）或达预算上限收尾 → 退出。不读用户输入、不保存会话、不查余额、不显示统计栏，适合脚本化与父代理调度（如派发子代理任务）。输出为纯文本（全局去色，表格/列表结构保留），末行输出哨兵 `[NN_DONE] reason=… rounds=…` 供程序判定结束与结束原因（reason：`done` / `goal_complete` / `goal_honest` / `goal_forced` / `goal_suspect` / `round_limit` / `aborted` / `round_failed` / `compress_failed` / `unknown`）。
+headless（`-p`）行为：注入任务后执行，**不带 `-g` 为单轮执行**（AI 一口气干到停手即退出，不注入 GoalComplete、无完成验证；`reason=done` 仅表示执行结束，**不校验任务是否达成**——需要任务成败判定/自动续跑请用 `-g` 目标模式）；**带 `-g N` 开启目标模式**：自动续跑 + AI 调用 GoalComplete 提交完成清单（经独立验证器复核）或达预算上限收尾 → 退出。不读用户输入、不保存会话、不查余额、不显示统计栏，适合脚本化与父代理调度（如派发子代理任务）。输出为纯文本（全局去色，表格/列表结构保留），末行输出哨兵 `[NN_DONE] reason=… rounds=…` 供程序判定结束与结束原因（reason：`done` / `goal_complete` / `goal_honest` / `goal_forced` / `goal_suspect` / `round_limit` / `aborted` / `round_failed` / `compress_failed` / `unknown`）。
 
 headless 退出码对照：`0`=正常收尾（`done` / `goal_*` / `round_limit` 等）；`1`=参数错误（如空任务、负轮数）或启动异常；`2`=任务级失败（`round_failed` / `aborted` / `compress_failed` / `unknown`）或参数解析错误（argparse）。注意 `round_limit`（任务未完成）退出码为 `0`——判定结束与结果以末行哨兵为准，退出码仅作辅助。进程被外部强制终止（如 `taskkill`）时退出码同样为 `1`，且可能没有任何输出与哨兵行——父代理应将"自己发起的终止"单独记账（超时兜底建议 `taskkill /F /T`，避免孙进程残留）。已开启「费用日志.启用」时，headless 的每次 API 调用照常记账（写入 `.narnat/data/cost_log.csv`）。
 
@@ -215,7 +215,7 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
 └── logs/             # 调试日志（-d 模式）
 ```
 
-> 环境变量 `NARNAT_HOME` 可指定 `.narnat` 所在目录，优先级最高；否则从当前目录向上查找，编译版取 exe 所在目录。
+> 环境变量 `NARNAT_HOME` 可指定 `.narnat` 所在目录，优先级最高；否则从当前目录向上查找，编译版取 exe 所在目录。（`NARNAT_HOME` 指向包含 `.narnat` 的目录；该目录下须已存在 `.narnat`，否则视为未设置、回退后续查找。）
 
 ### narnat.json
 
@@ -236,15 +236,15 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
     "最大输出token数": 128000,
     "上下文窗口大小": 1000000,                   // 模型上下文窗口 token 数，≤0 视为无效（占比显示 --）
     "目标模式最大轮数": 10,                      // /goal 开启后单个任务的续跑总预算（每轮续跑消耗1，每次验证打回额外消耗1）
-    "完成验证": true,                            // 可选，默认 true；GoalComplete 提交清单后由独立 AI 验证器（只读工具实地复核）验证
-    "验证模型": "",                              // 可选，默认空=当前模型；验证器使用的模型
+    "完成验证": true,                            // 默认 true（首次生成含此 key）；GoalComplete 提交清单后由独立 AI 验证器（只读工具实地复核）验证
+    "验证模型": "",                              // 默认空=当前模型；验证器使用的模型
     "思考": {
       "启用": true,                             // 关闭则不传 thinking 参数
       "强度": "high",                           // 当前生效值
       "强度选项": { "high": "高", "max": "全开" }, // /thinking 可选值 → 显示名
       "回传": true                              // 可选，默认 true；思考内容按厂商契约回传（/thinkback 切换）
     },
-    "LLM重试次数": 3
+    "LLM重试次数": 3                            // 网络类错误的重试次数（1-10，超出按边界钳制）
   },
 
   // ── 余额查询（独立分组，支持 DeepSeek / Kimi / GLM 等）──
@@ -266,10 +266,10 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
     "tool": "search",                           // 搜索工具名；空 = 连接后报错列出服务器工具表
     "query_params": ["query"],                  // 查询词填入的参数名（可多个）
     "count_param": "max_results",               // 结果数量参数名；"" = 不传
-    "args": {}                                  // 可选，附加固定参数，如 {"zone": "cn"}
+    "args": {}                                  // 可选，附加固定参数；仅当目标工具参数表声明该键时传入，未声明的键被忽略
   },
 
-  // ── 定价（用于费用统计，键为模型名）──
+  // ── 定价（用于费用统计，键为模型名；数值为示例且默认不预置——不填则费用显示 0）──
   "定价": {
     "模型": {
       "deepseek-v4-pro":   { "输入": 3.0, "缓存命中": 0.025, "输出": 6.0 },
@@ -284,7 +284,7 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
     "最大容量MB": 50                            // 写满后轮转为 主名_bak.csv（磁盘上保留 1 活动 + 1 备份）
   },
 
-  // ── 界面（详见下方「界面配色」）──
+  // ── 界面（可选；下图「颜色/基础色/标注/代码块/差异/框架/命令/提示符」各组首次生成不含，按需添加。详见下方「界面配色」）──
   "界面": {
     "显示费用": false,                          // 或英文 "show_cost"
     "显示余额": false,
@@ -303,7 +303,7 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
   "工具": {
     "输出上限KB": 64,                           // 工具输出全局硬截断（保留首尾），0=不限制
     "超时上限秒": 1800,                         // 工具执行超时上限，0=不限制
-    "SSH最大会话数": 5,                         // 可选，默认 5
+    "SSH最大会话数": 5,                         // 可选，默认 5（1-10，超出按边界钳制）
     "最大传输文件MB": 100,                      // 可选，默认 100
     "git免确认": false,                         // 可选，默认 false（git 命令需二次确认）
     "rm免确认": false,                          // 可选，默认 false（rm 命令需二次确认）
@@ -402,6 +402,7 @@ narnat_agent/
 │   ├── auto_save_manager.py  #   自动保存 / 自动命名
 │   ├── tool_dispatcher.py    #   工具调度（只读并行 / 写入按文件分组 / 串行）
 │   ├── tool_callbacks.py     #   工具回调（Todo 同步）
+│   ├── goal_verifier.py      #   目标完成验证器（独立复核 AI 的完成声明）
 │   ├── summarizer.py         #   探索分支总结
 │   ├── billing.py            #   费用 / 余额
 │   ├── stats.py              #   统计、费用日志
@@ -425,6 +426,8 @@ narnat_agent/
 │   ├── todo_write/           #   TodoWrite — 任务列表
 │   ├── goal_complete/        #   GoalComplete — 目标完成标记（目标模式动态注入）
 │   ├── registry.py           #   工具注册表
+│   ├── safety.py             #   安全判定共享正则（删除/git 命令拦截，单一定义源）
+│   ├── token_estimate.py     #   token 估算（AI 预算单位）
 │   ├── exec_signal.py        #   退出码 / 错误标签协议（防命令输出伪造）
 │   ├── diff_utils.py         #   diff 生成
 │   ├── param_utils.py        #   参数处理

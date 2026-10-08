@@ -25,6 +25,10 @@ from ..logger import AgentLogger
 # 迟到提醒触发阈值：同一任务累计工具轮数达到此值仍无计划 → 温和提醒一次
 TODO_NUDGE_TOOL_ROUNDS = 6
 
+# 请求前尾部守卫补的 user 收尾内容（异常形态兜底：/done 结论注入尾部 system 后
+# 转换层抽出 system 会以无 thinking 的 assistant 收尾，被 API 拒；正常交互不触发）
+TAIL_GUARD_MESSAGE = "[]请基于当前上下文继续推进任务。"
+
 
 class AgentLoop:
     """工具调度内循环"""
@@ -120,9 +124,28 @@ class AgentLoop:
             thinking_text = None            # 本轮思考内容（仅工具轮回传，学官方 harness 规则）
             thinking_signature = None       # 本轮思考签名（Claude 回传思考块必需）
 
-            for chunk in self._llm.chat_stream(self._msg_manager.view.to_list(), cancel_check=lambda: stream.cancelled):
+            # 请求前尾部守卫：转换层会把 system 消息抽出并入 API system prompt，
+            # 若抽除后请求以"无 thinking 的 assistant"收尾（如 /done 结论注入为
+            # 尾部 system 之后），thinking 模式下会被 API 拒（400: must be
+            # passed back）。正常交互不触发（请求总由 user 输入/续跑消息收尾）；
+            # 仅本次请求副本补一条 user，不改动内存与持久化。
+            request_msgs = self._msg_manager.view.to_list()
+            if request_msgs:
+                _tail = request_msgs[-1]
+                _tail_role = _tail.get("role")
+                if _tail_role == "system" or (
+                        _tail_role == "assistant"
+                        and not _tail.get("tool_calls") and not _tail.get("thinking")):
+                    request_msgs.append({"role": "user", "content": TAIL_GUARD_MESSAGE})
+
+            for chunk in self._llm.chat_stream(request_msgs, cancel_check=lambda: stream.cancelled):
                 # b. 检查中断
                 if stream.cancelled:
+                    # 已完成调用照常记账（与循环外取消分支同一口径：
+                    # usage 已到达而残余 chunk 被消费时，此前两条路径漏记不一致）
+                    if call_usage:
+                        self._stats.update(call_usage)
+                        self._sync_ratio()
                     if content_parts:
                         # 中断残留是纯文本轮：不回传思考（学官方：仅工具轮回传）
                         self._msg_manager.append_assistant("".join(content_parts))
@@ -221,6 +244,11 @@ class AgentLoop:
 
             # 中断检查
             if stream.cancelled:
+                # 已完成调用照常记账（"流完成瞬间取消"窄窗此前会漏记；
+                # 流中途取消时 usage 通常尚未到达，自然不记）
+                if call_usage:
+                    self._stats.update(call_usage)
+                    self._sync_ratio()
                 stream.abort()
                 self._ui.on_interrupted()
                 return
@@ -228,6 +256,14 @@ class AgentLoop:
             # 本轮收到正常完成标记（含工具轮）→ 重置流中断重试预算（每轮独立）
             if parsed_finish_reason is not None:
                 stream_interrupted_retries = 0
+
+            # 本轮 usage 统一落账（放在工具执行/收尾分支之前）：工具执行中被
+            # 终止（taskkill 等）时，已完成的 LLM 调用照常记账（README 承诺
+            # "每次 API 调用照常记账"）；原"工具轮后/文本轮后"两处记账点已
+            # 合并至此，保证每轮响应恰好记一次
+            if call_usage:
+                self._stats.update(call_usage)
+                self._sync_ratio()
 
             # 有tool_call → 执行工具 → 继续内循环
             if tool_calls_result:
@@ -269,10 +305,7 @@ class AgentLoop:
                 for tc_id, result in tool_results:
                     self._msg_manager.append_tool_result(tc_id, result)
 
-                # 更新统计 + 刷新占比（供循环顶部运行中自查判断下一步请求压力）
-                if call_usage:
-                    self._stats.update(call_usage)
-                    self._sync_ratio()
+                # （本轮的 usage 落账已上移至工具执行前统一处理）
 
                 # ── 迟到提醒：多轮工具后仍未建立计划 → 温和提醒一次 ──
                 # 不阻塞、不重复；文案自带"可忽略"出口，单步任务/探索阶段
@@ -345,6 +378,7 @@ class AgentLoop:
                 _empty_msgs = {
                     "stop": "⚠ AI 返回了空回复，请尝试缩短对话或稍后重试。",
                     "max_tokens": "⚠ AI 思考超过了最大输出限制，请增大限制或缩短对话。",
+                    "length": "⚠ AI 思考超过了最大输出限制，请增大限制或缩短对话。",
                     "content_filter": "⚠ AI 返回被安全策略拦截，请调整提问内容。",
                     "server_busy": "⚠ 服务器繁忙，请稍后重试。",
                     "error": "⚠ AI 调用出错，请查看上方错误信息。",
@@ -363,10 +397,7 @@ class AgentLoop:
                 )
                 return
 
-            # 更新统计 + 刷新占比（供循环顶部运行中自查判断下一步请求压力）
-            if call_usage:
-                self._stats.update(call_usage)
-                self._sync_ratio()
+            # （本轮的 usage 落账已上移至工具执行前统一处理）
 
             # ── 收尾软提醒：计划未全部勾选时提醒一次，仅一次 ──
             # AI漏勾选就输出总结时，注入一条提醒让它补勾；无论下一轮结果如何
@@ -455,6 +486,10 @@ class AgentLoop:
                     # 打回已无力再跑（没有下一轮空间）→ 强制放行（未通过质检），不空转。
                     # round_budget_left < 0 表示不限制（未提供预算）
                     if 0 <= round_budget_left < 1 + self._last_round_blocks:
+                        # 拟议打回无力再跑：本次打回未实际发生（不注入返工提示、
+                        # 不产生新一轮），撤回其计数——否则预算结算多记 1，
+                        # rounds 虚超 -g N，父代理误判预算消耗
+                        self._last_round_blocks -= 1
                         self._tool_context.goal_forced = True
                         stream.feed(f"  ⚠ 验证未通过（{result.summary}）且续跑预算已耗尽，强制放行（未通过质检）\n")
                         stream.flush_renderer()

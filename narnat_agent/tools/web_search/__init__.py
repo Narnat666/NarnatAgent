@@ -15,7 +15,8 @@ inputSchema 决定。配置（narnat.json "联网搜索"，缺项即报错；旧
   - tool:         搜索工具名；空 = 连接后报错列出服务器工具表
   - query_params: 查询词填入的参数名列表（可多个，数组型参数传 [query]）
   - count_param:  结果数量参数名；空串 = 不传
-  - args:         可选，附加固定参数，原样并入调用（如 {"zone": "cn"}）
+  - args:         可选，附加固定参数；仅当目标工具参数表（inputSchema）声明
+                  该键时传入，未声明的键被忽略（防换服务器后旧配置误传给其它工具）
 """
 
 import json
@@ -54,6 +55,14 @@ DEFINITION = {
             "required": ["query"],
         },
     },
+}
+
+
+CAPABILITY = {
+    "label": "联网搜索",
+    "dispatch": "readonly",
+    "summary": "query",
+    "trusted_output": True,
 }
 
 

@@ -309,7 +309,9 @@ def _coerce(v, target_type):
         return None
     try:
         return target_type(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError：JSON 的 1e999 解析为 float('inf')，int(inf) 不可转
+        # （输出上限KB/超时上限秒/上下文窗口/保留尾部等字段统一由此覆盖）
         return None
 
 
@@ -322,6 +324,26 @@ def _int_or(value, default: int) -> int:
     """整数配置解析：缺失/非法 → default（0 保留为合法值）"""
     v = _coerce(value, int)
     return default if v is None else v
+
+
+def _coerce_bool(value, default: bool) -> bool:
+    """布尔配置解析：字符串型布尔按语义解析，缺失/None → default。
+
+    手写配置可能把布尔写成字符串（"false"/"0"/"off"），bool("false")=True
+    会把功能反向开启（与用户意图相反）；与 param_utils.to_bool 同一语义。
+    真布尔/数字维持 bool() 行为。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("false", "0", "no", "off", "f", "n", "", "否"):
+            return False
+        if s in ("true", "1", "yes", "on", "t", "y", "是"):
+            return True
+    if value is None:
+        return default
+    return bool(value)
 
 
 def _parse_project_skill_roots(data: dict) -> Optional[tuple]:
@@ -464,8 +486,20 @@ def _load_json(config_dir: str) -> dict:
     if not os.path.isfile(path):
         return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        # utf-8-sig：兼容记事本"UTF-8"保存自带的 BOM（utf-8 解码器会把 BOM
+        # 留成 \ufeff 前缀字符，json 解析失败→整份配置被静默丢弃）
+        with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
+    except UnicodeDecodeError:
+        # 记事本"ANSI(GBK)"保存的配置：按 GBK 宽容重读（此前未捕获直接崩溃）。
+        # GBK 解码失败（非文本文件等）时按坏配置自愈：警告 + 默认配置
+        try:
+            with open(path, "r", encoding="gbk") as f:
+                data = json.load(f)
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, OSError) as e:
+            _warn(f"narnat.json 编码无法识别（{e}），已按默认配置启动；"
+                  f"请用 UTF-8 编码保存或删除该文件重新生成（文件: {path}）")
+            return {}
     except (json.JSONDecodeError, RecursionError) as e:
         # RecursionError：超深嵌套（约1000层起）会在解析期抛递归异常，
         # 按"坏 JSON 自愈"同类处理（警告 + 默认配置）
@@ -536,6 +570,10 @@ def _build_ai_config(data: dict) -> AIConfig:
     ai = data.get("智能体", {})
 
     protocol = ai.get("协议", DEFAULT_PROTOCOL)
+    if protocol not in ("anthropic", "openai"):
+        _warn(f"「智能体.协议」值 '{protocol}' 不被识别（仅支持 anthropic / openai），"
+              f"已回退为 '{DEFAULT_PROTOCOL}'")
+        protocol = DEFAULT_PROTOCOL
     base_url = ai.get("接口地址", DEFAULT_BASE_URL)
     model, model_options = _parse_model_config(ai.get("模型"))
 
@@ -543,9 +581,9 @@ def _build_ai_config(data: dict) -> AIConfig:
     if not isinstance(thinking_cfg, dict):
         _warn("「智能体.思考」段格式错误（应为对象），已按默认处理")
         thinking_cfg = {}
-    thinking_enabled = bool(thinking_cfg.get("启用", DEFAULT_THINKING_ENABLED))
+    thinking_enabled = _coerce_bool(thinking_cfg.get("启用"), DEFAULT_THINKING_ENABLED)
     thinking_effort = thinking_cfg.get("强度", DEFAULT_THINKING_EFFORT)
-    thinking_passback = bool(thinking_cfg.get("回传", DEFAULT_THINKING_PASSBACK))
+    thinking_passback = _coerce_bool(thinking_cfg.get("回传"), DEFAULT_THINKING_PASSBACK)
     thinking_options = thinking_cfg.get("强度选项", {"high": "高", "max": "全开"})
     if not isinstance(thinking_options, dict):
         _warn("「智能体.思考.强度选项」格式错误（应为对象），已按默认处理")
@@ -572,7 +610,7 @@ def _build_ai_config(data: dict) -> AIConfig:
         thinking_options=thinking_options,
         context_window=context_window,
         goal_max_rounds=_coerce(ai.get("目标模式最大轮数"), int) or DEFAULT_GOAL_MAX_ROUNDS,
-        goal_verify=bool(ai.get("完成验证", DEFAULT_GOAL_VERIFY)),
+        goal_verify=_coerce_bool(ai.get("完成验证"), DEFAULT_GOAL_VERIFY),
         goal_verify_model=str(ai.get("验证模型", "") or ""),
     )
 
@@ -686,7 +724,7 @@ def _build_ui_config(data: dict, max_output_tokens: int = 128000) -> UIConfig:
 def _pop_bool_any(d: dict, *keys) -> bool:
     for k in keys:
         if k in d:
-            return bool(d.pop(k))
+            return _coerce_bool(d.pop(k), False)
     return False
 
 
@@ -713,7 +751,7 @@ def _build_balance_config(data: dict) -> BalanceConfig:
     """从narnat.json的"余额查询"分组构建BalanceConfig"""
     bal = data.get("余额查询", {})
     return BalanceConfig(
-        enabled=bool(bal.get("启用", False)),
+        enabled=_coerce_bool(bal.get("启用"), False),
         url=bal.get("查询地址", ""),
         auth_method=bal.get("认证方式", "bearer"),
         value_path=bal.get("响应路径", ""),
@@ -726,7 +764,7 @@ def _build_cost_log_config(data: dict, data_dir: str) -> CostLogConfig:
     cfg = data.get("费用日志", {})
     if not isinstance(cfg, dict):
         cfg = {}
-    enabled = bool(cfg.get("启用", False))
+    enabled = _coerce_bool(cfg.get("启用"), False)
     path = cfg.get("输出文件") or os.path.join(data_dir, "cost_log.csv")
     # 最大容量MB：缺失/非法 → 50MB；显式 ≤0 → 不限制（不轮转）；小数按 MB 精度保留
     max_mb = cfg.get("最大容量MB")
@@ -747,17 +785,26 @@ def _load_user_md(config_dir: str) -> str:
     if not os.path.isfile(path):
         return ""
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        # utf-8-sig 吸收记事本保存的 BOM；解码失败（记事本 ANSI/GBK）宽容
+        # 按 GBK 重读，再失败返回空串（此前未捕获会直接崩溃）
+        with open(path, "r", encoding="utf-8-sig") as f:
             return f.read().strip()
+    except UnicodeDecodeError:
+        try:
+            with open(path, "r", encoding="gbk") as f:
+                return f.read().strip()
+        except (UnicodeDecodeError, OSError):
+            return ""
     except OSError:
         return ""
 
 
 # narnat.md 子代理隐藏区块：<!-- subagent:hide --> ... <!-- /subagent:hide -->
 # headless（nn -p）时整块剥离：子代理继承其余全部内容，唯独不感知子代理调度能力。
+# 大小写不敏感：标记是防泄漏协议，大写写法同样剥离（否则父代理专属内容会泄入子代理）
 _SUBAGENT_HIDE_RE = re.compile(
     r"<!--\s*subagent:hide\s*-->.*?<!--\s*/subagent:hide\s*-->",
-    re.DOTALL,
+    re.DOTALL | re.IGNORECASE,
 )
 
 
@@ -799,6 +846,8 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
     # 确保 .narnat 及子目录存在（logs 目录由 logger.start() 在 debug 模式下按需创建）
     os.makedirs(config_dir, exist_ok=True)
     os.makedirs(data_dir, exist_ok=True)
+    # 系统技能目录（README「首次运行自动生成」树含 config/skills/，/skill 的放置位置）
+    os.makedirs(os.path.join(config_dir, "skills"), exist_ok=True)
 
     # 确保关键配置文件存在
     for fname in (NARNAT_JSON, NARNAT_MD):
@@ -947,14 +996,14 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
             plugin_tools=plugin_tools,
         ),
         safety=SafetyConfig(
-            git_skip_confirm=bool(data.get("工具", {}).get("git免确认", DEFAULT_GIT_SKIP)),
-            rm_skip_confirm=bool(data.get("工具", {}).get("rm免确认", DEFAULT_RM_SKIP)),
+            git_skip_confirm=_coerce_bool(data.get("工具", {}).get("git免确认"), DEFAULT_GIT_SKIP),
+            rm_skip_confirm=_coerce_bool(data.get("工具", {}).get("rm免确认"), DEFAULT_RM_SKIP),
         ),
         session=SessionConfig(
-            auto_save=bool(data.get("会话", {}).get("自动保存", DEFAULT_AUTO_SAVE)),
+            auto_save=_coerce_bool(data.get("会话", {}).get("自动保存"), DEFAULT_AUTO_SAVE),
             auto_save_tokens=_parse_token_amount(
                 data.get("会话", {}).get("自动保存Token量"), DEFAULT_AUTO_SAVE_TOKENS),
-            show_ratio=bool(data.get("压缩", {}).get("占比显示", DEFAULT_SHOW_RATIO)),
+            show_ratio=_coerce_bool(data.get("压缩", {}).get("占比显示"), DEFAULT_SHOW_RATIO),
             warn_ratio=_coerce(data.get("压缩", {}).get("告警"), int) or DEFAULT_WARN_RATIO,
             compress_ratio=_coerce(data.get("压缩", {}).get("压缩"), int) or DEFAULT_COMPRESS_RATIO,
             retain_tokens=compress_retain,

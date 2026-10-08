@@ -58,9 +58,23 @@ class AutoSaveManager:
         name = self._summary.name_session(self._message_list.view().to_list())
         if not name:
             return
-        from ..config.session_store import save_session
-        err = save_session(self._config.paths.narnat_dir, name,
-                           self._message_list.view().to_list())
+        from ..config.session_store import save_session, session_exists
+        from .session_callbacks import _check_reserved_session_name
+        err = _check_reserved_session_name(name)
+        if not err and session_exists(self._config.paths.narnat_dir, name):
+            # 与历史会话重名：手动 /save 会拒绝并让用户换名，自动保存无人可问——
+            # 追加序号另存为新会话，绝不覆盖既有会话
+            base = name
+            for i in range(2, 100):
+                candidate = f"{base} ({i})"
+                if not session_exists(self._config.paths.narnat_dir, candidate):
+                    name = candidate
+                    break
+            else:
+                err = f"自动命名 '{base}' 与历史会话重名且未找到可用序号"
+        if not err:
+            err = save_session(self._config.paths.narnat_dir, name,
+                               self._message_list.view().to_list())
         if err:
             self._logger.warning("core.auto_save", f"自动保存失败: {err}")
             _stdout_write(f"  {D}⚠ 自动保存失败: {err}{R}\n")

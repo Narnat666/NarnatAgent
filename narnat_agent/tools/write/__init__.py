@@ -4,6 +4,9 @@
 """
 
 import os
+import shutil
+import tempfile
+import time
 import difflib
 
 from ..diff_utils import colorize_diff, describe_bytes_only_change
@@ -32,6 +35,13 @@ DEFINITION = {
     },
 }
 
+
+CAPABILITY = {
+    "label": "写入",
+    "dispatch": "write",
+    "summary": "file_path",
+    "trusted_output": True,
+}
 
 
 # Windows 保留设备名（写这些名字等价于写设备，要么假成功要么抛 WinError）
@@ -94,6 +104,11 @@ def execute(file_path: str, content: str,
     if device is None:
         return (f"[错误: {_file_tool_device_hint()}]", "")
 
+    # 路径含 NUL（JSON \u0000）：Win32 文件 API 抛未捕获 ValueError 逃出工具层，
+    # 提前拒绝给出可读错误（本地与 device=devN 远程路径同一层拦截）
+    if "\x00" in file_path:
+        return ("[错误: 路径含 NUL 字符（\\0），非法文件路径]", "")
+
     if device:
         from ..terminal.remote import remote_write
         return remote_write(file_path, content, device)
@@ -130,6 +145,7 @@ def execute(file_path: str, content: str,
     color_diff = ""
     old_content = ""
     old_bytes = None
+    old_encoding = None
     diff = ""
     if os.path.isfile(abs_path):
         try:
@@ -144,6 +160,7 @@ def execute(file_path: str, content: str,
                     old_bytes = fb.read()
             if old_bytes is not None:
                 encoding = _detect_text_encoding(head)
+                old_encoding = encoding
                 old_content = old_bytes.decode(encoding, errors="replace")
                 diff = _make_diff(old_content, content, file_path)
                 color_diff = colorize_diff(diff)
@@ -151,12 +168,53 @@ def execute(file_path: str, content: str,
             pass
 
     try:
-        with open(abs_path, "w", encoding="utf-8", newline='') as f:
-            f.write(content)
+        data = content.encode("utf-8")
+    except UnicodeEncodeError as e:
+        return (f"[错误: 写入失败: {e}]", "")
+    try:
+        # 临时文件 + 原子替换：并发读端（其它进程/编辑器重载）不会读到
+        # "截断到一半"的文件（open("w") 的 truncate+write 非原子，读写并发
+        # 实测 11.5% 撕裂；Edit 已用本方案，Write 对齐）
+        directory = os.path.dirname(abs_path) or "."
+        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".narnat_write_", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            # 保持原文件权限（与 Edit 同款；Windows 跳过——只读属性复制到
+            # tmp 会让 replace 与清理双双失败）
+            if os.name != "nt":
+                try:
+                    shutil.copymode(abs_path, tmp_path)
+                except OSError:
+                    pass
+            last_err = None
+            for i in range(3):
+                try:
+                    os.replace(tmp_path, abs_path)
+                    break
+                except OSError as e:
+                    # 读端句柄持续持有目标时 replace 需要删除权限，可能瞬时被拒
+                    last_err = e
+                    time.sleep(0.01 * (i + 1))
+            else:
+                # 3 次均被拒（持续并发读端持有）：回退直写保证本次写入成功——
+                # 原子保护在常规场景仍生效，极端并发下退化为直写（写成功优先，
+                # 撕裂窗口仅存在于该读写竞态场景）
+                try:
+                    with open(abs_path, "wb") as f:
+                        f.write(data)
+                except OSError:
+                    raise last_err
+        finally:
+            # 未消费的 tmp 一律清理（replace 成功时 tmp 已被移走，unlink 静默失败）
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     except OSError as e:
         return (f"[错误: 写入失败: {e}]", "")
 
-    new_bytes = content.encode("utf-8")
+    new_bytes = data
     byte_count = len(new_bytes)
 
     # 变更判定基于字节比较：_make_diff的splitlines()会抹平行尾符与末尾换行差异，
@@ -170,8 +228,33 @@ def execute(file_path: str, content: str,
         return (f"[提示: 文件已写入，正文内容相同，但字节层面有变化（{detail}）]",
                 colorize_diff(f"[正文相同，字节变化] {detail}"))
     if diff:
-        return (f"[已写入: {file_path} ({byte_count}字节)]\n{diff}", color_diff)
+        tip = ""
+        if old_bytes is not None:
+            drift = _describe_form_drift(old_bytes, old_encoding, old_content, content)
+            if drift:
+                tip = f"（注意: {drift}）"
+        return (f"[已写入: {file_path} ({byte_count}字节)]{tip}\n{diff}", color_diff)
     return (f"[已写入: {file_path} ({byte_count}字节)]", color_diff)
+
+
+def _describe_form_drift(old_bytes: bytes, old_encoding, old_content: str, content: str) -> str:
+    """正文有变化时，描述"正文之外"的文件形态漂移（编码/BOM/行尾符）。
+
+    Write 覆写固定按 UTF-8 无 BOM 写盘：原文件为 GBK 或带 BOM 时编码形态被
+    改变，行尾也可能由 CRLF 变为 LF。"正文相同"分支已有字节变化提示，正文
+    不同时此前只回 diff、对形态漂移零提示——AI/用户会误以为"只改了那几行"，
+    按原编码读取的下游工具链静默拿到坏数据。无漂移时返回空串。
+    """
+    notes = []
+    if old_encoding == "gbk":
+        notes.append("编码 GBK→UTF-8")
+    if old_bytes.startswith(b"\xef\xbb\xbf"):
+        notes.append("UTF-8 BOM 已移除")
+    if "\r\n" in old_content and "\r\n" not in content and "\n" in content:
+        notes.append("行尾符 CRLF→LF")
+    elif "\r\n" in content and "\r\n" not in old_content and "\n" in old_content:
+        notes.append("行尾符 LF→CRLF")
+    return "、".join(notes)
 
 
 def _make_diff(old_content: str, new_content: str, file_path: str) -> str:

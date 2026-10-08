@@ -92,8 +92,8 @@ class Assembly:
         message_list = MessageList(config.system_prompt)
         msg_manager = MessageManager(message_list, compressor, logger)
 
-        # 9. 摘要器
-        summarizer = Summarizer(llm, config, logger)
+        # 9. 摘要器：在统计就绪后构造（见统计追踪段后）——其 LLM 调用
+        # （/done 总结、自动命名）走费用日志旁路记账，需要 stats 先实例化
 
         # 9.5 工具上下文
         # 删除确认统一走 AWAIT_CONFIRM + agent 主循环（headless 读不到输入 → 取消执行），
@@ -133,6 +133,7 @@ class Assembly:
             goal_max_rounds=config.ai.goal_max_rounds,
             project_skill_roots=config.skills.project_roots,
             skill_ignore_dirs=config.tools.ignore_dirs,
+            context_reset_func=lambda: context.reset(),
         )
 
         # 11. UI
@@ -167,6 +168,9 @@ class Assembly:
             stats._model = v
         session_mgr._set_model = _set_model_with_stats
 
+        # 9. 摘要器（统计就绪后构造：/done 总结与自动命名调用计入费用日志旁路记账）
+        summarizer = Summarizer(llm, config, logger, stats=stats)
+
         # 15. 自动保存管理器
         auto_save_mgr = AutoSaveManager(
             config, message_list, session_mgr, summarizer, stats, logger,
@@ -177,13 +181,15 @@ class Assembly:
             config, msg_manager, llm, context, ui, logger,
             tool_context=tool_context,
             session_mgr=session_mgr,
+            stats=stats,
         )
 
         # 手动压缩命令（/compact）接线：session_mgr 转发给压缩协调器
         session_mgr.compact_func = compression_coordinator.compress_manual
 
         # 17. 目标完成验证器（独立复核 AI 的完成声明：全新会话 + 只读工具）
-        goal_verifier = GoalVerifier(llm, config, logger)
+        # stats 传入用于费用日志旁路记账（验证器调用同样记账，不改主会话统计）
+        goal_verifier = GoalVerifier(llm, config, logger, stats=stats)
 
         # 18. AgentLoop
         agent_loop = AgentLoop(

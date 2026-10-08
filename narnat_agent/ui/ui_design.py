@@ -19,7 +19,7 @@ from typing import Optional
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding import KeyBindings, KeyPress
 from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import ANSI
 
@@ -28,6 +28,63 @@ if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
     except (AttributeError, OSError):
         pass
+
+
+def _merge_paired_surrogates(keys):
+    """合并相邻的高位+低位代理按键为完整字符。
+
+    Windows 下 prompt_toolkit 的 Vt100 输入路径（现代终端启用 VT 输入时的
+    默认读取路径）不合并非 BMP 字符的 UTF-16 代理对，emoji 会以两个孤立
+    代理码元进入输入缓冲——回显 ??、日志编码异常、发给模型的内容损坏。
+    此处补上合并（语义与 prompt_toolkit 的 ConsoleInputReader.
+    _merge_paired_surrogates 一致）；无代理对时原样透传。
+    """
+    out = []
+    high = None
+    for k in keys:
+        key = k.key
+        if high is not None:
+            if isinstance(key, str) and "\udc00" <= key <= "\udfff":
+                char = (high.key + key).encode("utf-16-le", "surrogatepass").decode("utf-16-le")
+                out.append(KeyPress(char, char))
+                high = None
+                continue
+            out.append(high)
+            high = None
+        if isinstance(key, str) and len(key) == 1 and "\ud800" <= key <= "\udbff":
+            high = k
+            continue
+        out.append(k)
+    if high is not None:
+        out.append(high)
+    return out
+
+
+def _install_surrogate_merge_patch():
+    """安装 Win32Input.read_keys 代理对合并补丁（幂等）。
+
+    只补充"相邻高/低代理合并"，其余按键原样透传；若 prompt_toolkit
+    自身已在读取层合并（ConsoleInputReader 路径），重复经过本补丁也
+    不会二次处理（合并结果不再落在代理区间）。
+    """
+    try:
+        from prompt_toolkit.input.win32 import Win32Input
+    except ImportError:
+        return
+    if getattr(Win32Input, "_narnat_surrogate_patch", False):
+        return
+
+    _orig_read_keys = Win32Input.read_keys
+
+    def read_keys(self):
+        return _merge_paired_surrogates(_orig_read_keys(self))
+
+    Win32Input.read_keys = read_keys
+    Win32Input._narnat_surrogate_patch = True
+
+
+if sys.platform == "win32":
+    _install_surrogate_merge_patch()
 
 # ── 从子模块 re-export，保持外部导入兼容 ──
 from .colors import (

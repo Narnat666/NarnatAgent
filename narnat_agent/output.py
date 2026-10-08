@@ -284,7 +284,15 @@ def _parse_recipe(value: str) -> str:
             parts.append(_STYLE_MAP[tok])
         elif tok.startswith("bg:"):
             v = tok[3:]
-            parts.append(_hex_to_ansi(v, bg=True) if v.startswith("#") else _BASE_COLORS.get(v, _Color(""))._value)
+            if v.startswith("#"):
+                parts.append(_hex_to_ansi(v, bg=True))
+            elif v in _BASE_HEX:
+                # 命名色：按色板 hex 生成背景序列。此前直接取 _BASE_COLORS 的
+                # 值——未登记为背景色的自定义色名（如"卡片背景"）存的是前景
+                # 序列，会把文字前景覆盖成该色（深色终端下近黑不可见）
+                parts.append(_hex_to_ansi(_BASE_HEX[v], bg=True))
+            elif v in _BASE_COLORS:
+                parts.append(_BASE_COLORS[v]._value)
         elif tok.startswith("#"):
             parts.append(_hex_to_ansi(tok, bg=False))
         elif tok in _BASE_COLORS:

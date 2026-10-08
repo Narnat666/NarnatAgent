@@ -20,6 +20,10 @@ from ..config.session_store import (
     format_session_summary, load_session_meta, session_exists,
 )
 from ..config.skill_store import load_skill, list_skill_tree
+from ..output import write as _stdout_write, D, R
+from ..tools.registry import (
+    PLUGIN_TOOL_NAMES as _PLUGIN_TOOL_NAMES, get_capability as _get_capability,
+)
 from .message_list import MessageList
 
 
@@ -42,12 +46,17 @@ def _format_messages_text(messages: list) -> str:
     return "\n".join(lines)
 
 
-# 插件工具名称 → 说明（/plugin 状态表展示用；名称与顺序来源 registry.PLUGIN_TOOL_NAMES）
+def _report_save_error(err: str) -> None:
+    """会话落盘失败提示：打印到终端，避免保存失败被静默吞掉（数据丢失无感知）"""
+    if err:
+        _stdout_write(f"  {D}⚠ 会话保存失败: {err}{R}\n")
+
+
+# 插件工具名称 → 说明（/plugin 状态表展示用；名称与顺序来源 registry.PLUGIN_TOOL_NAMES，
+# 说明文案来源工具自身 CAPABILITY 的 plugin_label，缺省回退 label）
 _PLUGIN_TOOL_LABELS = {
-    "Terminal": "多终端持久 SSH",
-    "WebSearch": "联网搜索",
-    "Serial": "多终端持久串口",
-    "MCP": "MCP 服务器管理",
+    name: (_get_capability(name).get("plugin_label") or _get_capability(name)["label"])
+    for name in _PLUGIN_TOOL_NAMES
 }
 
 
@@ -97,6 +106,46 @@ def _check_reserved_session_name(name: str) -> str:
     if name.strip().lower() in _RESERVED_SESSION_NAMES:
         return f"[错误: '{name}' 为保留名称（/rm --all 表示全部删除），请换一个名称]"
     return ""
+
+
+# ── 命令元数据（单表）：{命令: (默认说明, {状态覆盖说明})} ──
+# 状态键：no_session / root / child；无覆盖时用默认说明
+_COMMAND_META = {
+    "/clear":     ("清理屏幕", {}),
+    "/compact":   ("压缩上下文", {}),
+    "/save":      ("保存当前会话", {}),
+    "/ls":        ("显示所有会话", {}),
+    "/cd":        ("进入历史会话", {}),
+    "/rm":        ("删除会话", {"root": "删除子会话"}),
+    "/skill":     ("加载技能", {}),
+    "/thinking":  ("切换思考强度", {}),
+    "/thinkback": ("思考回传开关", {}),
+    "/mode":      ("切换模型", {}),
+    "/goal":      ("目标模式开关", {}),
+    "/plugin":    ("插件开关", {}),
+    "/explore":   ("创建探索分支", {}),
+    "/done":      ("完成探索分支", {}),
+    "/exit":      ("退出程序", {"root": "退出会话", "child": "暂离探索分支"}),
+}
+
+# 各状态可用命令清单（列表顺序 = Tab 补全展示顺序，须稳定）
+_STATE_COMMANDS = {
+    "no_session": ["/clear", "/compact", "/save", "/ls", "/cd", "/rm", "/skill",
+                   "/thinking", "/thinkback", "/mode", "/goal", "/plugin", "/exit"],
+    "root":       ["/clear", "/compact", "/save", "/ls", "/cd", "/rm", "/skill",
+                   "/thinking", "/thinkback", "/mode", "/goal", "/plugin",
+                   "/explore", "/exit"],
+    "child":      ["/clear", "/compact", "/ls", "/cd", "/skill", "/thinking",
+                   "/thinkback", "/mode", "/goal", "/plugin", "/done", "/exit"],
+}
+
+
+def _commands_for(state: str) -> Dict[str, str]:
+    """由元数据表生成某状态的可用命令表（键序 = 清单顺序）"""
+    return {
+        cmd: _COMMAND_META[cmd][1].get(state, _COMMAND_META[cmd][0])
+        for cmd in _STATE_COMMANDS[state]
+    }
 
 
 class SessionState:
@@ -151,21 +200,7 @@ class NoSession(SessionState):
         self._mgr = mgr
 
     def available_commands(self) -> Dict[str, str]:
-        return {
-            "/clear":    "清理屏幕",
-            "/compact":  "压缩上下文",
-            "/save":     "保存当前会话",
-            "/ls":       "显示所有会话",
-            "/cd":       "进入历史会话",
-            "/rm":       "删除会话",
-            "/skill":    "加载技能",
-            "/thinking": "切换思考强度",
-            "/thinkback": "思考回传开关",
-            "/mode":     "切换模型",
-            "/goal":     "目标模式开关",
-            "/plugin":   "插件开关",
-            "/exit":     "退出程序",
-        }
+        return _commands_for("no_session")
 
     def save(self, name: str) -> str:
         msgs = self._mgr.get_messages()
@@ -265,30 +300,16 @@ class RootSession(SessionState):
         self._msg_count: int = len(mgr.get_messages())
 
     def available_commands(self) -> Dict[str, str]:
-        return {
-            "/clear":    "清理屏幕",
-            "/compact":  "压缩上下文",
-            "/save":     "保存当前会话",
-            "/ls":       "显示所有会话",
-            "/cd":       "进入历史会话",
-            "/rm":       "删除子会话",
-            "/skill":    "加载技能",
-            "/thinking": "切换思考强度",
-            "/thinkback": "思考回传开关",
-            "/mode":     "切换模型",
-            "/goal":     "目标模式开关",
-            "/plugin":   "插件开关",
-            "/explore":  "创建探索分支",
-            "/exit":     "退出会话",
-        }
+        return _commands_for("root")
 
     def _persist(self):
         msgs = self._mgr.get_messages()
         if len(msgs) > self._msg_count and self._status in ("new", "completed"):
             self._status = "active"
-        save_session(self._mgr.narnat_dir, self._name, msgs,
-                     status=self._status or "active",
-                     summary=self._summary)
+        err = save_session(self._mgr.narnat_dir, self._name, msgs,
+                           status=self._status or "active",
+                           summary=self._summary)
+        _report_save_error(err)
         self._msg_count = len(msgs)
 
     def save(self, name: str) -> str:
@@ -407,7 +428,9 @@ class RootSession(SessionState):
         return ""
 
     def exit(self) -> Tuple[str, Optional[SessionState]]:
-
+        # 退出会话前先把当前内存落盘：打断轮（aborted 不触发轮末自动保存）
+        # 的消息此前会静默丢失（/cd 回来不可见、无提示）
+        self._persist()
         return ("", NoSession(self._mgr))
 
     def auto_save(self):
@@ -489,31 +512,19 @@ class ChildSession(SessionState):
         self._msg_count: int = len(mgr.get_messages())
 
     def available_commands(self) -> Dict[str, str]:
-        return {
-            "/clear":    "清理屏幕",
-            "/compact":  "压缩上下文",
-            "/ls":       "显示所有会话",
-            "/cd":       "进入历史会话",
-            "/skill":    "加载技能",
-            "/thinking": "切换思考强度",
-            "/thinkback": "思考回传开关",
-            "/mode":     "切换模型",
-            "/goal":     "目标模式开关",
-            "/plugin":   "插件开关",
-            "/done":     "完成探索分支",
-            "/exit":     "暂离探索分支",
-        }
+        return _commands_for("child")
 
     def _persist(self):
         msgs = self._mgr.get_messages()
         if len(msgs) > self._msg_count and self._status in ("new", "completed"):
             self._status = "active"
-        save_session(self._mgr.narnat_dir, self._name, msgs,
-                     parent=self._parent,
-                     status=self._status or "active",
-                     summary=self._summary,
-                     parent_msg_count=self._parent_msg_count,
-                     last_summarized_at=self._last_summarized_at)
+        err = save_session(self._mgr.narnat_dir, self._name, msgs,
+                           parent=self._parent,
+                           status=self._status or "active",
+                           summary=self._summary,
+                           parent_msg_count=self._parent_msg_count,
+                           last_summarized_at=self._last_summarized_at)
+        _report_save_error(err)
         self._msg_count = len(msgs)
 
     def show(self, args: str = "") -> str:
@@ -553,8 +564,10 @@ class ChildSession(SessionState):
         return ""
 
     def done(self) -> str:
-        if self._status == "completed":
-            return "该探索分支已完成，不可重复 /done"
+        # 不做"completed 一律拒绝"的提前守卫：是否有可合并增量统一由下方
+        # target 为空判断（_persist 已把有续聊消息的 completed 恢复为 active，
+        # 提前守卫会与"续聊后第二轮合并"语义自相矛盾，并在无新消息时误报
+        # "不可重复 /done"）
         msgs = list(self._mgr.get_messages())
         parent_msg_count = self._parent_msg_count
         if parent_msg_count == 0:
@@ -597,17 +610,20 @@ class ChildSession(SessionState):
         round_label = f" (第{round_num}轮)" if round_num > 1 else ""
         parent_msgs.append({"role": "system",
             "content": f"# 子会话 [{self._name}]{round_label} 结论\n\n{summary}"})
-        save_session(self._mgr.narnat_dir, self._parent, parent_msgs)
+        err = save_session(self._mgr.narnat_dir, self._parent, parent_msgs)
+        _report_save_error(err)
 
         self._last_summarized_at = len(msgs)
         self._status = "completed"
         self._summary = summary
-        child_msgs, _ = load_session(self._mgr.narnat_dir, self._name,
-                                      parent=self._parent)
-        save_session(self._mgr.narnat_dir, self._name, child_msgs,
-                     parent=self._parent, status="completed", summary=summary,
-                     parent_msg_count=self._parent_msg_count,
-                     last_summarized_at=self._last_summarized_at)
+        # 分支文件写内存全量（权威版本）：磁盘版可能落后于内存（消息未持久化
+        # 时读取会把它回退为旧版，而 last_summarized_at 按内存长度记，内容与
+        # 基准错位导致后续增量被静默跳过）
+        err = save_session(self._mgr.narnat_dir, self._name, msgs,
+                           parent=self._parent, status="completed", summary=summary,
+                           parent_msg_count=self._parent_msg_count,
+                           last_summarized_at=self._last_summarized_at)
+        _report_save_error(err)
 
         self._mgr.replace_messages(parent_msgs)
         new_state = self._mgr.create_root_state(self._parent)
@@ -615,7 +631,9 @@ class ChildSession(SessionState):
         return ""
 
     def exit(self) -> Tuple[str, Optional[SessionState]]:
-
+        # 暂离分支前先把分支当前状态落盘（同上：打断轮消息不丢），
+        # 再切回父会话内存
+        self._persist()
         parent_msgs, err = load_session(self._mgr.narnat_dir, self._parent)
         if err:
             return (err, None)
@@ -676,10 +694,12 @@ class SessionManager:
                  plugin_setter: Callable[[str, bool], bool] = None,
                  goal_max_rounds: int = 0,
                  project_skill_roots=None,
-                 skill_ignore_dirs: tuple = ()):
+                 skill_ignore_dirs: tuple = (),
+                 context_reset_func: Callable[[], None] = None):
         self.narnat_dir = narnat_dir
         self._messages = messages
         self._config_dir = config_dir
+        self._context_reset = context_reset_func
         self._get_thinking_effort = thinking_effort_getter
         self._set_thinking_effort = thinking_effort_setter
         self._thinking_options = thinking_options or {"high": "高", "max": "全开"}
@@ -723,6 +743,10 @@ class SessionManager:
     def replace_messages(self, new_msgs: List[Dict[str, Any]]):
         # 恢复历史会话时占比从 0 开始（历史 token 数未持久化），第一轮回复结束后恢复真实值
         self._messages.replace_all(new_msgs)
+        # 会话切换：上一会话的占比/告警标记必须复位，否则新加载会话被残留
+        # 占比误触发压缩、首次告警不再提示（coordinator 经 assembly 注入复位回调）
+        if self._context_reset is not None:
+            self._context_reset()
 
     def switch_state(self, new_state: SessionState):
         self._state = new_state

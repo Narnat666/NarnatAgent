@@ -90,8 +90,28 @@ DEFINITION = {
 }
 
 
+CAPABILITY = {
+    "label": "读取",
+    "dispatch": "readonly",
+    "summary": "file_path",
+    "trusted_output": True,
+}
+
+
+def _sniff_bom_encoding(head: bytes):
+    """BOM 嗅探：返回 "utf-16"（Python 解码时按 BOM 自动定字节序）或 None。
+
+    必须在二进制判定之前调用：UTF-16 文本的 ASCII 字符含 NUL 字节，会被
+    "首块含 NUL"误判为二进制（Windows 生态常见：PowerShell 5.1 重定向输出、
+    部分导出文件为 UTF-16LE）。无 BOM 的 UTF-16 不猜（与 ripgrep 一致）。
+    """
+    if head.startswith(b"\xff\xfe") or head.startswith(b"\xfe\xff"):
+        return "utf-16"
+    return None
+
+
 def _detect_text_encoding(head: bytes) -> str:
-    """utf-8 严格解码成功 → utf-8-sig；失败 → gbk。
+    """先嗅探BOM（命中 → utf-16）；否则 utf-8 严格解码成功 → utf-8-sig，失败 → gbk。
 
     中文Windows环境GBK文件常见（旧日志/导出文件）。此前固定utf-8+replace解码
     会把GBK内容变成大片U+FFFD乱码，AI读到的是坏数据。此处用首块字节判定编码。
@@ -99,6 +119,9 @@ def _detect_text_encoding(head: bytes) -> str:
     尾部窗口重试: 首块8KB可能恰好多字节序列边界截断，utf-8严格解码在截断处
     抛错会误判为GBK。UnicodeDecodeError.start位于末尾3字节内时切除重试。
     """
+    encoding = _sniff_bom_encoding(head)
+    if encoding:
+        return encoding
     trial = head
     for _ in range(3):
         try:
@@ -206,11 +229,14 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
     except OSError as e:
         return f"[错误: 读取失败: {e}]"
 
-    if b"\x00" in head_bytes:
-        return "[错误: 检测到二进制文件（含NUL字节），Read仅支持纯文本。请使用Shell工具处理]"
-
-    # 编码探测（GBK回退，避免中文Windows下GBK文件读成U+FFFD乱码）
-    encoding = _detect_text_encoding(head_bytes)
+    # BOM 嗅探优先于二进制判定：UTF-16 文本的 ASCII 字符含 NUL 字节，
+    # 会被"首块含 NUL"误判为二进制（判定顺序与 Grep 一致）
+    encoding = _sniff_bom_encoding(head_bytes)
+    if encoding is None:
+        if b"\x00" in head_bytes:
+            return "[错误: 检测到二进制文件（含NUL字节），Read仅支持纯文本。请使用Shell工具处理]"
+        # 编码探测（GBK回退，避免中文Windows下GBK文件读成U+FFFD乱码）
+        encoding = _detect_text_encoding(head_bytes)
 
     try:
         with open(file_path, "r", encoding=encoding, errors="replace") as f:

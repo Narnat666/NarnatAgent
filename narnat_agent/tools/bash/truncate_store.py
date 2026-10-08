@@ -46,13 +46,18 @@ _lock = threading.Lock()
 
 
 def _root_dir() -> str:
-    """本进程专属结果目录：保证同一进程稳定、不同进程（含 fork）不同。"""
+    """本进程专属结果目录：保证同一进程稳定、不同进程（含 fork）不同。
+
+    目录被外部清理（清 C 盘/清临时文件）时自动重建：缓存目录已不存在
+    时重新 mkdtemp——否则本进程内落盘能力永久失效（提示误导为
+    "增大 max_output_chars"而不自知目录已没）。
+    """
     global _base_dir, _base_pid
     pid = os.getpid()
-    if _base_dir is not None and _base_pid == pid:
+    if _base_dir is not None and _base_pid == pid and os.path.isdir(_base_dir):
         return _base_dir
     with _lock:
-        if _base_dir is None or _base_pid != pid:
+        if _base_dir is None or _base_pid != pid or not os.path.isdir(_base_dir):
             _base_dir = tempfile.mkdtemp(prefix=DIR_PREFIX)
             _base_pid = pid
             _sweep_stale()

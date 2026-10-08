@@ -35,6 +35,7 @@ class Agent:
         self._auto_save = self._parts.auto_save_mgr
         self._compression = self._parts.compression_coordinator
         self._round = 0
+        self._debug = debug
 
     def run(self):
         """主循环"""
@@ -117,6 +118,12 @@ class Agent:
                                              if goal_enabled else -1)
                     except KeyboardInterrupt:
                         self._ui.on_interrupted()
+                        # 与 ESC（agent_loop 内）及异常路径一致：已产出的半截
+                        # 输出落为 assistant 消息——否则本轮内容丢失、历史以
+                        # 未回复的 user 结尾（下次输入形成连续 user）；
+                        # 此前 Ctrl+C 与 ESC 两种打断的上下文行为不一致
+                        if hasattr(self._agent_loop, '_last_content_parts') and self._agent_loop._last_content_parts:
+                            self._msg_manager.append_assistant("".join(self._agent_loop._last_content_parts))
                         stream.abort()
                     except Exception as e:
                         self._logger.error("core.agent", f"异常: {e}")
@@ -193,20 +200,10 @@ class Agent:
 
         普通模式下 AI 误调 GoalComplete 的残留、子代理同进程复用时的上一任务
         残留，都会让新任务被误判（跳过验证/误拒清单），故每个任务起手必须复位。
+        实际复位字段集由 ToolContext 的 task_scoped 标记决定（reset_for_task），
+        新增任务级字段只需在字段定义处标记，不再维护本处的手工清单。
         """
-        tc = self._parts.tool_context
-        tc.goal_complete = False
-        tc.goal_checklist = []
-        tc.goal_honest = False
-        tc.goal_rounds_used = 0
-        tc.goal_mech_rejects = 0
-        tc.goal_forced = False
-        tc.goal_suspect = False
-        tc.todo_reminded = False
-        tc.todo_nudge_sent = False
-        tc.tool_rounds_used = 0
-        tc.bg_reminded = False
-        tc.current_todos = []
+        self._parts.tool_context.reset_for_task()
 
     def run_headless(self, task: str, max_rounds: int = 0):
         """headless 一次性任务执行（nn -p 入口）。
@@ -234,6 +231,16 @@ class Agent:
         try:
             # 任务级状态复位：同进程复用（批处理/测试脚手架）时上一任务残留会跳过验证
             self._reset_goal_state()
+            # 消息列表复位（+上下文占比复位）：headless 每次调用是独立任务，
+            # 复用同一 Agent 对象时上一任务的完整对话（含工具结果/GoalComplete
+            # 交互）不得带入本任务——此前仅 goal/todo 复位，消息未复位，第 2 个
+            # 任务起请求携带全部历史并持续增长（跨任务污染与成本膨胀）
+            self._mgr.replace_messages(
+                [{"role": "system", "content": self._config.system_prompt}])
+            # debug 日志重建：上一任务 finally 已 logger.close()（移除 handler），
+            # 复用重跑时重新 start 创建新日志文件（否则第 2 个任务起零日志）
+            if self._debug:
+                self._logger.start(self._config.paths.logs_dir)
             if goal_enabled:
                 # 开启目标模式：注入 GoalComplete 工具（预算 = -g N）
                 self._mgr._goal_enabled = True
@@ -312,6 +319,14 @@ class Agent:
                     "请继续推进任务。\n"
                     + GOAL_AUDIT_HINT
                 )
+        except Exception as e:
+            # 本层未捕获异常（消息注入/流创建/压缩编排等；agent_loop 内的
+            # 异常已归因为 aborted/round_failed）：保持 end_reason=unknown，
+            # 不走冒泡——异常冒泡到 main.py 顶层会被归为"启动异常"exit 1，
+            # 而 README 约定 unknown（任务级失败）退出码为 2。此处收敛后
+            # 经哨兵+返回路径，main.py 据此 sys.exit(2)
+            self._logger.error("core.agent", f"headless 未捕获异常: {e}")
+            _stdout_write(f"\n程序异常退出: {e}\n")
         finally:
             # 完成信号哨兵：所有退出路径必经此处。父代理轮询结果文件时
             # 以该行为准判定"子代理已结束"及结束原因（goal_complete/round_limit/aborted等）。

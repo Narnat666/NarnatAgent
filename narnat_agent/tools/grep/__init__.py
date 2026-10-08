@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ..param_utils import to_bool
 from ..glob import _expand_braces, _unescape_braces, _ignored_dirs_hint
+from ..read import _detect_text_encoding, _sniff_bom_encoding
 
 class GrepLimits:
     """Grep 工具边界参数（原模块级常量收敛为类成员）"""
@@ -29,8 +30,14 @@ class GrepLimits:
     # ── 单文件最大大小（100MB），超出跳过 ──
     MAX_FILE_SIZE = 100 * 1024 * 1024
 
-    # ── 超长行上限（1MB），leftover 超过此值视为异常文件提前结束 ──
+    # ── 超长行显示截断阈值（1MB）：超过则完整参与匹配、仅显示前 MAX_LINE_DISPLAY 字符 ──
     MAX_LINE_LENGTH = 1 * 1024 * 1024
+
+    # ── 超长行硬上限（8MB）：leftover 超过此值才中止该文件（其后内容不搜索）──
+    MAX_LINE_HARD = 8 * 1024 * 1024
+
+    # ── 超长行显示截断长度（与 Read 工具单行截断一致，防 MB 级单行灌满输出）──
+    MAX_LINE_DISPLAY = 2000
 
     # ── 正则元字符集，用于判断 pattern 是否为纯文本 ──
     RE_META_CHARS = set(r".*+?[]{}()\|^$")
@@ -106,24 +113,154 @@ DEFINITION = {
 }
 
 
-def _detect_text_encoding(head: bytes) -> str:
-    """utf-8 严格解码成功 → utf-8-sig；失败 → gbk（策略与Read一致）。
+CAPABILITY = {
+    "label": "搜索内容",
+    "dispatch": "readonly",
+    "summary": "pattern",
+    "trusted_output": True,
+}
 
-    此前固定utf-8+replace解码流式读取：GBK中文文件每个字节都被替换为U+FFFD，
-    任何中文pattern都无法命中，AI会误以为内容不存在。首块判定编码后按正确
-    编码打开。尾部3字节窗口重试防止多字节序列边界截断误判。
+
+def _group_spans(pattern: str) -> list:
+    """返回每个括号组的内容区间 [(content_start, content_end)]（转义/字符类内不识别）"""
+    spans = []
+    stack = []
+    in_class = False
+    i, n = 0, len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c == "\\":
+            i += 2
+            continue
+        if in_class:
+            if c == "]":
+                in_class = False
+            i += 1
+            continue
+        if c == "[":
+            in_class = True
+        elif c == "(":
+            stack.append(i)
+        elif c == ")":
+            if stack:
+                gs = stack.pop()
+                spans.append((gs + 1, i))
+        i += 1
+    return spans
+
+
+def _penalty_quantifier_after(pattern: str, i: int) -> bool:
+    """位置 i 起是否有"放大性"量词。
+
+    * / + → 是；{m,} / {m,n}（变长）→ 是；{n}（固定次数）→ n ≥ 16 时是
+    （少量固定重复安全；大量固定重复可变元素仍指数，覆盖 (a?){40} 型）。
     """
-    trial = head
-    for _ in range(3):
+    if i >= len(pattern):
+        return False
+    c = pattern[i]
+    if c in ("*", "+"):
+        return True
+    if c == "{":
+        end = pattern.find("}", i)
+        if end == -1:
+            return False
+        body = pattern[i + 1:end]
+        if "," in body:
+            return True
         try:
-            trial.decode("utf-8")
-            return "utf-8-sig"
-        except UnicodeDecodeError as e:
-            if e.start >= len(trial) - 3:
-                trial = head[: e.start]
-                continue
-            break
-    return "gbk"
+            return int(body) >= 16
+        except ValueError:
+            return False
+    return False
+
+
+def _segment_has_nested_risk(seg: str) -> bool:
+    """组内容是否含可嵌套放大的量化元素（* / + / ? / 变长 {m,n}），或存在
+    "交替前缀重叠"（| 两侧紧邻字面相同，覆盖 (a|aa)+ 型灾难形态写法）。"""
+    in_class = False
+    i, n = 0, len(seg)
+    # 跳过组前缀（?: ?= ?! ?<= ?<! ?P<name>）——其中的 ? 是语法标记不是量词
+    if seg.startswith(("?:", "?=", "?!")):
+        i = 2
+    elif seg.startswith(("?<=", "?<!")):
+        i = 3
+    elif seg.startswith("?P<"):
+        gt = seg.find(">")
+        if gt != -1:
+            i = gt + 1
+    while i < n:
+        c = seg[i]
+        if c == "\\":
+            i += 2
+            continue
+        if in_class:
+            if c == "]":
+                in_class = False
+            i += 1
+            continue
+        if c == "[":
+            in_class = True
+        elif c in ("*", "+", "?"):
+            return True
+        elif c == "{":
+            end = seg.find("}", i)
+            if end != -1 and "," in seg[i + 1:end]:
+                return True
+        elif c == "|":
+            prev_c = seg[i - 1] if i > 0 else ""
+            nxt_c = seg[i + 1] if i + 1 < n else ""
+            if (prev_c and nxt_c and prev_c == nxt_c
+                    and prev_c not in "\\|()[]*+?{}"):
+                return True
+        i += 1
+    return False
+
+
+def _has_too_many_optional(pattern: str, limit: int = 16) -> bool:
+    """平铺 ? 量词过多 → 灾难性回溯（无分组形态的 ReDoS 变体：如 40 个 a?
+    后接 a{40}，2^40 组合）。不计非贪婪修正（*? / +? / }? / ??）与组前缀
+    （(?: (?= (?! (?<= (?<! 内的 ?）。"""
+    count = 0
+    in_class = False
+    i, n = 0, len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c == "\\":
+            i += 2
+            continue
+        if in_class:
+            if c == "]":
+                in_class = False
+            i += 1
+            continue
+        if c == "[":
+            in_class = True
+        elif c == "?":
+            prev = pattern[i - 1] if i > 0 else ""
+            if prev not in ("*", "+", "}", "?", "("):
+                count += 1
+                if count > limit:
+                    return True
+        i += 1
+    return False
+
+
+def _has_nested_quantifier(pattern: str) -> bool:
+    """检测灾难性回溯的常见根源形态（启发式，非完备）：
+
+    1) 组内容含量化元素（* / + / ? / 变长 {m,n}，任意深度）且组自身被
+       * / + / 变长{} 修饰——如 (a+)+、(a?)*、(a{1,3})+、((a+))+；
+    2) 被放大性量词修饰的组内存在交替前缀重叠——如 (a|aa)+、(a|a)+。
+
+    字符类、转义、组前缀（?: 等）内不检测。误报时给出改写指引——
+    宁可要求改写，不可挂死（启发式已知不覆盖全部等价形态）。
+    """
+    for cs, ce in _group_spans(pattern):
+        if not _penalty_quantifier_after(pattern, ce + 1):
+            continue
+        if _segment_has_nested_risk(pattern[cs:ce]):
+            return True
+    return False
 
 
 def execute(
@@ -180,6 +317,12 @@ def execute(
     # ── ReDoS 防护 ──
     if len(pattern) > GrepLimits.MAX_PATTERN_LENGTH:
         return f"[错误: 正则表达式过长（>{GrepLimits.MAX_PATTERN_LENGTH}字符），拒绝执行以防ReDoS]"
+    if _has_nested_quantifier(pattern):
+        return ("[错误: 正则含嵌套量词（如 (a+)+、(a+)*b），可能灾难性回溯导致挂死，"
+                "请改写（避免对含 +/* 的分组再加 +/*，必要时展开重复）]")
+    if _has_too_many_optional(pattern):
+        return ("[错误: 正则含过多可选量词 ?（可能灾难性回溯导致挂死），"
+                "请改写（减少可选元素或展开重复）]")
 
     flags = re.IGNORECASE if to_bool(i) else 0
     try:
@@ -248,6 +391,8 @@ def execute(
                        glob, A, B, head_limit, ignore_dirs, results, ctx)
 
     skip_line = _skip_summary_line(ctx)
+    # 目录不可访问 / 二进制截断 提示行（仅在触发时出现，单列一行避免改动既有汇总行文本）
+    hint_lines = [h for h in (_dir_error_line(ctx), _binary_cut_line(ctx)) if h]
 
     # ── 无匹配：带搜索范围帮 AI 定位（Shell cd 会改变 cwd）──
     if not results:
@@ -262,6 +407,8 @@ def execute(
         if warnings:
             head = "、".join(warnings[:5]) + ("等" if len(warnings) > 5 else "")
             no_match = f"路径不存在，已跳过: {head}\n{no_match}"
+        for line in hint_lines:
+            no_match += f"\n{line}"
         if skip_line:
             no_match += f"\n{skip_line}"
         # 忽略目录提示：无匹配时说明范围被配置收缩（有匹配时不加，避免噪音）
@@ -276,6 +423,8 @@ def execute(
     if warnings:
         head = "、".join(warnings[:5]) + ("等" if len(warnings) > 5 else "")
         output = f"路径不存在，已跳过: {head}\n{output}"
+    for line in hint_lines:
+        output += f"\n{line}"
     if skip_line:
         output += f"\n{skip_line}"
     return output
@@ -326,6 +475,19 @@ def _check_binary_first_chunk(first_chunk: bytes) -> bool:
     return first_chunk.count(0) >= GrepLimits.BINARY_NUL_THRESHOLD
 
 
+def _clip_line(text: str) -> str:
+    """超长行显示截断：超过 MAX_LINE_LENGTH 的行仅显示前 MAX_LINE_DISPLAY 字符。
+
+    匹配判定与计数基于完整行，不受截断影响；仅避免 MB 级单行灌满输出。
+    提示文案与 Read 工具的单行截断一致（AI 见到的格式统一）。
+    """
+    if len(text) <= GrepLimits.MAX_LINE_LENGTH:
+        return text
+    return (text[:GrepLimits.MAX_LINE_DISPLAY]
+            + f"...[单行截断: 本行共{len(text)}字符,"
+              f"仅显示前{GrepLimits.MAX_LINE_DISPLAY}字符]")
+
+
 # ═══════════════════════════════════════════════════════════════
 # 滚动缓冲流式扫描（核心引擎）
 # ═══════════════════════════════════════════════════════════════
@@ -355,9 +517,12 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
         raw_f.seek(0)
 
         first_chunk = raw_f.read(GrepLimits.BUFFER_SIZE)
-        if _check_binary_first_chunk(first_chunk):
-            return "skip_binary"
-        encoding = _detect_text_encoding(first_chunk)
+        encoding = _sniff_bom_encoding(first_chunk)
+        if encoding is None:
+            # BOM 嗅探优先于二进制判定：UTF-16 文本含 NUL，不能被误判为二进制
+            if _check_binary_first_chunk(first_chunk):
+                return "skip_binary"
+            encoding = _detect_text_encoding(first_chunk)
     except (PermissionError, OSError):
         return "skip_unreadable"
     finally:
@@ -379,7 +544,7 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
     pending_after = 0
     budget = collect_budget   # None = 无限
 
-    aborted = False
+    aborted = None   # None=正常；"longline"=超长行中止；"binary"=二进制截断
     try:
         while True:
             chunk = f.read(GrepLimits.BUFFER_SIZE)
@@ -393,15 +558,27 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
             lines = data.split("\n")
             leftover = lines.pop()
 
-            # ── 超长行防护：视为异常文件，提前结束（aborted 上报给调用方汇总提示）──
-            if len(leftover) > GrepLimits.MAX_LINE_LENGTH:
-                aborted = True
+            # ── 超长行硬上限：仅超过 8MB 才中止；1MB~8MB 行完整参与匹配、
+            #    显示时截断（旧版 1MB 即中止会丢掉长行之后的匹配）──
+            if len(leftover) > GrepLimits.MAX_LINE_HARD:
+                aborted = "longline"
                 break
 
+            # ── 流式二进制检测：NUL 出现在文件任意位置（不限于首块）即停止
+            #    该文件后续搜索（已收集的匹配保留，与 rg 的 quit 语义一致）。
+            #    chunk 级预筛（一次 C 扫描）使无 NUL 的常规文件几乎零开销；
+            #    仅含 NUL 的 chunk 才逐行定位停点 ──
+            chunk_has_nul = "\x00" in chunk or "\x00" in leftover
+            stop_binary = False
             for line in lines:
                 # 剥离行尾残留 \r（缓冲区恰好在 \r|\n 分裂时）
                 line = line.rstrip("\r")
                 line_num += 1
+
+                if chunk_has_nul and "\x00" in line:
+                    aborted = "binary"
+                    stop_binary = True
+                    break
 
                 # ── 快路径（纯文本）或慢路径（正则）──
                 if fast_searcher:
@@ -417,7 +594,7 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
                         pending = None
                         pending_after = 0
                     if budget is None or len(blocks) < budget:
-                        pending = [list(before_window), (line_num, line), []]
+                        pending = [list(before_window), (line_num, _clip_line(line)), []]
                         before_window.clear()
                         pending_after = A
                     else:
@@ -426,7 +603,7 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
                         pending_after = 0
                 elif pending_after > 0:
                     # after_context 行
-                    pending[2].append((line_num, line))
+                    pending[2].append((line_num, _clip_line(line)))
                     pending_after -= 1
                     if pending_after == 0:
                         blocks.append(pending)
@@ -434,25 +611,32 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
                 else:
                     # 维护 before_context 滑动窗口（仅在收集中）
                     if B > 0 and (budget is None or len(blocks) < budget):
-                        before_window.append((line_num, line))
+                        before_window.append((line_num, _clip_line(line)))
                         if len(before_window) > B:
                             before_window.popleft()
 
+            if stop_binary:
+                break
+
         # ── 处理文件末尾的不完整行 ──
-        if leftover and not aborted and len(leftover) < GrepLimits.MAX_LINE_LENGTH:
+        if leftover and not aborted:
             leftover = leftover.rstrip("\r")
-            line_num += 1
-            if fast_searcher:
-                matched = fast_searcher(leftover)
-            else:
-                matched = bool(regex.search(leftover))
-            if matched:
-                count += 1
-                if pending is not None:
-                    blocks.append(pending)
-                    pending = None
-                if budget is None or len(blocks) < budget:
-                    blocks.append([list(before_window), (line_num, leftover), []])
+            if "\x00" in leftover:
+                aborted = "binary"   # 二进制数据不参与匹配，避免 NUL 行进入输出
+            elif len(leftover) < GrepLimits.MAX_LINE_HARD:
+                line_num += 1
+                if fast_searcher:
+                    matched = fast_searcher(leftover)
+                else:
+                    matched = bool(regex.search(leftover))
+                if matched:
+                    count += 1
+                    if pending is not None:
+                        blocks.append(pending)
+                        pending = None
+                    if budget is None or len(blocks) < budget:
+                        blocks.append([list(before_window),
+                                       (line_num, _clip_line(leftover)), []])
 
         # 收尾：after 未收满的块照常入列（文件末尾 after 行数不足是正常现象）
         if pending is not None:
@@ -471,19 +655,28 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
 _SKIP_KINDS = {"skip_oversize": "oversize",
                "skip_binary": "binary",
                "skip_unreadable": "unreadable",
-               "skip_longline": "longline"}
+               "skip_longline": "longline",
+               "skip_binary_cut": "binary_cut"}
 _SKIP_MAX_SAMPLES = 3
 
 
 def _new_skip_stats() -> dict:
     """跳过统计容器（跨 path 项共享，挂在 ctx 上）。"""
-    return {"oversize": 0, "binary": 0, "unreadable": 0, "longline": 0, "paths": []}
+    return {"oversize": 0, "binary": 0, "unreadable": 0, "longline": 0,
+            "binary_cut": 0, "direrror": 0,
+            "paths": [], "dir_paths": [], "cut_paths": []}
 
 
 def _record_skip(ctx, sentinel: str, rel: str):
     """记录一个被跳过的文件（分类计数 + 最多 3 个示例路径）。"""
     stats = ctx["skipped"]
     stats[_SKIP_KINDS[sentinel]] += 1
+    if sentinel == "skip_binary_cut":
+        # 二进制截断=部分搜索（已有匹配输出），不列入"跳过示例"，
+        # 避免与完全跳过的文件混淆；示例单独存 cut_paths
+        if len(stats["cut_paths"]) < _SKIP_MAX_SAMPLES:
+            stats["cut_paths"].append(rel)
+        return
     if len(stats["paths"]) < _SKIP_MAX_SAMPLES:
         stats["paths"].append(rel)
 
@@ -498,6 +691,30 @@ def _skip_summary_line(ctx) -> str:
     return (f"[已跳过 {total} 个文件: 超100MB({stats['oversize']}) / "
             f"二进制({stats['binary']}) / 不可读({stats['unreadable']}) / "
             f"超长行中止({stats['longline']})（如 {'、'.join(stats['paths'])}）]")
+
+
+def _binary_cut_line(ctx) -> str:
+    """二进制截断提示行（NUL 出现在文件中段：该文件只搜索了 NUL 之前的部分）。"""
+    stats = ctx["skipped"]
+    if not stats["binary_cut"]:
+        return ""
+    return (f"[二进制截断 {stats['binary_cut']} 个文件（搜索到二进制数据处停止，"
+            f"其后内容未搜索；如需完整搜索请用其他工具提取文本）"
+            f"{('（如 ' + '、'.join(stats['cut_paths']) + '）') if stats['cut_paths'] else ''}]")
+
+
+def _dir_error_line(ctx) -> str:
+    """目录遍历错误提示行（权限不足/路径过长等导致目录内容未被搜索）。
+
+    此前 os.walk 静默吞掉目录级错误，输出"[无匹配]"——AI 会把"未读到"
+    误判为"内容不存在"。此处显式提示，错误可见。
+    """
+    stats = ctx["skipped"]
+    if not stats["direrror"]:
+        return ""
+    samples = "、".join(stats["dir_paths"])
+    return (f"[目录不可访问 {stats['direrror']} 个（权限/路径长度等原因，"
+            f"其内容未被搜索）{('（如 ' + samples + '）') if samples else ''}]")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -574,13 +791,30 @@ def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
         file_items = [(target, label)]
     else:
         file_items = []
-        for dirpath, dirnames, filenames in os.walk(target):
+
+        def _on_walk_error(exc):
+            # os.walk 默认静默吞掉目录级错误（权限不足、路径超长等），
+            # 输出"[无匹配]"会让 AI 把"未读到"误判为"内容不存在"；
+            # 改为计数并在结果末尾显式提示（错误可见化）
+            stats = ctx["skipped"]
+            stats["direrror"] += 1
+            if len(stats["dir_paths"]) < _SKIP_MAX_SAMPLES:
+                stats["dir_paths"].append(str(getattr(exc, "filename", None) or target))
+
+        for dirpath, dirnames, filenames in os.walk(target, onerror=_on_walk_error):
             dirnames[:] = [d for d in dirnames
                            if d not in ignore_dirs
                            and not _is_nt_reparse_dir(os.path.join(dirpath, d))]
             for fname in filenames:
                 full = os.path.join(dirpath, fname)
-                rel = os.path.relpath(full, target)
+                try:
+                    rel = os.path.relpath(full, target)
+                except ValueError:
+                    # 保留设备名文件（如 CON，ntpath 规范化后成为独立 mount
+                    # \\.\CON）：relpath 跨 mount 抛 ValueError。此类文件无法按
+                    # 普通路径读取，跳过并计入"不可读"，避免单文件中断整树搜索
+                    _record_skip(ctx, "skip_unreadable", full)
+                    continue
                 if glob_filter and not _match_glob(fname, rel, glob_filter):
                     continue
                 file_items.append((full, rel))
@@ -620,8 +854,10 @@ def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
                 _record_skip(ctx, item, rel)
                 continue
             count, blocks, in_file_trunc, aborted = item
-            if aborted:
+            if aborted == "longline":
                 _record_skip(ctx, "skip_longline", rel)
+            elif aborted == "binary":
+                _record_skip(ctx, "skip_binary_cut", rel)
             _emit_file(rel, count, blocks, in_file_trunc, head_limit, results, ctx)
     else:
         for full, rel in file_items:
@@ -637,8 +873,10 @@ def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
                 _record_skip(ctx, item, rel)
                 continue
             count, blocks, in_file_trunc, aborted = item
-            if aborted:
+            if aborted == "longline":
                 _record_skip(ctx, "skip_longline", rel)
+            elif aborted == "binary":
+                _record_skip(ctx, "skip_binary_cut", rel)
             _emit_file(rel, count, blocks, in_file_trunc, head_limit, results, ctx)
 
 

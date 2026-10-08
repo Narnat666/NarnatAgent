@@ -24,12 +24,14 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ..tools import registry
+from ..tools import safety
+from ..tools.param_utils import to_bool
 from ..tools.tool_context import ToolContext
 from ..tools.exec_signal import error_line, strip_tags
 from ..tools.read import DEFINITION as _READ_DEF
 from ..tools.glob import DEFINITION as _GLOB_DEF
 from ..tools.grep import DEFINITION as _GREP_DEF
-from ..tools.bash import DEFINITION as _BASH_DEF, BashRuntime
+from ..tools.bash import DEFINITION as _BASH_DEF
 
 # ── 常量 ──
 VERIFY_MAX_ROUNDS = 100      # 验证器 mini 循环最大轮数（防失控）
@@ -173,26 +175,37 @@ _GIT_READONLY = {"status", "diff", "log", "show", "rev-parse", "ls-files",
                  "show-ref", "name-rev", "merge-base", "grep",
                  "diff-tree", "whatchanged", "count-objects"}
 
-# git 词元识别 / 文件重定向识别（`>` 后跟 `&` 的 2>&1、1>&2 属合流，放行）
-_RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
-_RE_REDIRECT = re.compile(r">(?!\s*&)")
+# git 词元正则共享定义源 tools/safety.py（与 bash/terminal 拦截判定语义恒等）
+_RE_GIT = safety.RE_GIT
+# 文件重定向识别：`>` 目标为文件即拒绝。`>&` 仅当后跟文件
+# 描述符号（2>&1、>&2）属合流放行；POSIX 的 `>& file`（写文件的等价写法）
+# 不得被误放行——原前瞻只排除 `>&`，把 `>& out.txt` 当合流漏过
+_RE_REDIRECT = re.compile(r">(?!\s*&\s*\d)")
 
 
 def _check_shell_policy(arguments: dict) -> str:
     """验证器 Shell 抽查策略：返回 "" 放行，否则返回拒绝原因文本。
 
-    规则（按序）：无 command 放行（交给 bash 层报参数错）→ 删除类命令拒绝 →
-    含 git 时逐段解析子命令，只放行只读白名单，且拒绝 --output 写文件参数 →
-    向文件重定向拒绝 → 后台提交拒绝。
+    规则（按序）：后台提交/管理一律拒绝（bg 操作无 command 字段，须先于
+    空命令早退判定）→ 无 command 放行（交给 bash 层报参数错）→ 删除类命令
+    拒绝（含 cmd 等价写法归一化）→ 含 git 时逐段解析子命令，只放行只读
+    白名单，且拒绝 --output 写文件参数 → 向文件重定向拒绝。
     """
+    # 后台任务（提交与 status/wait/cancel 管理）一律拒绝：后台槽位表为
+    # 进程级全局，验证器以只读身份不应触碰主会话的后台任务
+    # （字符串布尔归一化："false" 不应被误判为后台提交而 fail-closed 误拒）
+    if to_bool(arguments.get("background")) or arguments.get("bg"):
+        return "验证器不提交/管理后台任务"
     command = arguments.get("command") or ""
     if not isinstance(command, str) or not command.strip():
         return ""
-    if BashRuntime.RE_DELETE.search(command):
+    if safety.match_delete(command):
         return f"验证器不执行删除类命令: {command[:60]}"
-    if _RE_GIT.search(command):
+    # cmd 等价写法归一化后再做 git 判定（g^it → git；拆分与匹配都在归一化文本上）
+    scan = safety.scan_text(command)
+    if _RE_GIT.search(scan):
         # 拆段符含单个 `&`（cmd 的顺序执行分隔符）：`git status & git push` 必须逐段检查
-        for segment in re.split(r"&&|\|\||[;|\n&]", command):
+        for segment in re.split(r"&&|\|\||[;|\n&]", scan):
             if not _RE_GIT.search(segment):
                 continue
             tokens = segment.split()
@@ -217,24 +230,26 @@ def _check_shell_policy(arguments: dict) -> str:
             if sub.lower() not in _GIT_READONLY:
                 return (f"验证器只放行只读 git 子命令（如 status/diff/log/show），"
                         f"拒绝: git {sub}")
-            # --output 写文件参数拒绝（git 的缩写匹配在有歧义前缀时会报错，只能写全称）
-            for tok in tokens[i + 1:]:
+            # --output 写文件参数拒绝（从 git 词元起全量检查，含子命令之前的全局选项；
+            # git 的缩写匹配在有歧义前缀时会报错，只能写全称）
+            for tok in tokens[idx + 1:]:
                 if tok.startswith("--output"):
                     return f"验证器只放行只读 git 查看，拒绝写输出参数: {tok}"
     if _RE_REDIRECT.search(command):
         return "验证器查看命令不得重定向输出到文件"
-    if arguments.get("background") or arguments.get("bg"):
-        return "验证器不提交后台任务"
     return ""
 
 
 class GoalVerifier:
     """独立完成验证器：全新会话 + 只读工具复核 + 三态裁决"""
 
-    def __init__(self, llm, config, logger):
+    def __init__(self, llm, config, logger, stats=None):
         self._llm = llm
         self._config = config
         self._logger = logger
+        # 可选旁路记账（费用日志）：验证器的 API 调用同样计入 cost_log，
+        # 但不触碰主会话的 token/费用累计（stats.log_external_usage）
+        self._stats = stats
         # 验证器工具定义（从各工具模块 DEFINITION 取，顺序固定；Shell 走策略检查）
         self._tool_defs = [_READ_DEF, _GLOB_DEF, _GREP_DEF, _BASH_DEF]
         self._tool_names = {d["function"]["name"] for d in self._tool_defs}
@@ -374,6 +389,12 @@ class GoalVerifier:
                 interrupted_info = chunk["stream_interrupted"]
             if "finish_reason" in chunk:
                 finish = chunk["finish_reason"]
+            # 旁路记账：验证器调用同样计入费用日志（不触碰主会话统计）
+            if "usage" in chunk and self._stats is not None:
+                try:
+                    self._stats.log_external_usage(chunk["usage"])
+                except Exception:
+                    pass
 
         content = "".join(content_parts)
         if finish is None:

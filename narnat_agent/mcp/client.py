@@ -235,10 +235,14 @@ class McpStdioClient:
                 raise McpError(f"写入失败: {e}")
 
     def _terminate(self, proc) -> None:
-        """强杀服务端（Windows 杀主进程；POSIX 杀进程组，连同其子进程）"""
+        """强杀服务端（Windows 杀进程树；POSIX 杀进程组，连同其子进程）"""
         try:
             if sys.platform == "win32":
-                proc.kill()
+                # Windows 无进程组信号语义：taskkill /T 杀整棵进程树——
+                # MCP 服务端常经 npx/cmd 包装，只 kill 直接子进程会留下后代
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True, check=False,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
             else:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 try:

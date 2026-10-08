@@ -106,9 +106,13 @@ class MessageList:
                 })
 
     def replace_all(self, new_messages: List[Dict[str, Any]]) -> None:
-        """原子替换全部消息（会话切换时使用）"""
-        self._messages.clear()
-        self._messages.extend(new_messages)
+        """原子替换全部消息（会话切换时使用）。
+
+        单次引用赋值（GIL 下原子）：并发读者要么看到旧列表、要么看到新列表，
+        不会撞见 clear()+extend() 两步之间的空/半列表（后台保存线程读到空
+        列表会把会话清空落盘）。
+        """
+        self._messages = list(new_messages)
 
     def clear_and_rebuild(self, system_prompt: str, summary: str,
                           compressor) -> None:

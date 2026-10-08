@@ -683,7 +683,10 @@ def bg_execute(command, timeout, background, bg, task_id, tool_context) -> str:
     if op == "status":
         return snapshot()
     if op == "wait":
-        t = timeout if timeout else 120
+        # None（未传）走默认 120s；0/负数显式传参交给下方 <=0 校验报错——
+        # 此前 "timeout if timeout else 120" 把 0 静默换成 120 挂起等待，
+        # 与前台 Shell 对 timeout<=0 的报错语义不一致（AI 传 0 会意外卡住）
+        t = 120 if timeout is None else timeout
         try:
             t = int(t)
         except (TypeError, ValueError, OverflowError):

@@ -50,6 +50,15 @@ DEFINITION = {
     },
 }
 
+
+CAPABILITY = {
+    "label": "MCP",
+    "dispatch": "serial",
+    "summary": "mcp",
+    "trusted_output": True,
+    "plugin_label": "MCP 服务器管理",
+}
+
 _MAX_TOOLS_SHOWN = 20       # connect 结果里工具名展示上限
 
 

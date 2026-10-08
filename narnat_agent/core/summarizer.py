@@ -14,10 +14,18 @@ from ..logger import AgentLogger
 class Summarizer:
     """LLM 摘要器"""
 
-    def __init__(self, llm: LLMClient, config: Config, logger: AgentLogger):
+    def __init__(self, llm: LLMClient, config: Config, logger: AgentLogger, stats=None):
         self._llm = llm
         self._config = config
         self._logger = logger
+        # 旁路记账：总结/命名调用计入费用日志（同压缩/验证器口径，不动主会话统计）
+        self._stats = stats
+
+    def _log_usage(self, usage: dict) -> None:
+        try:
+            self._stats.log_external_usage(usage)
+        except Exception:
+            pass
 
     def summarize(self, messages: List[Dict[str, Any]],
                   cancel_check: Callable[[], bool]) -> str:
@@ -29,6 +37,8 @@ class Summarizer:
                 return ""
             if "content" in chunk and "tool_calls" not in chunk:
                 summary_parts.append(chunk["content"])
+            if "usage" in chunk and self._stats is not None:
+                self._log_usage(chunk["usage"])
         return "".join(summary_parts)
 
     def name_session(self, messages: List[Dict[str, Any]]) -> str:
@@ -49,6 +59,8 @@ class Summarizer:
                                            cancel_check=lambda: False):
             if "content" in chunk and "tool_calls" not in chunk:
                 parts.append(chunk["content"])
+            if "usage" in chunk and self._stats is not None:
+                self._log_usage(chunk["usage"])
         name = "".join(parts).strip()
         if not name:
             return ""

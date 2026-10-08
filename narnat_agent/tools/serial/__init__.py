@@ -8,13 +8,13 @@
 - 超时默认 120s，超时返回已收集数据
 """
 
-import re
 import sys
 import threading
 from typing import Optional
 
 from .serial_session import SerialSession
 from ..exec_signal import error_line
+from ..safety import RE_DELETE as _SHARED_RE_DELETE, match_delete as _SHARED_MATCH_DELETE
 from ..tool_context import AWAIT_CONFIRM
 
 __all__ = ["execute", "DEFINITION", "kill_active_exec", "cleanup", "SerialRuntime"]
@@ -32,11 +32,8 @@ class SerialRuntime:
     # 删除命令正则（串口设备误删更危险）
     # 边界后跟空白或/：覆盖无空格变体（rd/s、del/f、rmdir/q）及erase/format；
     # \b边界防止误伤 delphi、3rd、formatting 等普通词
-    RE_DELETE = re.compile(
-        r"\b(?:rm|del|rd|rmdir|erase|format)\b[\s/]"
-        r"|\bRemove-Item\b",
-        re.IGNORECASE,
-    )
+    # 定义源统一在 tools/safety.py（与 bash/terminal 共用同一编译对象）
+    RE_DELETE = _SHARED_RE_DELETE
 
     # session_id(0-4) → SerialSession
     sessions: dict = {}
@@ -180,6 +177,15 @@ DEFINITION = {
             "required": [],
         },
     },
+}
+
+
+CAPABILITY = {
+    "label": "串口",
+    "dispatch": "serial",
+    "summary": "serial",
+    "trusted_output": False,
+    "plugin_label": "多终端持久串口",
 }
 
 
@@ -359,7 +365,8 @@ def _check_delete_safety(command: str, session_id: int, port: str, timeout: int,
                          max_output_chars: int, action_name: str,
                          _tool_context) -> Optional[str]:
     """删除命令安全确认。返回 None 表示放行，返回 str 表示被拦截的提示。"""
-    if not (_tool_context and not _tool_context.rm_skip_confirm and SerialRuntime.RE_DELETE.search(command)):
+    # 判定走 safety.match_delete（含 cmd 等价写法归一化：d^el、del.\x、del\x、!VAR! 拼接）
+    if not (_tool_context and not _tool_context.rm_skip_confirm and _SHARED_MATCH_DELETE(command)):
         return None
 
     # 终端被 prompt_toolkit 占用或本无交互终端：暂存命令由 agent 主循环
@@ -402,8 +409,7 @@ def _exec(session_id: int, port: str, command: str, timeout: int = 120,
         return error_line(str(e))
 
     if not session.is_alive:
-        with SerialRuntime.sessions_lock:
-            SerialRuntime.sessions.pop(sid, None)
+        _drop_dead_session(sid, session)
         return error_line(f"终端{sid}串口已断开，请重新 connect")
 
     try:
@@ -451,8 +457,7 @@ def _raw_exec(session_id: int, port: str, command: str, timeout: int = 120,
         return error_line(str(e))
 
     if not session.is_alive:
-        with SerialRuntime.sessions_lock:
-            SerialRuntime.sessions.pop(sid, None)
+        _drop_dead_session(sid, session)
         return error_line(f"终端{sid}串口已断开，请重新 connect")
 
     try:
@@ -492,8 +497,7 @@ def _input(session_id: int, port: str, text: str, timeout: int = 120,
         return error_line(str(e))
 
     if not session.is_alive:
-        with SerialRuntime.sessions_lock:
-            SerialRuntime.sessions.pop(sid, None)
+        _drop_dead_session(sid, session)
         return error_line(f"终端{sid}串口已断开，请重新 connect")
 
     try:
@@ -536,8 +540,7 @@ def _signal(session_id: int, port: str, dtr: str = "", rts: str = "",
         return error_line(str(e))
 
     if not session.is_alive:
-        with SerialRuntime.sessions_lock:
-            SerialRuntime.sessions.pop(sid, None)
+        _drop_dead_session(sid, session)
         return error_line(f"终端{sid}串口已断开，请重新 connect")
 
     result = session.set_signals(dtr=dtr, rts=rts, pulse_ms=pulse_ms)
@@ -637,6 +640,23 @@ def _allocate_session_id() -> int:
             del SerialRuntime.sessions[i]
             return i
     return -1
+
+
+def _drop_dead_session(sid: int, session: "SerialSession") -> None:
+    """从注册表移除已断开的会话并关闭其串口句柄。
+
+    只 pop 不 close 会泄漏串口句柄（如写超时置 dead 的会话），该端口在
+    本进程内将永久不可重连（PermissionError）。close 自带幂等保护。
+    身份校验：窄窗内该 sid 若已被新会话替换（僵尸 drop 与新连接交错），
+    不得误删替换者。
+    """
+    with SerialRuntime.sessions_lock:
+        if SerialRuntime.sessions.get(sid) is session:
+            SerialRuntime.sessions.pop(sid, None)
+    try:
+        session.close()
+    except Exception:
+        pass
 
 
 def _resolve_session_id(session_id: int, port: str = "") -> tuple[int, "SerialSession"]:

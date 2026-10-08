@@ -15,6 +15,7 @@ from .context import ContextManager
 from ..ui.ui_design import UIInterface
 from ..ui.interrupt import _interrupt_ctrl
 from ..logger import AgentLogger
+from ..output import write as _stdout_write
 
 # 溢出恢复压缩成功后追加的内部继续消息：告知模型历史已被压缩、任务继续。
 OVERFLOW_CONTINUE_MESSAGE = (
@@ -29,6 +30,13 @@ _MANUAL_FAIL_TEXT = {
     "overflow": "压缩失败: 压缩请求自身超出模型上下文限制，历史未变更",
 }
 
+# 自动压缩失败原因 → 用户提示（历史保持原样，对话继续）
+_AUTO_FAIL_REASON = {
+    "llm_error": "LLM调用出错",
+    "empty_summary": "总结为空",
+    "overflow": "压缩请求自身超出模型上下文限制",
+}
+
 
 class CompressionCoordinator:
     """上下文压缩协调器"""
@@ -37,7 +45,7 @@ class CompressionCoordinator:
                  llm: LLMClient, context: ContextManager,
                  ui: UIInterface,
                  logger: AgentLogger, tool_context=None,
-                 session_mgr=None):
+                 session_mgr=None, stats=None):
         self._config = config
         self._msg_manager = msg_manager
         self._llm = llm
@@ -48,6 +56,14 @@ class CompressionCoordinator:
         # 自动压缩成功后修正探索分支的 /done 增量基准（手动 /compact 由
         # session_callbacks 负责，见 compress_manual）
         self._session_mgr = session_mgr
+        # 旁路记账：压缩调用的费用日志（不触碰主会话统计，同验证器口径）
+        self._stats = stats
+
+    def _log_usage(self, usage: dict) -> None:
+        try:
+            self._stats.log_external_usage(usage)
+        except Exception:
+            pass
 
     def _append_plan_reminder(self):
         """压缩后重注入当前计划：TodoWrite 调用历史被压缩吞掉后模型会忘记
@@ -66,7 +82,21 @@ class CompressionCoordinator:
         self._msg_manager.append_user_merged("\n".join(lines))
 
     def compress(self, pending_input: str) -> bool:
-        """处理上下文压缩。成功=True，失败/中断=False。"""
+        """处理上下文压缩。
+
+        返回值：True=已妥善处理、可继续当前请求（压缩成功或无收益跳过）；
+        False=本轮不再发出请求（用户取消压缩）。
+        """
+        # 保留预算内无可压缩历史：压缩零收益（切点只能全保留，重建=历史
+        # 净增一条摘要）、每轮空转白耗一次摘要调用——与 compress_no_input/
+        # mid_run_guard 同一守卫。此路径不做压缩但对话必须继续：输入按普通
+        # 流程追加后放行（真超限由溢出恢复兜底）。
+        if not self._msg_manager.has_compressible_history(self._config.session.retain_tokens):
+            self._logger.warning(
+                "compressor", "占比超阈值但保留预算内无可压缩历史，跳过压缩（避免空转）")
+            self._msg_manager.append_user(pending_input)
+            return True
+
         def on_interrupt():
             self._ui.end_compressing()
             self._context.reset()
@@ -87,6 +117,7 @@ class CompressionCoordinator:
             on_interrupt=on_interrupt,
             on_llm_error=on_llm_error,
             retain_tokens=self._config.session.retain_tokens,
+            on_usage=self._log_usage if self._stats is not None else None,
         )
         if res.ok:
             self._ui.end_compressing()
@@ -97,7 +128,15 @@ class CompressionCoordinator:
                 # _parent_msg_count/_last_summarized_at 需重置到摘要边界，
                 # 否则 /done 静默丢增量（基类 no-op，仅 ChildSession 生效）
                 self._session_mgr.state.reset_after_compact()
-        return res.ok
+            return True
+        if res.reason == "interrupted":
+            return False
+        # 压缩失败（LLM 出错/总结为空/压缩请求超限）：不阻塞对话——输入已由
+        # 回调追加进历史，以现有历史继续本次请求（真超限由溢出恢复兜底），
+        # 并提示用户本次未压缩
+        _stdout_write(
+            f"  自动压缩失败（{_AUTO_FAIL_REASON.get(res.reason, '未识别原因')}），以现有历史继续对话\n")
+        return True
 
     def compress_no_input(self) -> bool:
         """溢出恢复压缩：请求被 400 上下文超限拒绝后调用，无新用户输入。
@@ -130,6 +169,7 @@ class CompressionCoordinator:
             on_interrupt=on_interrupt,
             on_llm_error=on_llm_error,
             retain_tokens=self._config.session.retain_tokens,
+            on_usage=self._log_usage if self._stats is not None else None,
         )
         if res.ok:
             self._ui.end_compressing()
@@ -170,6 +210,7 @@ class CompressionCoordinator:
                 on_interrupt=on_interrupt,
                 on_llm_error=on_llm_error,
                 retain_tokens=self._config.session.retain_tokens,
+                on_usage=self._log_usage if self._stats is not None else None,
             )
         finally:
             # 无论 handle_compress 还是 UI 回调抛异常，都必须回到输入模式，

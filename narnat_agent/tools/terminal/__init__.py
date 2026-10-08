@@ -17,6 +17,7 @@ from typing import Optional
 
 import paramiko
 
+from .. import safety
 from ..exec_signal import error_line
 from ..tool_context import AWAIT_CONFIRM
 from .session import SSHSession
@@ -34,17 +35,9 @@ class TerminalRuntime:
     # dev编号正则: dev0=本机(当前设备), devN(N>=1)=第N台被控设备(终端N-1)
     RE_DEV = re.compile(r"^dev(\d+)$", re.IGNORECASE)
 
-    # 删除命令正则
-    # 边界后跟空白或/：覆盖无空格变体（rd/s、del/f、rmdir/q）及erase/format；
-    # \b边界防止误伤 delphi、3rd、formatting 等普通词
-    RE_DELETE = re.compile(
-        r"\b(?:rm|del|rd|rmdir|erase|format)\b[\s/]"
-        r"|\bRemove-Item\b",
-        re.IGNORECASE,
-    )
-
-    # 匹配 git 命令的简单正则（出现 git 即命中）
-    RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
+    # 删除命令正则 / git 命令正则：共享定义源 tools/safety.py（安全判定语义恒等）
+    RE_DELETE = safety.RE_DELETE
+    RE_GIT = safety.RE_GIT
 
     # 纯 cd 命令（无 &&/||/管道/重定向/换行/分号）：单通道执行下 cd 不影响后续命令，
     # 结果后附提示引导。空白用 [ \t] 而非 \s：\s 允许换行会让 `cd\npwd` 被误判为纯 cd
@@ -146,6 +139,15 @@ DEFINITION = {
             "required": [],
         },
     },
+}
+
+
+CAPABILITY = {
+    "label": "终端",
+    "dispatch": "serial",
+    "summary": "device_host",
+    "trusted_output": False,
+    "plugin_label": "多终端持久 SSH",
 }
 
 
@@ -573,9 +575,10 @@ def _check_exec_safety(command: str, session_id: int, host: str,
         return None
 
     need_confirm = False
-    if not tc.rm_skip_confirm and TerminalRuntime.RE_DELETE.search(command):
+    # 判定走 safety.match_*（含 cmd 等价写法归一化：d^el、del.\x、del\x、!VAR! 拼接）
+    if not tc.rm_skip_confirm and safety.match_delete(command):
         need_confirm = True
-    elif not tc.git_skip_confirm and TerminalRuntime.RE_GIT.search(command):
+    elif not tc.git_skip_confirm and safety.match_git(command):
         need_confirm = True
     if not need_confirm:
         return None

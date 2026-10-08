@@ -15,19 +15,19 @@ from .token_estimate import estimate_text_tokens
 
 # ── 显式导入各工具（Nuitka安全） ──
 from . import background  # noqa: F401  Shell 工具的 bg 附属模块（bash 内延迟导入；显式导入确保 Nuitka 打包）
-from .read import execute as read_execute, DEFINITION as READ_DEF
-from .glob import execute as glob_execute, DEFINITION as GLOB_DEF
-from .grep import execute as grep_execute, DEFINITION as GREP_DEF
-from .edit import execute as edit_execute, DEFINITION as EDIT_DEF
-from .write import execute as write_execute, DEFINITION as WRITE_DEF
-from .bash import execute as bash_execute, DEFINITION as BASH_DEF
-from .terminal import execute as terminal_execute, DEFINITION as TERMINAL_DEF
+from .read import execute as read_execute, DEFINITION as READ_DEF, CAPABILITY as READ_CAP
+from .glob import execute as glob_execute, DEFINITION as GLOB_DEF, CAPABILITY as GLOB_CAP
+from .grep import execute as grep_execute, DEFINITION as GREP_DEF, CAPABILITY as GREP_CAP
+from .edit import execute as edit_execute, DEFINITION as EDIT_DEF, CAPABILITY as EDIT_CAP
+from .write import execute as write_execute, DEFINITION as WRITE_DEF, CAPABILITY as WRITE_CAP
+from .bash import execute as bash_execute, DEFINITION as BASH_DEF, CAPABILITY as BASH_CAP
+from .terminal import execute as terminal_execute, DEFINITION as TERMINAL_DEF, CAPABILITY as TERMINAL_CAP
 
-from .web_search import execute as web_search_execute, DEFINITION as WEBSEARCH_DEF
-from .todo_write import execute as todo_write_execute, DEFINITION as TODOWRITE_DEF
-from .serial import execute as serial_execute, DEFINITION as SERIAL_DEF
-from .mcp_tool import execute as mcp_execute, DEFINITION as MCP_DEF
-from .goal_complete import execute as goal_complete_execute
+from .web_search import execute as web_search_execute, DEFINITION as WEBSEARCH_DEF, CAPABILITY as WEBSEARCH_CAP
+from .todo_write import execute as todo_write_execute, DEFINITION as TODOWRITE_DEF, CAPABILITY as TODOWRITE_CAP
+from .serial import execute as serial_execute, DEFINITION as SERIAL_DEF, CAPABILITY as SERIAL_CAP
+from .mcp_tool import execute as mcp_execute, DEFINITION as MCP_DEF, CAPABILITY as MCP_CAP
+from .goal_complete import execute as goal_complete_execute, CAPABILITY as GOALCOMPLETE_CAP
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -102,8 +102,73 @@ def unregister_dynamic_tools(names: List[str]) -> None:
 # 公开接口
 # ═══════════════════════════════════════════════════════════════
 
-# 需要tool_context的工具：执行时注入 _tool_context 参数
-_CONTEXT_TOOLS = {"Shell", "Terminal", "TodoWrite", "WebSearch", "Read", "Glob", "Grep", "Serial", "MCP", "GoalComplete"}
+# ═══════════════════════════════════════════════════════════════
+# 工具能力声明聚合（各工具 __init__.py 的 CAPABILITY，导入时汇总）
+#
+# 声明随工具自身维护，消费方一律查表/派生，不再维护第二份名单：
+#   label           终端显示标签
+#   dispatch        调度分类：readonly | write | serial（三值封闭）
+#   summary         调用行摘要风格键（core/tool_dispatcher.py 的 _SUMMARY_STYLES）
+#   trusted_output  输出是否框架可信文本（False=含外部不可信文本，失败判定只认框架标签）
+#   plugin_label    /plugin 状态表说明文案（可缺省，缺省回退 label）
+# ═══════════════════════════════════════════════════════════════
+
+_CAPABILITIES: Dict[str, Dict[str, Any]] = {
+    "Read": READ_CAP,
+    "Glob": GLOB_CAP,
+    "Grep": GREP_CAP,
+    "Edit": EDIT_CAP,
+    "Write": WRITE_CAP,
+    "Shell": BASH_CAP,
+    "Terminal": TERMINAL_CAP,
+    "WebSearch": WEBSEARCH_CAP,
+    "TodoWrite": TODOWRITE_CAP,
+    "Serial": SERIAL_CAP,
+    "MCP": MCP_CAP,
+    "GoalComplete": GOALCOMPLETE_CAP,
+}
+
+# 未声明工具的能力（动态工具 mcp__*/未知工具，按名缓存，查询 O(1)）
+_UNDECLARED_CAPABILITIES: Dict[str, Dict[str, Any]] = {}
+
+
+def capability_names() -> List[str]:
+    """全部已声明能力的工具名（顺序同本表定义）"""
+    return list(_CAPABILITIES)
+
+
+def get_capability(name: str) -> Dict[str, Any]:
+    """工具能力查询（O(1)）。
+
+    未声明的动态工具（mcp__*，MCP 服务器热注册）与未知工具返回保守默认：
+    串行调度 + 原名标签；动态工具输出含服务端文本（不可信，失败判定只认框架标签）
+    且摘要风格为 mcp，未知工具无摘要。
+    """
+    cap = _CAPABILITIES.get(name)
+    if cap is not None:
+        return cap
+    cap = _UNDECLARED_CAPABILITIES.get(name)
+    if cap is None:
+        if name.startswith("mcp__"):
+            cap = {"label": name, "dispatch": "serial", "summary": "mcp",
+                   "trusted_output": False}
+        else:
+            cap = {"label": name, "dispatch": "serial", "summary": "none",
+                   "trusted_output": True}
+        _UNDECLARED_CAPABILITIES[name] = cap
+    return cap
+
+
+def _needs_context(name: str) -> bool:
+    """该工具执行时是否注入 _tool_context（由实现函数签名推导，替代人工名单）"""
+    impl = _TOOL_IMPLEMENTATIONS.get(name) or _DYNAMIC_IMPLEMENTATIONS.get(name)
+    if impl is None:
+        return False
+    try:
+        import inspect
+        return "_tool_context" in inspect.signature(impl).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolContext] = None) -> tuple:
@@ -125,7 +190,7 @@ def execute(name: str, arguments: Dict[str, Any], tool_context: Optional[ToolCon
         return (error_line(f"未知工具: {name}"), "")
 
     try:
-        if tool_context and name in _CONTEXT_TOOLS:
+        if tool_context and _needs_context(name):
             result = impl(**arguments, _tool_context=tool_context)
         else:
             result = impl(**arguments)

@@ -23,6 +23,63 @@ class GlobLimits:
 
 # ── 花括号展开 ────────────────────────────────────────────────
 
+def _expand_range(body: str) -> list[str] | None:
+    """展开 {N..M} / {c..c} 范围（bash 语义子集），无效返回 None。
+
+    支持：整数（可负、可补零、可步进）与 ASCII 单字符；显式步进只表达
+    步长，方向由首尾决定；0 步进或解析失败视为无效（调用方保持字面，
+    对齐 bash 对无效范围的处理）。生成项数受 MAX_BRACE_EXPANSIONS 截断
+    （与逗号展开共用上限）。此前仅检测 ".." 需要展开、却按逗号切分原样
+    保留（花括号被剥离为字面），r{1..3}.txt 静默无匹配。
+    """
+    parts = body.split("..")
+    if len(parts) not in (2, 3):
+        return None
+    step = None
+    if len(parts) == 3:
+        try:
+            step = int(parts[2])
+        except ValueError:
+            return None
+        if step == 0:
+            return None
+    a, b = parts[0], parts[1]
+    limit = GlobLimits.MAX_BRACE_EXPANSIONS
+
+    def _int_like(s: str) -> bool:
+        t = s[1:] if s[:1] in ("-", "+") else s
+        return bool(t) and t.isdigit()
+
+    if _int_like(a) and _int_like(b):
+        start, end = int(a), int(b)
+        pad = 0
+        for s in (a, b):
+            t = s.lstrip("+-")
+            if len(t) > 1 and t.startswith("0"):
+                pad = max(pad, len(t))
+        direction = 1 if start <= end else -1
+        step_val = abs(step) * direction if step is not None else direction
+        count = min(abs(end - start) // abs(step_val) + 1, limit)
+        return [
+            str(start + i * step_val).zfill(pad)
+            if pad and start + i * step_val >= 0
+            else str(start + i * step_val)
+            for i in range(count)
+        ]
+
+    def _is_ascii_char(s: str) -> bool:
+        return len(s) == 1 and s.isalpha() and ord(s) < 128
+
+    if _is_ascii_char(a) and _is_ascii_char(b):
+        start, end = ord(a), ord(b)
+        direction = 1 if start <= end else -1
+        step_val = abs(step) * direction if step is not None else direction
+        count = min(abs(end - start) // abs(step_val) + 1, limit)
+        return [chr(start + i * step_val) for i in range(count)]
+
+    return None
+
+
 def _expand_braces(pattern: str) -> list[str]:
     """展开花括号。支持 \\{ \\} \\, 转义，无逗号/..时不展开（对齐 bash 语义）。"""
     if "{" not in pattern:
@@ -49,8 +106,9 @@ def _expand_braces(pattern: str) -> list[str]:
                 body = pattern[start + 1:i]
                 tail = pattern[i + 1:]
 
-                # 检查 body 中是否有顶层的逗号或 ..（需要展开）
-                has_expand = False
+                # 检查 body 中是否有顶层逗号 / ..（需要展开）
+                has_comma = False
+                has_dots = False
                 b_depth = 0
                 j = 0
                 while j < len(body):
@@ -63,38 +121,43 @@ def _expand_braces(pattern: str) -> list[str]:
                     elif ch == "}":
                         b_depth = max(b_depth - 1, 0)
                     elif ch == "," and b_depth == 0:
-                        has_expand = True
-                        break
+                        has_comma = True
                     elif ch == "." and b_depth == 0:
                         # 检测 .. （范围序列，如 {1..5}）
                         if j + 1 < len(body) and body[j + 1] == ".":
-                            has_expand = True
-                            break
+                            has_dots = True
+                            j += 1
                     j += 1
 
-                if not has_expand:
+                if not has_comma and not has_dots:
                     # 无逗号/..，不展开，保留字面花括号
                     return [pattern]
 
-                # 按顶层逗号切分
-                options: list[str] = []
-                b_depth = 0
-                last = 0
-                j = 0
-                while j < len(body):
-                    ch = body[j]
-                    if ch == "\\" and j + 1 < len(body) and body[j + 1] in ("{", "}", ","):
-                        j += 2
-                        continue
-                    if ch == "{":
-                        b_depth += 1
-                    elif ch == "}":
-                        b_depth = max(b_depth - 1, 0)
-                    elif ch == "," and b_depth == 0:
-                        options.append(body[last:j])
-                        last = j + 1
-                    j += 1
-                options.append(body[last:])
+                if has_comma:
+                    # 按顶层逗号切分（bash 语义：逗号优先于范围）
+                    options: list[str] = []
+                    b_depth = 0
+                    last = 0
+                    j = 0
+                    while j < len(body):
+                        ch = body[j]
+                        if ch == "\\" and j + 1 < len(body) and body[j + 1] in ("{", "}", ","):
+                            j += 2
+                            continue
+                        if ch == "{":
+                            b_depth += 1
+                        elif ch == "}":
+                            b_depth = max(b_depth - 1, 0)
+                        elif ch == "," and b_depth == 0:
+                            options.append(body[last:j])
+                            last = j + 1
+                        j += 1
+                    options.append(body[last:])
+                else:
+                    # 仅 .. → 范围展开；无效范围（如 {1..x}）保持字面（bash 语义）
+                    options = _expand_range(body)
+                    if options is None:
+                        return [pattern]
 
                 results: list[str] = []
                 for opt in options:
@@ -525,11 +588,28 @@ DEFINITION = {
 }
 
 
+CAPABILITY = {
+    "label": "搜索文件",
+    "dispatch": "readonly",
+    "summary": "pattern_path",
+    "trusted_output": True,
+}
+
+
 def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=None) -> str:
     # ── 空 pattern 拒绝：返回全集会淹没 AI（大型项目海量结果无意义）──
     if pattern is None or not str(pattern).strip():
         return "[错误: pattern不能为空]"
     pattern = str(pattern).strip()
+
+    # path 类型防御：非字符串（float/list 等）会让 os.path.isdir 抛 TypeError
+    # 逃出工具层（registry 兜底不应是常规路径）
+    if path is not None and not isinstance(path, str):
+        return "[错误: path需为字符串]"
+
+    # 含 NUL（JSON \u0000）：win32 stat/open 抛未捕获 ValueError 逃出工具层
+    if "\x00" in pattern or "\x00" in (path or ""):
+        return "[错误: pattern/path 含 NUL 字符（\\0），非法路径]"
 
     root = path or os.getcwd()
     if not os.path.isdir(root):

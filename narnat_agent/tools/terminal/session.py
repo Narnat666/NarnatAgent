@@ -63,6 +63,11 @@ class SSHSession:
     POLL_INTERVAL = 0.05
     # exit_status 就绪后、EOF 未到时的静默等待轮次（× POLL_INTERVAL ≈ 500ms）
     EOF_WAIT_ROUNDS = 10
+    # SFTP 通道应用层 socket 超时（秒）：远端半开时防止无限阻塞
+    SFTP_TIMEOUT = 20.0
+    # SFTP 建链超时（秒）——open_session/invoke_subsystem 确认等待无超时支持，
+    # 用 worker 线程 + join 超时包装；与读写超时同源
+    SFTP_BUILD_TIMEOUT = 20.0
 
     def __init__(self, host: str, username: str, port: int = 22,
                  key_path: Optional[str] = None, password: Optional[str] = None,
@@ -203,10 +208,40 @@ class SSHSession:
                 pass
 
     def open_sftp(self):
-        """返回 paramiko SFTPClient（供 remote.py / transfer 使用）；断线时先重连。"""
+        """返回 paramiko SFTPClient（供 remote.py / transfer 使用）；断线时先重连。
+
+        建链在带超时的 worker 中执行：paramiko 的 open_session / invoke_subsystem
+        确认等待（event.wait）无超时支持，远端半开时会**永久挂住主线程**——
+        join 超时后断开该连接（唤醒挂起的等待）并抛可读超时错误。worker 为
+        daemon 线程，连接断开后自然了结。
+        """
         if not self.alive:
             raise RuntimeError(f"SSh会话已断开: {self.host}")
-        return self._client.open_sftp()
+        result = {}
+
+        def _build():
+            try:
+                chan = self._client.get_transport().open_session()
+                chan.settimeout(SSHSession.SFTP_TIMEOUT)
+                chan.invoke_subsystem("sftp")
+                result["sftp"] = paramiko.SFTPClient(chan)
+            except BaseException as e:  # 传回主线程按原语义抛出
+                result["err"] = e
+
+        t = threading.Thread(target=_build, daemon=True)
+        t.start()
+        t.join(SSHSession.SFTP_BUILD_TIMEOUT)
+        if t.is_alive():
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            raise TimeoutError(
+                f"SFTP 建链超时（{SSHSession.SFTP_BUILD_TIMEOUT:.0f}s 无响应）: {self.host}")
+        err = result.get("err")
+        if err is not None:
+            raise err
+        return result["sftp"]
 
     # ── 命令执行（核心） ──
 

@@ -62,6 +62,14 @@ DEFINITION = {
 }
 
 
+CAPABILITY = {
+    "label": "声明完成",
+    "dispatch": "serial",
+    "summary": "none",
+    "trusted_output": True,
+}
+
+
 def _check_checklist(checklist, ctx):
     """机械校验完成清单：通过返回 None，否则返回对AI的具体问题描述"""
     if not isinstance(checklist, list) or not checklist:

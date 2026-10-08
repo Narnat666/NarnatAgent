@@ -40,6 +40,14 @@ DEFINITION = {
 }
 
 
+CAPABILITY = {
+    "label": "更新计划",
+    "dispatch": "serial",
+    "summary": "todos",
+    "trusted_output": True,
+}
+
+
 def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
     """
     创建/更新任务列表。

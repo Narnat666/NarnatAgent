@@ -6,6 +6,7 @@ API key等敏感数据脱敏
 import logging
 import os
 import re
+import sys
 import time
 from typing import Optional
 
@@ -21,10 +22,14 @@ class AgentLogger:
 
     # 敏感信息脱敏：匹配 sk-xxx / as_sk_xxx / api_key=xxx / key=xxx / password=xxx 等
     # （password/passwd/pwd/secret/token 键名形态统一按"键名+分隔符+值"脱敏；_replace 分组编号不变）
+    # 密钥主体字符类含连字符：现代格式 sk-ant-api03-... / sk-or-v1-... /
+    # sk-proj-... 的中间段含 '-'，不含则整串匹配失败、密钥原样落日志
+    # 键名表含 x-api-key（MCP 远程头）/bearer（Authorization: Bearer <token>
+    # 形态从 "Bearer" 起匹配到 token 值）/裸 key（含 URL ?key= 形态）
     RE_SECRET = re.compile(
-        r'((?:api_key|password|passwd|pwd|secret|token)["\s:=]+["\s]*)'
+        r'((?:api_key|apikey|x-api-key|api-key|bearer|key|password|passwd|pwd|secret|token)["\s:=]+["\s]*)'
         r'([^\s",\}]{4,})([^\s",\}]*?)'
-        r'|((?:as_sk_|sk[-_]|key-|token-)([a-zA-Z0-9]{4})[a-zA-Z0-9]*)',
+        r'|((?:as_sk_|sk[-_]|key-|token-)([a-zA-Z0-9-]{4})[a-zA-Z0-9-]*)',
         re.IGNORECASE,
     )
 
@@ -61,7 +66,10 @@ class AgentLogger:
         if logs_dir:
             self._logs_dir = logs_dir
 
-        os.makedirs(self._logs_dir, exist_ok=True)
+        try:
+            os.makedirs(self._logs_dir, exist_ok=True)
+        except OSError:
+            pass   # 目录不可用：留给下方占位/FileHandler 报错并降级
 
         # 用 O_EXCL 原子占位探测占用：检查-创建两步存在竞态，同刻启动的多实例
         # 会都通过 os.path.exists 判断而撞名（混写同一文件）
@@ -74,6 +82,9 @@ class AgentLogger:
         except FileExistsError:
             # 同刻启动的多实例：文件名追加 pid 区分
             filepath = os.path.join(self._logs_dir, f"{base}_{os.getpid()}.log")
+        except OSError as e:
+            # 目录不可写（权限/磁盘满）等：降级为无文件日志
+            return self._disable(e)
 
         # 关闭旧handler
         if self._handler:
@@ -86,7 +97,10 @@ class AgentLogger:
         logger.handlers.clear()
         logger.propagate = False
 
-        handler = logging.FileHandler(filepath, encoding="utf-8")
+        try:
+            handler = logging.FileHandler(filepath, encoding="utf-8")
+        except OSError as e:
+            return self._disable(e)
         handler.setLevel(logging.DEBUG)
         fmt = logging.Formatter(
             "%(asctime)s [%(name)s]  %(levelname)-5s  %(message)s",
@@ -98,6 +112,24 @@ class AgentLogger:
         self._logger = logger
         self._handler = handler
         return filepath
+
+    def _disable(self, err: OSError) -> str:
+        """日志基础设施不可用（目录无权限/磁盘满/路径被占位）：降级为无文件日志。
+
+        日志仅作辅助，不应让主程序不可用；降级后 _log 自动静默（_logger=None）。
+        """
+        if self._handler:
+            try:
+                self._handler.close()
+            except Exception:
+                pass
+        self._logger = None
+        self._handler = None
+        try:
+            print(f"  ⚠ 日志目录不可用，调试日志已禁用: {err}", file=sys.stderr)
+        except Exception:
+            pass
+        return ""
 
     def _log(self, level: int, module: str, msg: str):
         if not self._logger:

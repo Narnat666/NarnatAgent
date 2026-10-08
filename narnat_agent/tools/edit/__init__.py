@@ -11,6 +11,7 @@
 import os
 import shutil
 import tempfile
+import time
 import difflib
 
 from typing import Optional
@@ -49,28 +50,47 @@ DEFINITION = {
 }
 
 
+CAPABILITY = {
+    "label": "编辑",
+    "dispatch": "write",
+    "summary": "file_path",
+    "trusted_output": True,
+}
+
+
 def _read_for_edit(file_path: str) -> tuple:
     """读取文件内容用于编辑，返回 (content, 写回编码)。
 
-    编码策略与 Read 一致（首块探测 utf-8-sig / gbk），但必须严格解码：
-    Edit 会把内容写回文件，errors="replace" 会以 U+FFFD 永久替换原字节，
-    造成静默数据损坏。探测结果无法严格解码时抛 UnicodeDecodeError，
-    由调用方拒绝编辑（对齐远程 Edit 行为）。
+    编码策略与 Read 一致（BOM 嗅探优先 → utf-16；未命中再探测 utf-8-sig /
+    gbk），但必须严格解码：Edit 会把内容写回文件，errors="replace" 会以
+    U+FFFD 永久替换原字节，造成静默数据损坏。探测结果无法严格解码时抛
+    UnicodeDecodeError，由调用方拒绝编辑（对齐远程 Edit 行为）。
 
     Raises:
-        ValueError: 二进制文件（含NUL字节）
-        UnicodeDecodeError: 无法按 UTF-8/GBK 严格解码
+        ValueError: 二进制文件（含NUL字节；BOM 未命中时才判）
+        UnicodeDecodeError: 无法按 UTF-8/GBK/UTF-16(BOM) 严格解码
     """
-    from ..read import _detect_text_encoding
+    from ..read import _detect_text_encoding, _sniff_bom_encoding
     with open(file_path, "rb") as fb:
         head = fb.read(8192)
-    if b"\x00" in head:
-        raise ValueError("binary")
-    encoding = _detect_text_encoding(head)
+    # BOM 嗅探优先于二进制判定（与 Read/Grep 一致）：UTF-16 文本的 ASCII 字符
+    # 含 NUL 字节，会被"首块含 NUL"误判为二进制（PowerShell 5.1 重定向输出等）
+    if _sniff_bom_encoding(head):
+        encoding = "utf-16"
+    else:
+        if b"\x00" in head:
+            raise ValueError("binary")
+        encoding = _detect_text_encoding(head)
     with open(file_path, "r", encoding=encoding, newline="") as f:
         content = f.read()
-    # 写回编码保持原文件形态：UTF-8 有 BOM 保留 BOM、无 BOM 不添加，GBK 写回 GBK
-    if encoding == "utf-8-sig":
+    # 写回编码保持原文件形态：UTF-16 保持原字节序+BOM，UTF-8 有 BOM 保留 BOM、
+    # 无 BOM 不添加，GBK 写回 GBK
+    if encoding == "utf-16":
+        # utf-16-le/be 编解码器不加 BOM：先给内容前置 BOM 字符（U+FEFF），
+        # 写回编码时还原原 BOM 字节（LE=FF FE / BE=FE FF）
+        write_encoding = "utf-16-le" if head.startswith(b"\xff\xfe") else "utf-16-be"
+        content = "\ufeff" + content
+    elif encoding == "utf-8-sig":
         write_encoding = "utf-8-sig" if head.startswith(b"\xef\xbb\xbf") else "utf-8"
     else:
         write_encoding = "gbk"
@@ -140,7 +160,7 @@ def execute(file_path: str, old_string: str = "", new_string: Optional[str] = No
     except OSError as e:
         return (f"[错误: 读取失败: {e}]", "")
     except UnicodeDecodeError:
-        return ((f"[错误: 文件非UTF-8/GBK编码，为防止内容损坏已拒绝编辑: {file_path}。"
+        return ((f"[错误: 文件非UTF-8/GBK/UTF-16(BOM)编码，为防止内容损坏已拒绝编辑: {file_path}。"
                  f"请用Shell工具处理（如转码为UTF-8后再编辑）]"), "")
     except ValueError:
         return ("[错误: 检测到二进制文件（含NUL字节），Edit仅支持文本文件。请使用Shell工具处理]", "")
@@ -156,17 +176,31 @@ def _edit_by_string(content: str, old_string: str, new_string: str,
     if not old_string:
         return ("[错误: old_string不能为空]", "")
 
-    # 检测文件换行符风格，转换 old_string/new_string 以匹配
+    # 检测文件换行符风格，转换 old_string/new_string 以匹配。
+    # 顺序回退：原样 → 文件全局风格归一化 → 全 LF。混合换行文件（CRLF 与
+    # LF 混存）中纯 LF 段落必须靠"原样/全 LF"命中：此前按"文件含 CRLF"一刀
+    # 切把整段匹配请求转成 CRLF 形态，导致 LF 段落永远"未找到匹配"（AI 从
+    # Read 看到的正是 LF 形态，出现相似度 100% 却报未找到的诡异现场）。
     has_crlf = '\r\n' in content
     if has_crlf:
         _normalize = lambda s: s.replace('\r\n', '\x00').replace('\n', '\r\n').replace('\x00', '\r\n')
     else:
         _normalize = lambda s: s.replace('\r\n', '\n').replace('\r', '\n')
+    _to_lf = lambda s: s.replace('\r\n', '\n').replace('\r', '\n')
 
-    old_string_normalized = _normalize(old_string)
-    new_string_normalized = _normalize(new_string)
+    old_string_normalized = None
+    new_string_normalized = None
+    count = 0
+    for cand_old, cand_new in (
+        (old_string, new_string),
+        (_normalize(old_string), _normalize(new_string)),
+        (_to_lf(old_string), _to_lf(new_string)),
+    ):
+        c = content.count(cand_old)
+        if c:
+            old_string_normalized, new_string_normalized, count = cand_old, cand_new, c
+            break
 
-    count = content.count(old_string_normalized)
     if count == 0:
         hint = _find_similar(content, old_string)
         return (f"[错误: 未找到匹配文本。请先Read确认文件内容。]\n{hint}", "")
@@ -214,13 +248,30 @@ def _write_and_diff(old_content: str, new_content: str, file_path: str,
                     shutil.copymode(file_path, tmp_path)
                 except OSError:
                     pass  # 目标不存在或权限查询失败：按临时文件默认权限替换
-            os.replace(tmp_path, file_path)
-        except BaseException:
+            last_err = None
+            for i in range(3):
+                try:
+                    os.replace(tmp_path, file_path)
+                    break
+                except OSError as e:
+                    # 读端句柄持续持有目标时 replace 需要删除权限，可能瞬时被拒
+                    last_err = e
+                    time.sleep(0.01 * (i + 1))
+            else:
+                # 3 次均被拒（持续并发读端持有）：回退直写保证本次写入成功——
+                # 原子保护在常规场景仍生效，极端并发下退化为直写（写成功优先，
+                # 撕裂窗口仅存在于该读写竞态场景）
+                try:
+                    with open(file_path, "wb") as f:
+                        f.write(data)
+                except OSError:
+                    raise last_err
+        finally:
+            # 未消费的 tmp 一律清理（replace 成功时 tmp 已被移走，unlink 静默失败）
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
-            raise
     except OSError as e:
         return (f"[错误: 写入失败: {e}]", "")
 

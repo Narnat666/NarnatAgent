@@ -86,6 +86,12 @@ class SerialSession:
     # 串口读取超时 (reader 线程阻塞上限)
     READ_TIMEOUT = 0.1
 
+    # 串口写入超时: 设备不消费数据时 write 的阻塞上限。
+    # pyserial 默认 write_timeout=None=无限阻塞——exec/input/ESC 打断
+    # （写 \x03）会永久挂死；超时抛 SerialTimeoutException，由各 write
+    # 调用点的既有 SerialException 分支转为可读错误
+    WRITE_TIMEOUT = 2.0
+
     # buffer 上限: 超出后丢弃最早一半, 防止设备失控导致 OOM
     BUFFER_MAX_CHARS = 1_000_000  # 1MB
 
@@ -133,6 +139,7 @@ class SerialSession:
         self._ser.xonxoff = (flow_control == "software")
         self._ser.rtscts = (flow_control == "hardware")
         self._ser.timeout = SerialSession.READ_TIMEOUT
+        self._ser.write_timeout = SerialSession.WRITE_TIMEOUT
 
         self._ser.open()
 

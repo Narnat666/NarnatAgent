@@ -121,6 +121,19 @@ class StatsTracker:
         if self._cost_log_enabled:
             self._append_cost_log(prompt, completion, cached)
 
+    def log_external_usage(self, usage: dict) -> None:
+        """旁路记账：外部子会话（如完成验证器）的 API 调用。
+
+        只追加费用日志行（与主口径同一分项计算），不参与主会话
+        token/费用累计——验证器"不触碰主会话统计"的边界不变。
+        """
+        if not self._cost_log_enabled:
+            return
+        prompt = _as_int(usage.get("prompt_tokens"))
+        completion = _as_int(usage.get("completion_tokens"))
+        cached = _as_int(usage.get("cached_tokens"))
+        self._append_cost_log(prompt, completion, cached)
+
     def _append_cost_log(self, prompt: int, completion: int, cached: int) -> None:
         """追加一行费用记录到CSV（每次LLM请求调用一次）。
 
@@ -172,7 +185,8 @@ class StatsTracker:
             except FileExistsError:
                 # 文件已存在但为空：可能是创建者刚建立、表头块尚未落盘。
                 # 短暂等待（有界）表头块落地，避免本进程的数据行抢在表头之前
-                # （表头错位）；超时（创建者写入失败/遗留空文件）则直接写数据行。
+                # （表头错位）；超时（创建者写入失败/遗留空文件）则本进程补写
+                # 表头——否则该文件此后永远无表头（数据行可解析性受损）
                 deadline = time.time() + 0.2
                 while time.time() < deadline:
                     try:
@@ -182,6 +196,11 @@ class StatsTracker:
                         break
                     time.sleep(0.005)
                 need_header = False   # 他人已创建（表头由创建者负责）
+                try:
+                    if os.path.getsize(path) == 0:
+                        need_header = True   # 遗留空文件：无创建者，本进程补写
+                except OSError:
+                    pass
         # 单次系统调用追加写（见 _append_bytes）：open("a") 文本缓冲写在多进程
         # 高频并发下互相覆盖丢行，故先构建完整单次写内容再原子追加。
         buf = io.StringIO()
@@ -192,6 +211,16 @@ class StatsTracker:
         data = buf.getvalue().encode("utf-8")
         if need_header:
             data = b"\xef\xbb\xbf" + data     # 新文件保留 BOM（与现状一致）
+        else:
+            # 尾部半行修复：文件尾若非换行（外部编辑/历史中断留下残行），
+            # 直接追加会让两行拼成结构错位行——追加前补一个换行
+            try:
+                with open(path, "rb") as f:
+                    f.seek(-1, os.SEEK_END)
+                    if f.read(1) not in (b"\n",):
+                        data = b"\n" + data
+            except (OSError, ValueError):
+                pass
         _append_bytes(path, data)
 
     def _rotate_to_bak(self, path: str) -> bool:

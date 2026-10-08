@@ -9,13 +9,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from typing import List, Dict, Any, Tuple
 
-from ..tools.registry import execute as tool_execute
+from ..tools.registry import (
+    execute as tool_execute, get_capability, capability_names,
+)
 from ..tools.bash import kill_active as _kill_bash
 from ..tools.terminal import kill_active_exec as _kill_terminal_exec
 from ..tools.terminal import resolve_dev_display as _dev_display
 from ..tools.serial import kill_active_exec as _kill_serial_exec
 from ..tools.tool_context import ToolContext
 from ..tools.exec_signal import has_error, strip_tags
+from ..tools.param_utils import to_bool
 from ..output import write as _stdout_write, D, R, X, is_quiet_tools
 
 
@@ -47,32 +50,168 @@ def _mcp_target_hint(config) -> str:
     return ""
 
 
+# ═══════════════════════════════════════════════════════════════
+# 工具调用行摘要风格表
+#
+# 键 = 工具 CAPABILITY["summary"]（见 tools/registry.py），生成函数收
+# (工具名, 参数) 返回摘要文本；空串表示该调用不显示摘要。
+# ═══════════════════════════════════════════════════════════════
+
+def _style_file_path(name: str, arguments: dict) -> str:
+    dev_raw = arguments.get("device", "")
+    # 只有远程设备(dev1..devn)才显示设备；dev0/省略=本机不显示
+    dev = _dev_display(dev_raw) if dev_raw else ""
+    if dev == _local_hostname():
+        dev = ""
+    fp = arguments.get("file_path", "")
+    return f"{dev}:{fp}" if dev else fp
+
+
+def _style_command(name: str, arguments: dict) -> str:
+    bg_op = arguments.get("bg", "")
+    # 字符串布尔归一化（"false" 不能显示为后台提交；与 bash 执行层同一判定）
+    if to_bool(arguments.get("background")):
+        return f"后台提交 {ToolDispatcher._fmt_cmd(arguments.get('command', ''))}"
+    if bg_op == "status":
+        return "后台状态"
+    if bg_op == "wait":
+        t = arguments.get("timeout", "")
+        return "等待后台任务" + (f"(≤{t}s)" if t else "")
+    if bg_op == "cancel":
+        return f"取消后台任务 bg{arguments.get('id', '?')}"
+    return ToolDispatcher._fmt_cmd(arguments.get("command", ""))
+
+
+def _style_device_host(name: str, arguments: dict) -> str:
+    action = arguments.get("action", "")
+    if not action and arguments.get("command", ""):
+        action = "exec"
+    sid = arguments.get("session_id", -1)
+    sid_str = f"[dev{sid + 1}]" if sid >= 0 else ""
+    if action == "connect":
+        host = arguments.get("host", "")
+        username = arguments.get("username", "")
+        return f"connect{sid_str} {username}@{host}"
+    if action == "exec":
+        dev_raw = arguments.get("host", "")
+        dev = _dev_display(dev_raw) if dev_raw else ""
+        dev_str = f"[{dev}]" if dev else ""
+        return f"exec{dev_str} {ToolDispatcher._fmt_cmd(arguments.get('command', ''))}"
+    if action == "status":
+        return "status"
+    if action == "close":
+        dev = arguments.get("host", "")
+        return f"close {_dev_display(dev)}" if dev else "close"
+    if action == "transfer":
+        src_h = _dev_display(arguments.get("source_host", ""))
+        src_p = arguments.get("source_path", "")
+        tgt_h = _dev_display(arguments.get("target_host", ""))
+        tgt_p = arguments.get("target_path", "")
+        return f"transfer {src_h}:{src_p} → {tgt_h}:{tgt_p}"
+    if action == "input":
+        dev_raw = arguments.get("host", "")
+        dev = _dev_display(dev_raw) if dev_raw else ""
+        dev_str = f"[{dev}]" if dev else ""
+        return f"input{dev_str} {ToolDispatcher._fmt_cmd(arguments.get('input', ''), '(空)')}"
+    return f"{action or '(未知)'}{sid_str}"
+
+
+def _style_pattern(name: str, arguments: dict) -> str:
+    return arguments.get("pattern", "")
+
+
+def _style_pattern_path(name: str, arguments: dict) -> str:
+    return arguments.get("pattern", "")
+
+
+def _style_query(name: str, arguments: dict) -> str:
+    return arguments.get("query", "")
+
+
+def _style_todos(name: str, arguments: dict) -> str:
+    todos = arguments.get("todos", [])
+    return f"{len(todos)}项" if todos else "(空)"
+
+
+def _style_mcp(name: str, arguments: dict) -> str:
+    if name.startswith("mcp__"):
+        # MCP 动态工具（mcp__<服务器>__<工具>）：摘要显示工具名+参数（紧凑全量）
+        parts = name.split("__", 2)
+        if len(parts) != 3:
+            return ""
+        summary = parts[2]
+        if arguments:
+            args_text = json.dumps(arguments, ensure_ascii=False,
+                                   separators=(",", ":"))
+            summary += f" {args_text}"
+        return summary
+    # 内置 MCP：与 Terminal 同风格，动作 + 目标（括号内为启动程序，便于人眼核对连的是什么）
+    action = arguments.get("action", "connect")
+    target = arguments.get("name", "")
+    if action == "connect":
+        hint = _mcp_target_hint(arguments.get("config"))
+        return f"connect {target}{f' ({hint})' if hint else ''}".strip()
+    if action == "disconnect":
+        return f"disconnect {target}".strip()
+    return str(action)
+
+
+def _style_serial(name: str, arguments: dict) -> str:
+    action = arguments.get("action", "exec")
+    sid = arguments.get("session_id", -1)
+    sid_str = f"[{sid}]" if sid >= 0 else ""
+    if action == "scan":
+        return "scan"
+    if action == "connect":
+        port = arguments.get("port", "")
+        baud = arguments.get("baudrate", 115200)
+        return f"connect{sid_str} {port} @{baud}"
+    if action == "exec":
+        return f"exec{sid_str} {ToolDispatcher._fmt_cmd(arguments.get('command', ''))}"
+    if action == "raw_exec":
+        return f"raw_exec{sid_str} {ToolDispatcher._fmt_cmd(arguments.get('command', ''))}"
+    if action == "input":
+        return f"input{sid_str} {ToolDispatcher._fmt_cmd(arguments.get('input', ''), '(空)')}"
+    if action == "status":
+        return "status"
+    if action == "close":
+        return f"close{sid_str}"
+    return f"{action}{sid_str}"
+
+
+def _style_none(name: str, arguments: dict) -> str:
+    return ""
+
+
+_SUMMARY_STYLES = {
+    "file_path": _style_file_path,
+    "command": _style_command,
+    "device_host": _style_device_host,
+    "pattern": _style_pattern,
+    "pattern_path": _style_pattern_path,
+    "query": _style_query,
+    "todos": _style_todos,
+    "mcp": _style_mcp,
+    "serial": _style_serial,
+    "none": _style_none,
+}
+
+
 class ToolDispatcher:
     """工具调度器"""
 
-    # ── 工具分类（原模块级常量收敛为类属性）──
-    READONLY_TOOLS = {"Read", "Glob", "Grep", "WebSearch"}
-    WRITE_TOOLS = {"Edit", "Write"}
-    SERIAL_TOOLS = {"Shell", "Terminal", "TodoWrite", "Serial", "GoalComplete"}
+    # ── 工具分类/标签（由各工具 CAPABILITY 派生，见 tools/registry.py）──
+    READONLY_TOOLS = {n for n in capability_names()
+                      if get_capability(n)["dispatch"] == "readonly"}
+    WRITE_TOOLS = {n for n in capability_names()
+                   if get_capability(n)["dispatch"] == "write"}
 
     # 工具名→简短描述映射
-    TOOL_LABELS = {
-        "Read": "读取",
-        "Glob": "搜索文件",
-        "Grep": "搜索内容",
-        "Edit": "编辑",
-        "Write": "写入",
-        "Shell": "执行命令",
-        "Terminal": "终端",
-        "WebSearch": "联网搜索",
-        "TodoWrite": "更新计划",
-        "Serial": "串口",
-        "MCP": "MCP",
-        "GoalComplete": "声明完成",
-    }
+    TOOL_LABELS = {n: get_capability(n)["label"] for n in capability_names()}
 
-    # 工具摘要提取：文件类工具取file_path
-    FILE_PATH_TOOLS = {"Read", "Edit", "Write"}
+    # 工具摘要提取：文件类工具取file_path（摘要风格为 file_path 的工具）
+    FILE_PATH_TOOLS = {n for n in capability_names()
+                       if get_capability(n)["summary"] == "file_path"}
 
     def __init__(self, tool_context: ToolContext, executor: ThreadPoolExecutor, logger=None):
         self._tool_context = tool_context
@@ -132,6 +271,7 @@ class ToolDispatcher:
                 fp = ToolDispatcher._write_group_key(arguments)
                 write_group.setdefault(fp, []).append((idx, tc_id, name, arguments))
             else:
+                # 未分类工具默认按串行执行（保守策略）
                 serial_group.append((idx, tc_id, name, arguments))
 
         # 批内 TodoWrite 须在其他串行工具前执行：UI 先呈现计划，再展示后续工具执行。
@@ -193,10 +333,14 @@ class ToolDispatcher:
                     for fut in done:
                         try:
                             fut.result()
-                        except Exception:
-                            # 组内某工具执行时崩溃：未执行到的工具补失败提示（结果语义不变）
+                        except Exception as e:
+                            # 组内某工具执行时崩溃：未执行到的工具补错误行结果
+                            # （与单文件分支一致——此前只补 UI 失败提示，会让
+                            # 该组 tool_call 结果缺失，下一轮 repair 以
+                            # "[用户中断]"占位，误导 LLM）
                             for _idx, _tc_id, _name, _args in futures[fut]:
                                 if _idx not in results:
+                                    results[_idx] = (_tc_id, f"[错误: 工具执行失败: {e}]")
                                     self._show_tool_failed(_name)
 
         if stream.cancelled:
@@ -251,7 +395,9 @@ class ToolDispatcher:
             # MCP 工具(mcp__*)结果含"服务端任意文本"（可能自带"[错误"开头的中文文本），
             #   与命令类工具同源：只认框架不可伪造标签，避免服务端文本被误判为工具失败。
             # 框架标签只服务于判定，不给AI看（strip_tags剥离后AI看到的内容与无标签一致）
-            tagged_judge = name in ("Shell", "Terminal", "Serial") or name.startswith("mcp__")
+            # 判定来源：CAPABILITY["trusted_output"]（输出含外部文本的工具声明 False）
+            tagged_judge = (name.startswith("mcp__")
+                            or not get_capability(name)["trusted_output"])
             exec_failed = (
                 tagged_judge
                 and isinstance(llm_result, str)
@@ -367,116 +513,15 @@ class ToolDispatcher:
         return ToolDispatcher.TOOL_LABELS.get(name, name)
 
     def _show_tool_call(self, name: str, arguments: dict):
-        """在终端显示工具调用摘要（静默模式跳过）"""
+        """在终端显示工具调用摘要（静默模式跳过）
+
+        摘要风格由工具 CAPABILITY["summary"] 指定（查 _SUMMARY_STYLES 分发）。
+        """
         if is_quiet_tools():
             return
         label = self._tool_label(name)
-        summary = ""
-        if name.startswith("mcp__"):
-            # MCP 工具（mcp__<服务器>__<工具>）：标签显示服务器，摘要显示工具名+参数（紧凑全量）
-            parts = name.split("__", 2)
-            if len(parts) == 3:
-                summary = parts[2]
-                if arguments:
-                    args_text = json.dumps(arguments, ensure_ascii=False,
-                                           separators=(",", ":"))
-                    summary += f" {args_text}"
-        if name in ToolDispatcher.FILE_PATH_TOOLS:
-            dev_raw = arguments.get("device", "")
-            # 只有远程设备(dev1..devn)才显示设备；dev0/省略=本机不显示
-            dev = _dev_display(dev_raw) if dev_raw else ""
-            if dev == _local_hostname():
-                dev = ""
-            fp = arguments.get("file_path", "")
-            summary = f"{dev}:{fp}" if dev else fp
-        elif name == "Shell":
-            bg_op = arguments.get("bg", "")
-            if arguments.get("background"):
-                summary = f"后台提交 {self._fmt_cmd(arguments.get('command', ''))}"
-            elif bg_op == "status":
-                summary = "后台状态"
-            elif bg_op == "wait":
-                t = arguments.get("timeout", "")
-                summary = "等待后台任务" + (f"(≤{t}s)" if t else "")
-            elif bg_op == "cancel":
-                summary = f"取消后台任务 bg{arguments.get('id', '?')}"
-            else:
-                summary = self._fmt_cmd(arguments.get("command", ""))
-        elif name == "Terminal":
-            action = arguments.get("action", "")
-            if not action and arguments.get("command", ""):
-                action = "exec"
-            sid = arguments.get("session_id", -1)
-            sid_str = f"[dev{sid + 1}]" if sid >= 0 else ""
-            if action == "connect":
-                host = arguments.get("host", "")
-                username = arguments.get("username", "")
-                summary = f"connect{sid_str} {username}@{host}"
-            elif action == "exec":
-                dev_raw = arguments.get("host", "")
-                dev = _dev_display(dev_raw) if dev_raw else ""
-                dev_str = f"[{dev}]" if dev else ""
-                summary = f"exec{dev_str} {self._fmt_cmd(arguments.get('command', ''))}"
-            elif action == "status":
-                summary = "status"
-            elif action == "close":
-                dev = arguments.get("host", "")
-                summary = f"close {_dev_display(dev)}" if dev else "close"
-            elif action == "transfer":
-                src_h = _dev_display(arguments.get("source_host", ""))
-                src_p = arguments.get("source_path", "")
-                tgt_h = _dev_display(arguments.get("target_host", ""))
-                tgt_p = arguments.get("target_path", "")
-                summary = f"transfer {src_h}:{src_p} → {tgt_h}:{tgt_p}"
-            elif action == "input":
-                dev_raw = arguments.get("host", "")
-                dev = _dev_display(dev_raw) if dev_raw else ""
-                dev_str = f"[{dev}]" if dev else ""
-                summary = f"input{dev_str} {self._fmt_cmd(arguments.get('input', ''), '(空)')}"
-            else:
-                summary = f"{action or '(未知)'}{sid_str}"
-        elif name == "Grep":
-            summary = arguments.get("pattern", "")
-        elif name == "Glob":
-            summary = arguments.get("pattern", "")
-        elif name == "WebSearch":
-            summary = arguments.get("query", "")
-        elif name == "TodoWrite":
-            todos = arguments.get("todos", [])
-            summary = f"{len(todos)}项" if todos else "(空)"
-        elif name == "MCP":
-            # 与 Terminal 同风格：动作 + 目标（括号内为启动程序，便于人眼核对连的是什么）
-            action = arguments.get("action", "connect")
-            target = arguments.get("name", "")
-            if action == "connect":
-                hint = _mcp_target_hint(arguments.get("config"))
-                summary = f"connect {target}{f' ({hint})' if hint else ''}".strip()
-            elif action == "disconnect":
-                summary = f"disconnect {target}".strip()
-            else:
-                summary = str(action)
-        elif name == "Serial":
-            action = arguments.get("action", "exec")
-            sid = arguments.get("session_id", -1)
-            sid_str = f"[{sid}]" if sid >= 0 else ""
-            if action == "scan":
-                summary = "scan"
-            elif action == "connect":
-                port = arguments.get("port", "")
-                baud = arguments.get("baudrate", 115200)
-                summary = f"connect{sid_str} {port} @{baud}"
-            elif action == "exec":
-                summary = f"exec{sid_str} {self._fmt_cmd(arguments.get('command', ''))}"
-            elif action == "raw_exec":
-                summary = f"raw_exec{sid_str} {self._fmt_cmd(arguments.get('command', ''))}"
-            elif action == "input":
-                summary = f"input{sid_str} {self._fmt_cmd(arguments.get('input', ''), '(空)')}"
-            elif action == "status":
-                summary = "status"
-            elif action == "close":
-                summary = f"close{sid_str}"
-            else:
-                summary = f"{action}{sid_str}"
+        style = _SUMMARY_STYLES.get(get_capability(name)["summary"])
+        summary = style(name, arguments) if style else ""
 
         if summary:
             _stdout_write(f"  {D}[{label}] {summary}{R}\n")

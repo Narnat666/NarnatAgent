@@ -122,7 +122,7 @@ class MessageManager:
 
     def handle_compress(self, pending_input: Optional[str], system_prompt: str,
                         llm_client, cancel_check, on_interrupt, on_llm_error,
-                        retain_tokens: int = 0) -> CompressResult:
+                        retain_tokens: int = 0, on_usage=None) -> CompressResult:
         """
         处理上下文压缩。
 
@@ -166,32 +166,44 @@ class MessageManager:
         # 构建压缩请求（全部历史 + 指令，摘要质量不受尾部切分影响）
         compress_messages = self._compressor.build_compress_messages(full_messages)
 
-        # 发送压缩请求，收集AI输出
+        # 发送压缩请求，收集AI输出（流迭代抛异常按 llm_error 处理：压缩失败
+        # 不应阻塞对话，更不能让异常冒泡终止整个会话）
         summary_content = []
         llm_error = False
-        for chunk in llm_client.chat_stream(compress_messages, no_tools=True, cancel_check=cancel_check):
-            if cancel_check and cancel_check():
-                on_interrupt()
-                return CompressResult(False, reason="interrupted")
-            if "finish_reason" in chunk:
-                if chunk["finish_reason"] == "context_overflow":
-                    # 压缩请求自身也超限（全量历史+指令仍超窗口）：单独归因，
-                    # 否则会被下游误报为"总结为空"，掩盖真实原因
-                    on_llm_error("压缩失败: 压缩请求自身超出模型上下文限制")
-                    return CompressResult(False, reason="overflow")
-                if chunk["finish_reason"] == "error":
-                    llm_error = True
-                    break
-            if "content" in chunk and "tool_calls" not in chunk:
-                summary_content.append(chunk["content"])
+        try:
+            for chunk in llm_client.chat_stream(compress_messages, no_tools=True, cancel_check=cancel_check):
+                if cancel_check and cancel_check():
+                    on_interrupt()
+                    return CompressResult(False, reason="interrupted")
+                if "finish_reason" in chunk:
+                    if chunk["finish_reason"] == "context_overflow":
+                        # 压缩请求自身也超限（全量历史+指令仍超窗口）：单独归因，
+                        # 否则会被下游误报为"总结为空"，掩盖真实原因
+                        on_llm_error("压缩失败: 压缩请求自身超出模型上下文限制")
+                        return CompressResult(False, reason="overflow")
+                    if chunk["finish_reason"] == "error":
+                        llm_error = True
+                        break
+                if "content" in chunk and "tool_calls" not in chunk:
+                    summary_content.append(chunk["content"])
+                # 旁路记账：压缩调用同样计入费用日志（不触碰主会话统计）
+                if "usage" in chunk and on_usage is not None:
+                    try:
+                        on_usage(chunk["usage"])
+                    except Exception:
+                        pass
+        except Exception as e:
+            on_llm_error(f"压缩失败: LLM调用出错({type(e).__name__}: {e})")
+            return CompressResult(False, reason="llm_error")
 
         if llm_error:
             on_llm_error("压缩失败: LLM调用出错")
             return CompressResult(False, reason="llm_error")
 
-        # llm 层在取消时静默结束流（不产出任何 chunk），此处补判一次：
-        # 否则"零输出 + 已取消"会被误归因为"总结为空"，掩盖真实原因
-        if not summary_content and cancel_check and cancel_check():
+        # llm 层在取消时静默结束流（不产出任何 chunk；已产出部分内容时同样
+        # 直接结束）：无论内容多少，取消标记在 → 一律按取消处理——否则
+        # "半截摘要"会落入成功路径替换全部历史（不可逆的信息损失）
+        if cancel_check and cancel_check():
             on_interrupt()
             return CompressResult(False, reason="interrupted")
 
@@ -204,6 +216,30 @@ class MessageManager:
 
         # 先完整构建新会话（含用户问题），再原子替换旧会话
         tail = full_messages[cut:] if cut is not None else []
+        # 尾部结构清洗（必须在下方"末尾角色"保护之前做）：
+        # 1) 孤儿 tool（tool_call_id 在尾部内无对应声明）：API 对无 tool_use
+        #    的 tool_result 会整体拒绝，压缩后的会话仍不可用——摘要请求覆盖
+        #    全历史（含孤儿内容），此处直接从保留尾部剔除，压缩是清除这类
+        #    坏结构的兜底机会
+        # 2) 尾部内 system（技能注入等）：新会话重建本就会过滤（system 不进
+        #    保留区）；提前过滤，否则末尾角色判断看的是即将消失的 system，
+        #    "防连续 user"的合并/剔除保护被绕过
+        if tail:
+            declared: set = set()
+            cleaned = []
+            for _m in tail:
+                _role = _m.get("role")
+                if _role == "assistant":
+                    for _tc in (_m.get("tool_calls") or []):
+                        if isinstance(_tc, dict) and _tc.get("id"):
+                            declared.add(_tc["id"])
+                    cleaned.append(_m)
+                elif _role == "tool":
+                    if _m.get("tool_call_id") in declared:
+                        cleaned.append(_m)
+                elif _role != "system":
+                    cleaned.append(_m)
+            tail = cleaned
         dropped = []
         if pending_input is None:
             # 手动压缩：不追加输入。尾部末条是 user 的罕见情形（上一轮没留下

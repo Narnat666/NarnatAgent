@@ -72,5 +72,10 @@ class ContextManager:
         self._warned = False
 
     def set_retry_soon(self):
-        """压缩失败后设置近期重试（占比设为 压缩阈值-10，留 10% 余量）"""
-        self._ratio = max(0.0, self._compress_ratio - 10)
+        """压缩失败后标记"下次输入前重试"：占比保持 ≥ 触发阈值。
+
+        此前置为"阈值-10"会让下一次输入不再触发压缩（need_compress=False），
+        重试被推迟到占比重新涨过阈值之后（用户感知为"下下次"才重试），与
+        "压缩失败不阻塞对话（下次输入前自动重试）"的承诺不符。
+        """
+        self._ratio = float(self._compress_ratio)

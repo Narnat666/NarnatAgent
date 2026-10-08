@@ -438,6 +438,11 @@ def _dispatch_command(cmd: str, args: str, mgr) -> CommandResult:
 
     cmd_slash = f"/{cmd}"
     if cmd_slash not in available:
+        # 已知命令但当前状态不可用：明确提示（README 只把"不在命令表"的
+        # / 输入交给 AI；静默转对话会让用户"输入命令无任何反应"）
+        if cmd in _commands:
+            _stdout_write(f"  {CMD_ERROR}/{cmd} 在当前状态下不可用{R}\n")
+            return CommandResult.HANDLED
         return CommandResult.UNKNOWN
 
     handler = _commands.get(cmd)

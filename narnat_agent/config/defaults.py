@@ -257,7 +257,9 @@ THINKING_PARAM_MAP = {
         "enable": {
             "body": {"thinking": {"type": "adaptive"}},
         },
-        "effort_path": ("body_top", "effort"),
+        # 官方契约：effort 位于 output_config 对象内（Claude Platform Docs
+        # 「Effort is set at output_config.effort」），不可写在请求体顶层
+        "effort_path": ("body_top", "output_config", "effort"),
         # 官方支持回传思考块（工具轮次建议带上），但必须携带加密签名；
         # 流式下签名经 signature_delta 事件送达，捕获后原样回传
         "passback": "thinking_block_signed",
