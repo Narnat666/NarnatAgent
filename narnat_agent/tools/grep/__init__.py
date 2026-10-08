@@ -16,7 +16,8 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ..param_utils import to_bool
-from ..glob import _expand_braces, _unescape_braces, _ignored_dirs_hint
+from ..glob import (_CancelGate, _CANCELLED_TEXT, _expand_braces,
+                    _unescape_braces, _ignored_dirs_hint)
 from ..read import _detect_text_encoding, _sniff_bom_encoding
 
 class GrepLimits:
@@ -349,6 +350,12 @@ def execute(
     ignore_dirs = ({str(d) for d in _tool_context.ignore_dirs}
                    if _tool_context and _tool_context.ignore_dirs else set())
 
+    # 取消门（用户中断时目录遍历/文件扫描提前结束；缺省 None → 行为不变）
+    gate = _CancelGate(getattr(_tool_context, "cancel_check", None)
+                       if _tool_context is not None else None)
+    if gate.check():
+        return _CANCELLED_TEXT
+
     # ── 收集搜索目标 (target, label, is_file)：去重、缺失警告但不中断 ──
     warnings = []
     entries = []
@@ -388,7 +395,9 @@ def execute(
     results = []
     for target, label, is_file in entries:
         _search_target(target, label, is_file, regex, fast_searcher,
-                       glob, A, B, head_limit, ignore_dirs, results, ctx)
+                       glob, A, B, head_limit, ignore_dirs, results, ctx, gate)
+        if gate.cancelled:
+            return _CANCELLED_TEXT
 
     skip_line = _skip_summary_line(ctx)
     # 目录不可访问 / 二进制截断 提示行（仅在触发时出现，单列一行避免改动既有汇总行文本）
@@ -492,15 +501,17 @@ def _clip_line(text: str) -> str:
 # 滚动缓冲流式扫描（核心引擎）
 # ═══════════════════════════════════════════════════════════════
 
-def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
+def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget, gate=None):
     """全扫单个文件，返回 (count, blocks, in_file_trunc, aborted)；跳过时返回哨兵字符串
     （"skip_oversize"/"skip_binary"/"skip_unreadable"，供上层汇总提示）。
 
     - count: 该文件全部匹配数（准确计数，供表头显示）
     - blocks: [ [before_lines, match_line, after_lines] ]，行元素为 (line_num, text)
     - in_file_trunc: 该文件还有未收集进 blocks 的匹配（collect_budget 受限）
-    - aborted: 扫描到超长行（> MAX_LINE_LENGTH）提前结束，剩余内容未搜索
+    - aborted: 扫描到超长行（> MAX_LINE_LENGTH）提前结束，剩余内容未搜索；
+      或用户中断（"cancelled"）提前结束，其后内容未搜索
     - collect_budget: 最多收集多少个匹配块（None=无限）；超过预算的匹配仅计数
+    - gate: 取消门（None=不检查取消）；命中即中止本文件扫描
 
     二进制/超100MB/不可读的文件跳过（与旧版语义一致）。
     """
@@ -544,9 +555,12 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget):
     pending_after = 0
     budget = collect_budget   # None = 无限
 
-    aborted = None   # None=正常；"longline"=超长行中止；"binary"=二进制截断
+    aborted = None   # None=正常；"longline"=超长行中止；"binary"=二进制截断；"cancelled"=用户中断
     try:
         while True:
+            if gate is not None and gate.check():
+                aborted = "cancelled"
+                break
             chunk = f.read(GrepLimits.BUFFER_SIZE)
             if not chunk:
                 break
@@ -782,10 +796,11 @@ def _is_nt_reparse_dir(path: str) -> bool:
 
 
 def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
-                   A, B, head_limit, ignore_dirs, results, ctx):
+                   A, B, head_limit, ignore_dirs, results, ctx, gate):
     """搜索一个目标（文件或目录），结果按预算追加到 results。
 
     目录内文件按相对路径排序（确定性输出）；文件数 >= 10 并行扫描。
+    gate 命中取消时立即停止收集/扫描（部分结果丢弃，由调用方按取消语义处理）。
     """
     if is_file:
         file_items = [(target, label)]
@@ -802,10 +817,14 @@ def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
                 stats["dir_paths"].append(str(getattr(exc, "filename", None) or target))
 
         for dirpath, dirnames, filenames in os.walk(target, onerror=_on_walk_error):
+            if gate.check():
+                return
             dirnames[:] = [d for d in dirnames
                            if d not in ignore_dirs
                            and not _is_nt_reparse_dir(os.path.join(dirpath, d))]
             for fname in filenames:
+                if gate.check():
+                    return
                 full = os.path.join(dirpath, fname)
                 try:
                     rel = os.path.relpath(full, target)
@@ -834,11 +853,14 @@ def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = {}
             for full, rel in file_items:
+                if gate.cancelled:
+                    break
                 key = os.path.normcase(os.path.abspath(full))
                 if key in ctx["seen_files"]:
                     continue
                 ctx["seen_files"].add(key)
-                fut = executor.submit(_scan_file, full, regex, fast_searcher, A, B, per_file_budget)
+                fut = executor.submit(_scan_file, full, regex, fast_searcher, A, B,
+                                      per_file_budget, gate)
                 futures[fut] = rel
             for fut in as_completed(futures):
                 rel = futures[fut]
@@ -846,6 +868,8 @@ def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
                     collected[rel] = fut.result()
                 except Exception:
                     collected[rel] = None
+            if gate.cancelled:
+                return
         for full, rel in file_items:
             item = collected.get(rel)
             if item is None:
@@ -861,12 +885,14 @@ def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
             _emit_file(rel, count, blocks, in_file_trunc, head_limit, results, ctx)
     else:
         for full, rel in file_items:
+            if gate.cancelled:
+                return
             key = os.path.normcase(os.path.abspath(full))
             if key in ctx["seen_files"]:
                 continue
             ctx["seen_files"].add(key)
             item = _scan_file(full, regex, fast_searcher, A, B,
-                              _remaining_budget(head_limit, ctx))
+                              _remaining_budget(head_limit, ctx), gate)
             if item is None:
                 continue
             if isinstance(item, str):

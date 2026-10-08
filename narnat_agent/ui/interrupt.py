@@ -129,10 +129,15 @@ class InterruptController:
             import ctypes
             kernel32 = ctypes.windll.kernel32
             handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
-            # 可用性自检：WaitForSingleObject返回WAIT_FAILED(0xFFFFFFFF)说明句柄
-            # 无效/不可等待，只能用msvcrt；否则（WAIT_OBJECT_0/WAIT_TIMEOUT）可用
-            if kernel32.WaitForSingleObject(handle, 0) != 0xFFFFFFFF:
-                self._poll_esc_windows_coninput(stop, kernel32)
+            # 可用性自检：WaitForSingleObject 默认 restype 是 c_int（有符号），
+            # WAIT_FAILED(0xFFFFFFFF) 在 Python 侧读出为 -1，必须按 -1 比较——
+            # 与 0xFFFFFFFF 比较恒为真，会把可用句柄误判为不可用
+            # （对比数据：真实控制台内 WaitForSingleObject(stdin,0) 返回 0）
+            if kernel32.WaitForSingleObject(handle, 0) != -1:
+                # 事件源可用：ReadConsoleInput 精确判定。中途句柄失效/读取失败时
+                # 返回 True，降级 msvcrt 继续轮询（不退出轮询线程，否则 ESC 永久失效）
+                if self._poll_esc_windows_coninput(stop, kernel32):
+                    self._poll_esc_windows_native(stop, msvcrt)
             else:
                 # msvcrt降级路径：不清空输入缓冲，"回车后立即按ESC"的ESC若被清掉
                 # 将无法打断。prompt_toolkit退出后的残留转义序列由轮询线程按
@@ -174,11 +179,14 @@ class InterruptController:
                 break
             stop.wait(0.03)
 
-    def _poll_esc_windows_coninput(self, stop: threading.Event, kernel32) -> None:
+    def _poll_esc_windows_coninput(self, stop: threading.Event, kernel32) -> bool:
         """非原生控制台(Windows Terminal等)下使用ReadConsoleInput检测ESC键。
 
         按事件判定：只认"ESC键按下"事件，同时出现的其他字符键不影响判定；
         判中中断后继续读取事件直到停止（fired保证只触发一次），避免按键积压。
+
+        返回 True = 事件源已不可用（句柄失效/读取失败），调用方降级 msvcrt 继续轮询；
+        返回 False = 正常结束（stop 置位）。
         """
         import ctypes
 
@@ -189,6 +197,8 @@ class InterruptController:
         INPUT_RECORD_SIZE = 20
         KEY_EVENT = 0x0001
         VK_ESCAPE = 0x1B
+        WAIT_OBJECT_0 = 0x0
+        WAIT_FAILED = -1   # c_int（有符号）读出值；0xFFFFFFFF 在此语义下即 -1
 
         buf = (ctypes.c_char * (INPUT_RECORD_SIZE * 8))()  # 一次读8条
         records_read = ctypes.c_ulong()
@@ -198,14 +208,18 @@ class InterruptController:
             try:
                 # WaitForSingleObject 等待控制台输入，超时50ms
                 result = kernel32.WaitForSingleObject(handle, 50)
-                if result != 0:  # WAIT_TIMEOUT=0x102, WAIT_FAILED=0xFFFFFFFF
+                if result == WAIT_FAILED:
+                    # 句柄失效：不能 continue（会空转死循环、ESC 永久失效），
+                    # 也不能退出轮询线程（线程不会重建），交还调用方降级 msvcrt
+                    return True
+                if result != WAIT_OBJECT_0:  # WAIT_TIMEOUT=0x102 等
                     continue
 
-                # 读取输入记录
+                # 读取输入记录；失败同样降级而非退出轮询线程
                 if not kernel32.ReadConsoleInputW(
                     handle, buf, 8, ctypes.byref(records_read)
                 ):
-                    break
+                    return True
 
                 for i in range(records_read.value):
                     offset = i * INPUT_RECORD_SIZE
@@ -228,8 +242,9 @@ class InterruptController:
                         _on_esc_detected(self)
                         fired = True
             except (OSError, ValueError):
-                break
+                return True
             stop.wait(0.02)
+        return False
 
     def _poll_esc_unix(self, stop: threading.Event) -> None:
         """Unix/Linux/macOS下使用select+termios检测ESC键。"""

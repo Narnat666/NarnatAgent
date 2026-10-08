@@ -275,6 +275,9 @@ class GoalVerifier:
         任何异常不外抛：捕获后返回 uncertain（summary 注明"验证不可用: 原因"）。
         """
         rounds = 0
+        # 工具级取消：把 cancel_check 注入验证器自己的 ToolContext，长耗时只读工具
+        # （Grep/Glob 扫大目录）在扫描中途即可中断；验证结束/异常后清除，避免残留
+        self._tool_context.cancel_check = cancel_check
         try:
             if cancel_check and cancel_check():
                 return VerifyResult(verdict="interrupted", summary="验证已中断")
@@ -298,7 +301,9 @@ class GoalVerifier:
                         verdict="uncertain", summary=f"验证不可用: {problem}")
 
                 if tool_calls:
-                    names, tool_results = self._execute_tools(tool_calls)
+                    names, tool_results = self._execute_tools(tool_calls, cancel_check)
+                    if cancel_check and cancel_check():
+                        return VerifyResult(verdict="interrupted", summary="验证已中断")
                     self._log("info", f"验证第{rounds}轮: 工具调用 {len(names)} 个"
                                       f"（{'、'.join(names)}）")
                     messages.append({"role": "assistant", "content": content or None,
@@ -330,6 +335,8 @@ class GoalVerifier:
         except Exception as e:
             self._log("error", f"验证异常: {e}")
             return VerifyResult(verdict="uncertain", summary=f"验证不可用: {e}")
+        finally:
+            self._tool_context.cancel_check = None
 
     # ── 内部实现 ──
 
@@ -398,6 +405,10 @@ class GoalVerifier:
 
         content = "".join(content_parts)
         if finish is None:
+            # 取消标记已置位而流未收尾（LLM 层取消时生成器静默 return，无 finish_reason）：
+            # 这是用户中断，不是"响应流中断"，据实归入 cancelled 以便上层产出 interrupted
+            if cancel_check and cancel_check():
+                return content, [], "cancelled"
             detail = ""
             if interrupted_info:
                 detail = (f"（{interrupted_info.get('kind', '')}: "
@@ -409,11 +420,17 @@ class GoalVerifier:
             return content, [], "请求超出模型上下文限制"
         return content, tool_calls, None
 
-    def _execute_tools(self, tool_calls):
-        """依次执行本轮工具调用（白名单工具；Shell 先过抽查策略）；返回 (名称列表, [(id, 结果)])"""
+    def _execute_tools(self, tool_calls, cancel_check=None):
+        """依次执行本轮工具调用（白名单工具；Shell 先过抽查策略）；返回 (名称列表, [(id, 结果)])
+
+        用户中断（cancel_check 命中）时不再执行后续工具：长耗时只读工具本身会在
+        扫描中途提前返回，这里保证已中断后不再继续发起新的工具调用。
+        """
         names = []
         results = []
         for tc in tool_calls or []:
+            if cancel_check and cancel_check():
+                break
             tc_id = tc.get("id", "") or ""
             func = tc.get("function") or {}
             name = func.get("name", "") or ""

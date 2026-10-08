@@ -105,7 +105,7 @@ $p = [Environment]::GetEnvironmentVariable('Path','User')
   - 报认证失败 / 401：按第 3 步确认 `"接口密钥"` 已替换为自己的密钥且有效。
   - `narnat.json` 被误改损坏：删除该文件，重新启动会自动生成默认配置（密钥需重新填写）。
   - 命令行报「'narnat' 不是内部或外部命令」，或子代理无法启动：按第 5 步将解压目录加入 PATH，并重新打开终端。
-  - C 盘空间紧张：老版本或异常退出的程序可能在 `%TEMP%` 残留 `onefile_*` 解压目录（每个约 157MB），可直接删除；按上文编译参数打包的版本运行时解压在启动目录下的 `narnat_runtime/`（在 exe 所在目录启动即为 exe 旁），不受 C 盘清理影响。
+  - C 盘空间紧张：老版本或异常退出的程序可能在 `%TEMP%` 残留 `onefile_*` 解压目录（每个约 157MB），可直接删除；按上文编译参数打包的版本运行时解压在 exe 旁的 `narnat_runtime/`（与启动目录无关），不受 C 盘清理影响。
 
 ## 快速上手
 
@@ -113,7 +113,28 @@ $p = [Environment]::GetEnvironmentVariable('Path','User')
 
 从源码编译为单文件二进制。
 
-**Windows**
+**一键编译（Windows / Linux 通用）**
+
+```bash
+python build.py                  # 默认：解压目录固定在产物旁 narnat_runtime/<版本>/，同版本缓存复用
+python build.py --runtime tmp    # 解压目录放系统临时目录：每次启动解压、退出即删
+python build.py --jobs 8 --assume-yes   # 并行任务数（默认 CPU 核数）；无人值守自动确认下载提示
+```
+
+`build.py` 自动读取 `main.py` 的 `__version__` 作为 `--product-version`；beside 模式（默认）下会先自动给 Nuitka 打补丁（见下节）。产物 `output/narnat.exe`（Linux 为 `output/narnat`）。
+
+**前置：给 Nuitka 打补丁（beside 模式必需，build.py 会自动执行）**
+
+上游 Nuitka 4.1.2 会把 `--onefile-tempdir-spec` 中以 `{PROGRAM_DIR}` 开头的值当作「相对启动目录」的相对路径处理（upstream issue #3830）——后果是同一个 exe 从不同工作目录启动时，会在**每个启动目录**下各解压一份 `narnat_runtime`。补丁已内置于 `build.py`，beside 模式编译时自动应用（幂等），也可单独执行：
+
+```bash
+python build.py --patch-nuitka    # 只打补丁，不编译
+python build.py --revert-nuitka   # 还原 Nuitka 为上游原始代码
+```
+
+补丁共四处：保留 spec 的 `{PROGRAM_DIR}` 前缀、`{PROGRAM_DIR}` 不计为动态变量（保证同版本免重复解压）、消除 `{PROGRAM_DIR}` 的编译期告警、修复 Linux 分支 `{PROGRAM_DIR}` 展开的死循环缺陷。打补丁后需重新编译才生效。
+
+**Windows（手动编译）**
 
 | 组件 | 版本 |
 |------|------|
@@ -137,10 +158,11 @@ python -m nuitka --onefile --output-dir=output --output-filename=narnat.exe \
 
 产物 `output/narnat.exe`，约 39MB。
 
-> **运行时解压目录（重要）**：onefile 程序每次启动会解压约 157MB 运行时文件。Nuitka 默认解压到 `%TEMP%\onefile_<PID>_...`、退出即删——**运行期间该目录被清理（清 C 盘 / 清临时文件）会导致程序立刻崩溃**，被强杀时还会把整个目录残留在 C 盘。上面命令中的 `--onefile-tempdir-spec="{PROGRAM_DIR}/narnat_runtime/{VERSION}"` 把解压目录固定到 `narnat_runtime\<版本>\`（Nuitka 对固定路径启用缓存复用：不删除、同版本后续启动免解压，且目录被整体误删后下次启动会自动重新解压）。注意 Nuitka 4.1.2 将 `{PROGRAM_DIR}` 按相对路径解析：**解压目录创建于启动时的当前目录**（在 exe 所在目录启动即为 exe 同级；从其它目录启动则在该目录下生成，且不与该缓存互复用）——建议在 exe 所在目录启动以获得 exe 同级解压与免解压复用：
-> - 目录始终创建在启动目录下，C 盘/TEMP 清理不会命中它，与系统临时文件彻底隔离；
-> - 升级版本会生成新的版本目录，旧目录可手动删除；启动目录需可写；
+> **运行时解压目录（重要）**：onefile 程序每次启动会解压约 157MB 运行时文件。Nuitka 默认解压到 `%TEMP%\onefile_<PID>_...`、退出即删——**运行期间该目录被清理（清 C 盘 / 清临时文件）会导致程序立刻崩溃**，被强杀时还会把整个目录残留在 C 盘。上面命令中的 `--onefile-tempdir-spec="{PROGRAM_DIR}/narnat_runtime/{VERSION}"`（配合上文 Nuitka 补丁）把解压目录固定到 **exe 旁**的 `narnat_runtime\<版本>\`：无论从哪个目录启动（双击、PATH 全局调用、子代理调度），都只在 exe 旁创建/复用一个 `narnat_runtime`，与启动目录无关；Nuitka 对该固定路径启用缓存复用：不删除、同版本后续启动免解压，且目录被整体误删后下次启动会自动重新解压。
+> - 目录始终创建在 exe 旁，C 盘/TEMP 清理不会命中它，与系统临时文件彻底隔离；
+> - 升级版本会生成新的版本目录，旧目录可手动删除；exe 所在目录需可写；
 > - `--product-version` 即目录名中的版本号，请与 `main.py` 的 `__version__` 保持一致。
+> - 需要「解压到系统临时目录」的默认行为时，用 `python build.py --runtime tmp`（等价于 `--onefile-tempdir-spec="{TEMP}/onefile_{PID}_{TIME_US}_{RANDOM}"`）：每次启动解压、退出即删，无需 Nuitka 补丁；但运行期间清临时文件会导致程序崩溃、被强杀会残留解压目录。
 
 **Ubuntu**
 
@@ -167,7 +189,7 @@ make -j$(nproc) && sudo make install
 /usr/local/python3.12/bin/pip3.12 install nuitka==4.1.2 httpx openai paramiko prompt_toolkit pyserial zstandard
 ```
 
-编译命令与 Windows 相同（将 `python` 替换为 `/usr/local/python3.12/bin/python3.12`；`--onefile-tempdir-spec` 在 Linux 同样生效，解压目录创建于启动时的当前目录下 `narnat_runtime/<版本>/`——在可执行文件所在目录启动即为文件旁），耗时约 28 分钟。产物约 35MB，仅依赖 glibc ≥ 2.35。
+Linux 上推荐直接用一键脚本 `python build.py`（自动打补丁、自动读取版本号），等价手动命令与 Windows 相同（将 `python` 替换为 `/usr/local/python3.12/bin/python3.12`；`--onefile-tempdir-spec` 在 Linux 同样生效，解压目录固定创建在可执行文件旁的 `narnat_runtime/<版本>/`），耗时约 28 分钟。产物约 35MB，仅依赖 glibc ≥ 2.35。
 
 > 依赖须全部装齐（尤其 `pyserial`）：Serial 工具在模块顶层 `import serial`，构建环境缺 pyserial 时 Nuitka 不报错、静默跳过该模块，产物启动即崩 `No module named 'serial'`。
 

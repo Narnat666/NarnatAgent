@@ -108,6 +108,8 @@ class Assembly:
             max_tool_output_chars=config.tools.max_output_chars,
             max_timeout_seconds=config.tools.max_timeout_seconds,
             mcp_manager=mcp_manager,
+            # 用户中断（ESC）时长耗时只读工具（Grep/Glob 扫大目录）在扫描中途提前返回
+            cancel_check=lambda: _interrupt_ctrl.is_set,
         )
 
         # 10. 会话管理器

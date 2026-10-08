@@ -37,6 +37,11 @@ class ToolContext:
     # 工具超时全局上限（秒），0=不限制。由配置"工具超时上限秒"驱动
     max_timeout_seconds: int = 1800
 
+    # 取消检查回调（返回 True = 用户已中断）。由组装层/验证器按需注入：
+    # 长耗时只读工具（Grep/Glob）据此在扫描中途提前返回；
+    # 默认 None = 无取消语义，工具行为与注入前完全一致
+    cancel_check: Optional[Callable[[], bool]] = None
+
     # MCP 服务器管理器（由 assembly 注入；MCP 工具用它做运行时连接/断开）
     mcp_manager: Any = None
 

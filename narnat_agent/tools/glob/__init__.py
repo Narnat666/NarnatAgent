@@ -21,6 +21,10 @@ class GlobLimits:
     MAX_HARD_LIMIT = 50_000
 
 
+# 用户中断（ESC）导致遍历/扫描提前结束时的返回文本（Grep/Glob 共用同一标记）
+_CANCELLED_TEXT = "[已取消: 用户中断，扫描提前结束]"
+
+
 # ── 花括号展开 ────────────────────────────────────────────────
 
 def _expand_range(body: str) -> list[str] | None:
@@ -325,6 +329,37 @@ def _compile_pattern(pattern: str) -> re.Pattern[str]:
 
 # ── 目录遍历 & 匹配 ────────────────────────────────────────────
 
+class _CancelGate:
+    """取消检查节流门：首个检查点立即查询，其后每 CHECK_INTERVAL 次调用真查一次。
+
+    长耗时遍历（Grep/Glob）在目录/文件/chunk 循环里按调用点粒度检查取消；
+    节流避免每步都付一次回调开销。cancel_check 为 None/不可调用时
+    check() 恒为 False —— 工具行为与无取消完全一致。
+
+    并行扫描下多个线程共享计数（自增非原子，最坏只是真查时机略偏），
+    仅作节流用，不影响取消判定的收敛性。
+    """
+
+    CHECK_INTERVAL = 32
+
+    def __init__(self, cancel_check=None):
+        self._fn = cancel_check if callable(cancel_check) else None
+        self._calls = 0
+        self._cancelled = False
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    def check(self) -> bool:
+        if self._cancelled or self._fn is None:
+            return self._cancelled
+        self._calls += 1
+        if self._calls == 1 or self._calls % self.CHECK_INTERVAL == 0:
+            self._cancelled = bool(self._fn())
+        return self._cancelled
+
+
 def _is_nt_reparse(entry) -> bool:
     """目录项是否 Windows 重解析点（junction 等）。
 
@@ -344,8 +379,12 @@ def _collect(
     ignore_dirs: set[str],
     max_results: int,
     skip_hidden_files: bool,
+    gate: "_CancelGate | None" = None,
 ) -> tuple[list[tuple[str, float]], int]:
-    """scandir 遍历目录树，返回 (按 mtime 降序的结果, 总匹配数)。"""
+    """scandir 遍历目录树，返回 (按 mtime 降序的结果, 总匹配数)。
+
+    gate 命中取消时立即停止遍历（已收集部分不回滚，由调用方按取消语义处理）。
+    """
     root = os.path.abspath(root)
     heap: list[tuple[float, str]] = []  # (mtime, rel_path) — 堆中统一用 / 分隔
     total = 0
@@ -353,13 +392,22 @@ def _collect(
     single_regex = regexes[0] if len(regexes) == 1 else None
     _is_nt = (os.name == "nt")  # 缓存，避免循环内重复判断
 
+    if gate is not None and gate.check():
+        return [], 0
+
     while stack:
         cur_dir, rel_prefix = stack.pop()
+
+        if gate is not None and gate.check():
+            break
 
         try:
             with os.scandir(cur_dir) as entries:
                 subdirs: list[tuple[str, str]] = []
                 for entry in entries:
+                    if gate is not None and gate.check():
+                        break
+
                     name = entry.name
 
                     # ── 符号链接：仅跳过指向目录的符号链接（防死循环），文件符号链接正常匹配 ──
@@ -635,6 +683,12 @@ def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=N
     extra = getattr(_tool_context, "ignore_dirs", None) if _tool_context is not None else None
     ignore_dirs = {str(d) for d in extra} if extra else set()
 
+    # 取消门（用户中断时遍历/扫描提前结束；cancel_check 缺省为 None，行为不变）
+    gate = _CancelGate(getattr(_tool_context, "cancel_check", None)
+                       if _tool_context is not None else None)
+    if gate.check():
+        return _CANCELLED_TEXT
+
     # 1. 展开花括号 + 去转义
     raw_patterns = _expand_braces(pattern)
     patterns = [_unescape_braces(p) for p in raw_patterns]
@@ -695,7 +749,7 @@ def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=N
                 continue
             search_dir = joined
         res, t = _collect(search_dir, [_compile_pattern(rest)], ignore_dirs,
-                          max_results, skip_hidden_files)
+                          max_results, skip_hidden_files, gate)
         # 输出前缀保持 AI 写法（相对 path 的用相对、绝对用绝对；
         # Windows 下大小写跟随 pattern 字面量，文件系统不区分大小写，路径仍有效）
         prefix = static_dir.replace("\\", "/").rstrip("/") + "/"
@@ -705,10 +759,14 @@ def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=N
 
     if root_patterns:
         res, t = _collect(root, [_compile_pattern(p) for p in root_patterns],
-                          ignore_dirs, max_results, skip_hidden_files)
+                          ignore_dirs, max_results, skip_hidden_files, gate)
         for rel, mtime in res:
             merged.setdefault(rel.replace("\\", "/"), mtime)
         total += t
+
+    # 取消优先于结果输出：中断后不再拼装/截断提示（结果不会被消费）
+    if gate.cancelled:
+        return _CANCELLED_TEXT
 
     if not merged:
         hint = _hidden_files_hint(skip_hidden_files)
