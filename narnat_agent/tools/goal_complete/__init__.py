@@ -6,6 +6,8 @@
 机械拒绝只做格式纠正、不占续跑预算；连续拒绝超限时兜底强制放行（防死循环）。
 """
 
+from ..param_utils import to_positive_int
+
 _STATUSES = ("完成", "未完成", "受阻")
 _FIELDS = ("要求", "证据", "状态")
 
@@ -23,6 +25,7 @@ DEFINITION = {
             "1. 任务目标已实际达成，关键结果已经真实验证，而非仅凭推理判断；\n"
             "2. 最终答复已完整写出。\n"
             "必须提交完成清单：逐条列出 任务要求 → 可检查证据 → 状态，覆盖任务的全部要求；未完成或受阻的项也要列出并写明原因。\n"
+            "清单每项须带 编号，逐条覆盖需求基线（GoalBaseline）的全部编号；未建基线时须先调用 GoalBaseline 建立基线。\n"
             "证据必须可检查：可复现命令+输出摘要 / 文件路径 / 实际现象；"
             "「已验证」「已完成」这类空泛表述不算证据。\n"
             "未完成或受阻的项，如实标注并写明原因。\n"
@@ -36,6 +39,10 @@ DEFINITION = {
                     "items": {
                         "type": "object",
                         "properties": {
+                            "编号": {
+                                "type": "integer",
+                                "description": "对应需求基线条目编号（见 GoalBaseline）",
+                            },
                             "要求": {
                                 "type": "string",
                                 "description": "任务的一项要求",
@@ -51,9 +58,9 @@ DEFINITION = {
                                 "description": "该项要求的实际状态；未完成/受阻须写明原因",
                             },
                         },
-                        "required": ["要求", "证据", "状态"],
+                        "required": ["编号", "要求", "证据", "状态"],
                     },
-                    "description": "完成清单：[{要求, 证据, 状态}, ...]",
+                    "description": "完成清单：[{编号, 要求, 证据, 状态}, ...]",
                 },
             },
             "required": ["checklist"],
@@ -97,6 +104,46 @@ def _check_checklist(checklist, ctx):
                 "文件路径 / 实际现象；「已验证」「已完成」这类空泛表述不算证据；"
                 "未完成/受阻项须写明原因。"
             )
+
+    # ── 编号校验：每项必须带 编号（对应需求基线条目），同一清单内不得重复 ──
+    nos = []
+    for i, item in enumerate(checklist, 1):
+        no = to_positive_int(item.get("编号"))
+        if no is None:
+            return (f"第{i}项缺少有效的 编号（正整数）：清单每项须带 编号，对应需求基线条目；"
+                    "先调用 GoalBaseline 建立需求基线，再按基线编号填写。")
+        nos.append(no)
+    dup = next((n for n in nos if nos.count(n) > 1), None)
+    if dup is not None:
+        return f"完成清单中 编号 {dup} 重复出现：每个基线编号对应清单一项，请合并或改填正确编号。"
+
+    # ── 基线门禁：没有基线就没有覆盖基准，先拆基线再声明完成（纯机械判定）──
+    baseline = ctx.goal_baseline if isinstance(ctx.goal_baseline, list) else []
+    if not baseline:
+        return ("尚未建立需求基线：目标模式下请先调用 GoalBaseline 把任务原文拆成编号需求清单"
+                "（可只有 1 条），再提交完成清单。")
+
+    base_items = [it for it in baseline if isinstance(it, dict)]
+    covered = set(nos)
+    # ── 编号覆盖：清单编号集合 ⊇ 基线编号集合（缺号为漏项，多号为越界）──
+    missing = [it for it in base_items if it.get("编号") not in covered]
+    if missing:
+        listed = "、".join(f"编号 {it.get('编号')}（{it.get('要求', '')}）" for it in missing[:5])
+        tail = f"，等共 {len(missing)} 项" if len(missing) > 5 else ""
+        return (f"完成清单未覆盖需求基线的全部编号，缺失：{listed}{tail}。"
+                "请补齐这些编号的清单项（确实未完成/受阻的如实标注），再重新调用 GoalComplete。")
+    extra = [n for n in nos if n not in {it.get("编号") for it in base_items}]
+    if extra:
+        return ("完成清单出现需求基线中没有的编号："
+                + "、".join(f"编号 {n}" for n in extra[:5])
+                + "。请先调用 GoalBaseline 把该要求追加进基线（新增条目不要填 编号），或改用基线中的编号。")
+
+    # ── 放弃项要求：基线已标 放弃 的编号，清单不得标 完成（如实标注未完成/受阻）──
+    for item, no in zip(checklist, nos):
+        base = next((it for it in base_items if it.get("编号") == no), None)
+        if base and base.get("状态") == "放弃" and item["状态"].strip() == "完成":
+            return (f"编号 {no} 在需求基线中已标记放弃（原因：{base.get('原因', '')}）；"
+                    "清单中必须如实标注「未完成」或「受阻」并写明原因。")
 
     # todo 交叉校验：计划仍有未勾选项时，清单必须如实含'未完成/受阻'项
     unfinished = [

@@ -460,7 +460,8 @@ class AgentLoop:
                 try:
                     result = self._goal_verifier.verify(
                         goal_task, self._tool_context.goal_checklist, final_answer,
-                        cancel_check=lambda: stream.cancelled)
+                        cancel_check=lambda: stream.cancelled,
+                        baseline=self._tool_context.goal_baseline)
                 finally:
                     if end_verify:
                         end_verify()

@@ -334,25 +334,28 @@ class LLMClient:
                                          tool_defs=tool_defs, model=model)
 
     def set_goal_tool(self, enabled: bool) -> None:
-        """动态注入/移除 GoalComplete 工具定义。
+        """动态注入/移除目标模式工具定义（GoalBaseline + GoalComplete）。
 
-        目标模式（/goal on）开启时注入，关闭时移除；普通模式不向 LLM 暴露该工具。
+        目标模式（/goal on）开启时注入，关闭时移除；普通模式不向 LLM 暴露这两个工具。
+        注入顺序：GoalBaseline 在前（先把任务原文拆成需求基线，再声明完成）。
         幂等：重复开启/关闭不会重复添加或报错。
         """
         # 局部导入避免模块顶层循环依赖
+        from ..tools.goal_baseline import DEFINITION as _BASELINE_DEF
         from ..tools.goal_complete import DEFINITION as _GOAL_DEF
-        name = _GOAL_DEF["function"]["name"]
-        exists = any(
-            d.get("function", {}).get("name") == name
-            for d in self._tool_defs
-        )
-        if enabled and not exists:
-            self._tool_defs.append(_GOAL_DEF)
-        elif not enabled and exists:
-            self._tool_defs[:] = [
-                d for d in self._tool_defs
-                if d.get("function", {}).get("name") != name
-            ]
+        for definition in (_BASELINE_DEF, _GOAL_DEF):
+            name = definition["function"]["name"]
+            exists = any(
+                d.get("function", {}).get("name") == name
+                for d in self._tool_defs
+            )
+            if enabled and not exists:
+                self._tool_defs.append(definition)
+            elif not enabled and exists:
+                self._tool_defs[:] = [
+                    d for d in self._tool_defs
+                    if d.get("function", {}).get("name") != name
+                ]
 
     def add_tool_definitions(self, definitions: list) -> None:
         """热追加工具定义（MCP 运行时连接后调用）。按名称去重，幂等。

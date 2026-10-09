@@ -12,6 +12,7 @@ from ..config.loader import Config
 from .message_manager import MessageManager
 from .llm import LLMClient
 from .context import ContextManager
+from ..tools.goal_baseline import render_baseline
 from ..ui.ui_design import UIInterface
 from ..ui.interrupt import _interrupt_ctrl
 from ..logger import AgentLogger
@@ -66,20 +67,27 @@ class CompressionCoordinator:
             pass
 
     def _append_plan_reminder(self):
-        """压缩后重注入当前计划：TodoWrite 调用历史被压缩吞掉后模型会忘记
-        计划，而收尾软提醒/GoalComplete 交叉校验仍以计划为准；此处把当前
-        未完成计划还给模型。无计划或全部完成时不注入。"""
+        """压缩后重注入当前计划与需求基线：TodoWrite/GoalBaseline 调用历史被压缩
+        吞掉后模型会忘记，而收尾软提醒/GoalComplete 交叉校验仍以计划为准、机械校验
+        仍以基线编号为准；压缩是最容易丢承诺的时刻，故两者一并还给模型。
+        两者都为空时不注入（保持原行为）。"""
         ctx = self._tool_context
         if ctx is None:
             return
+        blocks = []
         unfinished = [t for t in ctx.current_todos if t.get("status") != "completed"]
-        if not unfinished:
+        if unfinished:
+            lines = ["[系统提醒] 上下文已压缩。当前计划（未完成）："]
+            for i, t in enumerate(unfinished, 1):
+                label = "进行中" if t.get("status") == "in_progress" else "待处理"
+                lines.append(f"{i}. [{label}] {t.get('content', '')}")
+            blocks.append("\n".join(lines))
+        baseline = render_baseline(ctx.goal_baseline)
+        if baseline:
+            blocks.append(baseline)
+        if not blocks:
             return
-        lines = ["[系统提醒] 上下文已压缩。当前计划（未完成）："]
-        for i, t in enumerate(unfinished, 1):
-            label = "进行中" if t.get("status") == "in_progress" else "待处理"
-            lines.append(f"{i}. [{label}] {t.get('content', '')}")
-        self._msg_manager.append_user_merged("\n".join(lines))
+        self._msg_manager.append_user_merged("\n\n".join(blocks))
 
     def compress(self, pending_input: str) -> bool:
         """处理上下文压缩。

@@ -25,6 +25,7 @@ from typing import Optional
 
 from ..tools import registry
 from ..tools import safety
+from ..tools.goal_baseline import render_baseline
 from ..tools.param_utils import to_bool
 from ..tools.tool_context import ToolContext
 from ..tools.exec_signal import error_line, strip_tags
@@ -46,6 +47,11 @@ VERIFY_SYSTEM_PROMPT = (
     "规则：\n"
     "- 先立要求再核对：先从任务原文列出全部要求（同类可归并，只以任务原文为准，不新增），"
     "再逐项对照完成清单与最终答复；任何要求没有对应的证据与状态，即为漏项。\n"
+    "- 评估基准 = 任务原文 + 需求基线：基线是 AI 自己拆解的、不是用户的承诺，必须先核对基线"
+    "是否完整覆盖任务原文的每一项要求——原文有而基线没有（或基线把某项写得明显窄于原文）"
+    "即为漏项，判 fail，缺口写明「任务原文要求 X 未被需求基线覆盖」。\n"
+    "- 再核完成清单是否覆盖基线全部编号，且编号与内容语义对应"
+    "（防止「编号对上了但内容不是同一件事」）。\n"
     "- 把完成当作未证实。AI 自报完成不可信，只依据可核验的证据。\n"
     '- 证据必须具体：可复现的命令与输出、文件路径、实际现象。"已处理""已验证"这类空泛表述不算证据。\n'
     "- 抽查关键证据：证据涉及本地文件或命令结果时，用 Read/Glob/Grep/Shell 实地核对。"
@@ -64,7 +70,8 @@ VERIFY_SYSTEM_PROMPT = (
     'continue_prompt 是给主 AI 的可直接执行的返工指令（缺什么、怎么补、如何自证），'
     '结尾提示"完成后重新提交完成清单并调用 GoalComplete"。\n'
     "- uncertain：证据形式合规但无法核实真伪；summary 说明原因。\n"
-    '- summary 结尾附一句覆盖结论，如"任务共 4 项要求，清单覆盖 4 项"。\n'
+    '- summary 结尾附覆盖结论并给出计数："任务原文要求 K 项，基线 N 条，清单覆盖 M 条"'
+    "（K/N/M 为你的判断值）。\n"
     "\n"
     "只输出 JSON，不要输出任何其他文字（可用 ```json 代码块包裹）。"
 )
@@ -263,14 +270,15 @@ class GoalVerifier:
         )
 
     def verify(self, task: str, checklist: list, final_answer: str,
-               cancel_check=None) -> VerifyResult:
+               cancel_check=None, baseline=None) -> VerifyResult:
         """独立验证：返回三态裁决（pass/fail/uncertain/interrupted）。
 
         Args:
             task: 任务原文
-            checklist: 完成清单 [{"要求","证据","状态"}, ...]
+            checklist: 完成清单 [{"编号","要求","证据","状态"}, ...]
             final_answer: AI 的最终答复文本
             cancel_check: 可选可调用，返回 True 表示用户中断
+            baseline: 需求基线 [{"编号","要求","状态","原因"}, ...]（空=未建立）
 
         任何异常不外抛：捕获后返回 uncertain（summary 注明"验证不可用: 原因"）。
         """
@@ -283,7 +291,7 @@ class GoalVerifier:
                 return VerifyResult(verdict="interrupted", summary="验证已中断")
             messages = [
                 {"role": "system", "content": VERIFY_SYSTEM_PROMPT},
-                {"role": "user", "content": self._build_input(task, checklist, final_answer)},
+                {"role": "user", "content": self._build_input(task, checklist, final_answer, baseline)},
             ]
             model = self._verify_model()
             json_retried = False
@@ -345,19 +353,29 @@ class GoalVerifier:
         model = getattr(self._config.ai, "goal_verify_model", "") or ""
         return str(model).strip() or None
 
-    def _build_input(self, task, checklist, final_answer) -> str:
-        """构造首条 user 消息：任务原文 + 完成清单 + 最终答复"""
-        parts = ["【任务原文】", str(task or "(空)").strip(), "", "【AI 提交的完成清单】"]
+    def _build_input(self, task, checklist, final_answer, baseline=None) -> str:
+        """构造首条 user 消息：任务原文 + 需求基线 + 完成清单 + 最终答复"""
+        parts = ["【任务原文】", str(task or "(空)").strip(), ""]
+        baseline_text = render_baseline(baseline)
+        parts.append(baseline_text if baseline_text else "(未建立需求基线)")
+        parts.append(
+            "（框架已完成编号覆盖的机械校验：清单编号 ⊇ 基线编号；"
+            "你负责语义复核与任务原文覆盖复核。）"
+        )
+        parts += ["", "【AI 提交的完成清单】"]
         items = checklist if isinstance(checklist, list) else []
         if items:
             for i, item in enumerate(items, 1):
                 if isinstance(item, dict):
+                    no = item.get("编号", "")
                     req = item.get("要求", "")
                     ev = item.get("证据", "")
                     st = item.get("状态", "")
                 else:
-                    req, ev, st = str(item), "", ""
-                parts.append(f"{i}. 要求：{req}")
+                    no, req, ev, st = "", str(item), "", ""
+                # 编号必须回显：验证器要核对"清单编号 ↔ 基线编号"的内容语义对应
+                # （只给序号 i 会让这条核对退化成按位置猜）
+                parts.append(f"{i}. 编号：{no} 要求：{req}")
                 parts.append(f"   证据：{ev}")
                 parts.append(f"   状态：{st}")
         else:

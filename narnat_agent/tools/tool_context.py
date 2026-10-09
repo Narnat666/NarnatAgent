@@ -61,6 +61,10 @@ class ToolContext:
     # 目标模式完成清单（GoalComplete 提交：[{"要求","证据","状态"}, ...]）
     goal_checklist: list = field(default_factory=list, metadata={"task_scoped": True})
 
+    # 目标模式需求基线（GoalBaseline 提交：[{"编号","要求","状态","原因"}, ...]；
+    # 任务级：每个新任务重新拆解，不得跨任务沿用）
+    goal_baseline: list = field(default_factory=list, metadata={"task_scoped": True})
+
     # 诚实收尾标记：清单含"未完成/受阻"项（允许收尾，用户会看到未完成项）
     goal_honest: bool = field(default=False, repr=False, metadata={"task_scoped": True})
 
