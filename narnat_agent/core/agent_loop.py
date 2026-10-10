@@ -6,16 +6,21 @@
 
 import json
 import os
+import re
 import time
 
 from .llm import LLMClient, retry_sleep
 from .message_manager import MessageManager
 from .tool_dispatcher import ToolDispatcher
 from ..tools.tool_context import ToolContext, AWAIT_CONFIRM
+from ..tools.goal_complete import has_declared_changes
 from ..tools.background import running_count as _bg_running_count
 from ..tools.background import running_summary as _bg_running_summary
 from .stats import StatsTracker
 from ..ui.ui_design import UIInterface
+from ..ui.ui_design import (show_verify_start as _ui_verify_start,
+                            show_verify_result as _ui_verify_result,
+                            show_verify_skip as _ui_verify_skip)
 from ..config.loader import Config
 from ..output import write as _stdout_write
 from ..tools.exec_signal import strip_tags
@@ -28,6 +33,22 @@ TODO_NUDGE_TOOL_ROUNDS = 6
 # 请求前尾部守卫补的 user 收尾内容（异常形态兜底：/done 结论注入尾部 system 后
 # 转换层抽出 system 会以无 thinking 的 assistant 收尾，被 API 拒；正常交互不触发）
 TAIL_GUARD_MESSAGE = "[]请基于当前上下文继续推进任务。"
+
+# 验证器自报覆盖计数（如 "任务原文要求 3 项，清单覆盖 3 项"）的提取：
+# 两段分别取"最后一次出现"，不限制中间隔多少字符——验证器常把逐条核对明细
+# 插在两句之间（实测一句可长到上百字），限制宽度会漏掉计数
+_RE_REQ_N = re.compile(r"要求\s*(\d+)\s*项")
+_RE_COV_N = re.compile(r"覆盖\s*(\d+)\s*项")
+
+
+def _parse_coverage(summary: str):
+    """从验证器摘要里提取 (M, K) 覆盖计数；取不到返回 (0, 0)。"""
+    s = summary or ""
+    reqs = _RE_REQ_N.findall(s)
+    covs = _RE_COV_N.findall(s)
+    if not reqs or not covs:
+        return 0, 0
+    return int(covs[-1]), int(reqs[-1])
 
 
 class AgentLoop:
@@ -442,6 +463,8 @@ class AgentLoop:
 
             # ── 完成验证：AI 声明完成（goal_complete 置位）→ 独立验证器复核 ──
             # 诚实收尾（含未完成/受阻项）、已强制放行、收尾轮均不验证，直接走结案。
+            # 触发门槛：清单未申报任何文件改动（纯查询/推导类任务）时无文件可核对 →
+            # 跳过独立复核直接结案（省掉一次无据可查的验证往返）。
             if (goal_mode
                     and self._tool_context.goal_complete
                     and not self._tool_context.goal_honest       # 诚实收尾（含未完成/受阻项）不验证
@@ -449,58 +472,65 @@ class AgentLoop:
                     and not force_final                          # 收尾轮不验证
                     and self._config.ai.goal_verify              # 配置开关
                     and self._goal_verifier is not None):
-                final_answer = "".join(content_parts)
-                stream.feed("\n  ⚙ 正在验证完成声明（独立复核）…\n")
-                stream.flush_renderer()
-                # 验证动画为可选 UI 能力（轻量 UI/测试替身可缺省）→ 缺失时静默跳过
-                begin_verify = getattr(self._ui, "begin_verifying", None)
-                end_verify = getattr(self._ui, "end_verifying", None)
-                if begin_verify:
-                    begin_verify()
-                try:
-                    result = self._goal_verifier.verify(
-                        goal_task, self._tool_context.goal_checklist, final_answer,
-                        cancel_check=lambda: stream.cancelled,
-                        baseline=self._tool_context.goal_baseline)
-                finally:
-                    if end_verify:
-                        end_verify()
-                if stream.cancelled or result.verdict == "interrupted":
-                    stream.abort()
-                    self._ui.on_interrupted()
-                    return
-                if result.verdict == "pass":
-                    stream.feed(f"  ✓ 验证通过：{result.summary}\n")
+                if not has_declared_changes(self._tool_context.goal_checklist):
+                    _ui_verify_skip()
+                else:
+                    final_answer = "".join(content_parts)
+                    _ui_verify_start()
                     stream.flush_renderer()
-                    # 保持 goal_complete → 走正常结案收尾
-                elif result.verdict == "uncertain":
-                    self._tool_context.goal_suspect = True
-                    stream.feed(f"  ⚠ 验证存疑（{result.summary}），放行并标注待核查\n")
-                    stream.flush_renderer()
-                else:  # fail
-                    # 记录本轮一次验证打回（本轮内第 k 次）；预算结算统一在 agent.py：
-                    # 未声明完成时本轮消耗 = 1（续跑）+ k（验证打回次数）
-                    self._last_round_blocks += 1
-                    # 打回计数展示分母：本任务续跑总预算（剩余预算 + 已消耗轮数）
-                    limit = round_budget_left + self._tool_context.goal_rounds_used
-                    # 预算耗尽判定：本次打回后本轮消耗（1+k）将超出剩余预算 →
-                    # 打回已无力再跑（没有下一轮空间）→ 强制放行（未通过质检），不空转。
-                    # round_budget_left < 0 表示不限制（未提供预算）
-                    if 0 <= round_budget_left < 1 + self._last_round_blocks:
-                        # 拟议打回无力再跑：本次打回未实际发生（不注入返工提示、
-                        # 不产生新一轮），撤回其计数——否则预算结算多记 1，
-                        # rounds 虚超 -g N，父代理误判预算消耗
-                        self._last_round_blocks -= 1
-                        self._tool_context.goal_forced = True
-                        stream.feed(f"  ⚠ 验证未通过（{result.summary}）且续跑预算已耗尽，强制放行（未通过质检）\n")
-                        stream.flush_renderer()
-                    else:
-                        self._tool_context.goal_complete = False
-                        stream.feed(f"  ✗ 验证未通过（第{self._last_round_blocks}/{limit}次打回）：{result.summary}\n")
-                        stream.flush_renderer()
-                        self._msg_manager.append_user(result.continue_prompt)
-                        stream.begin()
-                        continue
+                    # 验证动画为可选 UI 能力（轻量 UI/测试替身可缺省）→ 缺失时静默跳过
+                    begin_verify = getattr(self._ui, "begin_verifying", None)
+                    end_verify = getattr(self._ui, "end_verifying", None)
+                    if begin_verify:
+                        begin_verify()
+                    _v_t0 = time.time()
+                    try:
+                        result = self._goal_verifier.verify(
+                            goal_task, self._tool_context.goal_checklist, final_answer,
+                            cancel_check=lambda: stream.cancelled)
+                    finally:
+                        if end_verify:
+                            end_verify()
+                    _v_secs = time.time() - _v_t0
+                    if stream.cancelled or result.verdict == "interrupted":
+                        stream.abort()
+                        self._ui.on_interrupted()
+                        return
+                    # 覆盖计数（K/M）：从裁决摘要里取验证器自报的计数，取不到则不展示
+                    _covered = _parse_coverage(result.summary)
+                    if result.verdict == "pass":
+                        _ui_verify_result("pass", result.summary, secs=_v_secs,
+                                          blocks=_covered[0], limit=_covered[1])
+                        # 保持 goal_complete → 走正常结案收尾
+                    elif result.verdict == "uncertain":
+                        self._tool_context.goal_suspect = True
+                        _ui_verify_result("uncertain", result.summary, secs=_v_secs)
+                    else:  # fail
+                        # 记录本轮一次验证打回（本轮内第 k 次）；预算结算统一在 agent.py：
+                        # 未声明完成时本轮消耗 = 1（续跑）+ k（验证打回次数）
+                        self._last_round_blocks += 1
+                        # 打回计数展示分母：本任务续跑总预算（剩余预算 + 已消耗轮数）
+                        limit = round_budget_left + self._tool_context.goal_rounds_used
+                        # 预算耗尽判定：本次打回后本轮消耗（1+k）将超出剩余预算 →
+                        # 打回已无力再跑（没有下一轮空间）→ 强制放行（未通过质检），不空转。
+                        # round_budget_left < 0 表示不限制（未提供预算）
+                        if 0 <= round_budget_left < 1 + self._last_round_blocks:
+                            # 拟议打回无力再跑：本次打回未实际发生（不注入返工提示、
+                            # 不产生新一轮），撤回其计数——否则预算结算多记 1，
+                            # rounds 虚超 -g N，父代理误判预算消耗
+                            self._last_round_blocks -= 1
+                            self._tool_context.goal_forced = True
+                            _ui_verify_result("forced", result.summary,
+                                              gaps=result.gaps, secs=_v_secs)
+                        else:
+                            self._tool_context.goal_complete = False
+                            _ui_verify_result("fail", result.summary,
+                                              gaps=result.gaps, secs=_v_secs,
+                                              blocks=self._last_round_blocks,
+                                              limit=limit)
+                            self._msg_manager.append_user(result.continue_prompt)
+                            stream.begin()
+                            continue
 
             # ── 结案点：goal_complete 置位（验证通过/存疑/强制/诚实收尾）→ 清理受管后台任务 ──
             # 声明完成≠结案：验证可能打回继续工作，故清理从 GoalComplete 工具移到本处，

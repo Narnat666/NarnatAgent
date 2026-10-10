@@ -23,9 +23,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .llm import run_cancelable
 from ..tools import registry
 from ..tools import safety
-from ..tools.goal_baseline import render_baseline
 from ..tools.param_utils import to_bool
 from ..tools.tool_context import ToolContext
 from ..tools.exec_signal import error_line, strip_tags
@@ -41,37 +41,29 @@ _VERDICTS = ("pass", "fail", "uncertain")
 _ERR_TEXT_MAX = 200
 
 VERIFY_SYSTEM_PROMPT = (
-    "你现在是完成验证员。拿任务要求逐条核对 AI 的完成清单与最终答复，判定任务是否真的完成。"
-    "不重做任务，只对关键证据做抽查式核实。\n"
+    "你现在是完成验证员。父代理 AI 声称任务已完成，并提交了它改动的文件清单；"
+    "你的职责是核对它是否真的做到了用户的要求。\n"
     "\n"
     "规则：\n"
-    "- 先立要求再核对：先从任务原文列出全部要求（同类可归并，只以任务原文为准，不新增），"
-    "再逐项对照完成清单与最终答复；任何要求没有对应的证据与状态，即为漏项。\n"
-    "- 评估基准 = 任务原文 + 需求基线：基线是 AI 自己拆解的、不是用户的承诺，必须先核对基线"
-    "是否完整覆盖任务原文的每一项要求——原文有而基线没有（或基线把某项写得明显窄于原文）"
-    "即为漏项，判 fail，缺口写明「任务原文要求 X 未被需求基线覆盖」。\n"
-    "- 再核完成清单是否覆盖基线全部编号，且编号与内容语义对应"
-    "（防止「编号对上了但内容不是同一件事」）。\n"
-    "- 把完成当作未证实。AI 自报完成不可信，只依据可核验的证据。\n"
-    '- 证据必须具体：可复现的命令与输出、文件路径、实际现象。"已处理""已验证"这类空泛表述不算证据。\n'
-    "- 抽查关键证据：证据涉及本地文件或命令结果时，用 Read/Glob/Grep/Shell 实地核对。"
-    "Shell 只用于查看：不得修改任何文件或系统状态，不得执行删除类命令，不得提交后台任务。\n"
+    "- 先立要求：从用户任务原文列出全部要求（只以原文为准，不新增、不缩小）。\n"
+    "- 再核改动：对清单里的每个文件用 Read 读取真实内容，核对改动是否满足对应要求；"
+    "可结合项目内直接相关的文件（调用方、配置、测试）判断改动是否完整、有没有改一半。\n"
+    "- 把完成当作未证实，只依据可核验的证据；不采信父代理的文字描述。\n"
+    "- 文件不存在、内容与描述不符、要求未被覆盖 → 判不通过。\n"
+    "- 核对范围限于清单文件及其直接相关文件；不做全盘搜索。\n"
+    "- 不重做任务、不修改任何文件（Shell 只用于查看：不得修改任何文件或系统状态，"
+    "不得执行删除类命令，不得提交后台任务）。\n"
+    "- 不得添加任务要求之外的新要求。\n"
     "- 证据涉及远程设备、串口或硬件的，本地查不到不构成未完成，按证据本身判断："
     "命令、路径、结果齐全且自洽，视为有效证据。\n"
-    "- 只有四种情况判不通过：任务要求未被完成清单覆盖（漏项）；证据空泛无法核验；"
-    "证据自相矛盾；用工具直接证伪。\n"
-    "- 不得添加任务要求之外的新要求。\n"
-    "- 不得因 AI 的措辞自信或篇幅长而放行。\n"
     "\n"
     "输出（严格 JSON，仅此格式）：\n"
     '{"verdict":"pass|fail|uncertain","gaps":["..."],"continue_prompt":"...","summary":"..."}\n'
-    "- pass：全部要求都有有效证据支撑；gaps 与 continue_prompt 可为空。\n"
-    '- fail：存在可修复缺口。gaps 逐条列明未通过项（漏项写明"任务要求 X 未被清单覆盖"）；'
-    'continue_prompt 是给主 AI 的可直接执行的返工指令（缺什么、怎么补、如何自证），'
-    '结尾提示"完成后重新提交完成清单并调用 GoalComplete"。\n'
-    "- uncertain：证据形式合规但无法核实真伪；summary 说明原因。\n"
-    '- summary 结尾附覆盖结论并给出计数："任务原文要求 K 项，基线 N 条，清单覆盖 M 条"'
-    "（K/N/M 为你的判断值）。\n"
+    "- pass：全部要求都被真实改动满足；gaps 与 continue_prompt 可为空。\n"
+    "- fail：存在可修复缺口。gaps 逐条列明缺什么；continue_prompt 是给主 AI 的可直接执行的"
+    '返工指令（缺什么、怎么补、如何自证），结尾提示"完成后重新提交完成清单并调用 GoalComplete"。\n'
+    "- uncertain：无法核实真伪（如证据在远程设备）；summary 说明原因。\n"
+    '- summary 结尾附覆盖结论并给出计数："任务原文要求 K 项，清单覆盖 M 项"（K/M 为你的判断值）。\n'
     "\n"
     "只输出 JSON，不要输出任何其他文字（可用 ```json 代码块包裹）。"
 )
@@ -270,15 +262,14 @@ class GoalVerifier:
         )
 
     def verify(self, task: str, checklist: list, final_answer: str,
-               cancel_check=None, baseline=None) -> VerifyResult:
+               cancel_check=None) -> VerifyResult:
         """独立验证：返回三态裁决（pass/fail/uncertain/interrupted）。
 
         Args:
             task: 任务原文
-            checklist: 完成清单 [{"编号","要求","证据","状态"}, ...]
+            checklist: 完成清单 [{"要求","证据","状态","改动文件"}, ...]
             final_answer: AI 的最终答复文本
             cancel_check: 可选可调用，返回 True 表示用户中断
-            baseline: 需求基线 [{"编号","要求","状态","原因"}, ...]（空=未建立）
 
         任何异常不外抛：捕获后返回 uncertain（summary 注明"验证不可用: 原因"）。
         """
@@ -291,7 +282,7 @@ class GoalVerifier:
                 return VerifyResult(verdict="interrupted", summary="验证已中断")
             messages = [
                 {"role": "system", "content": VERIFY_SYSTEM_PROMPT},
-                {"role": "user", "content": self._build_input(task, checklist, final_answer, baseline)},
+                {"role": "user", "content": self._build_input(task, checklist, final_answer)},
             ]
             model = self._verify_model()
             json_retried = False
@@ -353,29 +344,22 @@ class GoalVerifier:
         model = getattr(self._config.ai, "goal_verify_model", "") or ""
         return str(model).strip() or None
 
-    def _build_input(self, task, checklist, final_answer, baseline=None) -> str:
-        """构造首条 user 消息：任务原文 + 需求基线 + 完成清单 + 最终答复"""
+    def _build_input(self, task, checklist, final_answer) -> str:
+        """构造首条 user 消息：任务原文 + 完成清单（含改动文件）+ 最终答复"""
         parts = ["【任务原文】", str(task or "(空)").strip(), ""]
-        baseline_text = render_baseline(baseline)
-        parts.append(baseline_text if baseline_text else "(未建立需求基线)")
-        parts.append(
-            "（框架已完成编号覆盖的机械校验：清单编号 ⊇ 基线编号；"
-            "你负责语义复核与任务原文覆盖复核。）"
-        )
         parts += ["", "【AI 提交的完成清单】"]
         items = checklist if isinstance(checklist, list) else []
         if items:
             for i, item in enumerate(items, 1):
                 if isinstance(item, dict):
-                    no = item.get("编号", "")
                     req = item.get("要求", "")
                     ev = item.get("证据", "")
                     st = item.get("状态", "")
+                    files = item.get("改动文件", "")
                 else:
-                    no, req, ev, st = "", str(item), "", ""
-                # 编号必须回显：验证器要核对"清单编号 ↔ 基线编号"的内容语义对应
-                # （只给序号 i 会让这条核对退化成按位置猜）
-                parts.append(f"{i}. 编号：{no} 要求：{req}")
+                    req, ev, st, files = str(item), "", "", ""
+                parts.append(f"{i}. 要求：{req}")
+                parts.append(f"   改动文件：{files if files else '(未申报)'}")
                 parts.append(f"   证据：{ev}")
                 parts.append(f"   状态：{st}")
         else:
@@ -385,7 +369,8 @@ class GoalVerifier:
             "【AI 的最终答复】",
             str(final_answer or "(空)").strip(),
             "",
-            "请逐条核对：用只读工具实地核实证据是否真实成立，然后按系统指令只输出裁决 JSON。",
+            "请按上述清单里的改动文件逐个用只读工具读取真实内容核对，"
+            "然后按系统指令只输出裁决 JSON。",
         ]
         return "\n".join(parts)
 
@@ -441,8 +426,10 @@ class GoalVerifier:
     def _execute_tools(self, tool_calls, cancel_check=None):
         """依次执行本轮工具调用（白名单工具；Shell 先过抽查策略）；返回 (名称列表, [(id, 结果)])
 
-        用户中断（cancel_check 命中）时不再执行后续工具：长耗时只读工具本身会在
-        扫描中途提前返回，这里保证已中断后不再继续发起新的工具调用。
+        用户中断（cancel_check 命中）时不再执行后续工具并立即返回。
+        工具调用走 run_cancelable：调用体移入后台线程，主线程按 0.05s 轮询取消标记，
+        工具自身不查取消（或取消检查点稀疏）时用户按 ESC 也能立即收敛，而不是
+        卡到工具跑完（大目录 Grep 实测分钟级）。
         """
         names = []
         results = []
@@ -469,7 +456,17 @@ class GoalVerifier:
                     results.append((tc_id, strip_tags(error_line(
                         "验证器策略拒绝: " + reason))))
                     continue
-            llm_result, _color = registry.execute(name, args, self._tool_context)
+            cancelled, exec_result, error = run_cancelable(
+                lambda: registry.execute(name, args, self._tool_context),
+                cancel_check)
+            if cancelled:
+                break
+            if error is not None:
+                # worker 内异常按文件既有风格转成工具错误文本，不外抛到 verify 之外
+                results.append((tc_id, strip_tags(error_line(
+                    f"工具执行失败({name}): {error}"))))
+                continue
+            llm_result, _color = exec_result
             if isinstance(llm_result, str):
                 llm_result = strip_tags(llm_result)
             results.append((tc_id, llm_result))

@@ -27,7 +27,6 @@ from .web_search import execute as web_search_execute, DEFINITION as WEBSEARCH_D
 from .todo_write import execute as todo_write_execute, DEFINITION as TODOWRITE_DEF, CAPABILITY as TODOWRITE_CAP
 from .serial import execute as serial_execute, DEFINITION as SERIAL_DEF, CAPABILITY as SERIAL_CAP
 from .mcp_tool import execute as mcp_execute, DEFINITION as MCP_DEF, CAPABILITY as MCP_CAP
-from .goal_baseline import execute as goal_baseline_execute, CAPABILITY as GOALBASELINE_CAP
 from .goal_complete import execute as goal_complete_execute, CAPABILITY as GOALCOMPLETE_CAP
 
 
@@ -48,7 +47,6 @@ _TOOL_IMPLEMENTATIONS: Dict[str, Callable] = {
     "TodoWrite": todo_write_execute,
     "Serial": serial_execute,
     "MCP": mcp_execute,
-    "GoalBaseline": goal_baseline_execute,
     "GoalComplete": goal_complete_execute,
 }
 
@@ -63,7 +61,7 @@ TOOL_DEFINITIONS: List[Dict] = [
     SERIAL_DEF, MCP_DEF,
 ]
 # GoalComplete 不进默认工具定义：由 /goal 开启时通过 LLMClient.set_goal_tool(True) 动态注入，
-# 普通模式不暴露给 LLM（执行能力始终注册，兼容历史残留调用）。GoalBaseline 同此机制。
+# 普通模式不暴露给 LLM（执行能力始终注册，兼容历史残留调用）。
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -127,7 +125,6 @@ _CAPABILITIES: Dict[str, Dict[str, Any]] = {
     "TodoWrite": TODOWRITE_CAP,
     "Serial": SERIAL_CAP,
     "MCP": MCP_CAP,
-    "GoalBaseline": GOALBASELINE_CAP,
     "GoalComplete": GOALCOMPLETE_CAP,
 }
 

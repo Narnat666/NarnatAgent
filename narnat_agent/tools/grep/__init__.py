@@ -11,9 +11,10 @@
 
 import fnmatch
 import os
+import queue
 import re
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 from ..param_utils import to_bool
 from ..glob import (_CancelGate, _CANCELLED_TEXT, _expand_braces,
@@ -795,6 +796,20 @@ def _is_nt_reparse_dir(path: str) -> bool:
     return bool(getattr(st, "st_reparse_tag", 0))
 
 
+def _gate_poll_check(gate) -> bool:
+    """等待轮询专用取消检查：保证本轮至少发生一次真查。
+
+    gate.check() 每 CHECK_INTERVAL 次调用才真查一次（为密集遍历循环节流）；
+    等待轮询每 0.05s 才调用一次，单次调用可能落在节流窗口内 → 取消要拖到下一个
+    真查点才可见。连续调用至多 CHECK_INTERVAL 次必然跨过一个真查点（整数自增
+    的开销可忽略），命中即写入 gate 缓存，调用方沿用 gate.cancelled 判定。
+    """
+    for _ in range(_CancelGate.CHECK_INTERVAL):
+        if gate.check():
+            return True
+    return False
+
+
 def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
                    A, B, head_limit, ignore_dirs, results, ctx, gate):
     """搜索一个目标（文件或目录），结果按预算追加到 results。
@@ -850,10 +865,17 @@ def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
         per_file_budget = head_limit
         collected = {}
         worker_count = min(os.cpu_count() or 4, 12)
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        # 显式管理线程池：取消路径不能 join worker（见 finally），with 语句会强制
+        # shutdown(wait=True)，取消后要等卡在单次 IO（慢盘/大文件 read，不可中断）
+        # 上的 worker 跑完才返回，实测把取消延迟拖到秒级
+        executor = ThreadPoolExecutor(max_workers=worker_count)
+        try:
             futures = {}
+            done_q = queue.Queue()
             for full, rel in file_items:
-                if gate.cancelled:
+                # gate.cancelled 是缓存值（只有 check() 才刷新），此处必须真查，
+                # 否则取消置位后仍会把全部文件提交进线程池
+                if gate.check():
                     break
                 key = os.path.normcase(os.path.abspath(full))
                 if key in ctx["seen_files"]:
@@ -861,15 +883,37 @@ def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
                 ctx["seen_files"].add(key)
                 fut = executor.submit(_scan_file, full, regex, fast_searcher, A, B,
                                       per_file_budget, gate)
+                # 完成即入队（future 在提交瞬间已完成时回调就地执行，不丢通知）
+                fut.add_done_callback(done_q.put)
                 futures[fut] = rel
-            for fut in as_completed(futures):
+            # 等待循环可中断：as_completed 只认"全部完成"，取消置位后仍要等整棵树
+            # 扫描结束才返回（大目录下分钟级）。改为主线程 0.05s 轮询消费完成队列：
+            # 每轮成本 O(1)（cf.wait 每轮要遍历全部未完成任务挂等待器，任务量大时
+            # 轮询本身成为瓶颈），取消命中即取消剩余任务快速返回
+            pending_left = len(futures)
+            while pending_left:
+                try:
+                    fut = done_q.get(timeout=0.05)
+                except queue.Empty:
+                    fut = None
+                if _gate_poll_check(gate):
+                    for f in futures:
+                        f.cancel()   # 未启动的任务全部丢弃，不等它们被调度
+                    break
+                if fut is None:
+                    continue
+                pending_left -= 1
                 rel = futures[fut]
                 try:
                     collected[rel] = fut.result()
                 except Exception:
                     collected[rel] = None
-            if gate.cancelled:
-                return
+        finally:
+            # 取消路径不 join：在跑的 worker 由 chunk 级 gate 自行退出，个别卡在
+            # 不可中断单次 IO 上的线程留在后台自然收尾——用户中断要的是立刻返回
+            executor.shutdown(wait=not gate.cancelled)
+        if gate.cancelled:
+            return
         for full, rel in file_items:
             item = collected.get(rel)
             if item is None:

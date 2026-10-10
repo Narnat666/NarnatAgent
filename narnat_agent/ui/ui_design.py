@@ -94,6 +94,7 @@ from .colors import (
     UI_HEADER, UI_SPINNER,
     UI_INTERRUPTED, UI_INTERRUPTED_HINT,
     UI_STATS_LABEL, UI_STATS_VALUE,
+    CMD_SUCCESS, CMD_ERROR, CMD_HINT, CMD_MUTED,
     PTK_PROMPT_SYMBOL, PTK_PROMPT_TEXT, PTK_PROMPT_CUSTOM,
     apply_style,
 )
@@ -190,6 +191,59 @@ def _summary_thread(stop: threading.Event) -> None:
 def _verify_thread(stop: threading.Event) -> None:
     """验证动画。"""
     _animation_thread(stop, "正在验证")
+
+
+# ── 独立复核状态行（方案 B：单行徽标）──
+# 一次复核只占 1~2 行：起始行带核对文件数，结果行带裁决与耗时/缺口。
+# 长缺口逐条内联截断（细节由注入主会话的 continue_prompt 与日志承载）。
+_VERIFY_GAP_MAX = 3      # 结果行最多内联展示的缺口条数
+_VERIFY_GAP_CHARS = 60   # 单条缺口截断长度
+
+
+def _clip(text: str, limit: int) -> str:
+    s = " ".join(str(text or "").split())
+    return s if len(s) <= limit else s[:limit - 1] + "…"
+
+
+def show_verify_start() -> None:
+    """复核开始：一行徽标（紧随上一行输出，不另起空行）。"""
+    _stdout_write(f"  {UI_SPINNER}⟳{R} {CMD_MUTED}独立复核…{R}\n")
+
+
+def show_verify_result(verdict: str, summary: str = "", gaps=None,
+                       secs: float = 0.0, blocks: int = 0, limit: int = 0) -> None:
+    """复核结果：一行徽标。
+
+    pass      → ✓ 复核通过 · 3/3 · 6.5s
+    uncertain → ⚠ 复核存疑（放行待核查） · 8.1s
+    fail      → ✗ 复核未通过 1/10 · a.py 未改；缺 b.txt
+    forced    → ⚠ 复核未通过且预算耗尽，强制放行 · a.py 未改
+    """
+    t = f"{secs:.1f}s" if secs > 0 else ""
+    if verdict == "pass":
+        cov = f"{blocks}/{limit}" if limit else ""
+        tail = " · ".join(p for p in (cov, t) if p)
+        _stdout_write(f"  {CMD_SUCCESS}✓{R} {CMD_MUTED}复核通过{R}"
+                      f"{CMD_MUTED}{(' · ' + tail) if tail else ''}{R}\n")
+        return
+    if verdict == "uncertain":
+        _stdout_write(f"  {CMD_HINT}⚠{R} {CMD_MUTED}复核存疑（放行待核查）{R}"
+                      f"{CMD_MUTED}{(' · ' + t) if t else ''}{R}\n")
+        return
+    head = "复核未通过" + (f" {blocks}/{limit}" if verdict == "fail" and limit else "")
+    if verdict == "forced":
+        head += "（预算耗尽，强制放行）"
+    items = [_clip(g, _VERIFY_GAP_CHARS) for g in (gaps or []) if str(g).strip()]
+    extra_n = max(0, len(items) - _VERIFY_GAP_MAX)
+    detail = (" · " + "；".join(items[:_VERIFY_GAP_MAX])) if items else ""
+    if extra_n:
+        detail += f"；等{extra_n}项"
+    _stdout_write(f"  {CMD_ERROR}✗{R} {CMD_MUTED}{head}{detail}{R}\n")
+
+
+def show_verify_skip() -> None:
+    """未申报文件改动 → 跳过独立复核（紧随上一行输出，不另起空行）。"""
+    _stdout_write(f"  {CMD_MUTED}○ 无文件改动，无需复核{R}\n")
 
 
 def show_interrupted() -> None:

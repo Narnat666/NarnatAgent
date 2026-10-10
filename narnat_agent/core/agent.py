@@ -16,13 +16,6 @@ from typing import Optional
 from ..assembly import Assembly, AssemblyResult
 from ..config.defaults import GOAL_AUDIT_HINT
 from ..output import write as _stdout_write, X, R
-from ..tools.goal_baseline import render_baseline
-
-
-def _baseline_block(ctx) -> str:
-    """续跑提示中的需求基线块：未建立时给出催办行（基线是完成清单覆盖的基准）。"""
-    block = render_baseline(ctx.goal_baseline)
-    return block + "\n" if block else "【需求基线】尚未建立：请先调用 GoalBaseline 把任务原文拆成编号需求条目。\n"
 
 
 class Agent:
@@ -178,8 +171,7 @@ class Agent:
                     self._logger.info("core.agent", f"目标模式自动续跑: 第{goal_round}轮完成，继续")
                     self._msg_manager.append_user(
                         f"【自动续跑】已完成{goal_round}轮，任务：{goal_task}\n"
-                        + _baseline_block(self._parts.tool_context)
-                        + "请继续推进任务。\n"
+                        "请继续推进任务。\n"
                         + GOAL_AUDIT_HINT
                     )
 
@@ -324,8 +316,7 @@ class Agent:
                 self._logger.info("core.agent", f"目标模式自动续跑: 第{goal_round}轮完成，继续")
                 self._msg_manager.append_user(
                     f"【自动续跑】已完成{goal_round}轮，任务：{goal_task}\n"
-                    + _baseline_block(self._parts.tool_context)
-                    + "请继续推进任务。\n"
+                    "请继续推进任务。\n"
                     + GOAL_AUDIT_HINT
                 )
         except Exception as e:
