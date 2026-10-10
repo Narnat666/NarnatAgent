@@ -421,6 +421,11 @@ class GoalVerifier:
             return content, [], f"LLM调用出错: {content[:_ERR_TEXT_MAX]}"
         if finish == "context_overflow":
             return content, [], "请求超出模型上下文限制"
+        if finish == "content_rejected":
+            # 验证器的独立请求同样可能与主会话共享被投毒的工具输出；此处不做
+            # 折叠恢复（验证器不持有主会话消息），据实上报失败由上层按既有
+            # 验证失败路径处理
+            return content, [], "请求被服务端内容审核拦截"
         return content, tool_calls, None
 
     def _execute_tools(self, tool_calls, cancel_check=None):

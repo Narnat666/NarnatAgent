@@ -30,6 +30,10 @@ from ..logger import AgentLogger
 # 迟到提醒触发阈值：同一任务累计工具轮数达到此值仍无计划 → 温和提醒一次
 TODO_NUDGE_TOOL_ROUNDS = 6
 
+# 内容审核拦截恢复：单次 run 内最多折叠的工具结果条数。超出后以原错误收尾
+# （死循环防护：折叠本身会成功地把上下文变小，只有"折了也没用"才会走到上限）
+CONTENT_REJECT_MAX_FOLDS = 5
+
 # 请求前尾部守卫补的 user 收尾内容（异常形态兜底：/done 结论注入尾部 system 后
 # 转换层抽出 system 会以无 thinking 的 assistant 收尾，被 API 拒；正常交互不触发）
 TAIL_GUARD_MESSAGE = "[]请基于当前上下文继续推进任务。"
@@ -110,6 +114,8 @@ class AgentLoop:
         self._last_round_blocks = 0
         stream_interrupted_retries = 0  # 响应流中断（无完成标记）的自动重试计数
         overflow_compacted = False      # 本次 run 内是否已做过溢出恢复压缩（重发再溢出则放弃）
+        content_folds = 0               # 本次 run 内内容审核恢复的折叠条数（上限 CONTENT_REJECT_MAX_FOLDS）
+        folded_tool_ids = set()         # 本次 run 内已折叠的 tool_call_id（防同一结果被反复选中）
         # 流中断重试上限 = 配置的"LLM重试次数"（每轮独立：收到正常完成标记后重置，
         # 与连接层重试语义一致，仅累计同一次中断后的连续重试）
         try:
@@ -142,6 +148,7 @@ class AgentLoop:
             call_usage = None
             parsed_finish_reason = None
             stream_interrupted_info = None  # LLM层上报的流中断信息（kind/detail）
+            content_reject_detail = None    # LLM层上报的内容审核拦截详情（原错误文案）
             thinking_text = None            # 本轮思考内容（仅工具轮回传，学官方 harness 规则）
             thinking_signature = None       # 本轮思考签名（Claude 回传思考块必需）
 
@@ -209,6 +216,10 @@ class AgentLoop:
                     if parsed_finish_reason == "context_overflow":
                         # 上下文超限：跳出chunk循环，走压缩恢复分支
                         break
+                    if parsed_finish_reason == "content_rejected":
+                        # 内容审核拦截：跳出chunk循环，走折叠恢复分支
+                        content_reject_detail = chunk.get("detail", "")
+                        break
                     if parsed_finish_reason == "error":
                         stream.finish(
                             self._stats.input_tokens,
@@ -262,6 +273,54 @@ class AgentLoop:
                     thinking_effort=self._thinking_label,
                 )
                 return
+
+            # ── 内容审核拦截恢复：折叠最大的工具结果 → 重发请求 ──
+            # 服务端按内容风控拒绝整份请求时（典型来源：工具输出混入外部文本，
+            # 如网页/仓库描述被投毒），上下文里最长的工具结果通常即污染源。
+            # 逐条折叠后重发：此时 assistant 消息尚未写入历史，重发幂等安全；
+            # 折叠就地生效（内存与自动保存同步），原文不保留——残留原文会让
+            # 之后的每次请求继续被拒。折叠上限 CONTENT_REJECT_MAX_FOLDS，
+            # 无可折叠项或次数耗尽即打印原错误收尾，防死循环。
+            if parsed_finish_reason == "content_rejected":
+                folded = (self._msg_manager.fold_largest_tool_result(folded_tool_ids)
+                          if content_folds < CONTENT_REJECT_MAX_FOLDS else None)
+                if folded is None:
+                    stream.feed(
+                        "\n\n⚠ 请求被服务端内容审核拦截"
+                        + (f"，已折叠{content_folds}条工具结果仍被拦截。" if content_folds
+                           else "，上下文中没有可折叠的工具结果。")
+                        + "请检查最近的工具输出（外部网页/仓库描述等文本易被投毒），"
+                          "或 /save 保存会话后开启新对话。\n"
+                    )
+                    if self._logger:
+                        self._logger.error(
+                            "agent_loop",
+                            f"内容审核拦截(已折叠{content_folds}条): {content_reject_detail}",
+                        )
+                    stream.feed(
+                        f"\n[错误: API调用失败(400，内容审核拦截): {content_reject_detail}]\n"
+                    )
+                    stream.finish(
+                        self._stats.input_tokens,
+                        self._stats.output_tokens,
+                        cache_ratio=self._stats.cache_hit_ratio,
+                        cost=self._stats.cost,
+                        balance=self._stats.balance,
+                        thinking_effort=self._thinking_label,
+                    )
+                    return
+                content_folds += 1
+                if self._logger:
+                    self._logger.warning(
+                        "agent_loop",
+                        f"请求被内容审核拦截，已折叠工具结果({folded[1]}字符)后重发"
+                        f"(第{content_folds}/{CONTENT_REJECT_MAX_FOLDS}次)",
+                    )
+                stream.feed(
+                    f"\n⚠ 请求被服务端内容审核拦截，已折叠最大的工具结果"
+                    f"（{folded[1]}字符，第{content_folds}/{CONTENT_REJECT_MAX_FOLDS}次）后重试…\n"
+                )
+                continue
 
             # 中断检查
             if stream.cancelled:

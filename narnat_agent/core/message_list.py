@@ -4,7 +4,7 @@ MessageList 私有持有 messages 列表，外部通过 view() 获取只读视�
 通过受控方法修改。消除多处共享同一列表引用的问题。
 """
 
-from typing import List, Dict, Any, Iterator, Optional
+from typing import List, Dict, Any, Iterator, Optional, Set, Tuple
 
 # 合成 assistant 消息（repair 伪造"[用户中断]"）挂载的思考占位文本。
 # DeepSeek 思考模式校验：请求尾部 assistant 必须有 thinking 块，若为空则其前
@@ -12,6 +12,14 @@ from typing import List, Dict, Any, Iterator, Optional
 # 转换层（llm.py）仅在"思考回传"开关开启时回传该占位（与真实思考同规则）；
 # 开关关闭时 thinking 段彻底删除（用户选择：计划放行修复后正常流程不再出现尾部AI发言）。
 SYNTHETIC_THINKING = "（用户中断了工具执行）"
+
+# 内容审核拦截恢复：被折叠工具结果的替换文案。原文不留存——服务端按内容
+# 判定，残留原文会让后续每次请求继续被拒（折叠必须真正从上下文里移除）。
+FOLDED_TOOL_MARKER = "[已折叠: 原工具结果共{n}字符，疑似触发服务端内容审核，原文不再保留]"
+
+# 可折叠的最小长度：过低无收益（替换文案本身更长，反而增大上下文），
+# 且会让"参数类 400"白跑折叠重试——低于此值一律视为无可折叠项
+MIN_FOLDABLE_TOOL_CHARS = 200
 
 
 class MessageView:
@@ -104,6 +112,31 @@ class MessageList:
                     "tool_call_id": tc["id"],
                     "content": "[用户中断]",
                 })
+
+    def fold_largest_tool_result(self, folded_ids: Set[str]) -> Optional[Tuple[str, int]]:
+        """就地折叠最长的一条尚未折叠的 tool 结果（内容审核拦截恢复用）。
+
+        folded_ids: 已折叠的 tool_call_id 集合（调用方持有，跨次调用累计）。
+        就地改写消息内容——请求副本是同一批 dict 的浅拷贝，改写同步可见。
+        返回 (tool_call_id, 原字符数)；无可折叠项（无工具结果 / 均已折叠 /
+        均低于 MIN_FOLDABLE_TOOL_CHARS）时返回 None。
+        """
+        best_idx, best_len = -1, 0
+        for i, msg in enumerate(self._messages):
+            if msg.get("role") != "tool":
+                continue
+            if (msg.get("tool_call_id") or "") in folded_ids:
+                continue
+            n = len(msg.get("content") or "")
+            if n > best_len:
+                best_idx, best_len = i, n
+        if best_idx < 0 or best_len < MIN_FOLDABLE_TOOL_CHARS:
+            return None
+        msg = self._messages[best_idx]
+        tc_id = msg.get("tool_call_id") or ""
+        msg["content"] = FOLDED_TOOL_MARKER.format(n=best_len)
+        folded_ids.add(tc_id)
+        return tc_id, best_len
 
     def replace_all(self, new_messages: List[Dict[str, Any]]) -> None:
         """原子替换全部消息（会话切换时使用）。

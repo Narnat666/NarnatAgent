@@ -72,6 +72,15 @@ class MessageManager:
     def append_interrupted_tools(self, tool_calls: list, completed_ids: set) -> None:
         self._messages.append_interrupted_tools(tool_calls, completed_ids)
 
+    # ── 内容审核拦截恢复（委托 MessageList）──
+
+    def fold_largest_tool_result(self, folded_ids: set):
+        """折叠最长的一条尚未折叠的 tool 结果。
+
+        返回 (tool_call_id, 原字符数)；无可折叠项时 None（调用方据此以原错误收尾）。
+        """
+        return self._messages.fold_largest_tool_result(folded_ids)
+
     # ── 修复方法（repair 逻辑原样保留，通过 view 读取）──
 
     def repair(self) -> None:
@@ -184,6 +193,12 @@ class MessageManager:
                     if chunk["finish_reason"] == "error":
                         llm_error = True
                         break
+                    if chunk["finish_reason"] == "content_rejected":
+                        # 压缩请求复刻全部历史：历史含触发内容风控的文本时必然
+                        # 被拒。此处不折叠（压缩路径不持有消息表，折叠由 agent_loop
+                        # 的恢复分支负责），据实归因，避免误报为"总结为空"
+                        on_llm_error("压缩失败: 压缩请求被服务端内容审核拦截")
+                        return CompressResult(False, reason="llm_error")
                 if "content" in chunk and "tool_calls" not in chunk:
                     summary_content.append(chunk["content"])
                 # 旁路记账：压缩调用同样计入费用日志（不触碰主会话统计）

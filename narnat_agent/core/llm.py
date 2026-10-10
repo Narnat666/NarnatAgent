@@ -572,6 +572,14 @@ class _OpenAIBackend:
                             self._logger.warning("core.llm", "API返回400: 上下文超限")
                         yield {"finish_reason": "context_overflow"}
                         return
+                    # 其余 400 归类为内容审核拦截：上层折叠工具结果后重发
+                    # （不匹配错误文案——服务端措辞多变；能否推进由上层"还有无
+                    #  可折叠工具结果"判定，见 agent_loop 的恢复分支）
+                    if status == 400:
+                        if self._logger:
+                            self._logger.warning("core.llm", "API返回400: 内容审核拦截")
+                        yield {"finish_reason": "content_rejected", "detail": f"{e}"}
+                        return
                     if self._logger:
                         self._logger.error("core.llm", f"API调用失败(不可重试): {e}")
                     # 认证类失败（401）附中文引导，其余错误文案不变
@@ -900,6 +908,12 @@ class _AnthropicBackend:
                         if self._logger:
                             self._logger.warning("core.llm", "API返回400: 上下文超限")
                         yield {"finish_reason": "context_overflow"}
+                        return
+                    # 其余 400 归类为内容审核拦截：上层折叠工具结果后重发（见 llm 另一后端同款分支）
+                    if status == 400:
+                        if self._logger:
+                            self._logger.warning("core.llm", "API返回400: 内容审核拦截")
+                        yield {"finish_reason": "content_rejected", "detail": err_text[:500]}
                         return
                     if self._logger:
                         self._logger.error("core.llm", f"API调用失败(不可重试): {status} {err_text[:500]}")
