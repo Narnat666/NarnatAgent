@@ -155,7 +155,7 @@ class Agent:
                         # 达到轮数上限：注入收尾指令，让AI总结后结束（不再续跑）
                         self._logger.info("core.agent", f"目标模式达到轮数上限({goal_limit})，停止续跑")
                         self._msg_manager.append_user(
-                            f"【系统提示】目标模式已达到轮数上限（{goal_limit}轮），任务尚未完成。"
+                            f"[系统提示]目标模式已达到轮数上限（{goal_limit}轮），任务尚未完成。"
                             "请向用户总结当前进度、已完成工作和未完成原因，无需继续执行新任务。"
                         )
                         stream = self._ui.create_stream()
@@ -170,7 +170,7 @@ class Agent:
                     # 任务未完成：注入继续消息（含完成审计提示），再跑一轮
                     self._logger.info("core.agent", f"目标模式自动续跑: 第{goal_round}轮完成，继续")
                     self._msg_manager.append_user(
-                        f"【自动续跑】已完成{goal_round}轮，任务：{goal_task}\n"
+                        f"[自动续跑]已完成{goal_round}轮，任务：{goal_task}\n"
                         "请继续推进任务。\n"
                         + GOAL_AUDIT_HINT
                     )
@@ -303,7 +303,7 @@ class Agent:
                     # 达到轮数上限：注入收尾指令，让AI总结后结束
                     self._logger.info("core.agent", f"目标模式达到轮数上限({goal_limit})，停止续跑")
                     self._msg_manager.append_user(
-                        f"【系统提示】目标模式已达到轮数上限（{goal_limit}轮），任务尚未完成。"
+                        f"[系统提示]目标模式已达到轮数上限（{goal_limit}轮），任务尚未完成。"
                         "请向用户总结当前进度、已完成工作和未完成原因，无需继续执行新任务。"
                     )
                     stream = self._ui.create_stream()
@@ -315,7 +315,7 @@ class Agent:
                 # 任务未完成：注入继续消息（含完成审计提示），再跑一轮
                 self._logger.info("core.agent", f"目标模式自动续跑: 第{goal_round}轮完成，继续")
                 self._msg_manager.append_user(
-                    f"【自动续跑】已完成{goal_round}轮，任务：{goal_task}\n"
+                    f"[自动续跑]已完成{goal_round}轮，任务：{goal_task}\n"
                     "请继续推进任务。\n"
                     + GOAL_AUDIT_HINT
                 )

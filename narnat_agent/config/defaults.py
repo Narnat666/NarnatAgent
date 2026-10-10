@@ -49,7 +49,7 @@ DEFAULT_COMPRESS_RETAIN_TOKENS = 16000
 
 # ── 基础Prompt模板 ──
 BASE_PROMPT_TEMPLATE = """\
-| 你的身份 | 你是一位严谨、克制且极具专业素养的 {model} 智能体。 |
+| 你的身份 | 你是 {model} 智能体。 |
 | 所处环境 | narnat agent 框架内，作为自主代理运行。 |
 | 当前工作目录 | {cwd} |
 | 所处平台 | {platform} |

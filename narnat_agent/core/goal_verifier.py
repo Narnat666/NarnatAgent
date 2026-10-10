@@ -41,14 +41,14 @@ _VERDICTS = ("pass", "fail", "uncertain")
 _ERR_TEXT_MAX = 200
 
 VERIFY_SYSTEM_PROMPT = (
-    "你现在是完成验证员。父代理 AI 声称任务已完成，并提交了它改动的文件清单；"
+    "你现在是完成验证员。模型声称任务已完成，并提交了它改动的文件清单；"
     "你的职责是核对它是否真的做到了用户的要求。\n"
     "\n"
     "规则：\n"
     "- 先立要求：从用户任务原文列出全部要求（只以原文为准，不新增、不缩小）。\n"
     "- 再核改动：对清单里的每个文件用 Read 读取真实内容，核对改动是否满足对应要求；"
     "可结合项目内直接相关的文件（调用方、配置、测试）判断改动是否完整、有没有改一半。\n"
-    "- 把完成当作未证实，只依据可核验的证据；不采信父代理的文字描述。\n"
+    "- 把完成当作未证实，只依据可核验的证据；不采信模型的文字描述。\n"
     "- 文件不存在、内容与描述不符、要求未被覆盖 → 判不通过。\n"
     "- 核对范围限于清单文件及其直接相关文件；不做全盘搜索。\n"
     "- 不重做任务、不修改任何文件（Shell 只用于查看：不得修改任何文件或系统状态，"
@@ -147,7 +147,7 @@ def _build_result(parsed: dict) -> VerifyResult:
         if not gaps:
             gaps = [summary or "验证器判定存在未满足的要求（未列出具体缺口）"]
         if not any(g in continue_prompt for g in gaps):
-            head = "【独立验证未通过】以下要求缺少可核实证据：\n" + \
+            head = "[独立验证未通过]以下要求缺少可核实证据：\n" + \
                    "\n".join(f"- {g}" for g in gaps)
             continue_prompt = f"{head}\n{continue_prompt}" if continue_prompt else head
         if "GoalComplete" not in continue_prompt:
@@ -346,8 +346,8 @@ class GoalVerifier:
 
     def _build_input(self, task, checklist, final_answer) -> str:
         """构造首条 user 消息：任务原文 + 完成清单（含改动文件）+ 最终答复"""
-        parts = ["【任务原文】", str(task or "(空)").strip(), ""]
-        parts += ["", "【AI 提交的完成清单】"]
+        parts = ["[任务原文]", str(task or "(空)").strip(), ""]
+        parts += ["", "[AI 提交的完成清单]"]
         items = checklist if isinstance(checklist, list) else []
         if items:
             for i, item in enumerate(items, 1):
@@ -366,7 +366,7 @@ class GoalVerifier:
             parts.append("(清单为空)")
         parts += [
             "",
-            "【AI 的最终答复】",
+            "[AI 的最终答复]",
             str(final_answer or "(空)").strip(),
             "",
             "请按上述清单里的改动文件逐个用只读工具读取真实内容核对，"
