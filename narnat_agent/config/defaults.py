@@ -47,6 +47,16 @@ DEFAULT_COMPRESS_RATIO = 95       # 窗口占比 ≥ 此百分比时先压缩再
 # 压缩时逐字保留的近期消息预算（启发式估价）；0=不保留（压缩后仅剩摘要，即旧行为）
 DEFAULT_COMPRESS_RETAIN_TOKENS = 16000
 
+# ── 回话风格提醒（narnat.json "风格"）──
+# 周期性提醒：AI 连续若干轮纯讨论（未调用任何工具）后，在下一轮请求末尾追加
+# 一条提醒（仅发给AI，终端不显示）；AI 一旦调用工具即视为在干活，计数清零。
+# "提醒语"留空时用下面的内置默认文案；"间隔轮数"= 每多少轮讨论提醒一次。
+DEFAULT_STYLE_NOTICE_ENABLED = False
+DEFAULT_STYLE_NOTICE_INTERVAL = 5
+STYLE_NOTICE_TEXT = ("回复内容简洁且抓住核心")
+# 提醒语由用户配置原文，程序只加统一前缀（与 TodoWrite 迟到提醒同形）
+STYLE_NOTICE_TEMPLATE = "[系统提醒] {text}"
+
 # ── 基础Prompt模板 ──
 BASE_PROMPT_TEMPLATE = """\
 | 你的身份 | 你是 {model} 智能体。 |

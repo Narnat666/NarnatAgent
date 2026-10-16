@@ -22,6 +22,7 @@ from ..ui.ui_design import (show_verify_start as _ui_verify_start,
                             show_verify_result as _ui_verify_result,
                             show_verify_skip as _ui_verify_skip)
 from ..config.loader import Config
+from ..config.defaults import STYLE_NOTICE_TEMPLATE
 from ..output import write as _stdout_write
 from ..tools.exec_signal import strip_tags
 from ..logger import AgentLogger
@@ -92,6 +93,26 @@ class AgentLoop:
         if self._compression is not None:
             self._compression.refresh_ratio(self._stats.input_tokens)
 
+    def _discuss_round_done(self):
+        """一轮纯讨论结束 → 计数；达配置间隔则追加一条风格提醒并清零。
+
+        判据与复位：只有"AI 未调用任何工具"的轮到此（工具轮在分支内清零），
+        故计数等价于"连续纯讨论轮数"，AI 一干活即归零——干活期间不打扰。
+        提醒经 append_user_merged 进入历史后不再改动（与 Claude 的
+        system-reminder 同构：只追加、不改写，缓存前缀天然稳定）。
+        开关/间隔/文案见 narnat.json "风格"（默认关闭）。
+        """
+        cfg = self._config.style
+        if not cfg.enabled or cfg.notice_interval <= 0:
+            return
+        ctx = self._tool_context
+        ctx.style_discuss_rounds += 1
+        if ctx.style_discuss_rounds < cfg.notice_interval:
+            return
+        ctx.style_discuss_rounds = 0
+        self._msg_manager.append_user_merged(
+            STYLE_NOTICE_TEMPLATE.format(text=cfg.notice_text))
+
     def run(self, stream, goal_mode: bool = False, force_final: bool = False,
             goal_task: str = "", round_budget_left: int = -1):
         """工具调度内循环
@@ -116,6 +137,7 @@ class AgentLoop:
         overflow_compacted = False      # 本次 run 内是否已做过溢出恢复压缩（重发再溢出则放弃）
         content_folds = 0               # 本次 run 内内容审核恢复的折叠条数（上限 CONTENT_REJECT_MAX_FOLDS）
         folded_tool_ids = set()         # 本次 run 内已折叠的 tool_call_id（防同一结果被反复选中）
+        used_tools = False              # 本次 run 内是否调用过工具（风格提醒：干活轮不算讨论）
         # 流中断重试上限 = 配置的"LLM重试次数"（每轮独立：收到正常完成标记后重置，
         # 与连接层重试语义一致，仅累计同一次中断后的连续重试）
         try:
@@ -391,6 +413,9 @@ class AgentLoop:
                 # 不阻塞、不重复；文案自带"可忽略"出口，单步任务/探索阶段
                 # 由AI自行判断。判据"未建立计划"= current_todos 为空，与
                 # 收尾软提醒/GoalComplete 交叉校验对计划的口径一致。
+                # 风格提醒计数清零：AI 调工具=在干活（非纯讨论），不该被打扰
+                self._tool_context.style_discuss_rounds = 0
+                used_tools = True
                 self._tool_context.tool_rounds_used += 1
                 if (not self._tool_context.current_todos
                         and not self._tool_context.todo_nudge_sent
@@ -600,6 +625,13 @@ class AgentLoop:
                     cleanup_all()
                 except Exception:
                     pass
+
+            # ── 风格提醒：一轮纯讨论（无工具调用）结束 → 计数，达间隔追加一条 ──
+            # 仿 TodoWrite 迟到提醒的机制（计数→达阈值发一次→清零）；区别是
+            # 风格会反复漂移，故追加后清零可再次累计（非"一次即不再发"）。
+            # 仅当本轮未调用任何工具才算"纯讨论"：用户派活（AI 干活）不计入。
+            if not used_tools:
+                self._discuss_round_done()
 
             self._last_round_ok = True  # 正常完成：无tool_call纯文本输出
             # 统计栏 = 结案信号：普通模式每轮结束都显示；

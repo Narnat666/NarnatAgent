@@ -93,6 +93,11 @@ class ToolContext:
     # 每次用户新输入时由agent.py复位（与todo_reminded一致）
     bg_reminded: bool = field(default=False, repr=False, metadata={"task_scoped": True})
 
+    # 风格提醒：连续纯讨论轮数（AI 未调用任何工具的用户轮计数）。
+    # 达配置间隔后追加一条提醒并清零；AI 一调工具即清零（视作在干活）。
+    # 不带 task_scoped：讨论是跨任务的会话级状态，不随用户新输入复位。
+    style_discuss_rounds: int = field(default=0, repr=False)
+
     def reset_for_task(self) -> None:
         """复位全部任务级字段（task_scoped 标记驱动）。
 

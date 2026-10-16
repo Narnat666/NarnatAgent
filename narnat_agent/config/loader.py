@@ -30,6 +30,9 @@ from .defaults import (
     DEFAULT_AUTO_SAVE_TOKENS,
     DEFAULT_GOAL_MAX_ROUNDS,
     DEFAULT_GOAL_VERIFY,
+    DEFAULT_STYLE_NOTICE_ENABLED,
+    DEFAULT_STYLE_NOTICE_INTERVAL,
+    STYLE_NOTICE_TEXT,
 )
 
 
@@ -133,6 +136,19 @@ class SkillConfig:
 
 
 @dataclass(frozen=True)
+class StyleConfig:
+    """回话风格提醒配置（只读）
+
+    enabled=True 时，AI 连续 notice_interval 轮纯讨论（未调用任何工具）后，
+    在下一轮请求末尾追加一条提醒（仅发给AI，终端不显示）；AI 调工具即清零。
+    notice_text 为空时用内置默认文案；notice_interval<=0 视为关闭周期性提醒。
+    """
+    enabled: bool = DEFAULT_STYLE_NOTICE_ENABLED
+    notice_text: str = STYLE_NOTICE_TEXT
+    notice_interval: int = DEFAULT_STYLE_NOTICE_INTERVAL
+
+
+@dataclass(frozen=True)
 class PricingConfig:
     """定价配置（只读）"""
     # 用户自定义定价（中文key映射到英文key）
@@ -202,6 +218,7 @@ class Config:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
     skills: SkillConfig = field(default_factory=SkillConfig)
+    style: StyleConfig = field(default_factory=StyleConfig)
     pricing: PricingConfig = field(default_factory=PricingConfig)
     balance: BalanceConfig = field(default_factory=BalanceConfig)
     cost_log: CostLogConfig = field(default_factory=CostLogConfig)
@@ -520,7 +537,7 @@ def _load_json(config_dir: str) -> dict:
 
 # 顶层段类型规范：值必须为对象的段（非对象时警告并回落默认，防止启动崩溃）
 _DICT_SECTIONS = ("智能体", "余额查询", "联网搜索", "定价", "界面",
-                  "工具", "会话", "压缩", "费用日志", "技能")
+                  "工具", "会话", "压缩", "费用日志", "技能", "风格")
 
 
 def _sanitize_sections(data: dict) -> None:
@@ -908,6 +925,11 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
                             "压缩": DEFAULT_COMPRESS_RATIO,
                             "保留尾部": DEFAULT_COMPRESS_RETAIN_TOKENS,
                         },
+                        "风格": {
+                            "启用": DEFAULT_STYLE_NOTICE_ENABLED,
+                            "提醒语": "",
+                            "间隔轮数": DEFAULT_STYLE_NOTICE_INTERVAL,
+                        },
                         "忽略目录": DEFAULT_IGNORE_DIRS,
                     }, f, indent=2, ensure_ascii=False)
                 else:
@@ -957,6 +979,16 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
     _retain_raw = _coerce(data.get("压缩", {}).get("保留尾部"), int)
     compress_retain = (DEFAULT_COMPRESS_RETAIN_TOKENS if _retain_raw is None
                        else max(0, _retain_raw))
+
+    # 风格提醒语：非字符串或空白 → 内置默认文案（配置写坏不至于变哑巴）
+    _notice_raw = data.get("风格", {}).get("提醒语")
+    style_notice = (_notice_raw.strip()
+                    if isinstance(_notice_raw, str) and _notice_raw.strip()
+                    else STYLE_NOTICE_TEXT)
+    # 间隔轮数：0 是合法值（关闭周期性提醒），不能用 `or` 兜底；负数按 0 处理
+    _interval_raw = _coerce(data.get("风格", {}).get("间隔轮数"), int)
+    style_interval = (DEFAULT_STYLE_NOTICE_INTERVAL if _interval_raw is None
+                      else max(0, _interval_raw))
 
     # 补充 AIConfig 的 retry_count（从JSON读取，不在 _build_ai_config 中处理）
     ai_config = AIConfig(
@@ -1009,6 +1041,11 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
             retain_tokens=compress_retain,
         ),
         skills=SkillConfig(project_roots=_parse_project_skill_roots(data)),
+        style=StyleConfig(
+            enabled=_coerce_bool(data.get("风格", {}).get("启用"), DEFAULT_STYLE_NOTICE_ENABLED),
+            notice_text=style_notice,
+            notice_interval=style_interval,
+        ),
         pricing=pricing_config,
         balance=balance_config,
         cost_log=cost_log_config,

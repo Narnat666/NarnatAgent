@@ -81,6 +81,16 @@ class CompressionCoordinator:
             lines.append(f"{i}. [{label}] {t.get('content', '')}")
         self._msg_manager.append_user_merged("\n".join(lines))
 
+    def _append_compaction_notice(self):
+        """压缩成功后的提醒：历史已被摘要替换，按摘要继续。
+
+        无开关、压缩成功即发（提示模型别复述已压缩的历史、别问"我们聊到哪了"）；
+        仅注入AI上下文，终端不展示（内部纠偏，用户无需感知）。
+        """
+        self._msg_manager.append_user_merged(
+            "[系统提醒] 对话历史过长已压缩，早前内容已总结为上下文成果；"
+        )
+
     def compress(self, pending_input: str) -> bool:
         """处理上下文压缩。
 
@@ -122,6 +132,7 @@ class CompressionCoordinator:
         if res.ok:
             self._ui.end_compressing()
             self._context.reset()
+            self._append_compaction_notice()
             self._append_plan_reminder()
             if self._session_mgr is not None:
                 # 自动压缩同手动 /compact：压缩把列表整体替换，探索分支的
@@ -185,8 +196,8 @@ class CompressionCoordinator:
     def compress_manual(self) -> Tuple[str, str]:
         """手动压缩（/compact 命令）：不受占比阈值限制，不携带新输入。
 
-        与自动压缩的区别：压缩后不追加任何 user 消息（命令不是对话内容）；
-        失败/取消不改动占比与重试状态（历史未变，真实 token 数不变）。
+        与自动压缩的区别：压缩后不为命令追加对话内容（命令本身不是对话内容），
+        只追加系统提醒；失败/取消不改动占比与重试状态（历史未变，真实 token 数不变）。
         命令在输入模式下执行（ESC 轮询已停），此处临时切到运行模式，
         使压缩过程中的 Esc 取消与运行中压缩手感一致。
 
@@ -222,6 +233,7 @@ class CompressionCoordinator:
 
         if res.ok:
             self._context.reset()
+            self._append_compaction_notice()
             self._append_plan_reminder()
             self._logger.info(
                 "compressor",
