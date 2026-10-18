@@ -546,12 +546,14 @@ class AgentLoop:
                 continue
 
             # ── 完成验证：AI 声明完成（goal_complete 置位）→ 独立验证器复核 ──
-            # 诚实收尾（含未完成/受阻项）、已强制放行、收尾轮均不验证，直接走结案。
+            # 触发判据只看「申报了文件改动没有」：有改动就要实地核实改动的真伪，
+            # 与清单是否含未完成/受阻项无关——申报受阻同样要核（核的是"改了什么、
+            # 阻碍理由是否成立"），否则AI可借"未完成"绕过全部核查。
+            # 已强制放行（机械拒绝超限）、收尾轮不验证：二者是防死循环的出口。
             # 触发门槛：清单未申报任何文件改动（纯查询/推导类任务）时无文件可核对 →
             # 跳过独立复核直接结案（省掉一次无据可查的验证往返）。
             if (goal_mode
                     and self._tool_context.goal_complete
-                    and not self._tool_context.goal_honest       # 诚实收尾（含未完成/受阻项）不验证
                     and not self._tool_context.goal_forced       # 已强制放行
                     and not force_final                          # 收尾轮不验证
                     and self._config.ai.goal_verify              # 配置开关

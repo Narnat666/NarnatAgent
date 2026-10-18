@@ -171,8 +171,8 @@ def _approve(ctx, checklist, forced: bool = False) -> str:
         )
     if ctx.goal_honest:
         return (
-            "[GOAL_COMPLETE] 完成声明已提交（清单含未完成/受阻项）。"
-            "请向用户总结完成情况与未完成原因。"
+            "[GOAL_COMPLETE] 完成声明已提交（清单含未完成/受阻项），"
+            "系统将独立复核申报的阻碍是否成立。请向用户总结完成情况与未完成原因。"
         )
     return "[GOAL_COMPLETE] 完成声明已提交，系统将独立复核。请向用户总结完成情况。"
 
