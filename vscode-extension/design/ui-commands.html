@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Narnat · 命令 → UI 对照</title>
+<style>
+:root{
+  --bg:#1e1e1e;--bg-elev:#232323;--bg-hover:#2a2a2a;--bg-code:#191919;
+  --fg:#cfcfcf;--fg-dim:#939393;--fg-faint:#6b6b6b;
+  --line:#2c2c2c;--line-strong:#3c3c3c;
+  --accent:#5a9fd4;--ok:#5aa87a;--warn:#c9a227;--err:#c96a6a;
+  --font:-apple-system,"Segoe UI Variable Text","Segoe UI","Microsoft YaHei",sans-serif;
+  --mono:ui-monospace,"Cascadia Mono",Consolas,"Courier New",monospace;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#fff;--bg-elev:#fbfbfb;--bg-hover:#f4f4f4;--bg-code:#f7f7f7;
+    --fg:#2c2c2c;--fg-dim:#6a6a6a;--fg-faint:#9c9c9c;
+    --line:#ececec;--line-strong:#dcdcdc;--accent:#1a6fc4;
+    --ok:#2e7d55;--warn:#8a6d1f;--err:#b04040;
+  }
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg);color:var(--fg);
+  font-family:var(--font);font-size:13px;line-height:1.7;overflow:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;padding:0}
+.wrap{display:flex;height:100%}
+
+/* ---------- 左栏 ---------- */
+.side{
+  flex:none;width:190px;border-right:1px solid var(--line);
+  overflow-y:auto;padding:16px 0;
+}
+.side .ttl{
+  font-size:10.5px;color:var(--fg-faint);letter-spacing:.06em;
+  padding:0 16px 10px;
+}
+.side .grp{
+  font-size:10px;color:var(--fg-faint);padding:12px 16px 4px;
+  letter-spacing:.05em;
+}
+.side .it{
+  display:flex;align-items:baseline;gap:8px;
+  padding:4px 16px;font-size:12px;color:var(--fg-dim);cursor:pointer;
+  border-left:2px solid transparent;
+}
+.side .it:hover{background:var(--bg-hover);color:var(--fg)}
+.side .it[data-sel="true"]{
+  color:var(--fg);border-left-color:var(--accent);background:var(--bg-hover);
+}
+.side .it .c{font-family:var(--mono);font-size:11.5px;flex:none;width:76px}
+
+/* ---------- 右栏 ---------- */
+.main{flex:1;min-width:0;overflow-y:auto;padding:24px 28px 40px}
+.main > *{max-width:860px}
+h1{font-size:15px;font-weight:600;margin:0 0 4px;letter-spacing:.01em}
+h1 .m{font-family:var(--mono);color:var(--fg-dim);font-weight:400}
+.sub{font-size:12px;color:var(--fg-faint);margin:0 0 22px;line-height:1.7}
+
+.sec{margin-bottom:22px}
+.sec-h{
+  font-size:11px;color:var(--fg-faint);letter-spacing:.05em;
+  margin-bottom:7px;display:flex;align-items:baseline;gap:8px;
+}
+.sec-h .tag{
+  font-size:10px;padding:0 5px;border-radius:3px;
+  background:var(--bg-hover);color:var(--fg-faint);
+}
+
+/* 终端回显 */
+.term{
+  font-family:var(--mono);font-size:11.5px;line-height:1.75;
+  background:var(--bg-code);border-radius:6px;padding:10px 12px;
+  white-space:pre;overflow-x:auto;color:var(--fg-dim);
+}
+.term .p{color:var(--accent)}
+.term .cur{color:var(--fg)}
+.term .hl{color:var(--fg);font-weight:600}
+.term .dim{color:var(--fg-faint)}
+.term .ok{color:var(--ok)}
+.term .err{color:var(--err)}
+.term .warn{color:var(--warn)}
+
+/* UI 模拟 */
+.mock{
+  border:1px solid var(--line);border-radius:8px;
+  padding:12px;background:var(--bg-elev);
+}
+.mock .mt{
+  font-size:10.5px;color:var(--fg-faint);margin-bottom:9px;
+  letter-spacing:.04em;
+}
+
+/* 表格 */
+table{border-collapse:collapse;width:100%;font-size:12px}
+th{
+  text-align:left;font-weight:400;font-size:10.5px;color:var(--fg-faint);
+  padding:4px 10px 4px 0;border-bottom:1px solid var(--line);
+  letter-spacing:.04em;
+}
+td{
+  padding:5px 10px 5px 0;border-bottom:1px solid var(--line);
+  color:var(--fg-dim);vertical-align:top;
+}
+tr:last-child td{border-bottom:none}
+td .c{font-family:var(--mono);font-size:11.5px;color:var(--fg)}
+
+/* 会话列表（mock /ls） */
+.slist{font-family:var(--mono);font-size:11.5px;color:var(--fg-dim)}
+.slist .hd{color:var(--fg-faint);font-size:10.5px;padding:2px 0}
+.slist .row{
+  display:flex;align-items:baseline;gap:0;padding:2px 6px;
+  border-radius:4px;
+}
+.slist .row:hover{background:var(--bg-hover)}
+.slist .row[data-cur="true"]{background:var(--bg-hover);color:var(--fg)}
+.slist .tree{color:var(--fg-faint);white-space:pre;flex:none}
+.slist .nm{color:var(--fg);flex:none;min-width:150px}
+.slist .meta{color:var(--fg-faint);flex:1;min-width:0;text-align:left}
+.slist .act{
+  flex:none;display:flex;gap:6px;opacity:0;transition:opacity .1s;
+}
+.slist .row:hover .act{opacity:1}
+.slist .act button{
+  font-size:10px;font-family:var(--font);color:var(--fg-dim);
+  border:1px solid var(--line-strong);border-radius:3px;padding:0 6px;
+}
+.slist .act button:hover{color:var(--fg);border-color:var(--fg-dim)}
+.slist .act button.del:hover{color:var(--err);border-color:var(--err)}
+
+/* 开关行 */
+.opt{
+  display:flex;align-items:center;gap:10px;
+  padding:6px 0;font-size:12.5px;
+}
+.opt .lbl{width:118px;color:var(--fg-dim);flex:none}
+.opt .seg{display:flex;gap:2px}
+.opt .seg button{
+  font-size:11.5px;padding:1px 9px;border-radius:4px;color:var(--fg-faint);
+}
+.opt .seg button:hover{background:var(--bg-hover);color:var(--fg-dim)}
+.opt .seg button[data-on="true"]{background:var(--bg-hover);color:var(--fg)}
+.opt .desc{color:var(--fg-faint);font-size:11px}
+
+/* 插件表 */
+.pt{font-family:var(--mono);font-size:11.5px}
+.pt .pr{
+  display:flex;align-items:center;gap:10px;padding:3px 0;color:var(--fg-dim);
+}
+.pt .pr .nm{width:88px;color:var(--fg);flex:none}
+.pt .pr .tg{
+  font-family:var(--font);font-size:10.5px;padding:0 7px;border-radius:3px;
+  border:1px solid var(--line-strong);color:var(--fg-faint);width:34px;text-align:center;
+}
+.pt .pr .tg[data-on="true"]{color:var(--ok);border-color:var(--ok)}
+.pt .pr .lb{color:var(--fg-faint);font-size:11px}
+
+/* 分支卡 */
+.branch{
+  border:1px solid var(--line);border-radius:6px;padding:10px 12px;
+  margin-bottom:8px;
+}
+.branch .r1{display:flex;align-items:baseline;gap:8px;margin-bottom:3px}
+.branch .r1 .nm{font-family:var(--mono);font-size:12px;color:var(--fg)}
+.branch .r1 .st{font-size:10.5px;color:var(--fg-faint)}
+.branch .r1 .st.done{color:var(--ok)}
+.branch .r2{font-size:11.5px;color:var(--fg-faint)}
+.branch .acts{display:flex;gap:8px;margin-top:8px}
+.branch .acts button{
+  font-size:11px;border:1px solid var(--line-strong);border-radius:4px;
+  padding:1px 10px;color:var(--fg-dim);
+}
+.branch .acts button:hover{color:var(--fg)}
+.branch .acts button.primary{border-color:var(--accent);color:var(--accent)}
+
+/* 建议标签 */
+.verdict{
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:11px;padding:1px 8px;border-radius:10px;
+  border:1px solid var(--line-strong);color:var(--fg-faint);
+}
+.verdict[data-v="ui"]{color:var(--ok);border-color:var(--ok)}
+.verdict[data-v="cmd"]{color:var(--warn);border-color:var(--warn)}
+.verdict[data-v="both"]{color:var(--accent);border-color:var(--accent)}
+
+/* 聊天输入条（模拟） */
+.cbar{
+  display:flex;align-items:center;gap:8px;
+  border:1px solid var(--line-strong);border-radius:6px;
+  padding:6px 10px;background:var(--bg);
+  font-size:12px;color:var(--fg-faint);
+}
+.cbar .cmd{font-family:var(--mono);color:var(--fg)}
+.cbar .k{margin-left:auto;font-size:10px;color:var(--fg-faint)}
+
+/* 待确认 */
+.cfm{border:1px solid var(--line-strong);border-radius:6px;padding:9px 11px}
+.cfm .q{font-size:12px;margin-bottom:6px}
+.cfm .l{
+  font-family:var(--mono);font-size:11px;color:var(--fg-dim);
+  background:var(--bg-code);border-radius:3px;padding:2px 6px;margin-bottom:3px;
+}
+.cfm .a{display:flex;gap:8px;margin-top:8px}
+.cfm .a button{
+  font-size:11.5px;border:1px solid var(--line-strong);border-radius:4px;
+  padding:2px 12px;color:var(--fg-dim);
+}
+.cfm .a button.y{border-color:var(--err);color:var(--err)}
+
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{
+  background:var(--line-strong);border-radius:5px;border:3px solid var(--bg);
+}
+::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- 左栏：15 个命令 -->
+  <nav class="side" id="side">
+    <div class="ttl">命令</div>
+
+    <div class="grp">会话</div>
+    <div class="it" data-k="save"><span class="c">/save</span><span>保存</span></div>
+    <div class="it" data-k="ls"><span class="c">/ls</span><span>列出</span></div>
+    <div class="it" data-k="cd"><span class="c">/cd</span><span>进入</span></div>
+    <div class="it" data-k="rm"><span class="c">/rm</span><span>删除</span></div>
+    <div class="it" data-k="explore"><span class="c">/explore</span><span>分支</span></div>
+    <div class="it" data-k="done"><span class="c">/done</span><span>合并</span></div>
+
+    <div class="grp">上下文</div>
+    <div class="it" data-k="compact"><span class="c">/compact</span><span>压缩</span></div>
+    <div class="it" data-k="clear"><span class="c">/clear</span><span>清屏</span></div>
+    <div class="it" data-k="skill"><span class="c">/skill</span><span>技能</span></div>
+
+    <div class="grp">模型与行为</div>
+    <div class="it" data-k="mode"><span class="c">/mode</span><span>模型</span></div>
+    <div class="it" data-k="thinking"><span class="c">/thinking</span><span>思考强度</span></div>
+    <div class="it" data-k="thinkback"><span class="c">/thinkback</span><span>思考回传</span></div>
+    <div class="it" data-k="goal"><span class="c">/goal</span><span>目标模式</span></div>
+    <div class="it" data-k="plugin"><span class="c">/plugin</span><span>插件</span></div>
+
+    <div class="grp">退出</div>
+    <div class="it" data-k="exit"><span class="c">/exit</span><span>退出</span></div>
+  </nav>
+
+  <!-- 右栏：对照 -->
+  <main class="main" id="main"></main>
+</div>
+
+<script>
+(function(){
+  var P = function(s){ return '<span class="p">#</span> ' + s; };
+
+  var DATA = {
+    ls: {
+      title: '/ls',
+      desc: '列出会话树：今天全部，更早最多 3 个父会话。/ls --all 看全部。带 └── 的是探索分支。',
+      verdict: 'both',
+      verdictText: '命令保留，UI 应做成侧栏常驻',
+      why: '这是所有会话操作里最需要"看全局"的一个。终端里是一屏文字，看完还得手动敲 /cd 名字；UI 里可以直接点名字进入，把两步合成一步。',
+      term: [
+        P('ls'),
+        '  <span class="dim">今天 (2)</span>',
+        '  <span class="dim">├──</span> <span class="hl">grep-ignore-case</span>  <span class="dim">(14:32, 28条)</span>  <span class="ok">◀ 当前</span>',
+        '  <span class="dim">│     ├──</span> try-regex  <span class="ok">✓ 已完成 (14:20)</span>',
+        '  <span class="dim">│     └──</span> alt-approach  <span class="warn">⚠ 待完成 (14:25, 12条)</span>',
+        '  <span class="dim">└──</span> ui-webview  <span class="dim">(11:05, 64条)</span>',
+        '  ',
+        '  <span class="dim">更早 (5)</span>',
+        '  <span class="dim">├──</span> refactor-tools  <span class="dim">(10-16, 41条)</span>',
+        '  <span class="dim">└──</span> theme-tokens  <span class="dim">(10-15, 22条)</span>',
+        '  <span class="dim">… 还有 3 条更早的会话 (/ls --all 查看)</span>'
+      ].join('\n'),
+      mock: function(){
+        return '<div class="slist">' +
+          '<div class="hd">今天 (2)</div>' +
+          row(true, 0, 'grep-ignore-case', '14:32 · 28 条 · ◀ 当前') +
+          row(true, 1, 'try-regex', '✓ 已完成 14:20', true, false) +
+          row(true, 1, 'alt-approach', '⚠ 待完成 14:25 · 12 条', false, true) +
+          row(true, 0, 'ui-webview', '11:05 · 64 条') +
+          '<div class="hd" style="padding-top:8px">更早 (5)</div>' +
+          row(true, 0, 'refactor-tools', '10-16 · 41 条') +
+          row(true, 0, 'theme-tokens', '10-15 · 22 条') +
+          '<div class="row"><span class="tree"> </span><span class="meta" style="color:var(--fg-faint)">… 还有 3 条（滚动到底自动加载）</span></div>' +
+          '</div>';
+      }
+    },
+
+    cd: {
+      title: '/cd <名称>',
+      desc: '进入历史会话，把它的消息加载进当前上下文。子会话用 /cd 父/子 或 /cd 唯一子名。',
+      verdict: 'ui',
+      verdictText: 'UI 点名字就够了，命令可保留作老用户习惯',
+      why: '唯一参数是名字，名字只能从 /ls 里抄——这本质上是"从列表里选一项"。UI 里直接点会话行即可，不需要输入。',
+      term: [
+        P('ls'),
+        '  <span class="dim">├──</span> refactor-tools  <span class="dim">(10-16, 41条)</span>',
+        '',
+        P('cd refactor-tools'),
+        '  <span class="ok">已进入会话:</span> <span class="hl">refactor-tools</span>',
+        '',
+        '<span class="dim">（上下文切换为 41 条历史消息，可继续提问）</span>'
+      ].join('\n'),
+      mock: function(){
+        return '<div class="slist">' +
+          row(true, 0, 'refactor-tools', '10-16 · 41 条 · 点这一行即进入这是等价操作') +
+          '</div>' +
+          '<div style="margin-top:10px;font-size:11.5px;color:var(--fg-faint)">' +
+          'UI 里：鼠标移到会话行 → 行变亮 → 点击即进入，无参数输入。</div>';
+      }
+    },
+
+    rm: {
+      title: '/rm <名称 | --all>',
+      desc: '标记删除，退出 agent 时才真正删除。',
+      verdict: 'ui',
+      verdictText: 'UI 应加二次确认，比终端安全',
+      why: '终端里敲 /rm 名字是"无确认直接标记"，删错只能靠退出前来不及补救。UI 有确认弹窗，反而更安全。',
+      term: [
+        P('rm old-session'),
+        '  <span class="ok">已标记删除:</span> <span class="hl">old-session</span>  <span class="dim">(退出agent时生效)</span>',
+        '',
+        P('ls'),
+        '  <span class="dim">└──</span> old-session  <span class="dim">(10-14, 8条)</span>  <span class="err">✘ 退出后删除</span>'
+      ].join('\n'),
+      mock: function(){
+        return '<div class="cfm">' +
+          '<div class="q">删除会话 <span style="font-family:var(--mono)">old-session</span>？</div>' +
+          '<div style="font-size:11px;color:var(--fg-faint);margin-bottom:6px">退出 Narnat 时生效，此前可撤销。</div>' +
+          '<div class="a"><button class="y">删除</button><button>取消</button></div>' +
+          '</div>';
+      }
+    },
+
+    explore: {
+      title: '/explore <名称>',
+      desc: '以当前上下文为起点创建探索分支（子会话），在分支里试错，不影响主会话。',
+      verdict: 'ui',
+      verdictText: 'UI 一个按钮 + 输入名字',
+      why: '这是 Narnat 最有特色的功能，但终端里要先记住命令语法。UI 里应该显眼——顶栏一个「探索分支」按钮，点击后内联输入框填名字。',
+      term: [
+        P('explore try-regex'),
+        '  <span class="ok">已进入探索分支:</span> <span class="hl">try-regex</span>  <span class="dim">(/done 合并结论, /exit 暂离)</span>',
+        '',
+        '<span class="dim">（分支从当前 28 条消息复制出发，之后的改动只影响分支）</span>'
+      ].join('\n'),
+      mock: function(){
+        return '<div class="branch">' +
+          '<div class="r1"><span class="nm">try-regex</span><span class="st">进行中 · 从主分支 28 条复制</span></div>' +
+          '<div class="r2">在分支里试错，不影响主会话</div>' +
+          '<div class="acts"><button class="primary">合并结论</button><button>暂离</button><button>删除</button></div>' +
+          '</div>' +
+          '<div style="display:flex;gap:8px;margin-top:8px">' +
+          '<input placeholder="新分支名称…" style="flex:1;background:var(--bg);border:1px solid var(--line-strong);' +
+          'border-radius:5px;padding:4px 9px;font:inherit;font-size:12px;color:var(--fg);outline:none">' +
+          '<button style="font-size:12px;border:1px solid var(--accent);color:var(--accent);border-radius:5px;padding:3px 12px">创建分支</button>' +
+          '</div>';
+      }
+    },
+
+    done: {
+      title: '/done',
+      desc: '结束探索分支：把分支过程浓缩成结构化检查点，合并回父会话。',
+      verdict: 'ui',
+      verdictText: 'UI 按钮，但要显示合并结果',
+      why: '终端里 /done 之后只看到"结论已合并"，看不到合并了什么。UI 可以把结构化检查点直接渲染出来，让用户知道主分支收到了什么。',
+      term: [
+        P('done'),
+        '  <span class="dim">正在合并…</span>',
+        '  <span class="ok">探索分支已完成，结论已合并</span>',
+        '',
+        '<span class="dim">（主会话追加一条 system 消息：子会话 [try-regex] 结论）</span>'
+      ].join('\n'),
+      mock: function(){
+        return '<div class="branch">' +
+          '<div class="r1"><span class="nm">try-regex</span><span class="st done">✓ 已完成</span></div>' +
+          '<div class="r2">检查点已合并回 grep-ignore-case · 8 个新增量小节 · 1120 字</div>' +
+          '<div class="acts"><button>查看合并内容</button></div>' +
+          '</div>';
+      }
+    },
+
+    save: {
+      title: '/save [名称]',
+      desc: '保存当前会话。不填名称时用 AI 自动命名。',
+      verdict: 'both',
+      verdictText: 'UI 用无名称保存 + 就地改名',
+      why: '自动命名已经够用，终端里让人想名字反而增加摩擦。UI 应该默认一键保存（AI 命名），想改再双击标题重命名。',
+      term: [
+        P('save'),
+        '  <span class="ok">会话已保存:</span> <span class="hl">grep-ignore-case</span>'
+      ].join('\n'),
+      mock: function(){
+        return '<div class="opt"><span class="lbl">当前会话</span>' +
+          '<span style="font-family:var(--mono);font-size:12px">grep-ignore-case</span>' +
+          '<button style="font-size:11px;color:var(--fg-faint);border:1px solid var(--line-strong);' +
+          'border-radius:4px;padding:0 8px">重命名</button></div>' +
+          '<div style="font-size:11.5px;color:var(--fg-faint);margin-top:6px">' +
+          '顶栏会话名右侧一个「已保存」状态点，自动保存后变绿，无需手动操作。</div>';
+      }
+    },
+
+    compact: {
+      title: '/compact',
+      desc: '手动压缩上下文：摘要全部历史，保留近期尾部。过程中可取消。',
+      verdict: 'ui',
+      verdictText: 'UI 按钮 + 进度',
+      why: '终端里压缩是不可见的黑盒（只有一行"正在压缩"）。UI 可以显示压缩前后条数、节省的 token、以及压缩摘要的可折叠预览。',
+      term: [
+        P('compact'),
+        '  <span class="dim">* 正在压缩...</span>',
+        '  <span class="ok">压缩完成 · 42 条 → 9 条</span> <span class="dim">(12.4s)</span>'
+      ].join('\n'),
+      mock: function(){
+        return '<div class="opt"><span class="lbl">上下文</span>' +
+          '<span style="font-family:var(--mono);font-size:11.5px;color:var(--fg-dim)">42 条 · 12% 窗口</span>' +
+          '<button style="font-size:11px;color:var(--fg-dim);border:1px solid var(--line-strong);' +
+          'border-radius:4px;padding:0 10px">立即压缩</button></div>' +
+          '<div style="font-size:11.5px;color:var(--fg-faint);margin-top:6px">' +
+          '压缩中显示进度条；完成后消息流里插入一条系统事件行，可展开看压缩摘要。</div>';
+      }
+    },
+
+    clear: {
+      title: '/clear',
+      desc: '清理屏幕（只影响显示，不动上下文）。',
+      verdict: 'cmd',
+      verdictText: 'UI 里改名「收起历史」，不用 /clear',
+      why: '终端清屏是因为滚上去很卡。UI 里滚动的成本几乎为零，所以"清屏"没有意义。真正有用的是"折叠到某条消息之前"——但那是另一个功能，不该混在 /clear 里。',
+      term: [
+        P('clear'),
+        '<span class="dim">（屏幕清空，上下文不变）</span>',
+        '',
+        P(''),
+        '<span class="dim">↑ 提示符回到顶部，历史消息仍在内存里</span>'
+      ].join('\n'),
+      mock: function(){
+        return '<div style="font-size:12px;color:var(--fg-dim);line-height:1.8">' +
+          'UI 建议：不提供「清屏」。改为每条消息悬停时出现「从此处折叠」，' +
+          '折叠后消息不进入上下文计算但保留可展开。</div>';
+      }
+    },
+
+    skill: {
+      title: '/skill <名称 | 路径.md>',
+      desc: '加载技能文件（.narnat/config/skills/ 或项目目录），正文追加为 system 消息。',
+      verdict: 'both',
+      verdictText: 'UI 做成技能列表，点击加载',
+      why: '技能名需要记忆。UI 可以从 skills 目录读出文件列表，做成下拉/列表，显示每个技能的第一行描述。',
+      term: [
+        P('skill code-review'),
+        '  <span class="ok">已加载技能:</span> <span class="hl">code-review</span>',
+        '',
+        '<span class="dim">（技能正文 + 技能目录路径追加为 system 消息）</span>'
+      ].join('\n'),
+      mock: function(){
+        return '<div class="slist">' +
+          '<div class="row"><span class="nm" style="min-width:130px">code-review</span>' +
+          '<span class="meta">代码审查清单 · 已加载</span><span class="act"><button>卸载</button></span></div>' +
+          '<div class="row"><span class="nm" style="min-width:130px">commit-msg</span>' +
+          '<span class="meta">提交信息规范</span><span class="act"><button>加载</button></span></div>' +
+          '<div class="row"><span class="nm" style="min-width:130px">debug-playbook</span>' +
+          '<span class="meta">排查步骤</span><span class="act"><button>加载</button></span></div>' +
+          '</div>';
+      }
+    },
+
+    mode: {
+      title: '/mode [模型名]',
+      desc: '切换模型，写回 config 持久化。不填则列出可用模型。',
+      verdict: 'ui',
+      verdictText: 'UI 顶栏下拉，切换即时生效',
+      why: '这是纯选择操作，终端里还要记模型名。UI 下拉最自然，还能显示每个模型的价格/上下文长度。',
+      term: [
+        P('mode'),
+        '  <span class="dim">当前模型:</span> <span class="hl">deepseek-chat</span>',
+        '  <span class="dim">可用: deepseek-chat / deepseek-reasoner / claude-sonnet / kimi-k2</span>',
+        '',
+        P('mode deepseek-reasoner'),
+        '  <span class="ok">设置成功：deepseek-reasoner</span>'
+      ].join('\n'),
+      mock: function(){
+        return '<div class="opt"><span class="lbl">模型</span>' +
+          '<div class="seg"><button data-on="true">deepseek-chat</button>' +
+          '<button>deepseek-reasoner</button><button>claude-sonnet</button></div></div>' +
+          '<div style="font-size:11.5px;color:var(--fg-faint);margin-top:4px">' +
+          '状态行那颗「模型」也可点，弹出同一个下拉。</div>';
+      }
+    },
+
+    thinking: {
+      title: '/thinking [低|中|高]',
+      desc: '切换思考强度，写回 config。不填则显示当前值。',
+      verdict: 'ui',
+      verdictText: 'UI 三档分段控件',
+      why: '三个值，切换频繁。UI 用分段控件最合适，并且可以显示"高 = 更多 token"。',
+      term: [
+        P('thinking'),
+        '  <span class="hl">当前思考强度: 高</span>',
+        '',
+        P('thinking 低'),
+        '  <span class="ok">思考强度已切换为: 低</span>'
+      ].join('\n'),
+      mock: function(){
+        return '<div class="opt"><span class="lbl">思考强度</span>' +
+          '<div class="seg"><button>低</button><button>中</button><button data-on="true">高</button></div>' +
+          '<span class="desc">影响 token 消耗与推理深度</span></div>';
+      }
+    },
+
+    thinkback: {
+      title: '/thinkback [on|off]',
+      desc: '思考回传开关：开启时把思考内容随消息回传给 API（部分模型强制）。',
+      verdict: 'ui',
+      verdictText: 'UI 开关，但要写清副作用',
+      why: '这个开关直接影响能否在 UI 上显示思考（源码里 passback 关闭时不 yield thinking）。UI 必须明确说明：关掉 = 节省上下文，但界面看不到思考。',
+      term: [
+        P('thinkback'),
+        '  <span class="hl">思考回传: 开</span> <span class="dim">（DeepSeek 工具轮次强制）</span>',
+        '',
+        P('thinkback off'),
+        '  <span class="ok">思考回传已关闭</span>'
+      ].join('\n'),
+      mock: function(){
+        return '<div class="opt"><span class="lbl">思考回传</span>' +
+          '<div class="seg"><button data-on="true">开</button><button>关</button></div></div>' +
+          '<div style="font-size:11.5px;color:var(--fg-faint);margin-top:4px">' +
+          '关掉后界面不再显示思考内容（也省上下文）。当前模型 deepseek-chat <b style="color:var(--warn)">强制开启</b>。</div>';
+      }
+    },
+
+    goal: {
+      title: '/goal [on [轮数] | off]',
+      desc: '目标模式：任务没完成时自动续跑，直到 AI 声明完成或达到轮数上限。',
+      verdict: 'ui',
+      verdictText: 'UI 开关 + 轮数输入 + 进度显示',
+      why: '这是 Narnat 最有价值的自动化特性。终端里只有一行提示符是看不出来的，UI 应该常驻显示"第 2/10 轮"和停止按钮。',
+      term: [
+        P('goal on 10'),
+        '  <span class="ok">目标模式已开启</span>  <span class="dim">(本轮上限</span> <span class="hl">10</span> <span class="dim">轮)</span>',
+        '',
+        '<span class="dim">（AI 未声明完成时自动续跑；每轮在消息流里插一条系统事件）</span>',
+        P('goal off'),
+        '  <span class="ok">目标模式已关闭</span>'
+      ].join('\n'),
+      mock: function(){
+        return '<div class="opt"><span class="lbl">目标模式</span>' +
+          '<div class="seg"><button>关</button><button data-on="true">开</button></div>' +
+          '<span class="desc">轮数上限</span>' +
+          '<input value="10" style="width:44px;background:var(--bg);border:1px solid var(--line-strong);' +
+          'border-radius:4px;padding:1px 6px;font:inherit;font-size:11.5px;color:var(--fg);outline:none">' +
+          '</div>' +
+          '<div style="font-size:11.5px;color:var(--fg-faint);margin-top:4px">' +
+          '开启后在输入框 chips 里显示「目标 开 · 2/10」，并出现停止按钮。</div>';
+      }
+    },
+
+    plugin: {
+      title: '/plugin [名称 on|off]',
+      desc: '插件工具开关：关掉的工具下一轮起不再发给 LLM（省 token），不断开已有连接。',
+      verdict: 'ui',
+      verdictText: 'UI 做成开关列表',
+      why: '终端里 /plugin 是一屏表格，改一个要敲一次命令。UI 里一排开关最直观，而且能看到每个插件对应的中文说明。',
+      term: [
+        P('plugin'),
+        '  <span class="dim">插件开关: 12/12 开启  用法: /plugin &lt;名称&gt; &lt;on|off&gt;</span>',
+        '    <span class="hl">terminal</span>  on   <span class="dim">多终端持久 SSH</span>',
+        '    <span class="hl">serial</span>    on   <span class="dim">多终端持久串口</span>',
+        '    <span class="hl">mcp</span>       on   <span class="dim">MCP 服务器管理</span>',
+        '    <span class="dim">…</span>',
+        '',
+        P('plugin serial off'),
+        '  <span class="ok">已关闭插件:</span> <span class="hl">serial</span>',
+        '  <span class="dim">Serial 工具下一轮起不再发送给 LLM（已有连接保持）</span>'
+      ].join('\n'),
+      mock: function(){
+        return '<div class="pt">' +
+          pr('terminal', true, '多终端持久 SSH') +
+          pr('serial', true, '多终端持久串口') +
+          pr('mcp', true, 'MCP 服务器管理') +
+          pr('web_search', true, '联网搜索') +
+          pr('serial', false, '多终端持久串口') +
+          '</div>';
+      }
+    },
+
+    exit: {
+      title: '/exit',
+      desc: '退出程序。在探索分支里是「暂离分支」。',
+      verdict: 'cmd',
+      verdictText: 'UI 不需要这个命令',
+      why: 'VSCode 里关面板就是关面板，没有"退出进程"的概念——除非做常驻守护进程（C 形态）。那种情况下也应该由扩展生命周期管理，不该让用户敲命令。',
+      term: [
+        P('exit'),
+        '  <span class="dim">已退出会话</span>',
+        '',
+        '<span class="dim">（在探索分支中执行则显示：已暂离探索分支  (/cd 回来继续)）</span>'
+      ].join('\n'),
+      mock: function(){
+        return '<div style="font-size:12px;color:var(--fg-dim);line-height:1.8">' +
+          'UI 建议：不提供退出命令。若是常驻守护进程形态，' +
+          '由扩展 deactivate 时自动断开，并在下次激活时自动重连。</div>';
+      }
+    }
+  };
+
+  function row(isTree, depth, name, meta, done, warn){
+    var tree = depth === 0 ? (isTree ? '├── ' : '') : '│     ' + (done ? '├── ' : '└── ');
+    var n = '<span class="nm">' + name + '</span>';
+    var m = '<span class="meta">' + meta + '</span>';
+    return '<div class="row">' +
+      '<span class="tree">' + tree + '</span>' + n + m +
+      '<span class="act"><button>进入</button><button class="del">删除</button></span>' +
+      '</div>';
+  }
+
+  function pr(name, on, label){
+    return '<div class="pr"><span class="nm">' + name + '</span>' +
+      '<span class="tg"' + (on ? ' data-on="true"' : '') + '>' + (on ? 'on' : 'off') + '</span>' +
+      '<span class="lb">' + label + '</span></div>';
+  }
+
+  var main = document.getElementById('main');
+  var side = document.getElementById('side');
+  var cur = 'ls';
+
+  function render(k){
+    cur = k;
+    var d = DATA[k];
+    var vMap = { ui: '建议全部用 UI 操作', both: '两者都保留', cmd: 'UI 里可以去掉' };
+    var html = '';
+    html += '<h1><span class="m">' + d.title + '</span></h1>';
+    html += '<p class="sub">' + d.desc + '</p>';
+
+    html += '<div class="sec"><div class="sec-h">终端里输入会看到 <span class="tag">真实输出格式</span></div>';
+    html += '<div class="term">' + d.term + '</div></div>';
+
+    html += '<div class="sec"><div class="sec-h">UI 里怎么操作 <span class="tag">可交互</span></div>';
+    html += '<div class="mock"><div class="mt">' + vMap[d.verdict] + '</div>' + d.mock() + '</div></div>';
+
+    html += '<div class="sec"><div class="sec-h">判断</div>';
+    html += '<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">';
+    html += '<span class="verdict" data-v="' + d.verdict + '">' + d.verdictText + '</span></div>';
+    html += '<p class="sub" style="margin:0">' + d.why + '</p></div>';
+
+    main.innerHTML = html;
+    main.scrollTop = 0;
+
+    Array.prototype.forEach.call(side.querySelectorAll('.it'), function(it){
+      it.setAttribute('data-sel', it.getAttribute('data-k') === k ? 'true' : 'false');
+    });
+  }
+
+  side.addEventListener('click', function(e){
+    var it = e.target.closest('.it');
+    if (it) render(it.getAttribute('data-k'));
+  });
+
+  render('ls');
+})();
+</script>
+</body>
+</html>

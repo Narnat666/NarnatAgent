@@ -285,6 +285,31 @@ def _find_narnat_exe_dir() -> Optional[str]:
     return None
 
 
+def _is_ephemeral_install_dir(exe_dir: str) -> bool:
+    """exe 所在目录是不是「会被整体替换掉」的安装目录。
+
+    VSCode 扩展目录（…/.vscode/extensions/<id>-<ver>/bin）是典型：
+    升级 vsix 时 VSCode 会**删掉整个扩展目录再装新的**，于是
+    任何放在里面的数据（含 API Key 的配置、会话、费用日志）都会一起消失，
+    而且升级命令退出码还是 0、报「安装成功」（实测：升级一次丢光全部会话）。
+    同样危险的还有临时解压目录、/tmp 下的临时安装位置。
+    """
+    try:
+        low = exe_dir.replace("\\", "/").lower()
+    except Exception:
+        return False
+    markers = (
+        "/.vscode/extensions/", "/.vscode-insiders/extensions/",
+        "/.vscode-server/extensions/", "/.cursor/extensions/",
+        # VSCode 便携版：解压目录里 data/extensions/<id>-<ver>/bin。
+        # 不在上面几条里，漏掉会导致便携版用户的数据仍落在扩展目录内，
+        # 升级 vsix 时被一起删掉（会话列表空、Key 要重填）。
+        "/data/extensions/",
+        "/appdata/local/temp/", "/tmp/",
+    )
+    return any(m in low for m in markers)
+
+
 def _find_project_root() -> str:
     # 1. 环境变量优先级最高，允许用户显式指定
     env_home = os.environ.get("NARNAT_HOME")
@@ -294,6 +319,14 @@ def _find_project_root() -> str:
     # 2. Nuitka onefile 模式
     if _is_nuitka_onefile():
         exe_dir = _find_narnat_exe_dir()
+        # 装进 VSCode 扩展目录时，绝不能把数据放在 exe 旁边：
+        # 升级 vsix 会把整个扩展目录删掉重建，用户配置（含 API Key）、
+        # 全部会话、费用日志会一起消失，而升级命令退出码是 0
+        #（实测：升级一次丢光）。改放到用户主目录下的 .narnat。
+        if exe_dir and _is_ephemeral_install_dir(exe_dir):
+            home_dir = os.path.expanduser("~")
+            if home_dir and os.path.isdir(home_dir):
+                return home_dir
         if exe_dir and os.path.isdir(os.path.join(exe_dir, NARNAT_DIR)):
             return exe_dir
         if exe_dir:
@@ -303,6 +336,10 @@ def _find_project_root() -> str:
     # 3. PyInstaller / Nuitka standalone 模式
     if getattr(sys, 'frozen', False):
         exe_dir = os.path.dirname(sys.executable)
+        if exe_dir and _is_ephemeral_install_dir(exe_dir):
+            home_dir = os.path.expanduser("~")
+            if home_dir and os.path.isdir(home_dir):
+                return home_dir
         if os.path.isdir(os.path.join(exe_dir, NARNAT_DIR)):
             return exe_dir
         return exe_dir
@@ -332,9 +369,32 @@ def _coerce(v, target_type):
         return None
 
 
+_LOAD_WARNINGS: List[str] = []
+
+
 def _warn(msg: str) -> None:
-    """配置问题警告：输出到 stderr（不干扰 stdout 的界面输出流）"""
+    """配置问题警告：输出到 stderr（不干扰 stdout 的界面输出流）。
+
+    同时留一份给 RPC 界面用：配置坏掉时后端会「按默认配置继续」，
+    一切看起来正常，直到用户发消息收到 401 —— 他只会以为 API Key 失效，
+    实际是整份配置（含密钥）被丢弃了（实测）。所以警告必须能到界面。
+    """
     print(f"[警告] {msg}", file=sys.stderr)
+    if len(_LOAD_WARNINGS) < 20:
+        _LOAD_WARNINGS.append(msg)
+
+
+def take_load_warnings() -> List[str]:
+    """取走本次加载产生的配置警告。
+
+    清空过一次就不再产生新警告（配置只在进程启动时读一次），所以这里
+    **不再清空**：每次 initialize 都返回同一份，让用户每次重开面板都看到。
+    清空会怎样（实测）：只有第一次握手带警告，重开面板/重连之后
+    configWarnings 变成 []，界面上只剩一个 401——用户去查密钥，
+    而真因是配置文件坏了（后端按默认配置启动，Key 也是空的）。
+    配置一直坏着，警告就该一直在。
+    """
+    return list(_LOAD_WARNINGS)
 
 
 def _int_or(value, default: int) -> int:
@@ -542,6 +602,20 @@ _DICT_SECTIONS = ("智能体", "余额查询", "联网搜索", "定价", "界面
 
 def _sanitize_sections(data: dict) -> None:
     """顶层段类型防御（就地修正）：非预期类型时警告并回落默认"""
+    # 未知段名：多半是把段名拼错了（`智能体` 写成 `智能休`）。
+    # 不警告会怎样（实测）：整段被忽略，里面的接口密钥/模型全部静默丢弃，
+    # 界面只剩一句「还没填 API Key」——用户于是去填密钥，而真正要改的是段名，
+    # 填了也不会生效。这里把「看到了但不认识的段」直接点出来。
+    _known = set(_DICT_SECTIONS) | {"忽略目录"}
+    for name in list(data.keys()):
+        if name in _known:
+            continue
+        _warn(f"「{name}」不是已知的配置段，已忽略；"
+              f"如果是段名拼错了，请对照可用段名：{'、'.join(_DICT_SECTIONS)}")
+    # 必需的「智能体」段缺失：同样会表现为「什么都没配置」
+    if "智能体" not in data:
+        _warn("缺少「智能体」段，密钥与模型设置都不会生效；"
+              "请补上该段（或删除配置文件让程序重新生成）")
     for name in _DICT_SECTIONS:
         if name in data and not isinstance(data[name], dict):
             _warn(f"「{name}」段格式错误（应为对象），已按默认处理")

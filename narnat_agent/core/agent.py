@@ -65,14 +65,18 @@ class Agent:
                     cmd = parts[0]
                     args = parts[1] if len(parts) > 1 else ""
                     result = self._ui.dispatch_command(cmd, args)
-                    if result == 2:
+                    if int(result) == 2:
                         self._auto_save.on_exit()
                         self._logger.info("core.agent", "用户退出")
                         # os._exit 不走 finally：MCP 服务端子进程在此显式回收
                         self._parts.mcp_manager.cleanup()
                         self._logger.close()
                         os._exit(0)
-                    if result == 1:
+                    # HANDLED(1) 与 FAILED(3) 都表示「这条输入已被命令层消费」。
+                    # FAILED 也必须 continue：漏掉它的话，一条失败的斜杠命令
+                    # 会继续往下走、被当成普通对话发给模型（命令已报错，
+                    # 模型又对着 "/cd 不存在的名字" 回答一通）。
+                    if int(result) in (1, 3):
                         continue
 
                 # 2. 轮次计数（余额查询周期用）+ 余额查询
@@ -87,6 +91,16 @@ class Agent:
                 if self._context.need_compress():
                     compress_ok = self._compression.compress(stripped)
                     if not compress_ok:
+                        # 压缩被用户中断：这一轮到此为止，必须收口。
+                        # 压缩发生在 create_stream() 之前，没有 stream 可 close_turn，
+                        # 不收口的话服务端 _turn_active 永远是 true ——
+                        # 之后所有消息都被 busy 拒、界面上一直「运行中」，只能重载窗口。
+                        _close = getattr(self._ui, "close_cancelled_turn", None)
+                        if _close is not None:
+                            try:
+                                _close()
+                            except Exception:
+                                pass
                         continue
 
                 # 4. 追加用户消息

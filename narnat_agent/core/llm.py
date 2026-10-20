@@ -644,6 +644,13 @@ class _OpenAIBackend:
             content_buffer = []
             reasoning_buffer = []  # DeepSeek/Kimi OpenAI 协议：reasoning_content（思考回传用）
             _tc_idx = 0
+            # 思考内容流式下发条件：与结束时 thinking 回传判定同源（开关 + 协议查表）。
+            # 关闭回传时连 thinking_delta 也不下发，语义与 anthropic 侧保持一致。
+            rc_delta_on = (
+                self._config.thinking_enabled
+                and getattr(self._config, "thinking_passback", True)
+                and resolve_thinking_passback("openai", request_model) == "reasoning_content"
+            )
 
             chunk_queue = queue.Queue()
             stream_err = []   # 流迭代异常（服务端中途断开）
@@ -710,6 +717,8 @@ class _OpenAIBackend:
                     rc = (getattr(delta, 'model_extra', None) or {}).get('reasoning_content')
                 if rc:
                     reasoning_buffer.append(rc)
+                    if rc_delta_on:
+                        yield {"thinking_delta": rc}
 
                 if delta.tool_calls:
                     for tc in delta.tool_calls:
@@ -735,12 +744,7 @@ class _OpenAIBackend:
                     received_finish = True
                     # 思考回传开关 + 查表：reasoning_content 格式时随完成标记上报思考
                     # （与 anthropic 后端的 thinking 上报同构，上层统一存进消息的 thinking 字段）
-                    rc_on = (
-                        self._config.thinking_enabled
-                        and getattr(self._config, "thinking_passback", True)
-                        and resolve_thinking_passback("openai", request_model) == "reasoning_content"
-                    )
-                    thinking_out = "".join(reasoning_buffer) if rc_on else None
+                    thinking_out = "".join(reasoning_buffer) if rc_delta_on else None
                     if tool_calls_buffer:
                         completed_calls = []
                         for tc_id, buf in tool_calls_buffer.items():
@@ -1116,6 +1120,9 @@ class _AnthropicBackend:
                         if thinking_text:
                             thinking_buffer.append(thinking_text)
                             thinking_blocks[idx] = thinking_blocks.get(idx, "") + thinking_text
+                            # 回传开关关闭：思考内容不下发（含流式增量），与 message_delta 分支一致
+                            if getattr(self._config, "thinking_passback", True):
+                                yield {"thinking_delta": thinking_text}
 
                     elif d_type == "input_json_delta":
                         pj = delta.get("partial_json", "")

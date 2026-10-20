@@ -31,14 +31,23 @@ class Summarizer:
                   cancel_check: Callable[[], bool]) -> str:
         """用 LLM 总结消息内容（探索分支合并时使用）"""
         summary_parts = []
+        failed = False
         for chunk in self._llm.chat_stream(messages, no_tools=True,
                                            cancel_check=cancel_check):
             if cancel_check():
                 return ""
+            # LLM 出错时正文就是一整段错误文案（如「[错误: API调用失败(401): …]」）。
+            # 不判 finish_reason 会把它当成"总结结论"返回，/done 于是把这段
+            # 错误原文合并进父会话、还把分支标成 completed —— 用户以为结论
+            # 已经合并，实际父会话里多了一条假的结论（实测，数据被污染）。
+            if chunk.get("finish_reason") == "error":
+                failed = True
             if "content" in chunk and "tool_calls" not in chunk:
                 summary_parts.append(chunk["content"])
             if "usage" in chunk and self._stats is not None:
                 self._log_usage(chunk["usage"])
+        if failed:
+            return ""
         return "".join(summary_parts)
 
     def name_session(self, messages: List[Dict[str, Any]]) -> str:
@@ -55,12 +64,19 @@ class Summarizer:
             "content": f"请为以上对话起一个简短标题（15字以内），直接输出标题，不要引号不要解释。{hint}\n[重要]不要调用任何工具，直接输出标题文本。"
         })
         parts = []
+        failed = False
         for chunk in self._llm.chat_stream(name_messages, no_tools=False, no_thinking=True,
                                            cancel_check=lambda: False):
+            # 同 summarize：出错时正文是错误文案，不能拿它当会话名
+            # （否则会话列表里会出现一个叫「[错误: API调用失败(401)…]」的会话）
+            if chunk.get("finish_reason") == "error":
+                failed = True
             if "content" in chunk and "tool_calls" not in chunk:
                 parts.append(chunk["content"])
             if "usage" in chunk and self._stats is not None:
                 self._log_usage(chunk["usage"])
+        if failed:
+            return ""
         name = "".join(parts).strip()
         if not name:
             return ""

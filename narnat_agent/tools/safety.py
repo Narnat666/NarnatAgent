@@ -57,6 +57,52 @@ RE_DELETE = re.compile(
 # 匹配 git 命令的简单正则（出现 git 即命中）
 RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
 
+# 杀进程类命令：与删除同级——不可撤销，而且会连带杀掉看不见的东西。
+# 原来一条都不在判定表里（实测全部直接执行）：AI 排查「端口占用」时先
+# tasklist 找到 python.exe 的 PID，紧接着 taskkill /PID <pid> /F ——
+# **没有确认条**，那个 PID 正是它自己的后端，后端立刻退出、面板掉线，
+# 这一轮没有 turn/end，用户只能干等超时。
+# 这类命令的错误代价是「整个会话被打断」，远超一次确认的打扰。
+#
+# 判定比删除更严：必须是**命令位置**，不能出现在普通参数位。
+# 删除词（rm/del）几乎不会作为参数出现，但 kill 会——`grep kill app.log`、
+# `findstr kill`、`Select-String kill` 都是正常排查操作，若沿用 _CMD_POS
+# （含裸空白）会被误判成删除、headless 下直接取消执行（实测）。
+# 这里只认行首或命令连接符（& | ; ( `）之后，连接符与命令名之间允许空白。
+_KILL_CMD_POS = r"(?:^|[&|;(`])@?\s*"
+RE_KILL = re.compile(
+    _KILL_CMD_POS + r"(?:taskkill|killall|kill|pkill)\b"
+    + r"|" + _KILL_CMD_POS + r"(?:stop-process|terminateprocess)\b",
+    re.IGNORECASE,
+)
+
+# 会覆盖/清空已有文件的写法——原来一条都不在判定表里（实测全部直接执行）：
+#   echo hi > important.txt      截断覆盖
+#   copy /y a.txt b.txt          静默覆盖目标
+#   xcopy src dst /Y /E          覆盖同名
+#   robocopy src dst /MIR        /MIR 会删掉目标里源没有的全部文件
+# 只收「明确覆盖/删除语义」的四种，不碰 mv/move（重命名是常规操作，
+# 每次弹确认会把正常用法烦死）。
+# `>` 重定向排除 /dev/null 与 NUL（写丢弃是常见无害写法）。
+RE_OVERWRITE = re.compile(
+    # 覆盖重定向：单个 > （不是 >> 追加、不是 >= 、不是 2>&1），
+    # 目标不是 /dev/null / NUL（写丢弃是常见无害写法）。
+    # (?<!>) 必须有：只看 (?!>) 时，`>> log` 的第二个 > 会被当成覆盖。
+    # 目标用 * 不用 +：`echo x > "文件"` 里引号内容会被 _split_quoted 移到
+    # containers，outside 里 > 后面就是空串——要求 + 会把带引号的覆盖全漏掉
+    #（实测：`echo overwritten > "C:/tmp/a.txt"` 判 False）。
+    # 两个分支并列（不是 \s* 后面接 *）：单分支时 \s* 会回溯成 0 个字符，
+    # 让 `> /dev/null` 绕过 /dev/null 的排除（实测误报）。
+    r"(?<![0-9&>])>(?!>)(?!=)"
+    r"(?:\s*(?!/dev/null\b)(?!NUL\b)(?!nul\b)[^\s|&;]+|\s*$)"
+    # copy /y、xcopy ... /Y
+    + r"|\bcopy\b[^\n]*?\s/y\b"
+    + r"|\bxcopy\b[^\n]*?\s/y\b"
+    # robocopy ... /MIR
+    + r"|\brobocopy\b[^\n]*?\s/mir\b",
+    re.IGNORECASE,
+)
+
 # cmd 延迟展开变量引用（!VAR!）与 set 赋值：单独出现均为正常文本（如
 # `echo "wow!nice!"`、`cmd /v:on /c "set PATH=…;!PATH! && …"`）；
 # 劫词条件 = set 赋值与 !VAR! 成对出现 **且展开后文本命中删除判定**
@@ -161,13 +207,21 @@ def _segment_hits(segment: str) -> bool:
 
 
 def match_delete(command: str) -> bool:
-    """删除类命令判定（含 ^ 归一化、引号语义结构化、变量拼接条件拦截）"""
+    """删除类命令判定（含 ^ 归一化、引号语义结构化、变量拼接条件拦截）。
+
+    杀进程（taskkill / Stop-Process / pkill …）也归在这里：对用户来说
+    「删掉一个文件」和「杀掉一个进程」都是不可撤销的破坏，代价同级。
+    """
     if not command or not isinstance(command, str):
         return False
     outside, containers = _split_quoted(scan_text(command))
     if _segment_hits(outside):
         return True
-    return any(_segment_hits(c) for c in containers)
+    if RE_KILL.search(outside):
+        return True
+    if any(_segment_hits(c) or RE_KILL.search(c) for c in containers):
+        return True
+    return False
 
 
 def match_git(command: str) -> bool:
@@ -178,3 +232,23 @@ def match_git(command: str) -> bool:
     if RE_GIT.search(outside):
         return True
     return any(RE_GIT.search(c) for c in containers)
+
+
+def match_overwrite(command: str) -> bool:
+    """覆盖/清空已有文件的写法判定。
+
+    这几类在任何配置下都不问就会执行（实测）：`echo hi > important.txt`
+    直接把用户文件截断，`copy /y` / `xcopy /Y` 静默覆盖目标，
+    `robocopy /MIR` 还会删掉目标目录里源没有的文件。
+
+    不受 `rm免确认` / `git免确认` 影响：那两个开关的语义是「删除/git 类少问」，
+    而这里是覆盖——用户从来没为「覆盖文件」配过免确认。
+
+    与 match_delete 一样走引号语义：`echo "a > b"` 里的 > 不算重定向。
+    """
+    if not command or not isinstance(command, str):
+        return False
+    outside, containers = _split_quoted(scan_text(command))
+    if RE_OVERWRITE.search(outside):
+        return True
+    return any(RE_OVERWRITE.search(c) for c in containers)

@@ -166,6 +166,16 @@ def execute(file_path: str, content: str,
                 color_diff = colorize_diff(diff)
         except Exception:
             pass
+    else:
+        # 新建文件也要出 diff。只给「(N字节)」会怎样（实测）：AI 写了 866 行、
+        # 31KB 的文件，面板上只显示「已写入 X (31954字节)」，一行代码都看不到——
+        # 用户必须去编辑器打开才知道它写了什么，面板等于没有呈现改动的能力。
+        # 新建等价于「空文件 → 全部新增」，直接按这个语义生成 diff。
+        try:
+            diff = _make_diff("", content, file_path)
+            color_diff = colorize_diff(diff)
+        except Exception:
+            pass
 
     try:
         data = content.encode("utf-8")

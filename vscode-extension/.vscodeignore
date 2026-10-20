@@ -1,0 +1,15 @@
+.vscode-test/**
+node_modules/**
+test/**
+design/**
+scripts/**
+shots/**
+.playwright-mcp/**
+**/*.map
+# Nuitka onefile 的运行期解压缓存（beside 模式会在 exe 旁边建这个目录）。
+# 它是一次性缓存，绝不能进包：实测带进 vsix 后包里多 1620 个文件、
+# 397.6MB，装机后整个扩展目录 888.9MB，其中一半是永远不会用的旧缓存。
+bin/narnat_runtime/**
+output/**
+# 用户自己的配置与数据不该随扩展分发
+.narnat/**

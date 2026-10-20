@@ -543,6 +543,12 @@ def execute(
         need_confirm = True
     elif command and tc and not tc.git_skip_confirm and safety.match_git(command):
         need_confirm = True
+    elif command and tc and safety.match_overwrite(command):
+        # 覆盖已有文件（> 重定向 / copy /y / xcopy /Y / robocopy /MIR）：
+        # 不受「rm免确认」「git免确认」影响——那两个开关从没承诺过覆盖也免问。
+        # 不拦会怎样（实测）：AI 一句 `echo hi > important.txt` 直接把用户
+        # 文件截断，Shell 侧没有 diff、没有备份，事后找不回。
+        need_confirm = True
 
     if need_confirm:
         # 暂存命令由 agent 主循环在 # 提示符下等用户确认后重放；

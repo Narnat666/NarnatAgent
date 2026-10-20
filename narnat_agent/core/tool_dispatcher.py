@@ -5,9 +5,10 @@
 
 import json
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 
 from ..tools.registry import (
     execute as tool_execute, get_capability, capability_names,
@@ -16,7 +17,7 @@ from ..tools.bash import kill_active as _kill_bash
 from ..tools.terminal import kill_active_exec as _kill_terminal_exec
 from ..tools.terminal import resolve_dev_display as _dev_display
 from ..tools.serial import kill_active_exec as _kill_serial_exec
-from ..tools.tool_context import ToolContext
+from ..tools.tool_context import ToolContext, AWAIT_CONFIRM
 from ..tools.exec_signal import has_error, strip_tags
 from ..tools.param_utils import to_bool
 from ..output import write as _stdout_write, D, R, X, is_quiet_tools
@@ -29,6 +30,65 @@ def _local_hostname() -> str:
         return socket.gethostname()
     except Exception:
         return "localhost"
+
+
+# ── 着色diff → 结构化diff（RPC tool/result.diff 用；终端展示不受影响）──
+_ANSI_SEQ = re.compile(r"\x1b\[[0-9;]*m")
+_HUNK_HEAD = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+# 结构化 diff 最多带多少条变更行（新建大文件时防止 133KB payload）
+_DIFF_LINES_MAX = 200
+
+
+def _struct_diff(color_diff: str) -> Optional[dict]:
+    """把着色 unified diff 解析成协议要求的结构。
+
+    仅保留变更行（add/del）及其行号：add 用新文件行号，del 用旧文件行号；
+    "无差异"返回空行列表，无 diff（空串）返回 None。上下文行只推进行号不输出。
+    """
+    if not color_diff:
+        return None
+    plain = _ANSI_SEQ.sub("", color_diff)
+    if plain.strip() == "[无差异]":
+        return {"added": 0, "removed": 0, "lines": []}
+    added = removed = 0
+    old_no = new_no = 0
+    lines = []
+    seen_hunk = False
+    for raw in plain.split("\n"):
+        # 文件头只在第一个 @@ 之前出现。用「见过 hunk 了吗」做判据而不是
+        # 纯前缀：删掉一行内容为 `--` 的代码时，unified diff 里那一行是
+        # `---`，与文件头 `--- a/xxx` 同前缀，按前缀跳过会把这一行内容吃掉
+        #（实测：代码里的分隔线 `---` 在 diff 里凭空消失，用户以为没删）。
+        head = _HUNK_HEAD.match(raw)
+        if head:
+            seen_hunk = True
+            old_no, new_no = int(head.group(1)), int(head.group(2))
+            continue
+        if not seen_hunk and (raw.startswith("--- ") or raw.startswith("+++ ")):
+            continue
+        if raw.startswith("---") or raw.startswith("+++"):
+            # 还没进 hunk 但也没空格（极短的伪头）：同样是头，跳过
+            if not seen_hunk:
+                continue
+        if raw.startswith("-"):
+            removed += 1
+            lines.append({"type": "del", "no": old_no, "text": raw[1:]})
+            old_no += 1
+        elif raw.startswith("+"):
+            added += 1
+            lines.append({"type": "add", "no": new_no, "text": raw[1:]})
+            new_no += 1
+        else:
+            old_no += 1
+            new_no += 1
+    # 变更行太多时只带前若干行进协议：一个 1000 行的新建文件会产生 1000 条
+    # 结构化行、133KB 的 tool/result，前端要铺 1000 个 DOM 节点（实测渲染明显变慢）。
+    # 行头仍有 +N −M，用户能看出规模；要看全文去编辑器。
+    total_add, total_del = added, removed
+    if len(lines) > _DIFF_LINES_MAX:
+        lines = lines[:_DIFF_LINES_MAX]
+    return {"added": total_add, "removed": total_del, "lines": lines,
+            "truncated": (total_add + total_del) > len(lines)}
 
 
 def _mcp_target_hint(config) -> str:
@@ -63,8 +123,38 @@ def _style_file_path(name: str, arguments: dict) -> str:
     dev = _dev_display(dev_raw) if dev_raw else ""
     if dev == _local_hostname():
         dev = ""
-    fp = arguments.get("file_path", "")
+    fp = _shorten_path(str(arguments.get("file_path", "") or ""))
     return f"{dev}:{fp}" if dev else fp
+
+
+# 工具行里路径的显示上限（字符）。宽面板一行能放下 60 个左右的等宽字符，
+# 再多就把行头的「名称 / 耗时 / 状态」全挤出去了。
+_PATH_SHOW_MAX = 46
+
+
+def _shorten_path(fp: str) -> str:
+    """把过长的路径缩成「上级目录\文件名」，中间省略。
+
+    为什么不能简单截尾：两个不同文件可能在行头显示成同一个字符串——
+    `E:\\…\\sandbox\\rect_area.py` 与 `E:\\…\\sandbox\\rect_perimeter.py`
+    截尾后都是 `…\\rect_…`，用户看不出改的是哪一个，必须逐个展开核对（实测）。
+    Windows 路径分隔符两种都认（模型有时给正斜杠）。
+    """
+    if not fp or len(fp) <= _PATH_SHOW_MAX:
+        return fp
+    # 两种分隔符都要认：模型给的路径可能混用（`E:\a/b\c.py`）。
+    # 只用第一个出现的分隔符 split 会漏掉另一种，导致拼出来的 tail 丢字符。
+    parts = [p for p in re.split(r"[\\/]", fp) if p]
+    if not parts:
+        return fp
+    sep = "\\" if "\\" in fp else "/"
+    base = parts[-1]
+    parent = parts[-2] if len(parts) > 1 else ""
+    tail = (parent + sep + base) if parent else base
+    if len(tail) >= _PATH_SHOW_MAX:
+        # 文件名本身就很长：保留前若干字符，至少让不同文件的首部能区分
+        return "…" + sep + tail[-(_PATH_SHOW_MAX - 1):]
+    return "…" + sep + tail
 
 
 def _style_command(name: str, arguments: dict) -> str:
@@ -375,9 +465,11 @@ class ToolDispatcher:
         """执行单个工具调用，处理UI和日志"""
         # UI: 暂停spinner，flush渲染缓冲区，显示工具调用摘要
         stream.pause_spinner()
+        started = time.time()
         try:
             stream.flush_renderer()
             self._show_tool_call(name, arguments)
+            self._notify_tool_call(stream, tc_id, name, arguments)
 
             # 执行工具
             llm_result, color_diff = tool_execute(name, arguments, self._tool_context)
@@ -415,19 +507,27 @@ class ToolDispatcher:
             )
 
             # 展示着色diff
-            if color_diff:
-                self._show_diff(color_diff)
-            elif exec_failed:
-                # Shell/Terminal框架错误（带不可伪造标签）：终端补一行失败提示，原因只进AI上下文
-                self._show_tool_failed(name)
-            elif (not tagged_judge
-                  and isinstance(llm_result, str)
-                  and llm_result.startswith("[错误")):
+            tool_failed = (
+                exec_failed
                 # 非命令类工具(Read/Edit/Write/Serial等)：结果纯框架文本、绝无命令输出，
                 # startswith("[错误")即100%确定的工具错误
+                or (not tagged_judge
+                    and isinstance(llm_result, str)
+                    and llm_result.startswith("[错误"))
+            )
+            if color_diff:
+                self._show_diff(color_diff)
+            elif tool_failed:
+                # Shell/Terminal框架错误（带不可伪造标签）：终端补一行失败提示，原因只进AI上下文
                 self._show_tool_failed(name)
 
+            self._notify_tool_result(stream, tc_id, name, started,
+                                     llm_result, color_diff, tool_failed)
             return llm_result
+        except BaseException:
+            # 工具抛异常同样要成对下发结果事件，否则 RPC 侧 tool/call 悬空
+            self._notify_tool_result(stream, tc_id, name, started, "", None, True)
+            raise
         finally:
             # 工具抛异常也必须成对恢复，否则 pause 计数泄漏 → spinner 永久不再显示
             stream.resume_spinner()
@@ -512,6 +612,43 @@ class ToolDispatcher:
                 return f"MCP:{parts[1]}"
         return ToolDispatcher.TOOL_LABELS.get(name, name)
 
+    @staticmethod
+    def _tool_label_summary(name: str, arguments: dict) -> Tuple[str, str]:
+        """工具名→(终端标签, 摘要文本)。终端行与结构化钩子共用，避免两处各算一套。"""
+        label = ToolDispatcher._tool_label(name)
+        style = _SUMMARY_STYLES.get(get_capability(name)["summary"])
+        summary = style(name, arguments) if style else ""
+        return label, summary
+
+    @staticmethod
+    def _notify_tool_call(stream, tc_id: str, name: str, arguments: dict) -> None:
+        """把工具调用下发到 stream 的可选钩子（终端形态无此方法 → 什么都不做）"""
+        hook = getattr(stream, "on_tool_call", None)
+        if hook is None:
+            return
+        label, summary = ToolDispatcher._tool_label_summary(name, arguments)
+        hook(tool_call_id=tc_id, name=name, label=label,
+             dispatch=get_capability(name)["dispatch"], summary=summary,
+             arguments=arguments)
+
+    @staticmethod
+    def _notify_tool_result(stream, tc_id: str, name: str, started: float,
+                            output, color_diff, failed: bool) -> None:
+        """把工具结果下发到 stream 的可选钩子（终端形态无此方法 → 什么都不做）"""
+        hook = getattr(stream, "on_tool_result", None)
+        if hook is None:
+            return
+        # AWAIT_CONFIRM 是内部哨兵（工具还没执行，等用户确认）。
+        # 原样下发会让界面显示 "__AWAIT_CONFIRM__" 这串无意义文本；
+        # 换成用户看得懂的「等待确认」，确认后的真实结果由主循环补发。
+        text = output if isinstance(output, str) else ""
+        if text == AWAIT_CONFIRM:
+            text = "等待确认…"
+        hook(tool_call_id=tc_id, name=name, ok=not failed,
+             duration_ms=int(max(0.0, time.time() - started) * 1000),
+             output=text,
+             failed=failed, diff=_struct_diff(color_diff))
+
     def _show_tool_call(self, name: str, arguments: dict):
         """在终端显示工具调用摘要（静默模式跳过）
 
@@ -519,9 +656,7 @@ class ToolDispatcher:
         """
         if is_quiet_tools():
             return
-        label = self._tool_label(name)
-        style = _SUMMARY_STYLES.get(get_capability(name)["summary"])
-        summary = style(name, arguments) if style else ""
+        label, summary = self._tool_label_summary(name, arguments)
 
         if summary:
             _stdout_write(f"  {D}[{label}] {summary}{R}\n")

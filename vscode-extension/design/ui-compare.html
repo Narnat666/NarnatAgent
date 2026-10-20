@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Narnat UI 方案对比</title>
+<style>
+:root{
+  --bg:#1e1e1e;
+  --bg-elev:#232323;
+  --bg-hover:#2a2a2a;
+  --bg-code:#191919;
+  --fg:#cfcfcf;
+  --fg-dim:#919191;
+  --fg-faint:#6b6b6b;
+  --line:#2c2c2c;
+  --line-strong:#3c3c3c;
+  --accent:#5a9fd4;
+  --ok:#5aa87a;
+  --warn:#c9a227;
+  --err:#c96a6a;
+  --add:#1f3a29;
+  --del:#3a2121;
+  --font:-apple-system,"Segoe UI Variable Text","Segoe UI","Microsoft YaHei",sans-serif;
+  --mono:ui-monospace,"Cascadia Mono",Consolas,"Courier New",monospace;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#ffffff;
+    --bg-elev:#fbfbfb;
+    --bg-hover:#f4f4f4;
+    --bg-code:#f7f7f7;
+    --fg:#2c2c2c;
+    --fg-dim:#6a6a6a;
+    --fg-faint:#9c9c9c;
+    --line:#ebebeb;
+    --line-strong:#dcdcdc;
+    --accent:#1a6fc4;
+    --ok:#2e7d55;
+    --warn:#8a6d1f;
+    --err:#b04040;
+    --add:#eef7f0;
+    --del:#fdefef;
+  }
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg);
+  color:var(--fg);
+  font-family:var(--font);
+  font-size:13px;
+  line-height:1.7;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ---------- 外壳 ---------- */
+.shell{display:flex;flex-direction:column;height:100%}
+.bar{
+  display:flex;align-items:center;gap:16px;
+  padding:0 20px;height:44px;flex:none;
+  border-bottom:1px solid var(--line);
+}
+.brand{font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--fg)}
+.brand span{color:var(--fg-faint);font-weight:400;margin-left:8px;letter-spacing:0}
+.seg{display:flex;gap:2px;margin-left:auto}
+.seg button{
+  font:inherit;font-size:12px;color:var(--fg-dim);
+  background:none;border:none;border-radius:5px;
+  padding:4px 10px;cursor:pointer;
+}
+.seg button:hover{background:var(--bg-hover);color:var(--fg)}
+.seg button[aria-selected="true"]{background:var(--bg-hover);color:var(--fg)}
+
+.body{flex:1;display:flex;min-height:0}
+.convo{
+  flex:1;min-width:0;overflow-y:auto;
+  padding:28px 24px 8px;
+}
+.convo > *{max-width:720px;margin-left:auto;margin-right:auto}
+
+/* ---------- 对话 ---------- */
+.msg{padding:0 0 20px}
+.msg.user{margin-bottom:4px}
+.msg .who{
+  font-size:11px;color:var(--fg-faint);
+  letter-spacing:.04em;margin-bottom:6px;
+}
+.msg p{margin:0 0 10px}
+.msg p:last-child{margin-bottom:0}
+.msg code{
+  font-family:var(--mono);font-size:12px;
+  background:var(--bg-code);border-radius:3px;
+  padding:1px 4px;color:var(--fg);
+}
+.msg pre{
+  font-family:var(--mono);font-size:12px;line-height:1.6;
+  background:var(--bg-code);border-radius:6px;
+  padding:12px 14px;margin:10px 0 0;overflow-x:auto;
+}
+.msg ul{margin:0 0 10px;padding-left:18px}
+.msg li{margin-bottom:4px}
+.msg li::marker{color:var(--fg-faint)}
+
+/* 用户消息：不加气泡，用一条细竖线区分（方案 1 起底） */
+.msg.user .text{
+  border-left:2px solid var(--line-strong);
+  padding-left:12px;margin-left:-14px;color:var(--fg);
+}
+
+/* ---------- 思考块 ---------- */
+.think{margin-bottom:18px}
+.think-head{
+  display:flex;align-items:baseline;gap:0;
+  font-family:var(--mono);font-size:11.5px;color:var(--fg-faint);
+  padding:2px 8px 2px 0;border-radius:4px;cursor:pointer;
+  user-select:none;
+}
+.think-head:hover{background:var(--bg-hover)}
+.think-head .caret{
+  flex:none;width:14px;font-size:9px;transition:transform .1s;
+}
+.think[data-open="true"] .think-head .caret{transform:rotate(90deg)}
+.think[data-open="true"] .think-head{color:var(--fg-dim)}
+.think-head .live{color:var(--fg-dim)}
+.think-head .live::after{
+  content:"…";animation:dots 1.2s steps(4,end) infinite;
+}
+@keyframes dots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
+.think-body{display:none;padding:6px 12px 10px 24px}
+.think[data-open="true"] .think-body{display:block}
+.think-body p{
+  margin:0 0 8px;font-size:12.5px;line-height:1.75;color:var(--fg-dim);
+}
+.think-body p:last-child{margin-bottom:0}
+.think-body code{
+  font-family:var(--mono);font-size:11.5px;
+  background:var(--bg-code);border-radius:3px;padding:1px 4px;color:var(--fg-dim);
+}
+body[data-scheme="3"] .think-body p{font-size:13px;line-height:1.85}
+
+/* ---------- 工具行 ---------- */
+.tools{margin-bottom:20px}
+.tools > .t{
+  display:flex;align-items:baseline;gap:0;
+  min-height:28px;padding:3px 8px 3px 0;
+  font-family:var(--mono);font-size:12px;
+  color:var(--fg-dim);cursor:pointer;
+  border-radius:4px;
+}
+.tools > .t:hover{background:var(--bg-hover)}
+.tools > .t .caret{
+  flex:none;width:14px;color:var(--fg-faint);
+  font-size:9px;transition:transform .1s;
+}
+.tools > .t[data-open="true"] .caret{transform:rotate(90deg)}
+.tools > .t .name{flex:none;color:var(--fg-dim);padding-right:10px}
+.tools > .t .arg{
+  flex:1;min-width:0;color:var(--fg);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  padding-right:12px;
+}
+.tools > .t .meta{flex:none;color:var(--fg-faint);font-size:11px}
+.tools > .t .meta .bad{color:var(--err)}
+
+/* 工具内容块：与 arg 列对齐 */
+.tools > .t + .body-slot{display:none}
+.tools > .t[data-open="true"] + .body-slot{display:block}
+.body-slot{padding:2px 0 10px 24px}
+.snippet{
+  font-family:var(--mono);font-size:11.5px;line-height:1.7;
+  background:var(--bg-code);border-radius:6px;
+  padding:8px 0;overflow-x:auto;
+}
+.snippet .ln{
+  display:flex;padding:0 12px;
+}
+.snippet .ln .no{
+  flex:none;width:34px;color:var(--fg-faint);
+  text-align:right;padding-right:14px;user-select:none;
+}
+.snippet .ln .tx{white-space:pre}
+.snippet .ln.add{background:var(--add)}
+.snippet .ln.del{background:var(--del)}
+.snippet .ln.add .tx::before{content:"+ ";color:var(--ok)}
+.snippet .ln.del .tx::before{content:"- ";color:var(--err)}
+.snippet.out .ln{padding:0 12px;color:var(--fg-dim)}
+.snippet .ln.exit{padding:4px 12px 0;color:var(--fg-faint)}
+.snippet .ln.exit b{color:var(--ok);font-weight:400}
+
+/* ---------- 输入区 ---------- */
+.composer{
+  flex:none;padding:12px 24px 18px;border-top:1px solid var(--line);
+}
+.composer .box{
+  max-width:720px;margin:0 auto;
+  border:1px solid var(--line-strong);border-radius:8px;
+  background:var(--bg-elev);
+  padding:10px 12px 8px;
+}
+.composer .box:focus-within{border-color:var(--accent)}
+.composer textarea{
+  width:100%;border:none;background:none;resize:none;
+  font:inherit;font-size:13px;line-height:1.6;color:var(--fg);
+  outline:none;height:22px;
+}
+.composer textarea::placeholder{color:var(--fg-faint)}
+.composer .row{
+  display:flex;align-items:center;gap:8px;margin-top:4px;
+}
+.chip{
+  font-size:11px;color:var(--fg-dim);
+  padding:1px 6px;border-radius:4px;background:var(--bg-hover);
+}
+.chip.mono{font-family:var(--mono);font-size:10.5px}
+.composer .hint{margin-left:auto;font-size:11px;color:var(--fg-faint)}
+
+/* ---------- 调度栏（方案 2 / 3） ---------- */
+.dock{
+  flex:none;width:248px;border-left:1px solid var(--line);
+  overflow-y:auto;padding:16px 0;
+  display:none;
+}
+.dock-head{
+  display:flex;align-items:center;gap:8px;
+  padding:0 16px 12px;font-size:11px;color:var(--fg-faint);
+  letter-spacing:.05em;
+}
+.dock-head .live{
+  width:5px;height:5px;border-radius:50%;background:var(--ok);
+}
+.stage{padding:0 16px 14px}
+.stage-title{
+  display:flex;align-items:baseline;gap:6px;
+  font-size:11px;color:var(--fg-dim);margin-bottom:6px;
+}
+.stage-title em{
+  font-style:normal;color:var(--fg-faint);font-size:10.5px;
+}
+.d-item{
+  display:flex;align-items:baseline;gap:7px;
+  padding:3px 0;font-size:11.5px;
+}
+.d-item .dot{
+  flex:none;width:5px;height:5px;border-radius:50%;
+  background:var(--line-strong);margin-top:5px;
+}
+.d-item[data-st="run"] .dot{background:var(--accent);animation:pulse 1.4s ease-in-out infinite}
+.d-item[data-st="ok"] .dot{background:var(--ok)}
+.d-item[data-st="err"] .dot{background:var(--err)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.d-item .lbl{flex:none;color:var(--fg-dim)}
+.d-item .tg{
+  flex:1;min-width:0;color:var(--fg);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  font-family:var(--mono);font-size:10.5px;
+  direction:rtl;text-align:left;
+}
+.d-item .ms{flex:none;color:var(--fg-faint);font-size:10.5px;font-family:var(--mono)}
+.dock-sep{border-top:1px solid var(--line);margin:4px 16px 14px}
+
+/* ============ 方案 2：双栏（同方案 1 + 调度栏） ============ */
+body[data-scheme="2"] .dock{display:block}
+
+/* ============ 方案 3：分组长卷（更松，工具列表成组） ============ */
+body[data-scheme="3"] .convo{padding-top:36px}
+body[data-scheme="3"] .convo > *{max-width:780px}
+body[data-scheme="3"] .msg{padding-bottom:28px}
+body[data-scheme="3"] .dock{display:block;width:260px}
+body[data-scheme="3"] .tools{
+  border:1px solid var(--line);border-radius:8px;
+  padding:6px 4px;margin-bottom:28px;
+}
+body[data-scheme="3"] .tools > .t{padding:4px 10px}
+body[data-scheme="3"] .tools > .t:hover{background:var(--bg-hover)}
+body[data-scheme="3"] .body-slot{padding:2px 12px 10px 34px}
+body[data-scheme="3"] .group-label{
+  font-size:10.5px;color:var(--fg-faint);
+  letter-spacing:.05em;padding:6px 10px 2px;
+}
+body[data-scheme="3"] .msg.user .text{border-left-color:var(--accent)}
+
+/* 方案 1 / 2 隐藏分组标签 */
+body:not([data-scheme="3"]) .group-label{display:none}
+
+/* ---------- 顶部方案说明 ---------- */
+.note{
+  max-width:720px;margin:0 auto;padding:0 24px 20px;
+  font-size:11.5px;color:var(--fg-faint);line-height:1.7;
+}
+body[data-scheme="3"] .note{max-width:780px}
+.note b{color:var(--fg-dim);font-weight:500}
+
+/* ---------- 滚动条 ---------- */
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:var(--line-strong);border-radius:5px;border:3px solid var(--bg)}
+::-webkit-scrollbar-track{background:transparent}
+
+@media (max-width:820px){
+  body[data-scheme="2"] .dock,
+  body[data-scheme="3"] .dock{display:none}
+}
+</style>
+</head>
+<body data-scheme="1">
+<div class="shell">
+  <header class="bar">
+    <div class="brand">Narnat<span>UI 方案对比</span></div>
+    <div class="seg" role="tablist">
+      <button data-s="1" aria-selected="true">1 · 极简</button>
+      <button data-s="2">2 · 双栏</button>
+      <button data-s="3">3 · 分组长卷</button>
+    </div>
+  </header>
+
+  <div class="body">
+    <main class="convo" id="convo">
+      <div class="note" id="note"></div>
+
+      <div class="msg user">
+        <div class="text">给 grep 加一个忽略大小写的参数，改完跑测试确认没坏。</div>
+      </div>
+
+      <div class="think" data-open="false">
+        <div class="think-head">
+          <span class="caret">▶</span><span>思考 3.2s · 616 字</span>
+        </div>
+        <div class="think-body">
+          <p>用户要给 grep 加参数。先确认参数定义在哪一层——<code>DEFINITION["function"]["parameters"]</code> 是唯一的参数来源，执行层不需要改。</p>
+          <p>校验上应该复用现成的 <code>to_bool</code>，不要自己写字符串归一化，否则 <code>"false"</code> 这种会被当成真值。</p>
+          <p>改完要跑测试确认没破坏原有行为。注意仓库里可能没有 tests 目录，需要先确认测试入口。</p>
+        </div>
+      </div>
+
+      <div class="msg">
+        <p>grep 的参数定义在 <code>DEFINITION["function"]["parameters"]</code>，复用现成的 <code>to_bool</code> 做校验就行，只有参数表一处要改。</p>
+      </div>
+
+      <div class="tools">
+        <div class="group-label">只读 · 并行</div>
+
+        <div class="t" data-open="false">
+          <span class="caret">▶</span>
+          <span class="name">读取</span>
+          <span class="arg">narnat_agent/tools/grep/__init__.py</span>
+          <span class="meta">11ms</span>
+        </div>
+        <div class="body-slot">
+          <div class="snippet">
+            <div class="ln"><span class="no">226</span><span class="tx">"description": "文件过滤，如*.py、src/*.c"</span></div>
+            <div class="ln"><span class="no">227</span><span class="tx">"type": "string"</span></div>
+            <div class="ln"><span class="no">228</span><span class="tx">},</span></div>
+            <div class="ln"><span class="no">229</span><span class="tx">"head_limit": {</span></div>
+          </div>
+        </div>
+
+        <div class="t" data-open="false">
+          <span class="caret">▶</span>
+          <span class="name">搜索内容</span>
+          <span class="arg">to_bool</span>
+          <span class="meta">8ms</span>
+        </div>
+        <div class="body-slot">
+          <div class="snippet">
+            <div class="ln"><span class="no">1</span><span class="tx">narnat_agent/tools/param_utils.py</span></div>
+            <div class="ln"><span class="no">24</span><span class="tx">def to_bool(value, default=False):</span></div>
+          </div>
+        </div>
+
+        <div class="group-label">写入 · 同文件串行</div>
+
+        <div class="t" data-open="true">
+          <span class="caret">▶</span>
+          <span class="name">编辑</span>
+          <span class="arg">narnat_agent/tools/grep/__init__.py</span>
+          <span class="meta">+4 −1 · 9ms</span>
+        </div>
+        <div class="body-slot">
+          <div class="snippet">
+            <div class="ln"><span class="no">229</span><span class="tx">"type": "string",</span></div>
+            <div class="ln add"><span class="no">230</span><span class="tx">"ignore_case": {</span></div>
+            <div class="ln add"><span class="no">231</span><span class="tx">"type": "boolean",</span></div>
+            <div class="ln add"><span class="no">232</span><span class="tx">"description": "忽略大小写（等价 rg -i）",</span></div>
+            <div class="ln add"><span class="no">233</span><span class="tx">},</span></div>
+            <div class="ln"><span class="no">234</span><span class="tx">"head_limit": {</span></div>
+          </div>
+        </div>
+
+        <div class="group-label">串行 · 逐个执行</div>
+
+        <div class="t" data-open="false">
+          <span class="caret">▶</span>
+          <span class="name">执行命令</span>
+          <span class="arg">python -m pytest tests/ -q</span>
+          <span class="meta">exit 0 · 3.2s</span>
+        </div>
+        <div class="body-slot">
+          <div class="snippet out">
+            <div class="ln"><span class="tx">............                              [100%]</span></div>
+            <div class="ln"><span class="tx">12 passed in 3.18s</span></div>
+            <div class="ln exit"><span class="tx">退出码 <b>0</b></span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="msg">
+        <p>改完了：新增 <code>ignore_case</code> 布尔参数，透传给 ripgrep 的 <code>-i</code>。12 项测试全部通过。</p>
+        <p>需要我把这个参数同步加进 <code>Glob</code> 工具吗？它也走同一套大小写逻辑。</p>
+      </div>
+    </main>
+
+    <aside class="dock">
+      <div class="dock-head"><span class="live"></span>调度 · 3 阶段</div>
+
+      <div class="stage">
+        <div class="stage-title">只读<em>全部并行</em></div>
+        <div class="d-item" data-st="ok"><span class="dot"></span><span class="lbl">读取</span><span class="tg">grep/__init__.py</span><span class="ms">11</span></div>
+        <div class="d-item" data-st="ok"><span class="dot"></span><span class="lbl">搜索内容</span><span class="tg">to_bool</span><span class="ms">8</span></div>
+      </div>
+
+      <div class="dock-sep"></div>
+
+      <div class="stage">
+        <div class="stage-title">写入<em>同文件串行</em></div>
+        <div class="d-item" data-st="ok"><span class="dot"></span><span class="lbl">编辑</span><span class="tg">grep/__init__.py</span><span class="ms">9</span></div>
+      </div>
+
+      <div class="dock-sep"></div>
+
+      <div class="stage">
+        <div class="stage-title">串行<em>逐个执行</em></div>
+        <div class="d-item" data-st="ok"><span class="dot"></span><span class="lbl">执行命令</span><span class="tg">pytest -q</span><span class="ms">3.2s</span></div>
+        <div class="d-item" data-st="run"><span class="dot"></span><span class="lbl">复核</span><span class="tg">独立复核中</span><span class="ms">—</span></div>
+      </div>
+    </aside>
+  </div>
+
+  <footer class="composer">
+    <div class="box">
+      <textarea rows="1" placeholder="向 Narnat 提问，或描述要做的事…"></textarea>
+      <div class="row">
+        <span class="chip">deepseek-chat</span>
+        <span class="chip mono">工作目录</span>
+        <span class="chip">目标模式 关</span>
+        <span class="hint">Enter 发送 · Shift+Enter 换行</span>
+      </div>
+    </div>
+  </footer>
+</div>
+
+<script>
+(function(){
+  var NOTES = {
+    '1': '<b>方案 1 · 极简</b>　无气泡、无彩色边框、无阴影。对话一栏到底，思考与工具调用都压成一行等宽文本，点开才展开。留白优先，界面本身尽量不抢注意力。',
+    '2': '<b>方案 2 · 双栏</b>　在方案 1 基础上右侧加一条 248px 调度栏，用灰点和细线表达三阶段与执行状态。只在你需要时看，不打断对话节奏。',
+    '3': '<b>方案 3 · 分组长卷</b>　思考与工具调用收进容器成组呈现，行距与段落间距更大，分组标签常显。信息密度最低，最不挤。'
+  };
+  var note = document.getElementById('note');
+  var convo = document.getElementById('convo');
+  function apply(s){
+    document.body.setAttribute('data-scheme', s);
+    note.innerHTML = NOTES[s];
+    Array.prototype.forEach.call(document.querySelectorAll('.seg button'), function(b){
+      b.setAttribute('aria-selected', b.getAttribute('data-s') === s ? 'true' : 'false');
+    });
+    convo.scrollTop = 0;
+  }
+  document.querySelector('.seg').addEventListener('click', function(e){
+    var b = e.target.closest('button[data-s]');
+    if (b) apply(b.getAttribute('data-s'));
+  });
+  convo.addEventListener('click', function(e){
+    var row = e.target.closest('.t');
+    if (row) {
+      row.setAttribute('data-open', row.getAttribute('data-open') === 'true' ? 'false' : 'true');
+      return;
+    }
+    var th = e.target.closest('.think-head');
+    if (th) {
+      var box = th.parentNode;
+      box.setAttribute('data-open', box.getAttribute('data-open') === 'true' ? 'false' : 'true');
+    }
+  });
+  var q = new URLSearchParams(location.search).get('s');
+  apply(q === '2' || q === '3' ? q : '1');
+})();
+</script>
+</body>
+</html>

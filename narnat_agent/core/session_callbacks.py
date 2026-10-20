@@ -46,10 +46,30 @@ def _format_messages_text(messages: list) -> str:
     return "\n".join(lines)
 
 
+# 「需要让用户看见的提示」通道。终端形态用不上（stderr 就在眼前），
+# 面板形态必须注册：_report_save_error 只写 stderr 的话，RPC 模式下
+# 那句话只落到扩展的 console.log，用户在界面上完全看不到保存失败——
+# 数据丢了都不知道（实测：文件被占用导致写入失败，界面一片安静）。
+_NOTIFY_HOOK: Optional[Callable[[str], None]] = None
+
+
+def set_notify_hook(fn: Optional[Callable[[str], None]]) -> None:
+    """注册界面提示通道（RPC 层启动时注册，把提示推成 notice 通知）。"""
+    global _NOTIFY_HOOK
+    _NOTIFY_HOOK = fn
+
+
 def _report_save_error(err: str) -> None:
     """会话落盘失败提示：打印到终端，避免保存失败被静默吞掉（数据丢失无感知）"""
-    if err:
-        _stdout_write(f"  {D}⚠ 会话保存失败: {err}{R}\n")
+    if not err:
+        return
+    _stdout_write(f"  {D}⚠ 会话保存失败: {err}{R}\n")
+    hook = _NOTIFY_HOOK
+    if hook is not None:
+        try:
+            hook(f"⚠ 会话保存失败: {err}")
+        except Exception:
+            pass
 
 
 # 插件工具名称 → 说明（/plugin 状态表展示用；名称与顺序来源 registry.PLUGIN_TOOL_NAMES，
@@ -105,6 +125,22 @@ def _check_reserved_session_name(name: str) -> str:
     """会话名保留字校验；命中返回错误文案，否则返回""。"""
     if name.strip().lower() in _RESERVED_SESSION_NAMES:
         return f"[错误: '{name}' 为保留名称（/rm --all 表示全部删除），请换一个名称]"
+    return ""
+
+
+def _quick_session_name(msgs, limit: int = 24) -> str:
+    """用首条用户消息截断成会话名，不调用 LLM。
+
+    「新建对话」时的兜底保存必须**立刻返回**：走 LLM 命名要同步等一次网络，
+    慢的时候「新建」按钮会转很久（实测宿主里连做几段后表现为卡住）。
+    后台自动保存仍用 LLM 命名——那是异步线程，不影响交互。
+    """
+    for m in msgs or []:
+        if m.get("role") != "user":
+            continue
+        text = " ".join(str(m.get("content") or "").split())
+        if text:
+            return text[:limit] + ("…" if len(text) > limit else "")
     return ""
 
 
@@ -177,7 +213,13 @@ class SessionState:
         raise NotImplementedError
 
     def auto_save(self):
-        pass
+        """落盘当前内容。返回本次自动保存出的会话名（没存则 None）。
+
+        游离态这里什么都不做：轮末每轮都会调它，若在此处保存，未保存的
+        对话会「每轮刷出一个新会话」。游离态的兜底保存在
+        NoSession.carry_over()，只由「新建对话」显式触发。
+        """
+        return None
 
     def reset_after_compact(self):
         """上下文压缩后修正会话基准（默认无基准可修正，no-op）"""
@@ -223,6 +265,44 @@ class NoSession(SessionState):
         new_state = self._mgr.create_root_state(name)
         self._mgr.switch_state(new_state)
         return ""
+
+    def carry_over(self):
+        """新建对话前的兜底保存：把游离态这段内容存成一条会话。
+
+        只由 on_new 显式调用，**不**覆盖 auto_save：
+        轮末的 on_auto_save 也会调 auto_save，若把逻辑放进 auto_save，
+        游离态就变成「每轮结束都存一个新会话」，会刷出一堆碎会话
+        （实测过：「记忆蓝莓」「蓝莓记忆测试」并存）。
+
+        返回存出的会话名（没存则 None），供界面告诉用户存到哪了。
+        不切状态：调用方随后自己把状态换成新的 NoSession。
+        """
+        msgs = self._mgr.get_messages()
+        if not any(m.get("role") == "user" for m in msgs):
+            return None  # 只有 system prompt，没什么可存
+        if self._mgr._auto_save_done and self._mgr._pending_auto_save_name:
+            # 后台自动保存已经落盘（名字就绪，等 wait 消费）→ 不必再存一份
+            return None
+        # 注意这里不能只判断 _auto_save_done：
+        # 它只是「线程已启动」，线程可能还在跑 LLM 命名、甚至已失败。
+        # 此时若跳过保存，用户点「新建」就丢了这一段（实测宿主里连做几段后复现）。
+        # 用 _carried_over 通知后台线程：这段已由这里存下，别重复写。
+        # 用快速截断命名，不走 LLM：这个调用发生在「新建对话」的同步路径上，
+        # 走 LLM 会让按钮转很久（实测连做几段后像卡死）。
+        name = _quick_session_name(msgs)
+        if not name or _check_reserved_session_name(name):
+            return None
+        if session_exists(self._mgr.narnat_dir, name):
+            return None
+        try:
+            err = save_session(self._mgr.narnat_dir, name, msgs)
+        except Exception:
+            return None
+        if err:
+            return None
+        # 通知后台自动保存线程：这段已经被这里存下，别再写一份
+        self._mgr._carried_over = True
+        return name
 
     def show(self, args: str = "") -> str:
         tree = list_sessions_tree(self._mgr.narnat_dir)
@@ -724,6 +804,10 @@ class SessionManager:
         self._skill_ignore_dirs = tuple(skill_ignore_dirs or ())
         self._auto_save_done: bool = False
         self._pending_auto_save_name: Optional[str] = None
+        # 最近一次「新建对话」时自动存下的会话名（None=没存），供界面回执用
+        self._last_auto_saved: Optional[str] = None
+        # carry_over 已把这一段落盘 → 后台自动保存线程完成时据此跳过写盘，避免重复
+        self._carried_over: bool = False
         self.pending_deletes: Set[Tuple[str, Optional[str]]] = set()
         self._state: SessionState = NoSession(self)
         # 目标模式状态：_goal_enabled=开关；_goal_max_rounds=临时轮数覆盖（0=用配置默认值）；
@@ -856,6 +940,42 @@ class SessionManager:
 
     def on_auto_save(self):
         self._state.auto_save()
+
+    def on_new(self) -> str:
+        """新建对话：回到游离态并清空上下文。
+
+        与 /exit 的区别：/exit 只切状态、消息还留在内存里（再聊就接上了上一段）。
+        这里明确把消息重置为只剩 system prompt，用户才能真的「不要这个对话」。
+
+        当前内容先落盘再清空——已聊内容不丢，之后仍可从会话列表进入。
+        已在会话/分支里时走 auto_save（写回原文件）；游离态时走
+        NoSession.carry_over()——否则「未保存的对话点新建」就是静默丢数据，
+        磁盘上连痕迹都没有。
+        存下的名字记在 _last_auto_saved 里，好让界面告诉用户存到哪了。
+        """
+        self._last_auto_saved = None
+        # 清上一段可能遗留的「已由 carry_over 存下」标记
+        self._carried_over = False
+        try:
+            saved = self._state.auto_save()
+            if saved is None and isinstance(self._state, NoSession):
+                saved = self._state.carry_over()   # 存下时会置 _carried_over=True
+            self._last_auto_saved = saved
+        except Exception:
+            # 落盘失败不该挡住「新建」这个动作本身
+            pass
+        # 复位自动保存标志：它表示「本段对话已由 AutoSaveManager 处理过」，
+        # 新的一段开始后必须清零。不清会怎样：第二次及以后「新建对话」时
+        # try_save 与 carry_over 都因这个标志跳过，那一段内容静默丢失
+        # （实测：聊一句→新建，内容既不落盘也不提示）。
+        self._auto_save_done = False
+        self._pending_auto_save_name = None
+        self._state = NoSession(self)
+        msgs = self.get_messages()
+        system = msgs[0] if msgs and msgs[0].get("role") == "system" else None
+        # replace_messages 会顺带复位上下文占比（与会话切换同语义）
+        self.replace_messages([system] if system else [])
+        return ""
 
     def on_skill(self, name: str) -> str:
         content, err, path = load_skill(self.narnat_dir, name,

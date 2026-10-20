@@ -46,6 +46,11 @@ def _safe_filename(name: str) -> str:
     safe_name = name.replace("/", "_").replace("\\", "_")
     safe_name = safe_name.replace(":", "_").replace("<", "_").replace(">", "_")
     safe_name = safe_name.replace("|", "_").replace("?", "_").replace("*", "_")
+    # 双引号也是 Windows 文件名非法字符，漏了它会得到
+    # 「[Errno 22] Invalid argument: 'C:\\...\\"周会记录".json.tmp'」这种
+    # 带完整磁盘路径的系统错误。`/save "周会记录"` 是常见的带引号命名写法，
+    # 实测必失败且用户看不懂错误原因。与上面几个字符同等对待即可。
+    safe_name = safe_name.replace('"', "_")
     safe_name = safe_name.replace("..", "_")
     if not safe_name:
         safe_name = "unnamed"
@@ -101,6 +106,127 @@ def _session_path(narnat_dir: str, name: str, parent: Optional[str] = None) -> s
 
 def session_exists(narnat_dir: str, name: str, parent: Optional[str] = None) -> bool:
     return os.path.isfile(_session_path(narnat_dir, name, parent=parent))
+
+
+def rename_session(narnat_dir: str, old_name: str, new_name: str,
+                   parent: Optional[str] = None) -> str:
+    """改会话名。返回 ""=成功，非空=错误信息。
+
+    做法是「读旧文件 → 写新文件 → 删旧文件」而不是 os.rename：
+    文件名经过 _safe_filename 归一化（特殊字符替换），直接改名会让
+    文件里的 "name" 字段与文件名不一致，之后按名查找会错位。
+
+    子会话改名只动它自己那个文件；根会话改名要连它的子会话目录一起搬，
+    否则子会话会留在旧父名下成为孤儿。
+    """
+    old_path = _session_path(narnat_dir, old_name, parent=parent)
+    if not os.path.isfile(old_path):
+        return f"会话不存在: {old_name}"
+    if old_name == new_name:
+        return ""
+    if session_exists(narnat_dir, new_name, parent=parent):
+        return f"已有同名会话: {new_name}"
+
+    sessions_root = _sessions_dir(narnat_dir)
+    old_dir = os.path.join(sessions_root, _safe_filename(old_name))
+    new_dir = os.path.join(sessions_root, _safe_filename(new_name))
+    # 子会话目录的重名必须在**写文件之前**查。
+    # 放到后面查会怎样（实测）：新 json 已写、旧 json 已删，这时才报
+    # 「已有同名子会话目录」——用户看到失败，实际名字已经改了，
+    # 子会话还留在旧目录里成了孤儿。失败要么什么都没发生，要么别报失败。
+    if not parent and os.path.normpath(new_dir) != os.path.normpath(sessions_root):
+        if os.path.isdir(new_dir):
+            if os.listdir(new_dir):
+                return f"已有同名会话: {new_name}"
+            # 只剩空目录的残骸：清掉即可，否则换个名字都换不成
+            try:
+                os.rmdir(new_dir)
+            except OSError as e:
+                return f"目标名下有残留目录，无法重命名: {e}"
+
+    try:
+        with open(old_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError, RecursionError):
+        return f"会话文件损坏，无法重命名: {old_name}"
+    if not isinstance(data, dict):
+        return f"会话文件格式异常，无法重命名: {old_name}"
+
+    data["name"] = new_name
+    new_path = _session_path(narnat_dir, new_name, parent=parent)
+    # 先落新文件再删旧文件：中途失败只会多一个副本，不会两边都没有。
+    # 新文件的创建必须用 O_EXCL 独占：两个进程同时把不同会话改名成同一个
+    # 目标名时，只靠上面的 session_exists 检查两边都会通过，然后互相覆盖，
+    # 先写那一整个会话静默消失（实测 40 轮里 20 次双成功）。
+    try:
+        fd = os.open(new_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+    except FileExistsError:
+        return f"已有同名会话: {new_name}"
+    except OSError as e:
+        return f"写入新会话失败: {e}"
+    tmp = new_path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, new_path)
+    except OSError as e:
+        # 占位文件要清掉，否则留一个空会话在列表里
+        try:
+            os.remove(new_path)
+        except OSError:
+            pass
+        return f"写入新会话失败: {e}"
+    # 删旧文件走同一套重试：两个窗口同时改名时，一方可能正好撞上对方
+    # 刚做的 replace，Windows 报 WinError 5（拒绝访问），裸 os.remove
+    # 会把「删除旧会话失败: [WinError 5] …绝对路径」糊到界面上（实测）。
+    err_del = _remove_file_with_retry(old_path)
+    if err_del:
+        return f"会话已改名为「{new_name}」，但旧文件没能删除（{err_del}）。请手动删除后再试"
+
+    # 根会话改名：子会话目录跟着搬（重名已在上面查过）
+    if not parent:
+        if (os.path.normpath(old_dir) != os.path.normpath(sessions_root)
+                and os.path.isdir(old_dir)):
+            try:
+                os.rename(old_dir, new_dir)
+            except OSError as e:
+                # 到这一步主文件已经改名成功了（新 json 已落盘、旧 json 已删），
+                # 报「失败」会让用户以为没改成——实际名字变了、子会话却留在旧目录，
+                # 于是列表里长出一个幽灵父会话（实测）。如实说明「部分完成」。
+                return (f"会话已改名为「{new_name}」，但它的子会话目录没能一起搬"
+                        f"（{type(e).__name__}）。请手动把 {old_dir} 改成 {new_dir}"
+                        f"，或删除该会话后重新创建")
+            # 子会话文件里有 "parent" 字段，必须一起改写：
+            # 不改会在列表里挂出一个「幽灵父会话」（旧名，0 条消息），
+            # 点进去还会报「会话不存在」。
+            _rewrite_child_parent(new_dir, new_name)
+    return ""
+
+
+def _rewrite_child_parent(child_dir: str, new_parent: str) -> None:
+    """把目录下所有子会话文件的 parent 字段改成 new_parent（尽力而为，不抛错）。"""
+    try:
+        names = os.listdir(child_dir)
+    except OSError:
+        return
+    for fn in names:
+        if not fn.endswith(".json"):
+            continue
+        path = os.path.join(child_dir, fn)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict) or data.get("parent") == new_parent:
+                continue
+            data["parent"] = new_parent
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+        except (OSError, ValueError, RecursionError):
+            # 单个子会话改不动不影响改名本身：列表里最多少一个子项
+            continue
 
 
 def save_session(narnat_dir: str, name: str,
@@ -217,6 +343,34 @@ def list_sessions(narnat_dir: str) -> List[Dict[str, Any]]:
     return result
 
 
+def _remove_file_with_retry(path: str) -> str:
+    """删一个文件，把并发与占用两种情况都处理好。返回 ""=成功。
+
+    - FileNotFoundError：另一个进程刚删掉了同一个文件。结果相同，不算失败
+      （不捕获会抛 WinError 2，界面弹一句「Internal error」，像崩了）
+    - PermissionError：Windows 文件共享冲突（另一进程正在读/替换），
+      短退避重试几次（不重试会留下「点了删除但文件还在」）
+    """
+    try:
+        os.remove(path)
+        return ""
+    except FileNotFoundError:
+        return ""
+    except PermissionError:
+        for attempt in range(6):
+            time.sleep(0.02 * (attempt + 1))
+            try:
+                os.remove(path)
+                return ""
+            except FileNotFoundError:
+                return ""
+            except OSError:
+                continue
+        return "删除会话失败（文件被其他程序占用）。请关闭占用它的程序后重试"
+    except OSError:
+        return "删除会话失败（磁盘或权限异常）。请检查后重试"
+
+
 def delete_session(narnat_dir: str, name: str, parent: Optional[str] = None) -> str:
     if name == "--all":
         sdir = _sessions_dir(narnat_dir)
@@ -320,6 +474,9 @@ def list_sessions_tree(narnat_dir: str) -> List[Dict[str, Any]]:
                 "name": parent_name,
                 "timestamp": 0,
                 "message_count": 0,
+                # ghost：父会话文件缺失，只剩子会话。RPC 侧据此标注「无记录」，
+                # 不要把它当成一条正常的空会话。
+                "ghost": True,
                 "children": [child],
             }
             roots[parent_name] = root_entry
@@ -455,6 +612,114 @@ def format_session_summary(tree: List[Dict[str, Any]],
     if active_name is None and active_parent is None:
         lines.append(f"   ◉  ◀ 当前")
     return "\n".join(lines)
+
+
+def session_tree_payload(tree: List[Dict[str, Any]],
+                         active_name: Optional[str] = None,
+                         active_parent: Optional[str] = None,
+                         show_all: bool = False) -> Dict[str, Any]:
+    """会话树 → 协议 session/list 的结构化结果（docs/vscode-rpc-protocol.md 3.5）。
+
+    分组/排序规则与 format_session_summary 一致：今天全部列出，更早最多3个父会话
+    （当前会话不在前3棵时追加显示），其余计入该组 hidden；show_all=True 不截断。
+
+    Returns:
+        {"current": "父/子" | 名称 | None,
+         "groups": [{"label": "今天"|"更早", "count": 组内父会话总数,
+                     "sessions": [{"name","time","count","group","current",
+                                   "deleted","children":[...]}],
+                     "hidden": 未展示条数（仅截断时出现）}]}
+        子会话项为 {"name","status","time","count","current","deleted"}，
+        status 取值 new / active / completed。
+    """
+    if active_parent is not None and active_name is not None:
+        current = f"{active_parent}/{active_name}"
+    else:
+        current = active_name
+    payload: Dict[str, Any] = {"current": current, "groups": []}
+    if not tree:
+        return payload
+
+    now = time.localtime()
+    today_midnight = time.mktime((now.tm_year, now.tm_mon, now.tm_mday,
+                                  0, 0, 0, 0, 0, -1))
+
+    def _entry(root):
+        return {
+            "name": root["name"],
+            "timestamp": root["timestamp"],
+            "count": root["message_count"],
+            # ghost：父会话文件缺失（只剩子会话反推出的行）。
+            # 界面据此标注「无记录」，别让用户以为这是条 0 条消息的空会话。
+            "ghost": bool(root.get("ghost")),
+            "current": (root["name"] == active_name and active_parent is None),
+            "deleted": bool(root.get("_delete_marked")),
+            "children": [
+                {
+                    "name": child["name"],
+                    "timestamp": child["timestamp"],
+                    "count": child["message_count"],
+                    "status": child.get("status", "active"),
+                    "current": (child["name"] == active_name and root["name"] == active_parent),
+                    "deleted": bool(child.get("_delete_marked")),
+                }
+                for child in root.get("children", [])
+            ],
+        }
+
+    today, earlier = [], []
+    for root in tree:
+        entry = _entry(root)
+        (today if entry["timestamp"] >= today_midnight else earlier).append(entry)
+    today.sort(key=lambda e: e["timestamp"], reverse=True)
+    earlier.sort(key=lambda e: e["timestamp"], reverse=True)
+
+    def _session(entry, ts_fmt, group):
+        return {
+            "name": entry["name"],
+            "time": _format_ts(entry["timestamp"], ts_fmt),
+            "count": entry["count"],
+            "group": group,
+            "ghost": entry.get("ghost", False),
+            "current": entry["current"],
+            "deleted": entry["deleted"],
+            "children": [
+                {
+                    "name": child["name"],
+                    "status": child["status"],
+                    "time": _format_ts(child["timestamp"], ts_fmt),
+                    "count": child["count"],
+                    "current": child["current"],
+                    "deleted": child["deleted"],
+                }
+                for child in entry["children"]
+            ],
+        }
+
+    if today:
+        payload["groups"].append({
+            "label": "今天",
+            "count": len(today),
+            "sessions": [_session(e, "%H:%M", "today") for e in today],
+        })
+    if earlier:
+        shown = earlier if show_all else earlier[:3]
+        if not show_all:
+            # 当前会话（父或子）若不在前3棵，追加显示，保证"我在哪"可见
+            cur = next((e for e in earlier
+                        if e["current"] or any(c["current"] for c in e["children"])), None)
+            if cur is not None and cur not in shown:
+                shown = shown + [cur]
+        group = {
+            "label": "更早",
+            "count": len(earlier),
+            "sessions": [_session(e, "%m-%d", "earlier") for e in shown],
+        }
+        rest = len(earlier) - len(shown)
+        if rest > 0:
+            group["hidden"] = rest
+        payload["groups"].append(group)
+    return payload
 
 
 def load_session_meta(narnat_dir: str, name: str, parent: Optional[str] = None) -> dict:

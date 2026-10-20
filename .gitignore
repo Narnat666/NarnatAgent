@@ -9,7 +9,6 @@ build/
 
 # ═══ pytest ═══
 .pytest_cache/
-.pytest_cache/
 
 # ═══ Nuitka 编译产物 ═══
 output/
@@ -44,3 +43,35 @@ eccplan
 npm/
 graphify-out/
 _cc_src/
+
+# ═══ 界面测试产物 ═══
+shots/
+.playwright-mcp/
+
+# ═══ VSCode 宿主测试（下载的 VSCode 约 335MB）═══
+vscode-extension/.vscode-test/
+vscode-extension/node_modules/
+
+# ═══ 扩展打包产物（内嵌的 exe 与生成的 vsix 都是构建产物）═══
+vscode-extension/bin/
+vscode-extension/*.vsix
+vscode-extension/package-lock.json
+
+# ═══ 宿主测试期间写入的工作区配置（测试会自行还原，兜底忽略）═══
+vscode-extension/test/fixtures/workspace/.vscode/
+.vscode-test
+nn-tasks
+# 早先这里写的是 `%~dp0.vscode-probe`（批处理里的未展开变量），
+# 实际生成的是 `.vscode-probe`，原来那行谁也匹配不到。
+.vscode-probe/
+
+# ═══ 测试脚手架在仓库根留下的空目录 ═══
+# nn-tasks 里的脚本常用 home/、data/、sandbox/ 当假的 NARNAT_HOME 或工作目录；
+# 有几次是我在 cmd 里手敲命令时环境变量没展开，直接在仓库根建了出来（%ISO% 那种）。
+# 它们本身是空的、内容全被 .narnat/ 规则吃掉，但会一直挂在 git status 的忽略
+# 清单里，让人以为工作区有东西。全部锚定在根目录，不影响子目录里的同名用途。
+/home/
+/data/
+/sandbox/
+/%ISO%/
+/%NARNAT_HOME%/

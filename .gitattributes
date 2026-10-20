@@ -1,0 +1,36 @@
+# 换行符固定在仓库里，不随各机器 core.autocrlf 变化。
+#
+# 不加这个文件会怎样：Windows 上 core.autocrlf=true 时，git stash / checkout
+# 会把工作区文件转成 CRLF。而 scripts/sync-ui.js 之类按 \n 提取 HTML 的代码
+# 会突然全部失配（实测直接报「提取失败」），整条构建链断掉。
+#
+# 这里强制文本文件一律 LF（Python/Node/HTML/Markdown 都吃 LF），
+# 二进制文件显式标 binary，git 不做任何转换。
+
+* text=auto eol=lf
+
+*.py    text eol=lf
+*.js    text eol=lf
+*.cjs   text eol=lf
+*.mjs   text eol=lf
+*.json  text eol=lf
+*.jsonc text eol=lf
+*.md    text eol=lf
+*.html  text eol=lf
+*.css   text eol=lf
+*.svg   text eol=lf
+*.txt   text eol=lf
+*.sh    text eol=lf
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
+
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.vsix  binary
+*.exe   binary
+*.zip   binary

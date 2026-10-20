@@ -58,6 +58,12 @@ class AutoSaveManager:
         name = self._summary.name_session(self._message_list.view().to_list())
         if not name:
             return
+        # 「新建对话」可能已经等不及这条线程，自己用快速名把这段存下来了
+        # （见 SessionManager.on_new → NoSession.carry_over）。
+        # 那就别再写一份，否则同一个对话会出现两条记录。
+        if self._mgr._carried_over:
+            self._mgr._carried_over = False
+            return
         from ..config.session_store import save_session, session_exists
         from .session_callbacks import _check_reserved_session_name
         err = _check_reserved_session_name(name)

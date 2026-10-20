@@ -27,6 +27,7 @@ class CommandResult(IntEnum):
     UNKNOWN = 0  # 未知命令
     HANDLED = 1  # 已处理，继续主循环
     EXIT = 2     # 退出 agent 进程
+    FAILED = 3   # 已处理但失败了（参数缺失、状态不可用、业务返回错误）；RPC 层据此判成败
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -199,33 +200,33 @@ def _cmd_compact(args: str, mgr) -> CommandResult:
     """手动压缩上下文：摘要全部历史，保留近期尾部；过程中可按 Esc 取消"""
     if args.strip():
         _stdout_write(f"  {CMD_HINT}用法: /compact（无参数）{R}\n")
-        return CommandResult.HANDLED
+        return CommandResult.FAILED
     try:
         status, text = mgr.on_compact()
     except Exception as e:
         # 命令层兜底：压缩内部异常不应把整个进程带崩。此处不宣称历史状态
         # （异常可能发生在压缩生效后的落盘阶段）
         _stdout_write(f"  {CMD_ERROR}压缩中断: 内部异常({e}){R}\n")
-        return CommandResult.HANDLED
+        return CommandResult.FAILED
     if status == "error" and "取消" in text:
         color = CMD_MUTED  # 用户主动取消属正常操作，非错误
     else:
         color = {"ok": CMD_SUCCESS, "empty": CMD_HINT}.get(status, CMD_ERROR)
     _stdout_write(f"  {color}{text}{R}\n")
-    return CommandResult.HANDLED
+    return CommandResult.FAILED if status == "error" and "取消" not in text else CommandResult.HANDLED
 
 
 @_register("explore")
 def _cmd_explore(args: str, mgr) -> CommandResult:
     if _require_args(args, "用法: /explore <名称>"):
-        return CommandResult.HANDLED
+        return CommandResult.FAILED
     result = mgr.on_explore(args)
     if result:
         _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
     else:
         _stdout_write(f"  {CMD_SUCCESS}已进入探索分支: {CMD_HIGHLIGHT}{args}{R}  "
                       f"{CMD_MUTED}(/done 合并结论, /exit 暂离){R}\n")
-    return CommandResult.HANDLED
+    return CommandResult.FAILED if result else CommandResult.HANDLED
 
 
 @_register("done")
@@ -235,7 +236,7 @@ def _cmd_done(args: str, mgr) -> CommandResult:
         _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
     else:
         _stdout_write(f"  {CMD_SUCCESS}探索分支已完成，结论已合并{R}\n")
-    return CommandResult.HANDLED
+    return CommandResult.FAILED if result else CommandResult.HANDLED
 
 
 @_register("goal")
@@ -251,10 +252,10 @@ def _cmd_goal(args: str, mgr) -> CommandResult:
                 override = int(rest)
             except ValueError:
                 _stdout_write(f"  {CMD_ERROR}无效轮数: {rest}{R}\n")
-                return CommandResult.HANDLED
+                return CommandResult.FAILED
             if override < 1:
                 _stdout_write(f"  {CMD_ERROR}轮数必须为正整数{R}\n")
-                return CommandResult.HANDLED
+                return CommandResult.FAILED
         mgr._goal_enabled = True
         mgr._goal_max_rounds = override
         # 目标模式开启：向 LLM 动态注入 GoalComplete 工具
@@ -291,7 +292,7 @@ def _cmd_goal(args: str, mgr) -> CommandResult:
         return CommandResult.HANDLED
     # 其它无效值：明确报错，不再静默落入查看状态分支
     _stdout_write(f"  {CMD_ERROR}无效值: {arg}（可用: on / off）{R}\n")
-    return CommandResult.HANDLED
+    return CommandResult.FAILED
 
 
 @_register("save")
@@ -306,7 +307,7 @@ def _cmd_save(args: str, mgr) -> CommandResult:
             saved_name = mgr.state.session_name()
             label = saved_name if saved_name else ""
             _stdout_write(f"  {CMD_SUCCESS}会话已保存: {CMD_HIGHLIGHT}{label}{R}\n")
-    return CommandResult.HANDLED
+    return CommandResult.FAILED if result else CommandResult.HANDLED
 
 
 @_register("ls")
@@ -322,43 +323,46 @@ def _cmd_ls(args: str, mgr) -> CommandResult:
 @_register("cd")
 def _cmd_cd(args: str, mgr) -> CommandResult:
     if _require_args(args, "用法: /cd <名称>"):
-        return CommandResult.HANDLED
+        return CommandResult.FAILED
     result = mgr.on_enter(args)
     if result:
         _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
     else:
         _stdout_write(f"  {CMD_SUCCESS}已进入会话: {CMD_HIGHLIGHT}{args}{R}\n")
-    return CommandResult.HANDLED
+    return CommandResult.FAILED if result else CommandResult.HANDLED
 
 
 @_register("skill")
 def _cmd_skill(args: str, mgr) -> CommandResult:
     if _require_args(args, "用法: /skill <名称 | 项目目录/文件.md>"):
-        return CommandResult.HANDLED
+        return CommandResult.FAILED
     result = mgr.on_skill(args)
     if result:
         _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
     else:
         _stdout_write(f"  {CMD_SUCCESS}已加载技能: {CMD_HIGHLIGHT}{args}{R}\n")
-    return CommandResult.HANDLED
+    return CommandResult.FAILED if result else CommandResult.HANDLED
 
 
 @_register("rm")
 def _cmd_rm(args: str, mgr) -> CommandResult:
     if _require_args(args, "用法: /rm <名称 | --all>"):
-        return CommandResult.HANDLED
+        return CommandResult.FAILED
     result = mgr.on_delete(args)
     if result:
         _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
     else:
         _stdout_write(f"  {CMD_SUCCESS}已标记删除: {CMD_HIGHLIGHT}{args}{R}  "
                       f"{CMD_MUTED}(退出agent时生效){R}\n")
-    return CommandResult.HANDLED
+    return CommandResult.FAILED if result else CommandResult.HANDLED
 
 
 @_register("thinking")
 def _cmd_thinking(args: str, mgr) -> CommandResult:
     result = mgr.on_thinking(args.strip() if args else "")
+    if result.startswith("无效值"):
+        _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
+        return CommandResult.FAILED
     _stdout_write(f"  {CMD_HIGHLIGHT}{result}{R}\n")
     return CommandResult.HANDLED
 
@@ -367,6 +371,9 @@ def _cmd_thinking(args: str, mgr) -> CommandResult:
 def _cmd_thinkback(args: str, mgr) -> CommandResult:
     """思考回传开关：/thinkback 查状态，/thinkback on|off 切换"""
     result = mgr.on_thinkback(args.strip() if args else "")
+    if result.startswith("无效值"):
+        _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
+        return CommandResult.FAILED
     _stdout_write(f"  {CMD_HIGHLIGHT}{result}{R}\n")
     return CommandResult.HANDLED
 
@@ -378,7 +385,7 @@ def _cmd_plugin(args: str, mgr) -> CommandResult:
     color = {"ok": CMD_SUCCESS, "info": CMD_HIGHLIGHT,
              "hint": CMD_MUTED, "error": CMD_ERROR}.get(status, CMD_MUTED)
     _stdout_write(f"{color}{text}{R}\n")
-    return CommandResult.HANDLED
+    return CommandResult.FAILED if status == "error" else CommandResult.HANDLED
 
 
 @_register("mode")
@@ -386,6 +393,7 @@ def _cmd_mode(args: str, mgr) -> CommandResult:
     result = mgr.on_mode(args.strip() if args else "")
     if result.startswith("无效值"):
         _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
+        return CommandResult.FAILED
     elif result.startswith("设置成功"):
         _stdout_write(f"  {CMD_SUCCESS}{result}{R}\n")
     else:
@@ -404,7 +412,7 @@ def _cmd_exit(args: str, mgr) -> CommandResult:
     if result:
         # 状态切换失败（如子会话父文件损坏）：只报错，不打印"已暂离/已退出"误导提示
         _stdout_write(f"  {CMD_ERROR}{result}{R}\n")
-        return CommandResult.HANDLED
+        return CommandResult.FAILED
     if was_no_session:
         return CommandResult.EXIT
     if was_child:
@@ -442,7 +450,7 @@ def _dispatch_command(cmd: str, args: str, mgr) -> CommandResult:
         # / 输入交给 AI；静默转对话会让用户"输入命令无任何反应"）
         if cmd in _commands:
             _stdout_write(f"  {CMD_ERROR}/{cmd} 在当前状态下不可用{R}\n")
-            return CommandResult.HANDLED
+            return CommandResult.FAILED
         return CommandResult.UNKNOWN
 
     handler = _commands.get(cmd)

@@ -1,0 +1,855 @@
+:root{
+  /* 优先取 VSCode 主题色，浏览器预览时回退到深色 */
+  --bg: var(--vscode-editor-background, #1e1e1e);
+  --bg-elev: var(--vscode-sideBar-background, #232323);
+  --bg-hover: var(--vscode-list-hoverBackground, rgba(128,128,128,.12));
+  --bg-code: var(--vscode-textCodeBlock-background, #191919);
+  --fg: var(--vscode-editor-foreground, #cfcfcf);
+  --fg-dim: var(--vscode-descriptionForeground, #939393);
+  /* 不能用 disabledForeground：它在浅色主题下是半透明的 disabled 色，
+     实测 Light+ 下只有 2.0~2.2:1 对比度（状态栏、系统提示、占位符等 13 处
+     等同「看不见」）。descriptionForeground 是 VSCode 给次要文字定的色，
+     两种主题下都够读。层级感靠字号/字重区分，不靠把字调到看不清。 */
+  --fg-faint: var(--vscode-descriptionForeground, #939393);
+  --line: var(--vscode-panel-border, #2c2c2c);
+  --line-strong: var(--vscode-widget-border, #3c3c3c);
+  --accent: var(--vscode-textLink-foreground, #5a9fd4);
+  --ok: var(--vscode-charts-green, #5aa87a);
+  /* 不用 testing-iconPassed：它在浅色主题下是 #73c991，白底上只有 2.0:1，
+     「已复制」「✓ 复核通过」这类小字信号几乎看不出变化（实测）。
+     charts-green 浅色是 #388A34（深绿），深色是 #89D185，两套都够读。 */
+  --warn: var(--vscode-editorWarning-foreground, #c9a227);
+  --err: var(--vscode-errorForeground, #c96a6a);
+  --add: var(--vscode-diffEditor-insertedTextBackground, rgba(90,168,122,.16));
+  --del: var(--vscode-diffEditor-removedTextBackground, rgba(201,106,106,.16));
+  --font:var(--vscode-font-family,-apple-system,"Segoe UI Variable Text","Segoe UI","Microsoft YaHei",sans-serif);
+  --mono:var(--vscode-editor-font-family,ui-monospace,"Cascadia Mono",Consolas,"Courier New",monospace);
+}
+/* 浏览器预览：跟随系统浅色 */
+@media (prefers-color-scheme: light){
+  body[data-preview="true"]{
+    --bg:#fff;--bg-elev:#fbfbfb;--bg-hover:#f4f4f4;--bg-code:#f7f7f7;
+    --fg:#2c2c2c;--fg-dim:#6a6a6a;--fg-faint:#6a6a6a;
+    --line:#ececec;--line-strong:#dcdcdc;--accent:#1a6fc4;
+    --ok:#2e7d55;--warn:#8a6d1f;--err:#b04040;
+    --add:#eef7f0;--del:#fdefef;
+  }
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg);color:var(--fg);
+  font-family:var(--font);font-size:13px;line-height:1.7;
+  -webkit-font-smoothing:antialiased;overflow:hidden;
+}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;padding:0}
+/* container-type：让下面的 @container 查询以面板自身宽度为基准（iframe 宽 = 面板宽） */
+.shell{display:flex;flex-direction:column;height:100%;container-type:inline-size}
+
+/* ---------- 顶栏 ---------- */
+.bar{
+  flex:none;display:flex;align-items:center;gap:10px;
+  height:40px;padding:0 16px;border-bottom:1px solid var(--line);
+  /* Ctrl+A 选全文档时，顶栏的品牌名与连接状态也会被选进去，
+     用户以为复制到了对话内容，粘出来头一段是「Narnat / 已连接后端」。 */
+  user-select:none;
+}
+.brand{font-size:12px;font-weight:600;letter-spacing:.04em;flex:none}
+.sess{
+  display:flex;align-items:center;gap:6px;
+  font-size:12px;color:var(--fg-dim);
+  padding:2px 6px;border-radius:4px;
+  /* 会话名可能很长：允许收缩，溢出由 .branch 省略号处理 */
+  min-width:0;max-width:100%;overflow:hidden;
+}
+.sess:hover{background:var(--bg-hover);color:var(--fg)}
+.sess[data-open="true"]{background:var(--bg-hover);color:var(--fg)}
+.sess .branch{
+  color:var(--fg);
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.sess[data-open="true"] .branch{color:var(--fg)}
+.bar .right{margin-left:auto;display:flex;align-items:center;gap:2px}
+
+/* ---------- 状态行（输入框下方） ---------- */
+.status{
+  display:flex;align-items:center;gap:12px;
+  max-width:680px;margin:0 auto;padding:8px 2px 0;
+  font-family:var(--mono);font-size:10.5px;color:var(--fg-faint);
+  flex-wrap:wrap;
+  /* Ctrl+A 不该把顶栏/状态栏的标签一起选进去：用户想复制的是对话内容。
+     （实测原来 Ctrl+A 选中 192 个字符，开头是「Narnat / grep-ignore-case…」） */
+  user-select:none;
+}
+.status .k{color:var(--fg-faint)}
+.status .v{color:var(--fg-dim)}
+.status .sep{color:var(--line-strong)}
+.status .right{margin-left:auto;display:flex;gap:12px}
+.status button.v:hover{color:var(--fg)}
+
+/* ---------- 主体 ---------- */
+.body{flex:1;display:flex;min-height:0;position:relative}
+.convo{flex:1;min-width:0;overflow-y:auto;padding:26px 24px 8px}
+.convo > *{max-width:680px;margin-left:auto;margin-right:auto}
+/* 错误行上的「重试这一条」：出错后唯一的补救入口（见 turnEnd 的 error 分支） */
+.sys .retry{
+  margin-left:8px;font-size:10.5px;padding:1px 8px;border-radius:4px;
+  color:var(--fg);border:1px solid var(--fg-dim);background:transparent;cursor:pointer;
+}
+/* 每条消息末尾的「复制」。
+   它曾经是绝对定位在消息右上角（top:-2px; right:0; z-index:3）——那是错的：
+   `opacity:0` 只让元素看不见，**不阻止它接收鼠标事件**。AI 直接甩一段代码
+   时，代码块正好顶在消息顶端，代码块自己的「复制」按钮中心就落在它下面，
+   实测点下去复制到的是整条回答（连 ``` 围栏），代码块按钮毫无反馈，
+   用户会以为复制坏了、反复点（按钮 32.9% 面积被盖，可见文字被盖 46%，
+   249/289/360/420/620px 五档宽度全都一样）。
+   现在改成消息内部的尾部右对齐块：不覆盖任何内容，也就没有误点可能。 */
+.msg-copy{
+  display:block;width:fit-content;margin:2px 0 0 auto;height:16px;
+  padding:0 6px;font-size:10px;line-height:16px;border-radius:3px;
+  color:var(--fg-faint);background:transparent;border:1px solid transparent;
+  opacity:0;transition:opacity .12s;cursor:pointer;
+  pointer-events:none;   /* 不可见时不吃点击，也不占 hover 判定 */
+}
+.msg:hover > .msg-copy{opacity:1;pointer-events:auto;border-color:var(--line)}
+.msg-copy:hover{color:var(--fg);border-color:var(--fg-faint)}
+.msg-copy[data-done="true"]{color:var(--ok);border-color:var(--ok);opacity:1;pointer-events:auto}
+/* 按钮文字用 CSS 生成，**不能**写成元素文本：这一条消息的 textContent
+   会被 assistantText() 用来生成渲染回执，按钮文字混进去会让回执变成
+   「……正文。复制」（实测被 ui/rpc 回归测试抓到）。生成内容不进 textContent。 */
+.msg-copy::after{content:'复制'}
+.msg-copy[data-done="true"]::after{content:'已复制'}
+.msg-copy[data-fail="true"]::after{content:'复制失败'}
+.sys .retry:hover{background:var(--bg-hover);border-color:var(--fg)}
+/* 回到底部：贴在对话区右下角，只在「用户上翻中」出现。
+   不常显——常显会一直挡在最后一行文字上（尤其是 249px 的窄面板）。 */
+#toBottom{
+  display:none;position:absolute;right:14px;bottom:12px;z-index:12;
+  padding:3px 10px;font-size:11px;line-height:1.7;
+  color:var(--fg);background:var(--bg-elev);border:1px solid var(--fg-faint);
+  border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,.28);cursor:pointer;
+}
+#toBottom[data-on="true"]{display:block}
+#toBottom:hover{background:var(--bg-hover)}
+#toBottom[data-new="1"]{border-color:var(--accent);color:var(--accent)}
+
+/* 演示数据提示条：只在未连上后端时出现，连上后隐藏 */
+.demo-tip{
+  flex:none;padding:4px 12px;font-size:10.5px;
+  color:var(--fg-faint);background:var(--bg-hover);
+  border-bottom:1px solid var(--line);text-align:center;
+}
+body[data-real="true"] .demo-tip{display:none}
+
+/* ---------- 消息 ---------- */
+.msg{padding-bottom:22px}
+/* 用户消息必须保留换行：粘进来一段 30 行的中文需求（一、背景／二、目标／
+   验收…），发出去后会塌成一大段，回看时压根没法核对第几条说了什么。
+   实测 32 行 → 显示成 1 行、高度 840px vs 应 1701px。 */
+.msg .text{
+  /* 竖线不能用 --line-strong（widget-border）：深色 #303031 on #1E1E1E 只有
+     1.26:1、浅色 #D4D4D4 on #FFF 只有 1.48:1——等于看不见。这条竖线是用户
+     消息与助手消息唯一的形状区别（助手正文没有任何左侧标记），看不出线
+     就分不出「哪句是我说的」。改用 descriptionForeground：深 6.17:1、浅 4.74:1。 */
+  border-left:2px solid var(--fg-faint);padding-left:12px;margin-left:-14px;
+  white-space:pre-wrap;
+  /* 长串不换行的内容（URL、文件路径、base64）在 pre-wrap 下不会自动断，
+     会把整个对话区撑出横向滚动条（实测贴一个长 URL 溢出 546px，面板里
+     出现左右滚动）。anywhere 允许在任意位置断行，只在放不下时才生效。 */
+  overflow-wrap:anywhere;
+}
+/* 探索分支合并结论：不是用户说的话，左边竖线换成强调色以示区分 */
+.msg.sys-note .text{border-left-color:var(--accent);color:var(--fg-dim)}
+/* 没发出去的那条：明确标出来，别让用户以为已经发出去了 */
+.msg[data-failed] .text{border-left-color:var(--err);opacity:.65}
+.msg[data-failed] .text::after{
+  content:'未发送';margin-left:8px;font-size:10.5px;
+  color:var(--err);border:1px solid var(--err);border-radius:3px;
+  padding:0 4px;vertical-align:middle;
+}
+.msg p{margin:0 0 10px}
+.msg p:last-child{margin-bottom:0}
+/* 无空格长 token（长 URL / 长路径 / 长 hash）必须能在容器内折行，
+   否则整段对话只能横向拖动才能读完（实测 300px 宽下溢出 2355px） */
+.msg p,.msg li,.msg h1,.msg h2,.msg h3,.msg h4,.msg h5,.msg h6,.msg blockquote{
+  overflow-wrap:anywhere;
+}
+.msg h1,.msg h2,.msg h3,.msg h4,.msg h5,.msg h6{
+  margin:14px 0 8px;line-height:1.4;font-weight:600;color:var(--fg);
+}
+.msg > *:first-child{margin-top:0}
+.msg h1{font-size:16px}
+.msg h2{font-size:15px}
+.msg h3{font-size:14px}
+.msg h4,.msg h5,.msg h6{font-size:13px}
+.msg blockquote{
+  margin:0 0 10px;padding:2px 0 2px 12px;
+  border-left:2px solid var(--fg-faint);color:var(--fg-dim);
+}
+.msg ol{margin:0 0 10px;padding-left:20px}
+.msg a{color:var(--accent);text-decoration:none}
+.msg a:hover{text-decoration:underline}
+.msg code,.think code,.tools code{
+  font-family:var(--mono);font-size:11.5px;
+  background:var(--bg-code);border-radius:3px;padding:1px 4px;
+  border:1px solid var(--line);color:var(--fg);
+}
+.msg ul{margin:0 0 10px;padding-left:18px}
+.msg li{margin-bottom:4px}
+.msg li::marker{color:var(--fg-faint)}
+.msg pre{
+  font-family:var(--mono);font-size:11.5px;line-height:1.65;
+  background:var(--bg-code);border-radius:6px;padding:10px 12px;
+  margin:10px 0 0;overflow-x:auto;
+}
+/* ---------- 代码块（语言标签 + 复制 + 语法高亮） ---------- */
+/* 不用 <pre> 直接做容器：语言标签和复制按钮要贴在右上角，
+   而 <pre> 本身 overflow-x:auto，子元素会被一起横向滚走。 */
+.code{
+  margin:10px 0 0;border:1px solid var(--line);border-radius:6px;
+  background:var(--bg-code);overflow:hidden;
+}
+.code-hd{
+  display:flex;align-items:center;gap:8px;
+  padding:4px 10px;border-bottom:1px solid var(--line);
+  font-family:var(--mono);font-size:10.5px;line-height:1.6;
+  color:var(--fg-faint);background:var(--bg-elev);
+}
+.code-hd .lang{flex:1;text-transform:lowercase;letter-spacing:.03em}
+.code-copy,.code-wrap{
+  font-family:var(--font);font-size:10.5px;color:var(--fg-dim);
+  padding:1px 7px;border-radius:3px;border:1px solid transparent;
+}
+.code-copy:hover,.code-wrap:hover{background:var(--bg-hover);color:var(--fg);border-color:var(--line)}
+.code-copy[data-done="true"]{color:var(--ok)}
+.code-wrap[data-on="true"]{color:var(--accent);border-color:var(--line-strong)}
+/* 换行开关默认打开：默认形态是右侧辅助侧边栏（约 289px），
+   80 列代码在 290px 里只能看到三分之一，必须横向拖才能读完一行。
+   这里改用 pre-wrap，代码竖着读完；关掉开关还能切回横向滚动看原始缩进。 */
+.code pre{
+  margin:0;padding:10px 12px;border:none;border-radius:0;
+  background:transparent;overflow-x:auto;
+  /* 源码里的 Tab 按 4 列算：主流语言（Python/JS/Go）都用 4 空格缩进，
+     浏览器默认的 8 列会让混用 Tab 的代码缩进看起来是别人的两倍，
+     同一段代码里 4 空格与 1 Tab 对不对齐全靠运气。 */
+  tab-size:4;
+}
+.code[data-wrap="true"] pre{
+  white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;
+}
+/* 折行的续行无法用纯 CSS 标出来 —— 这里踩过一次，记下来别再试：
+   曾用 `padding-left:calc(12px + 2ch); text-indent:-2ch` 做悬挂缩进，
+   但 `text-indent` 只作用于**块的第一行**，而 <pre> 里全部源码行都是同一个块。
+   实测结果：只有整个块的第 1 行回到原位（x=12），其余 15 个视觉行——包括
+   所有源码行和所有续行——全在 x=25.5，续行与源码行仍然分不开，反倒白占了 2ch 宽。
+   要真正做到「每行悬挂」，必须把每个源码行包成独立的块元素，这会让
+   pre.textContent 丢掉换行（复制按钮依赖它），风险大于收益。
+   所以默认**不折行**（与 VSCode 编辑器 wordWrap 默认关闭一致）：横滚保住
+   行结构与缩进，少拖几下比读错缩进便宜。用户仍可点「换行」自己选。 */
+/* 超长代码块折叠：120 行代码高 2296px，而对话区可视高度只有 722px，
+   一条回复刷 3 屏会把后面的结论顶到很远。超过阈值时收成 60vh 并可展开。 */
+.code[data-fold="true"] pre{max-height:60vh;overflow-y:auto}
+.code-more{
+  display:block;width:100%;text-align:center;
+  font-family:var(--font);font-size:10.5px;color:var(--fg-dim);
+  padding:3px 0;border-top:1px solid var(--line);background:var(--bg-elev);
+}
+.code-more:hover{color:var(--fg);background:var(--bg-hover)}
+/* 语法高亮：全部取 VSCode 主题色，浅色/深色主题自动跟随。
+   关键字不能用 --vscode-symbolIcon-keywordForeground：该键的默认值就是
+   foreground（实测 Dark+ #CCCCCC / Light+ #616161），拿它当关键字颜色
+   等于没高亮。debugTokenExpression-name 才是紫红（Dark+ #c586c0 /
+   Light+ #9b46b0），且语义相符（调试视图里的 token 名）。 */
+.tk-cm{color:var(--vscode-editorLineNumber-foreground,var(--fg-faint));font-style:italic}
+.tk-st{color:var(--vscode-debugTokenExpression-string,#ce9178)}
+.tk-nu{color:var(--vscode-debugTokenExpression-number,#b5cea8)}
+.tk-kw{color:var(--vscode-debugTokenExpression-name,#c586c0)}
+.tk-fn{color:var(--vscode-symbolIcon-methodForeground,#b180d7)}
+/* 类型名不能借 symbolIcon-classForeground：Light+ 给的是 #D67E00，
+   在 #F1F1F1 代码底色上只有 2.72:1（连 3:1 的图标线都不到）——
+   类名/类型名是代码里的关键标识，看不清等于没高亮。
+   换成 textLink 色：VSCode 保证它在两套主题下都是可读的强调色。 */
+.tk-ty{color:var(--vscode-textLink-foreground,#569cd6)}
+/* diff 代码块（```diff）：按行首字符染色。
+   取 git 装饰色，VSCode 保证四套主题下都可读。 */
+.tk-add{color:var(--vscode-gitDecoration-addedResourceForeground,#4ec9b0)}
+.tk-del{color:var(--vscode-gitDecoration-deletedResourceForeground,#f14c4c)}
+.tk-hdr{color:var(--vscode-textLink-foreground,#569cd6)}
+.tk-meta{color:var(--fg-faint)}
+/* Markdown 表格：外层负责横向滚动，表格本身保持 table 布局 */
+.tw{margin:10px 0 0;overflow-x:auto}
+.msg table{border-collapse:collapse;font-size:11.5px;min-width:100%}
+.msg th,.msg td{
+  border:1px solid var(--line);padding:4px 9px;
+  text-align:left;vertical-align:top;
+}
+.msg th{
+  background:var(--bg-code);color:var(--fg);
+  font-weight:600;white-space:nowrap;
+}
+.msg td{color:var(--fg-dim)}
+.msg th[data-a="center"],.msg td[data-a="center"]{text-align:center}
+.msg th[data-a="right"],.msg td[data-a="right"]{text-align:right}
+.msg td code{margin:0}
+
+/* ---------- 可折叠行（思考 / 工具） ---------- */
+.row{
+  display:flex;align-items:baseline;
+  min-height:26px;padding:2px 8px 2px 0;margin-left:-8px;
+  padding-left:8px;border-radius:4px;cursor:pointer;
+  font-family:var(--mono);font-size:11.5px;
+}
+.row:hover{background:var(--bg-hover)}
+.row .caret{flex:none;width:13px;font-size:8px;color:var(--fg-faint);transition:transform .1s}
+.row[data-open="true"] .caret{transform:rotate(90deg)}
+.row .name{flex:none;color:var(--fg-dim);padding-right:10px}
+.row .arg{
+  flex:1;min-width:0;color:var(--fg);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:12px;
+}
+/* 路径类摘要（`…\sandbox\rect_area.py`）在窄面板里要保留**尾部**：
+   尾部是文件名，是用户唯一能区分「改的是哪个文件」的信息。
+   text-overflow:ellipsis 默认砍尾、留头，而头部（工作目录那一段）
+   对所有文件都一样——两行长得完全一致（实测 249px 面板里就是这样）。
+   direction:rtl 让省略号出现在左边、尾部保住；同时用 bdi 保持文本顺序。 */
+.row .arg.path{
+  /* 只加 direction:rtl 让省略号出现在左边、尾部保住。
+     不能同时写 unicode-bidi:plaintext —— 那会把每段按自身方向重排，
+     rtl 的截断效果被抵消，又变回「砍尾留头」（实测 249px 下只剩工作目录那半截）。
+     代价：纯拉丁路径在 rtl 盒里逐段仍是 LTR（由浏览器按 bidi 规则处理），
+     只要路径里没有 RTL 语言字符，显示顺序就是正常的。 */
+  direction:rtl;text-align:left;
+}
+.row .meta{flex:none;color:var(--fg-faint);font-size:10.5px}
+.row .meta .bad{color:var(--err)}
+.row[data-st="err"] .name{color:var(--err)}
+
+.think{margin-bottom:16px}
+.think .row .name{color:var(--fg-faint)}
+.think[data-open="true"] .row .name{color:var(--fg-dim)}
+.dot-anim::after{content:"…";animation:dots 1.2s steps(4,end) infinite}
+@keyframes dots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
+
+.slot{display:none;padding:4px 0 12px 21px}
+.row[data-open="true"] + .slot{display:block}
+.think .slot p{
+  margin:0 0 8px;font-size:12.5px;line-height:1.8;color:var(--fg-dim);
+}
+.think .slot p:last-child{margin-bottom:0}
+
+.snippet{
+  font-family:var(--mono);font-size:11.5px;line-height:1.7;
+  background:var(--bg-code);border-radius:6px;padding:7px 0;overflow-x:auto;
+}
+.snippet .ln{display:flex;padding:0 12px;white-space:pre}
+/* 行号在横向滚动时不能跟着滚走。
+   diff 的每行最长 74~82 个字符，而 249px 面板一屏只放得下约 31 个字符，
+   横滚是必然动作（实测内容宽 599px / 可视 212px）。行号原来跟着内容一起滚，
+   拖到右端时整列行号跑出视口（x 从 41 → −79），看完不知道这是第几行。
+   sticky 把行号钉在左缘：它仍占原来的 32px 位置，滚动时不被带走。
+   背景必须补上，否则后面滚过来的代码会盖着行号透出来。 */
+.snippet .ln .no{
+  flex:none;width:32px;color:var(--fg-faint);text-align:right;
+  padding-right:14px;user-select:none;
+  position:sticky;left:0;z-index:1;
+  background:var(--bg-code);
+}
+.snippet .ln.add .no{background:var(--add)}
+.snippet .ln.del .no{background:var(--del)}
+.snippet .ln.add{background:var(--add)}
+.snippet .ln.del{background:var(--del)}
+.snippet .ln.add .tx::before{content:"+ ";color:var(--ok)}
+.snippet .ln.del .tx::before{content:"- ";color:var(--err)}
+.snippet.out .ln{color:var(--fg-dim)}
+.snippet .ln mark{background:none;color:var(--fg);font-weight:600}
+.snippet .ln .dim{color:var(--fg-faint)}
+
+/* ---------- 通用小工具类 ----------
+   这些样式原来写成元素上的内联 style="…"。VSCode webview 的 CSP 是
+   `style-src ${webview.cspSource}`（不含 'unsafe-inline'），会按 style-src-attr
+   把内联 style **属性**整条丢掉（实测：探针里 display:none 不生效，
+   面板中 11 个 [style] 元素受影响）。后果不只是「字色差一点」：
+   #branchActs / #branchTip 的 display:none 失效时，「完成并合并结论」按钮
+   会一直在普通会话里显示。
+   注意：`element.style.foo = x`（CSSOM 赋值）**是有效的**，不在这个限制内；
+   这里改用类只是为了让初始状态不依赖 JS、也不留 CSP 隐患。 */
+.dim{color:var(--fg-faint)}
+.err-tx{color:var(--err)}
+.mt6{margin-top:6px}
+.lb-dim{font-size:11.5px;color:var(--fg-dim)}
+#branchActs{display:none}
+#branchActs[data-on="true"]{display:block}
+#branchTip{display:none;padding:6px 0 0}
+#branchTip[data-on="true"]{display:block}
+#newBranchBtn[data-off="true"]{opacity:.45}
+.snippet .foot{
+  padding:5px 12px 0;color:var(--fg-faint);font-size:10.5px;
+  border-top:1px solid var(--line);margin-top:6px;padding-top:6px;
+}
+.snippet .foot b{color:var(--ok);font-weight:400}
+/* 工具输出被截断时的「还有 N 行」入口：可点、要显眼，不能被当成正文 */
+.snippet .more{
+  padding:4px 12px;color:var(--accent);font-size:10.5px;
+  cursor:pointer;border-top:1px dashed var(--line);margin-top:4px;
+}
+.snippet .more:hover{background:var(--bg-hover)}
+
+/* ---------- 计划清单 ---------- */
+.todo{font-family:var(--font);font-size:12.5px;padding:2px 2px 0}
+.todo div{padding:1px 0;color:var(--fg-dim)}
+.todo .done{color:var(--fg-faint);text-decoration:line-through}
+.todo .now{color:var(--fg)}
+.todo .mk{display:inline-block;width:16px;color:var(--fg-faint)}
+.todo .now .mk{color:var(--accent)}
+
+/* ---------- 系统事件行 ---------- */
+.sys{
+  display:flex;align-items:baseline;gap:8px;
+  font-family:var(--mono);font-size:11.5px;color:var(--fg-faint);
+  padding:0 0 14px;
+  /* 系统行里常出现「不可断」的长串：离线提示会带上后端可执行文件的真实绝对
+     路径（Windows 下形如 `<盘符>\<很深的目录>\narnat.exe`），错误详情里还有
+     ENOENT 之类的原文。这些在默认 249px 面板里会把 #convo 撑出横向滚动条
+     （实测 scrollWidth 321 / clientWidth 249）。允许任意位置断行。 */
+  overflow-wrap:anywhere;
+}
+.sys .ico{flex:none;width:12px;text-align:center}
+.sys .tail{min-width:0}
+.sys.ok{color:var(--fg-dim)}
+.sys.ok .ico{color:var(--ok)}
+.sys.warn .ico{color:var(--warn)}
+.sys.err .ico{color:var(--err)}
+.sys .tail{color:var(--fg-faint)}
+
+/* ---------- 待确认命令 ---------- */
+.confirm{
+  /* 边框不能只用 --line-strong（widget.border）：深色 1.26:1、浅色 1.48:1，
+     确认条这个「等你拍板」的容器在页面上几乎看不出边界。换成
+     descriptionForeground（深 6.17 / 浅 4.74），让人一眼看到「这里要我点」。
+     边框本身不承载文字，按 WCAG 1.4.11「非文本对比度 3:1」也够。 */
+  border:1px solid var(--fg-faint);border-radius:6px;
+  padding:10px 12px;margin-bottom:22px;
+  max-width:680px;
+}
+.confirm .q{font-size:12.5px;color:var(--fg);margin-bottom:6px}
+.confirm .cmd{
+  font-family:var(--mono);font-size:11.5px;color:var(--fg-dim);
+  background:var(--bg-code);border-radius:4px;padding:6px 8px;margin-bottom:10px;
+  white-space:pre-wrap;
+  /* 命令可能几百字符：限高 + 内部滚动，不能把对话区顶走 */
+  max-height:160px;overflow:auto;
+}
+.confirm .cmd-line{display:flex;gap:6px;align-items:baseline;padding:1px 0}
+.confirm .cmd-line + .cmd-line{border-top:1px dashed var(--line);margin-top:3px;padding-top:4px}
+.confirm .cmd-name{
+  flex:none;color:var(--fg-faint);font-size:10.5px;
+  border:1px solid var(--line);border-radius:3px;padding:0 4px;
+}
+.confirm .cmd-line code{
+  flex:1;min-width:0;background:none;border:none;padding:0;
+  color:var(--fg);word-break:break-all;
+}
+.confirm .acts{display:flex;gap:8px}
+.confirm .acts button{
+  font-size:12px;padding:3px 12px;border-radius:4px;
+  border:1px solid var(--line-strong);color:var(--fg-dim);
+}
+.confirm .acts button:hover{background:var(--bg-hover);color:var(--fg)}
+.confirm .acts .primary{border-color:var(--accent);color:var(--accent)}
+.confirm .acts .primary:hover{background:var(--accent);color:var(--bg)}
+
+/* ---------- 输入区 ---------- */
+.composer{flex:none;padding:10px 24px 10px}
+.cbox{
+  max-width:680px;margin:0 auto;position:relative;
+  /* 背景用 input-background（深色 #3C3C3C 对 #1E1E1E 面板底有明显层次，
+     比原来的 sideBar-background 更像个输入框）；边框在 HC 主题下取
+     input-border 才有强对比，普通主题靠背景差 + 聚焦变强调色。 */
+  border:1px solid var(--vscode-input-border,var(--line-strong));
+  border-radius:8px;
+  background:var(--vscode-input-background,var(--bg-elev));
+  padding:9px 12px 7px;
+}
+.cbox:focus-within{border-color:var(--accent)}
+.cbox textarea{
+  width:100%;border:none;background:none;resize:none;outline:none;
+  font:inherit;font-size:13px;line-height:1.6;color:var(--fg);
+  /* 高度由 JS 按内容撑开（auto-grow），这里只给上下限：
+     固定 21px 会让多行输入只看到最后一行，旧文字被裁掉。 */
+  height:auto;min-height:21px;max-height:160px;
+  overflow-y:hidden;padding:0;display:block;
+}
+.cbox textarea::placeholder{color:var(--fg-faint)}
+.crow{display:flex;align-items:center;gap:6px;margin-top:5px;min-height:20px;user-select:none}
+.chip{
+  font-size:10.5px;color:var(--fg-dim);padding:1px 6px;
+  border-radius:3px;background:var(--bg-hover);white-space:nowrap;
+  /* 会话名/路径可能很长：可以收缩，溢出用省略号而不是把 .crow 顶宽 */
+  min-width:0;overflow:hidden;text-overflow:ellipsis;
+}
+.chip.mono{font-family:var(--mono)}
+.chip.on{color:var(--accent)}
+/* 目标 chip 可点开目标面板（窄面板里它是唯一的目标入口）：给出可点的光标 */
+#chipGoal{cursor:pointer}
+#chipGoal:hover{background:var(--bg-hover)}
+/* 插件 chip：只在窄面板出现（宽面板用状态栏里那个按钮）。
+   249px 下状态栏只剩 233px，装不下「插件 4」及其分隔符（实测需要约 40px），
+   而 400px 断点又把整个 .st-opt 隐藏了 → 界面上一个插件入口都没有，
+   用户只能靠 /plugin 命令（而界面上没写这个命令）。
+   文案固定写「插件」不带计数：计数由状态栏按钮持有，两处各写一份必然不同步。 */
+#chipPlugin{display:none;flex:none;cursor:pointer}
+#chipPlugin:hover{background:var(--bg-hover)}
+/* 收缩优先级：会话名先让 → 路径次之（留 3em 不至于整块消失）→ 目标状态不让 */
+.crow .chip.on{flex:none}
+.crow .chip.path{flex-shrink:2;min-width:3em}
+/* 按钮组不参与收缩：宁可省略 chip 文字，也不让「发送」被压成两行 */
+.crow .right{margin-left:auto;flex:none;display:flex;align-items:center;gap:6px}
+.stop{
+  display:none;align-items:center;gap:5px;
+  font-size:11.5px;color:var(--fg-dim);
+  border:1px solid var(--line-strong);border-radius:5px;padding:2px 9px;
+}
+.stop:hover{color:var(--err);border-color:var(--err)}
+/* 已点过停止、等后端收口：按钮留着但按时不可点，避免连点把 cancel 请求堆在后面 */
+.stop[data-pending="true"]{color:var(--warn);border-color:var(--warn);cursor:default;opacity:.85}
+.stop[data-pending="true"] .sq{animation:sqpulse 1s ease-in-out infinite}
+@keyframes sqpulse{0%,100%{opacity:.35}50%{opacity:1}}
+.stop .sq{width:7px;height:7px;background:currentColor;border-radius:1px}
+body[data-run="true"] .stop{display:inline-flex}
+body[data-run="true"] .send{display:none}
+.send{
+  font-size:11.5px;color:var(--fg-dim);
+  border:1px solid var(--line-strong);border-radius:5px;padding:2px 9px;
+}
+.send:hover{color:var(--fg)}
+.kbd{font-family:var(--mono);font-size:10px;color:var(--fg-faint)}
+
+/* ---------- 命令面板 ---------- */
+.palette{
+  display:none;position:absolute;left:0;right:0;bottom:calc(100% + 6px);
+  background:var(--bg-elev);border:1px solid var(--line-strong);
+  border-radius:8px;padding:5px;max-height:300px;overflow-y:auto;
+  box-shadow:0 6px 18px rgba(0,0,0,.35);z-index:20;
+}
+.palette[data-open="true"]{display:block}
+.palette .grp{font-size:10px;color:var(--fg-faint);padding:6px 8px 3px}
+.palette .item{
+  display:flex;align-items:baseline;gap:10px;
+  padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px;
+}
+.palette .item[data-sel="true"]{background:var(--bg-hover)}
+/* 鼠标悬停也要有反馈：只靠键盘选中态的话，鼠标移上去毫无变化，
+   用户不确定这一行能不能点（实测 .item 没有 :hover 规则）。 */
+.palette .item:hover{background:var(--bg-hover)}
+/* 下拉/候选的键盘选中态（↑↓ 移动时）与鼠标悬停同一视觉 */
+.pop .pi[data-sel="true"],.palette .item[data-sel="true"]{background:var(--bg-hover)}
+/* 可聚焦的标题行/按钮要有可见焦点：VSCode 里 outline:none 且无替代高亮
+   等于「键盘用户不知道焦点在哪」（实测 #goalRounds 完全看不见） */
+.think .name:focus-visible,.tools .row:focus-visible,
+#goalRounds:focus-visible,.status button:focus-visible{
+  outline:1px solid var(--accent);outline-offset:1px;
+}
+.palette .item .c{
+  font-family:var(--mono);font-size:11.5px;color:var(--fg);flex:none;
+  /* 名字列宽度按内容给，但**不超过**一个上限。
+     原来写死 88px：最长命令名 `/thinkback` 只要 67.4px，白占 20.6px；
+     而会话名 40 字符时只显示得下约 13 个字符（实测）。改成 max-content 后
+     命令名不再截断、长会话名也拿得到多出来的宽度，描述列跟着受益。 */
+  width:max-content;min-width:64px;max-width:150px;
+  /* 会话名可能很长（`grep-ignore-case/try-regex`）：必须省略而不是折行。
+     不截会怎样（实测）：同一列表里出现 28.5 / 48.1 / 67.6px 三种行高，
+     方向键上下移动时列表跟着来回滚，眼睛跟不上。 */
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.palette .item .d{
+  color:var(--fg-dim);font-size:11.5px;flex:1;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.palette .item .s{color:var(--fg-faint);font-family:var(--mono);font-size:10.5px;flex:none}
+
+/* ---------- 抽屉 ---------- */
+.drawer{
+  display:none;flex:none;width:262px;
+  border-left:1px solid var(--line);overflow-y:auto;padding:14px 0;
+  background:var(--bg);
+}
+.drawer[data-open="true"]{display:block}
+.dw-head{
+  display:flex;align-items:center;padding:0 14px 10px;
+  font-size:11px;color:var(--fg-faint);letter-spacing:.04em;
+}
+.dw-head button{margin-left:auto;color:var(--fg-faint);font-size:14px}
+.dw-head button:hover{color:var(--fg)}
+.dw-item{
+  display:flex;align-items:baseline;gap:7px;
+  padding:4px 14px;font-size:12px;color:var(--fg-dim);cursor:pointer;
+  min-height:26px;position:relative;
+}
+.dw-item:hover{background:var(--bg-hover)}
+.dw-item .n{
+  flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--fg);
+}
+.dw-item .m{flex:none;font-family:var(--mono);font-size:10px;color:var(--fg-faint)}
+/* 当前会话：只留左侧细色条 + 加粗，不加圆点等额外符号 */
+.dw-item[data-cur="true"]{background:var(--bg-hover);color:var(--fg)}
+.dw-item[data-cur="true"] .n{font-weight:600}
+.dw-item[data-cur="true"]::before{
+  content:"";position:absolute;left:0;top:3px;bottom:3px;width:2px;
+  background:var(--accent);border-radius:1px;
+}
+.dw-sep{border-top:1px solid var(--line);margin:10px 14px}
+.dw-note{padding:0 14px;font-size:11px;color:var(--fg-faint);line-height:1.7}
+/* 展开/收起更早会话：做成可点的整行，hover 给出可点提示 */
+.dw-more{
+  padding:5px 14px;font-size:11px;color:var(--fg-dim);cursor:pointer;
+  display:flex;align-items:center;gap:5px;
+}
+.dw-more:hover{background:var(--bg-hover);color:var(--fg)}
+.dw-more::before{content:"▾";font-size:9px;color:var(--fg-faint)}
+.dw-more[data-more="0"]::before{content:"▴"}
+/* hover 出来的「改名 / 删除」浮在右侧，不参与 flex 挤压。
+   原来它占着 flex 位，鼠标一移上去名字区就从 184px 掉到 104px——
+   用户正在辨认那个被省略的长名字，名字自己又变短了。 */
+.dw-item{position:relative}
+.dw-item .acts{
+  display:none;gap:5px;flex:none;
+  position:absolute;right:8px;top:50%;transform:translateY(-50%);
+  background:var(--bg);padding-left:4px;
+}
+.dw-item:hover .acts{display:flex}
+.dw-item .acts button{
+  font-size:10px;border:1px solid var(--line-strong);border-radius:3px;
+  padding:0 6px;color:var(--fg-faint);
+}
+.dw-item .acts button:hover{color:var(--fg);border-color:var(--fg-dim)}
+.dw-item .acts button.rn:hover{color:var(--accent);border-color:var(--accent)}
+.dw-item .acts button.del:hover{color:var(--err);border-color:var(--err)}
+/* 删除确认行必须与「删除」按钮**完全不重叠**，因此它固定钉在条目左缘。
+   踩过两次：
+   ① 原来是流内 flex 项 + margin-left:auto（靠右）——与「删除」按钮横向重叠 6px，
+      在「删除」左缘双击时第二下正好落在刚变出来的「是」上，会话当场被删，
+      没有二次确认也无法撤销（双击正中碰巧落到「否」，所以这个坑只在左缘出现）。
+   ② 改成 margin-right:auto 靠左也不行：「删除」是 absolute 定位（right:8px），
+      而确认行还在流里，长会话名会把它一路挤到右端，实测仍与「删除」重叠 28px、
+      与「否」重叠 24px（900/620/420/249 四个宽度全都一样）。
+   现在两者都用绝对定位、一个贴左一个贴右，中间隔开整条宽度，物理上不可能重叠。
+   改名字区让位：data-del="ask" 时给 .n 留出确认行的宽度，名字用省略号收窄。 */
+.dw-item .asks{
+  display:none;gap:4px;flex:none;align-items:baseline;
+  position:absolute;left:8px;top:50%;transform:translateY(-50%);
+  background:var(--bg-hover);z-index:2;
+}
+.dw-item[data-del="ask"] .n{padding-left:100px}
+.dw-item[data-del="ask"] .asks{display:flex}
+.dw-item[data-del="ask"] .acts{display:none}
+.dw-item[data-del="ask"]{background:var(--bg-hover)}
+.dw-item .asks span{font-size:10px;color:var(--fg-faint)}
+.dw-item .asks button{
+  font-size:10px;border:1px solid var(--line-strong);border-radius:3px;
+  padding:0 6px;color:var(--fg-faint);
+}
+.dw-item .asks button.y{color:var(--err);border-color:var(--err)}
+.dw-item .asks button:hover{color:var(--fg);border-color:var(--fg-dim)}
+/* 底部操作区常驻：会话多到 100+ 条时，列表会把「＋ 新建对话」推到几千像素之外
+   （实测 108 条会话时按钮在 2493px 之下，用户会以为按钮消失了） */
+.dw-foot{
+  padding:10px 14px 0;border-top:1px solid var(--line);margin-top:10px;
+  position:sticky;bottom:0;background:var(--bg);z-index:2;
+}
+.dw-foot > button{
+  width:100%;font-size:11.5px;color:var(--fg-dim);
+  border:1px dashed var(--line-strong);border-radius:5px;padding:4px;
+}
+.dw-foot > button:hover{color:var(--fg);border-color:var(--fg-dim)}
+/* 主操作（新建对话）：实心描边，和其它次级按钮区分开 */
+.dw-foot > button.dw-primary{
+  border-style:solid;border-color:var(--accent);color:var(--accent);
+}
+.dw-foot > button.dw-primary:hover{background:var(--accent);color:var(--bg)}
+.dw-empty{
+  padding:10px 14px;font-size:11.5px;color:var(--fg-faint);
+}
+/* ---------- 下拉面板 ---------- */
+.pop{
+  display:none;position:fixed;z-index:60;
+  background:var(--bg-elev);border:1px solid var(--line-strong);
+  border-radius:8px;padding:5px;min-width:196px;
+  box-shadow:0 8px 24px rgba(0,0,0,.42);
+  /* 模型多的时候（配置里 20 个）面板会高到超出视口，靠后的项既看不见
+     也点不到（实测：视口 520 时底部 4 项在视口外，且不可滚）。
+     限高 + 可滚，并留出贴边余量。 */
+  max-height:calc(100vh - 24px);overflow-y:auto;overscroll-behavior:contain;
+}
+.pop[data-open="true"]{display:block}
+.pop .pt{
+  font-size:10px;color:var(--fg-faint);padding:5px 8px 4px;letter-spacing:.05em;
+}
+.pop .pi{
+  display:flex;align-items:center;gap:8px;
+  padding:4px 8px;border-radius:4px;font-size:12px;
+  color:var(--fg-dim);cursor:pointer;
+}
+.pop .pi:hover{background:var(--bg-hover);color:var(--fg)}
+.pop .pi[data-on="true"]{color:var(--fg)}
+.pop .pi .ck{width:12px;flex:none;color:var(--accent);font-size:10px}
+.pop .pi .lb{flex:1;white-space:nowrap}
+.pop .pi .sd{font-family:var(--mono);font-size:10.5px;color:var(--fg-faint)}
+.pop .pi .sw{
+  font-family:var(--mono);font-size:10px;padding:0 6px;border-radius:3px;
+  border:1px solid var(--line-strong);color:var(--fg-faint);
+}
+.pop .pi .sw[data-on="true"]{color:var(--ok);border-color:var(--ok)}
+.pop .pd{
+  font-size:10.5px;color:var(--fg-faint);line-height:1.6;
+  padding:5px 8px 4px;border-top:1px solid var(--line);margin-top:4px;
+}
+.pop .pin{
+  display:flex;align-items:center;gap:6px;padding:4px 8px;
+}
+.pop .pin input{
+  width:52px;background:var(--bg);border:1px solid var(--line-strong);
+  border-radius:4px;padding:1px 6px;font:inherit;font-size:11.5px;
+  color:var(--fg);outline:none;
+}
+
+/* ---------- 命令块 ---------- */
+.cmdwrap{padding-bottom:16px}
+.cmdhead{
+  display:flex;align-items:baseline;gap:8px;
+  font-family:var(--mono);font-size:11.5px;
+  padding-bottom:4px;
+}
+.cmdhead .p{color:var(--accent);flex:none}
+.cmdhead .ct{color:var(--fg)}
+.cmdhead .tail{margin-left:auto;color:var(--fg-faint);font-size:10.5px;font-family:var(--mono)}
+.cmdrow{
+  /* 用两列网格而不是 flex-wrap：flex-wrap 折行时整个 .tx 会换到下一根
+     flex line 的起点（容器左边缘），图标下面的缩进层次就没了——实测
+     13 条单行回执里有 5 条正文宽于 213px，折行后 icoX 与 txX 都等于 28，
+     屏幕上出现「✗」独占一行、正文顶格的怪样子。
+     网格的固定第一列让正文永远挂在图标右边，折行也在同一列内继续。 */
+  display:grid;grid-template-columns:12px minmax(0,1fr);column-gap:8px;
+  align-items:baseline;
+  font-family:var(--mono);font-size:11.5px;color:var(--fg-faint);
+  padding:1px 0 0 20px;
+  overflow-wrap:anywhere;
+  /* 后端有些提示本身就是多行的（重名子会话会列两行候选路径），
+     原来 white-space:normal 把它们压成一行，「other/dup alpha/dup」
+     粘在一起，用户照着敲必然敲错（实测）。pre-wrap 保住后端给的换行与缩进。 */
+  white-space:pre-wrap;
+}
+.cmdrow .ico{text-align:center}
+.cmdrow .tx{color:var(--fg-dim);min-width:0}
+/* tail 单独占第三列（跨两列放右边）：网格里 margin-left:auto 不起作用 */
+.cmdrow .tail{grid-column:2;color:var(--fg-faint);font-size:10.5px;white-space:normal}
+.cmdrow.ok .ico{color:var(--ok)}
+.cmdrow.ok .tx{color:var(--fg-dim)}
+.cmdrow.err .ico{color:var(--err)}
+.cmdrow.err .tx{color:var(--err)}
+.cmdrow.warn .ico{color:var(--warn)}
+.cmdrow .tail{margin-left:auto;color:var(--fg-faint);font-size:10.5px}
+.cmdout{
+  font-family:var(--mono);font-size:11.5px;line-height:1.75;
+  white-space:pre;overflow-x:auto;color:var(--fg-dim);
+  padding-left:20px;padding-top:2px;
+}
+.cmdout .dim{color:var(--fg-faint)}
+.cmdout .hl{color:var(--fg)}
+.cmdout .ok{color:var(--ok)}
+.cmdout .err{color:var(--err)}
+.cmdout .warn{color:var(--warn)}
+
+/* 命令输出里需要「多列对齐」的地方（/ls、/help）。
+   做法是纯文本 + 空格补齐（见 js 里的 padDisp），不用 grid：
+   grid 能把列对齐得很准，但**选中复制时每个格子都会变成独立一行**
+   （10 行输出复制出来变 30 多行，实测），而命令输出用户会复制。
+   代价是等宽字体里中文宽约为英文的 1.7 倍（不是 2 倍），按 2 补齐会留
+   极小的余量误差；把列宽取整到常见名字长度就能把误差控制在几个像素内。 */
+.cmdout--cols{white-space:pre}
+/* 名字列用固定 ch 宽度，而不是往文本里补空格。
+   补空格为什么会错位（实测）：中文在等宽字体里是 1.7 个半角宽，补空格只能补
+   整数个（0.5 格 ≈ 3.4px 的残差），于是 10 个汉字的名字和 4 个汉字的名字后面
+   那一列差 5.1px，越靠右越明显。交给浏览器用 ch 排版就没有残差。
+   22ch / 18ch 对应 js 里的 NAME_W=22 与子会话的 NAME_W-4=18。 */
+.cmdout .col22{display:inline-block;min-width:22ch}
+.cmdout .col18{display:inline-block;min-width:18ch}
+/* 不需要跨行对齐的多行输出（/help）：允许换行，窄面板里不横滚 */
+.cmdout--wrap{white-space:pre-wrap;overflow-wrap:anywhere}
+
+/* ---------- 滚动条 ---------- */
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{
+  background:var(--vscode-scrollbarSlider-background, rgba(128,128,128,.35));
+  border-radius:5px;
+  border:3px solid transparent;
+  background-clip:content-box;
+}
+::-webkit-scrollbar-thumb:hover{
+  background:var(--vscode-scrollbarSlider-hoverBackground, rgba(128,128,128,.55));
+  background-clip:content-box;
+}
+::-webkit-scrollbar-thumb:active{
+  background:var(--vscode-scrollbarSlider-activeBackground, rgba(128,128,128,.7));
+  background-clip:content-box;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner,
+::-webkit-scrollbar-track-piece{background:transparent}
+
+/* ---------- 窄宽度（辅助侧边栏）自适应 ----------
+   侧边栏被拉窄时（典型 300–330px），按 Copilot Edits 的做法逐级让位：
+   先收内边距 → 再按重要性隐藏次要信息 → 最后只留骨架。
+   用容器查询而不是媒体查询：iframe 宽度 = 面板宽度，与浏览器窗口无关。
+   只处理真正会溢出的 .composer/.cbox/.crow/.bar/.status；
+   .arg/.snippet/.cmdout 的溢出是设计如此（省略号/横向滚动），不在此列。 */
+
+/* 620px：先让掉纯参考值，控件一个不动。 */
+@container (max-width:620px){
+  .status .st-cache,.status .st-bal{display:none}
+}
+
+/* 520px：收内边距 */
+@container (max-width:520px){
+  .composer{padding:8px 12px}
+  .convo{padding:20px 12px 8px}
+  /* 竖线要跟着收。它是负 margin 顶出来的（margin-left:-14px 配 .convo 的 20px
+     内边距，落点 x=6）；只收 .convo 不跟着收，落点就变成 12-14=-2，
+     整条 2px 边框被裁到面板外——用户消息和助手消息唯一的外形区别就没了。
+     实测 420px（默认宽度）时 0 像素可见。这里让落点始终是 x=6。 */
+  .msg .text{margin-left:-6px}
+}
+
+/* 400px：输入框下方按钮行允许换行，路径 chip 与次要控件让位 */
+@container (max-width:400px){
+  .composer{padding:8px 8px}
+  .convo{padding:16px 8px 8px}
+  .crow{flex-wrap:wrap;row-gap:4px}
+  .crow .chip.path{display:none}
+  /* 只让位于有 /goal、/plugin 命令等价入口的控件；思考档位最常看，始终保留 */
+  .status .st-opt{display:none}
+  /* 状态栏的插件按钮在这里让掉了，界面上必须补一个入口（见 #chipPlugin 注释） */
+  #chipPlugin{display:inline-block}
+  .sess .cnt{display:none}
+  .bar{padding:0 8px;gap:8px}
+  /* 同 520 那条：8px 内边距下把落点补回 x=6 */
+  .msg .text{margin-left:-2px}
+  /* 抽屉在窄面板里改成覆盖整个对话区：262px 的固定宽度会把对话挤成一条 */
+  .drawer[data-open="true"]{
+    position:absolute;inset:0;width:100%;z-index:15;
+  }
+}
+
+/* 340px：再让一轮。
+   真实默认面板只有约 249px 可用宽（webview 视口 289 减 IDE 两侧内边距），
+   这个断点在默认布局下就会命中 —— 所以这里只让「真的放不下」的东西。
+   · 键位提示：本来就是给新手的，老手不需要
+   · 费用的「费用」二字：「¥0.0123」本身已经说明是钱，标签可以省
+   注意「费用」这一项绝不能整体藏掉：它是用户最关心的数字（花了多少），
+   .status 本来就会 flex-wrap 换行，藏掉换不来任何布局好处，只换来「看不到」。 */
+@container (max-width:340px){
+  .crow .kbd{display:none}
+  .status .st-cost .k{display:none}
+  /* 正文再收一点内边距（竖线落点仍由上面两条 margin 规则保持 x=6） */
+  .msg .text{padding-left:10px}
+}

@@ -7,7 +7,7 @@
 把 `.json` 会话文件放到脚本所在目录，然后：
 
 ```powershell
-cd D:\desktop\FILE\NarnatAgent\translator
+cd <仓库目录>\translator
 python translate_sessions.py
 ```
 
@@ -24,7 +24,7 @@ python translate_sessions.py <输入目录> <输出目录>
 例：
 
 ```powershell
-python translate_sessions.py D:\sessions D:\sessions\markdown
+python translate_sessions.py .\translated\src .\translated\markdown
 ```
 
 ---

@@ -619,6 +619,31 @@ def cancel_task(bg_id: int) -> str:
     )
 
 
+def cancel_all() -> int:
+    """取消所有运行中的后台任务，返回真正发过终止的槽位数。
+
+    用户点「停止」时用：那一格 UI 上写的是「已打断」，如果背后还有
+    agent 自己派出去的后台进程在跑，它既继续烧钱、也继续往工作区写文件，
+    而界面已经告诉用户"停了"——这是最不能接受的一种不一致。
+    """
+    from ..bash import _kill_proc_tree  # 延迟导入：避免循环
+    victims = []
+    with _lock:
+        for slot in _slots:
+            if slot.status != STATUS_RUNNING:
+                continue
+            slot.cancel_flag = True
+            victims.append((slot.id, slot.proc, slot.log_path))
+    killed = 0
+    for _bg_id, proc, _log_path in victims:
+        if proc is not None and proc.poll() is None:
+            threading.Thread(target=_kill_proc_tree, args=(proc,), daemon=True).start()
+            killed += 1
+        else:
+            killed += 1        # 已在收尾也算「已处理」
+    return killed
+
+
 def running_count() -> int:
     with _lock:
         return sum(1 for s in _slots if s.status == STATUS_RUNNING)

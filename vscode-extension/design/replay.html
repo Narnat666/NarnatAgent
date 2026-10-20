@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Narnat · 真实事件回放</title>
+<link rel="stylesheet" href="../media/narnat.css">
+</head>
+<body data-run="false" data-preview="true">
+<script src="../media/narnat.body.js"></script>
+<script>document.write(window.NARNAT_BODY);</script>
+<script src="../media/narnat.js"></script>
+<script src="replay-events.js"></script>
+<script>
+(function () {
+  var data = window.NARNAT_REPLAY || { events: [] };
+  var events = data.events || [];
+  var i = 0;
+
+  function step() {
+    if (i >= events.length) {
+      document.title = 'Narnat · 回放完成 (' + events.length + ' 条)';
+      return;
+    }
+    var e = events[i++];
+    window.postMessage({ type: e.type, params: e.params || {} }, '*');
+    var delay = new URLSearchParams(location.search).get('delay');
+    var wait = delay === null ? 120 : parseInt(delay, 10);
+    setTimeout(step, isNaN(wait) ? 120 : wait);
+  }
+
+  // 等 narnat.js 完成首帧渲染
+  setTimeout(step, 60);
+})();
+</script>
+</body>
+</html>

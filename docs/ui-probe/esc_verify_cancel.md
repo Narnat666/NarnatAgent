@@ -1,7 +1,7 @@
 # ESC 中断"验证期间长耗时只读工具执行"修复与验证记录（2026-10-08）
 
-> 对应任务书：`D:\tmp\vfprobe\task_verify_esc_cancel.md`
-> 证据目录：`D:\tmp\vfprobe\`（probe 脚本 + result*.json，可复跑，勿删）
+> 对应任务书与证据目录在当时的临时工作区（`<临时目录>\vfprobe\`），
+> 那是做这次修复时的一次性脚手架，已不在仓库里。复跑方法见下方各节引用的探针脚本名。
 
 ## 1. 现象与根因
 
@@ -26,7 +26,7 @@
 | `ui/interrupt.py` | 自检改按 c_int 语义比较 `-1`；`_poll_esc_windows_coninput` 返回 bool，句柄失效/读取失败时**降级 msvcrt 继续轮询**（不再退出线程、不再空转） |
 | `assembly.py` | 主会话 ToolContext 注入 `cancel_check=lambda: _interrupt_ctrl.is_set` |
 
-## 3. 验收判据与结果（证据在 `D:\tmp\vfprobe\`）
+## 3. 验收判据与结果
 
 | 验收项 | 命令 | 结果 |
 |---|---|---|

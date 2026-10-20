@@ -371,6 +371,11 @@ class UIStreamSession:
         self._stop_spinner()
         self._renderer.feed(chunk)
 
+    def notice(self, text: str) -> None:
+        """框架运行提示（压缩/重试/超限）。终端形态与正文一样直接打印。"""
+        if text:
+            self.feed(text)
+
     def pause_spinner(self) -> None:
         """暂停spinner（工具执行前调用），避免与工具输出竞争同一行"""
         with self._spinner_lock:

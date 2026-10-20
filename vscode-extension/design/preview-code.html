@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Narnat 代码块渲染预览</title>
+<link rel="stylesheet" href="../media/narnat.css">
+<style>
+  body{overflow:auto!important;padding:0}
+  .wrap{max-width:760px;margin:0 auto;padding:24px 20px 60px}
+  h2{font-size:15px;margin:0 0 4px}
+  .sub{color:var(--fg-faint);font-size:12px;margin:0 0 24px}
+  h3{font-size:12px;color:var(--fg-dim);margin:26px 0 8px;font-weight:600}
+  .hint{color:var(--fg-faint);font-size:11.5px;margin:0 0 16px;line-height:1.8}
+</style>
+</head>
+<body data-run="false" data-preview="true">
+<div class="wrap">
+  <h2>代码块渲染预览</h2>
+  <p class="sub">内容由 ui-full.html 里真实的 markdownInline 生成，样式取自 media/narnat.css</p>
+  <p class="hint">检查点：语言标签在左上、复制按钮在右上、关键字/字符串/数字/注释各有颜色、超长行横向滚动不撑破布局。<br>
+  点击任意「复制」按钮应变成「已复制」。</p>
+<h3>JavaScript</h3>
+<div class="msg assistant"><div class="code"><div class="code-hd"><span class="lang">js</span><button class="code-copy" type="button">复制</button></div><pre data-lang="js"><span class="tk-cm">// 计算对话的 token 占用</span>
+<span class="tk-kw">const</span> stats = <span class="tk-kw">new</span> <span class="tk-fn">Map</span>();
+<span class="tk-kw">function</span> <span class="tk-fn">addTurn</span>(id, tokens) {
+  <span class="tk-kw">if</span> (!stats.<span class="tk-fn">has</span>(id)) stats.<span class="tk-kw">set</span>(id, { <span class="tk-kw">in</span>: <span class="tk-nu">0</span>, out: <span class="tk-nu">0</span> });
+  <span class="tk-kw">const</span> cur = stats.<span class="tk-kw">get</span>(id);
+  cur.<span class="tk-kw">in</span> += tokens.input;
+  <span class="tk-kw">return</span> <span class="tk-st">`turn ${id}: ${cur.in} tokens`</span>;
+}
+<span class="tk-kw">const</span> RATIO = <span class="tk-nu">0.85</span>; <span class="tk-cm">// 压缩阈值</span></pre></div></div>
+<h3>Python</h3>
+<div class="msg assistant"><div class="code"><div class="code-hd"><span class="lang">python</span><button class="code-copy" type="button">复制</button></div><pre data-lang="python"><span class="tk-kw">def</span> <span class="tk-fn">summarize</span>(messages, cancel_check):
+    <span class="tk-st">&quot;&quot;</span><span class="tk-st">&quot;用 LLM 总结消息内容。&quot;</span><span class="tk-st">&quot;&quot;</span>
+    parts = []
+    <span class="tk-kw">for</span> chunk <span class="tk-kw">in</span> <span class="tk-fn">chat_stream</span>(messages):
+        <span class="tk-kw">if</span> <span class="tk-fn">cancel_check</span>():
+            <span class="tk-kw">return</span> <span class="tk-st">&quot;&quot;</span>
+        parts.<span class="tk-fn">append</span>(chunk.<span class="tk-fn">get</span>(<span class="tk-st">&quot;content&quot;</span>, <span class="tk-st">&quot;&quot;</span>))
+    <span class="tk-kw">return</span> <span class="tk-st">&quot;&quot;</span>.<span class="tk-fn">join</span>(parts)  <span class="tk-cm"># 拼接</span></pre></div></div>
+<h3>JSON</h3>
+<div class="msg assistant"><div class="code"><div class="code-hd"><span class="lang">json</span><button class="code-copy" type="button">复制</button></div><pre data-lang="json">{
+  <span class="tk-st">&quot;智能体&quot;</span>: { <span class="tk-st">&quot;模型&quot;</span>: { <span class="tk-st">&quot;当前&quot;</span>: <span class="tk-st">&quot;deepseek-chat&quot;</span> } },
+  <span class="tk-st">&quot;工具&quot;</span>: { <span class="tk-st">&quot;git免确认&quot;</span>: <span class="tk-kw">false</span>, <span class="tk-st">&quot;rm免确认&quot;</span>: <span class="tk-kw">false</span> },
+  <span class="tk-st">&quot;自动保存&quot;</span>: <span class="tk-kw">true</span>,
+  <span class="tk-st">&quot;阈值&quot;</span>: <span class="tk-nu">12000</span>
+}</pre></div></div>
+<h3>Bash</h3>
+<div class="msg assistant"><div class="code"><div class="code-hd"><span class="lang">bash</span><button class="code-copy" type="button">复制</button></div><pre data-lang="bash"><span class="tk-cm">#!/usr/bin/env bash</span>
+<span class="tk-kw">set</span> -euo pipefail
+<span class="tk-kw">for</span> f in narnat_agent/**/*.py; <span class="tk-kw">do</span>
+  python -c <span class="tk-st">&quot;import ast,sys; ast.parse(open(sys.argv[1]).read())&quot;</span> <span class="tk-st">&quot;$f&quot;</span>
+<span class="tk-kw">done</span>
+<span class="tk-kw">echo</span> <span class="tk-st">&quot;全部通过 # done&quot;</span></pre></div></div>
+<h3>SQL</h3>
+<div class="msg assistant"><div class="code"><div class="code-hd"><span class="lang">sql</span><button class="code-copy" type="button">复制</button></div><pre data-lang="sql">SELECT s.name, <span class="tk-fn">COUNT</span>(m.id) AS msg_count
+FROM sessions s
+LEFT JOIN messages m ON m.session_id = s.id
+WHERE s.updated_at &gt; <span class="tk-fn">NOW</span>() - INTERVAL <span class="tk-nu">7</span> DAY  <span class="tk-cm">-- 最近一周</span>
+GROUP BY s.name
+ORDER BY msg_count DESC;</pre></div></div>
+<h3>无语言标记</h3>
+<div class="msg assistant"><div class="code"><div class="code-hd"><span class="lang">text</span><button class="code-copy" type="button">复制</button></div><pre data-lang="">纯文本块，不做高亮（不认识的语言一律原样显示）
+plans/2026-roadmap.md</pre></div></div>
+<h3>未知语言</h3>
+<div class="msg assistant"><div class="code"><div class="code-hd"><span class="lang">ruby</span><button class="code-copy" type="button">复制</button></div><pre data-lang="ruby">puts &quot;不认识的语言也不会被染色&quot;</pre></div></div>
+<h3>超长行（横向滚动）</h3>
+<div class="msg assistant"><div class="code"><div class="code-hd"><span class="lang">js</span><button class="code-copy" type="button">复制</button></div><pre data-lang="js"><span class="tk-kw">const</span> veryLongLine = <span class="tk-st">&quot;这一行很长，用来验证代码块在窄面板里会横向滚动而不是把布局撑破，用户可以左右拖动查看完整内容&quot;</span>;</pre></div></div>
+</div>
+<script>
+  // 复制按钮在预览页里也能用，验证交互
+  function copyText(t){
+    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t);
+    return Promise.reject(new Error('no clipboard'));
+  }
+  document.addEventListener('click', function(e){
+    var btn = e.target.closest && e.target.closest('.code-copy');
+    if (!btn) return;
+    var pre = btn.closest('.code').querySelector('pre');
+    copyText(pre.textContent).then(function(){
+      btn.setAttribute('data-done','true'); btn.textContent='已复制';
+      setTimeout(function(){ btn.removeAttribute('data-done'); btn.textContent='复制'; }, 1200);
+    }).catch(function(){ btn.textContent='复制失败'; });
+  });
+</script>
+</body>
+</html>

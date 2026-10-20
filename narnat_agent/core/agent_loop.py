@@ -56,6 +56,39 @@ def _parse_coverage(summary: str):
     return int(covs[-1]), int(reqs[-1])
 
 
+def _notice(stream, text: str) -> None:
+    """发一条「框架运行提示」（压缩中/重试中/超限…），不是 AI 说的话。
+
+    为什么单独走一条路：原先这些文案直接 stream.feed() → stream/delta，
+    客户端当成 AI 正文渲染，用户看到「⚠ 上下文占比超阈值」混在回复里；
+    而这些文本又不进消息历史，切走再切回就消失，同一轮内容前后不一致。
+    终端形态 notice 等价于 feed，行为不变。
+    """
+    fn = getattr(stream, "notice", None)
+    if fn is not None:
+        fn(text)
+    else:
+        stream.feed(text)
+
+
+def _push_progress_stats(stream, stats) -> None:
+    """长任务中途补推 stats（有则推，无则跳过）。
+
+    终端形态的流没有这个方法，getattr 拿不到就跳过，行为不变。
+    RPC 形态有了它，界面的「上下文 x%」才能在一轮长任务中途跟着涨——
+    否则整轮 2.5 分钟都显示「—」，用户对上下文压力零感知（实测）。
+    """
+    fn = getattr(stream, "progress_stats", None)
+    if fn is None:
+        return
+    try:
+        fn(stats.input_tokens, stats.output_tokens,
+           getattr(stats, "cache_hit_ratio", 0.0),
+           getattr(stats, "cost", 0.0), getattr(stats, "balance", 0.0))
+    except Exception:
+        pass
+
+
 class AgentLoop:
     """工具调度内循环"""
 
@@ -151,12 +184,12 @@ class AgentLoop:
             #     （AI 自我运行期间不经过用户轮边界；占比由每轮 usage 到达时刷新）
             #     提示先于压缩落定到屏幕：压缩要调一次 LLM，用户需知情（headless 进日志）
             if self._compression is not None and self._compression.need_compress():
-                stream.feed("\n⚠ 上下文占比超阈值，正在自动压缩历史…\n")
+                _notice(stream, "\n⚠ 上下文占比超阈值，正在自动压缩历史…\n")
                 stream.flush_renderer()
                 if self._compression.mid_run_guard():
-                    stream.feed("  压缩完成，继续任务…\n")
+                    _notice(stream, "  压缩完成，继续任务…\n")
                 else:
-                    stream.feed("  未执行压缩（无可压缩历史或压缩失败），继续本次请求…\n")
+                    _notice(stream, "  未执行压缩（无可压缩历史或压缩失败），继续本次请求…\n")
                 stream.flush_renderer()
                 stream.begin()  # 压缩动画已停止，重启"思考中"spinner
 
@@ -213,6 +246,12 @@ class AgentLoop:
                 if "thinking_signature" in chunk:
                     thinking_signature = chunk["thinking_signature"]
 
+                # c3. 思考内容增量转发给 stream（终端形态无该钩子 → 不显示，保持现状）
+                if "thinking_delta" in chunk:
+                    _thinking_hook = getattr(stream, "on_thinking_delta", None)
+                    if _thinking_hook is not None:
+                        _thinking_hook(chunk["thinking_delta"])
+
                 # d. 处理纯文本
                 if "content" in chunk and "tool_calls" not in chunk:
                     stream.feed(chunk["content"])
@@ -229,7 +268,7 @@ class AgentLoop:
 
                 # g. 重试通知（LLM层网络/429重试的用户提示，非AI内容，不入历史）
                 if "retry_notice" in chunk:
-                    stream.feed(chunk["retry_notice"])
+                    _notice(stream, chunk["retry_notice"])
                     continue
 
                 # h. 处理结束
@@ -259,7 +298,7 @@ class AgentLoop:
             # 本身超限，压不压都救不了，报错收尾防死循环。
             if parsed_finish_reason == "context_overflow":
                 if overflow_compacted or self._compression is None:
-                    stream.feed(
+                    _notice(stream,
                         "\n\n⚠ 请求超出模型上下文限制。"
                         "请尝试缩减本次输入，或 /save 保存会话后开启新对话。\n"
                     )
@@ -276,13 +315,13 @@ class AgentLoop:
                 if self._logger:
                     self._logger.warning("agent_loop", "请求被拒绝: 上下文超限，执行压缩恢复")
                 stream.reset_renderer()
-                stream.feed("\n⚠ 上下文超限，正在自动压缩历史…\n")
+                _notice(stream, "\n⚠ 上下文超限，正在自动压缩历史…\n")
                 if self._compression.compress_no_input():
                     if self._logger:
                         self._logger.info("agent_loop", "压缩恢复完成，重发请求")
-                    stream.feed("  压缩完成，重试请求…\n")
+                    _notice(stream, "  压缩完成，重试请求…\n")
                     continue
-                stream.feed(
+                _notice(stream,
                     "\n\n⚠ 自动压缩失败，请求仍超出模型上下文限制。"
                     "请尝试缩减本次输入，或 /save 保存会话后开启新对话。\n"
                 )
@@ -307,7 +346,7 @@ class AgentLoop:
                 folded = (self._msg_manager.fold_largest_tool_result(folded_tool_ids)
                           if content_folds < CONTENT_REJECT_MAX_FOLDS else None)
                 if folded is None:
-                    stream.feed(
+                    _notice(stream,
                         "\n\n⚠ 请求被服务端内容审核拦截"
                         + (f"，已折叠{content_folds}条工具结果仍被拦截。" if content_folds
                            else "，上下文中没有可折叠的工具结果。")
@@ -319,7 +358,7 @@ class AgentLoop:
                             "agent_loop",
                             f"内容审核拦截(已折叠{content_folds}条): {content_reject_detail}",
                         )
-                    stream.feed(
+                    _notice(stream,
                         f"\n[错误: API调用失败(400，内容审核拦截): {content_reject_detail}]\n"
                     )
                     stream.finish(
@@ -338,7 +377,7 @@ class AgentLoop:
                         f"请求被内容审核拦截，已折叠工具结果({folded[1]}字符)后重发"
                         f"(第{content_folds}/{CONTENT_REJECT_MAX_FOLDS}次)",
                     )
-                stream.feed(
+                _notice(stream,
                     f"\n⚠ 请求被服务端内容审核拦截，已折叠最大的工具结果"
                     f"（{folded[1]}字符，第{content_folds}/{CONTENT_REJECT_MAX_FOLDS}次）后重试…\n"
                 )
@@ -366,6 +405,8 @@ class AgentLoop:
             if call_usage:
                 self._stats.update(call_usage)
                 self._sync_ratio()
+                # 让界面的上下文占比在长任务中途也跟着涨（不结束轮次）
+                _push_progress_stats(stream, self._stats)
 
             # 有tool_call → 执行工具 → 继续内循环
             if tool_calls_result:
@@ -448,7 +489,7 @@ class AgentLoop:
                     # 清空渲染器缓冲：重试流会从开头重播，上一轮残留的半行文字/
                     # 表格行/代码块若不清除，会与重播内容拼接重复或错乱。
                     stream.reset_renderer()
-                    stream.feed(
+                    _notice(stream,
                         f"\n⚠ 服务端响应流中断，约{base}s后自动重试"
                         f"（第{stream_interrupted_retries}/{stream_retry_max}次）…\n"
                     )
@@ -459,7 +500,7 @@ class AgentLoop:
                         return
                     continue
                 # 重试耗尽 → 报错结束（截断内容不写入历史，避免污染上下文）
-                stream.feed(
+                _notice(stream,
                     f"\n\n⚠ 服务端响应流中断，已自动重试{stream_retry_max}次仍失败，请稍后重试。\n"
                 )
                 stream.finish(
@@ -491,7 +532,7 @@ class AgentLoop:
                 }
                 reason = parsed_finish_reason or "stream_interrupted"
                 msg = _empty_msgs.get(reason, f"⚠ AI 返回异常（{reason}），请稍后重试。")
-                stream.feed(f"\n\n{msg}\n")
+                _notice(stream, f"\n\n{msg}\n")
                 stream.finish(
                     self._stats.input_tokens,
                     self._stats.output_tokens,
@@ -694,12 +735,30 @@ class AgentLoop:
         # 在#提示符下显示确认信息，等待用户输入
         prompt = ("  确认执行此命令? [y/N]: " if len(confirm_ids) == 1
                   else f"  确认执行这{len(confirm_ids)}条命令? [y/N]: ")
+        # 把「要确认哪几条」记到工具上下文里，供 RPC 界面渲染成可读列表。
+        # 面板里用户看不到上面那几行 shell 回显（那是终端的排版），prompt 本身
+        # 又只有「确认执行此命令?」——不记下来，用户就是在盲批准一条命令。
+        # 终端形态不读这个字段，行为完全不变。
+        try:
+            self._tool_context._pending_commands = [
+                {"name": name, "arguments": args} for name, args in pendings
+            ]
+        except Exception:
+            pass
         user_input = self._ui.read_input_with_prompt(prompt)
+        try:
+            self._tool_context._pending_commands = []
+        except Exception:
+            pass
         if user_input is None:
             user_input = ""
 
         confirmed = user_input.strip().lower() in ("y", "yes")
 
+        # 重放/取消的真实结果先收起来：此刻的 stream 已 finish，发不出去，
+        # 等新流建好再补发 tool/result——否则界面上那行工具调用永远停在
+        # 「等待确认…」，用户看不到「已执行/已取消」。
+        replayed = []
         if confirmed and len(pendings) == len(confirm_ids):
             # 用户确认：逐条重放。每条重放前设置确认标志，工具消费该标志后跳过
             # 确认检测直接执行（标志一次性）；结果回填到各自的 tool_call_id。
@@ -710,6 +769,7 @@ class AgentLoop:
                 # 框架退出码标签只服务于判定，不给AI看
                 llm_result = strip_tags(llm_result)
                 self._msg_manager.append_tool_result(tc_id, llm_result)
+                replayed.append((tc_id, llm_result))
                 if color_diff:
                     _stdout_write("\n".join(f"  {line}" for line in color_diff.split("\n")) + "\n\n")
             # 重放结束无条件复位：防止异常输入（未消费标志的命令）把"跳过确认"
@@ -718,10 +778,23 @@ class AgentLoop:
         else:
             # 用户取消（或配对异常，安全侧按取消处理）：全部按取消回填
             for tc_id in confirm_ids:
-                self._msg_manager.append_tool_result(tc_id, "[操作已取消: 此命令需用户确认]")
+                msg = "[操作已取消: 此命令需用户确认]"
+                self._msg_manager.append_tool_result(tc_id, msg)
+                replayed.append((tc_id, msg))
 
         # 创建新的流式输出会话，继续agent_loop
-        return self._ui.create_stream()
+        new_stream = self._ui.create_stream()
+        hook = getattr(new_stream, "on_tool_result", None)
+        if hook is not None:
+            for tc_id, result in replayed:
+                failed = isinstance(result, str) and result.startswith("[错误")
+                try:
+                    hook(tool_call_id=tc_id, ok=not failed, duration_ms=0,
+                         output=result if isinstance(result, str) else "",
+                         failed=failed, diff=None)
+                except Exception:
+                    pass   # 补发失败不影响主流程
+        return new_stream
 
     def _dump_empty_debug(self, content_parts, tool_calls_result, finish_reason, call_usage):
         """空回复时写调试日志"""

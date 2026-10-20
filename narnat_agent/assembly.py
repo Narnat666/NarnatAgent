@@ -29,12 +29,26 @@ from .ui.interrupt import _interrupt_ctrl
 from .logger import AgentLogger
 
 
+# ── RPC 模式开关（入口显式设置）──
+# core/agent.py 的构造签名不含 rpc 且禁止改动，故由 main.py --rpc 显式打开
+_RPC_MODE = False
+
+
+def set_rpc_mode(enabled: bool = True) -> None:
+    """声明本次进程是否为 RPC 模式（须在 Agent 构造前调用）"""
+    global _RPC_MODE
+    _RPC_MODE = bool(enabled)
+
+
 class Assembly:
     """唯一组装点 — 构造所有对象，注入依赖"""
 
     @classmethod
     def build(cls, project_root: Optional[str] = None, debug: bool = False,
-              headless: bool = False) -> 'AssemblyResult':
+              headless: bool = False, rpc: bool = False) -> 'AssemblyResult':
+        # core.agent 不接受 rpc 参数（core/ 不在本任务改动范围），
+        # 由入口显式置模块级开关补齐：唯一 UI 选型分支仍在下方 rpc 判定处
+        rpc = rpc or _RPC_MODE
         # 1. 配置
         config = load_config(project_root, headless)
 
@@ -98,8 +112,15 @@ class Assembly:
         # 9.5 工具上下文
         # 删除确认统一走 AWAIT_CONFIRM + agent 主循环（headless 读不到输入 → 取消执行），
         # 权限与交互模式一致（配置"rm免确认/git免确认"仍生效）。
+        # RPC 模式下清单更新多接一路 todo/update 事件（终端打印行为不变）。
+        ui_callback = TodoCallbacks.on_todo_update
+        rpc_todo_bridge = None
+        if rpc:
+            from .rpc.ui import RpcTodoBridge
+            rpc_todo_bridge = RpcTodoBridge()
+            ui_callback = rpc_todo_bridge
         tool_context = ToolContext(
-            ui_callback=TodoCallbacks.on_todo_update,
+            ui_callback=ui_callback,
             api_keys=config.api_keys,
             ignore_dirs=list(config.tools.ignore_dirs),
             git_skip_confirm=config.safety.git_skip_confirm,
@@ -138,8 +159,13 @@ class Assembly:
             context_reset_func=lambda: context.reset(),
         )
 
-        # 11. UI
-        if headless:
+        # 11. UI（显式分支：rpc / headless / 终端）
+        if rpc:
+            from .rpc.ui import RpcUI
+            ui = RpcUI(config.ai.model, session_mgr, config, tool_context=tool_context)
+            if rpc_todo_bridge is not None:
+                rpc_todo_bridge.bind(ui)
+        elif headless:
             from .ui.headless import HeadlessUI
             ui = HeadlessUI(config.ai.model)
         else:
@@ -163,6 +189,12 @@ class Assembly:
             config.balance,
             config.cost_log,
         )
+
+        # RpcUI 需要 stats（stats 字段的缺省来源），它在第 11 步先于 stats 构造 → 此处回注
+        if rpc:
+            ui.attach_stats(stats)
+            from .rpc.ui import install_verify_result_hook
+            install_verify_result_hook(ui)
 
         # 模型切换需同步 stats 持有的模型名（费用计算按模型定价查表），stats 创建后才可接线
         def _set_model_with_stats(v: str) -> None:

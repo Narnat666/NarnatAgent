@@ -1,0 +1,123 @@
+{
+  "name": "narnat-vscode",
+  "displayName": "Narnat",
+  "description": "Narnat Agent 的 VSCode 扩展界面：对话面板停靠在辅助侧边栏（与 Copilot Edits 同形态）。",
+  "version": "0.0.1",
+  "publisher": "narnat",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:narnat.launcher",
+    "onView:narnat.chatView"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "Narnat",
+      "properties": {
+        "narnat.autoOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "启动 VSCode 时自动在最右列打开 Narnat 面板。关闭后点左侧 Narnat 图标唤起。"
+        },
+        "narnat.rpc.executable": {
+          "type": "string",
+          "default": "narnat.exe",
+          "description": "后端子进程路径。Narnat 面板通过 JSON-RPC over stdio 与它通信。"
+        },
+        "narnat.rpc.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "--rpc"
+          ],
+          "description": "传给后端子进程的启动参数。"
+        },
+        "narnat.rpc.timeout": {
+          "type": "number",
+          "default": 30000,
+          "description": "单个 RPC 请求的超时时间（毫秒）。"
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "narnatLauncher",
+          "title": "Narnat",
+          "icon": "media/icon.svg"
+        }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "narnatSidePanel",
+          "title": "Narnat",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "narnatLauncher": [
+        {
+          "type": "webview",
+          "id": "narnat.launcher",
+          "name": "Narnat"
+        }
+      ],
+      "narnatSidePanel": [
+        {
+          "type": "webview",
+          "id": "narnat.chatView",
+          "name": "对话"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "narnat.openChat",
+        "title": "打开对话",
+        "category": "Narnat"
+      },
+      {
+        "command": "narnat.toggleInspector",
+        "title": "切换调度面板",
+        "category": "Narnat"
+      },
+      {
+        "command": "narnat.openSettings",
+        "title": "打开配置文件（填 API Key）",
+        "category": "Narnat"
+      },
+      {
+        "command": "narnat.restartBackend",
+        "title": "重启后端（改完配置后用）",
+        "category": "Narnat"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "narnat.openChat",
+          "when": "!narnatPanelVisible",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "check": "node --check src/extension.js && node --check src/webview.js && node --check media/narnat.js",
+    "test": "node test/runTest.js"
+  },
+  "devDependencies": {
+    "@vscode/test-electron": "^3.1.0"
+  }
+}

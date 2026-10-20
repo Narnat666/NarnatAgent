@@ -1,0 +1,251 @@
+{
+ "recordedAt": "2026-10-17T16:09:46.368Z",
+ "events": [
+  {
+   "type": "initialize",
+   "params": {
+    "version": "16.7.9",
+    "protocol": 1,
+    "model": {
+     "current": "deepseek-flash",
+     "options": [
+      "deepseek-v4-pro",
+      "deepseek-flash"
+     ]
+    },
+    "thinking": {
+     "effort": "max",
+     "options": {
+      "high": "高",
+      "max": "全开"
+     }
+    },
+    "goal": {
+     "enabled": false,
+     "maxRounds": 10
+    },
+    "plugins": [
+     {
+      "name": "Terminal",
+      "label": "多终端持久 SSH",
+      "enabled": false
+     },
+     {
+      "name": "WebSearch",
+      "label": "联网搜索",
+      "enabled": true
+     },
+     {
+      "name": "Serial",
+      "label": "多终端持久串口",
+      "enabled": false
+     },
+     {
+      "name": "MCP",
+      "label": "MCP 服务器管理",
+      "enabled": false
+     }
+    ],
+    "session": {
+     "current": null,
+     "children": []
+    },
+    "workdir": "<演示工作目录>"
+   }
+  },
+  {
+   "type": "turn/begin",
+   "params": {
+    "round": 1,
+    "goal": {
+     "enabled": false,
+     "current": 0,
+     "max": 0
+    }
+   }
+  },
+  {
+   "type": "tool/call",
+   "params": {
+    "id": "call_00_La6Z8VtqgP3JfzIg8BEQ0892",
+    "name": "Read",
+    "label": "读取",
+    "dispatch": "readonly",
+    "summary": "main.py",
+    "arguments": {
+     "file_path": "main.py",
+     "limit": 1
+    }
+   }
+  },
+  {
+   "type": "tool/call",
+   "params": {
+    "id": "call_01_FyMUOzyo4Ct95HSZmSLh3315",
+    "name": "Glob",
+    "label": "搜索文件",
+    "dispatch": "readonly",
+    "summary": "main.py",
+    "arguments": {
+     "pattern": "main.py"
+    }
+   }
+  },
+  {
+   "type": "tool/result",
+   "params": {
+    "id": "call_01_FyMUOzyo4Ct95HSZmSLh3315",
+    "ok": true,
+    "durationMs": 1,
+    "output": "main.py",
+    "failed": false,
+    "diff": null
+   }
+  },
+  {
+   "type": "tool/result",
+   "params": {
+    "id": "call_00_La6Z8VtqgP3JfzIg8BEQ0892",
+    "ok": true,
+    "durationMs": 3,
+    "output": "  1→\"\"\"\n  ... [截断: 已显示 1 行。文件共110行，剩余109行。使用 offset=2 参数可读取其余部分]",
+    "failed": false,
+    "diff": null
+   }
+  },
+  {
+   "type": "tool/call",
+   "params": {
+    "id": "call_00_9K3dTKg5zToYFqXHXOTh4570",
+    "name": "Read",
+    "label": "读取",
+    "dispatch": "readonly",
+    "summary": "main.py",
+    "arguments": {
+     "file_path": "main.py",
+     "limit": 30
+    }
+   }
+  },
+  {
+   "type": "tool/result",
+   "params": {
+    "id": "call_00_9K3dTKg5zToYFqXHXOTh4570",
+    "ok": true,
+    "durationMs": 0,
+    "output": "  1→\"\"\"\n  2→Narnat Agent 入口\n  3→\"\"\"\n  4→\n  5→import argparse\n  6→import sys\n  7→import os\n  8→\n  9→__version__ = \"16.7.9\"\n  10→\n  11→\n  12→def main():\n  13→    \"\"\"启动Narnat Agent\"\"\"\n  14→    parser = argparse.ArgumentParser(description=\"Narnat Agent - 代码智能体\")\n  15→    parser.add_argument(\"-d\", \"--debug\", action=\"store_true\", help=\"调试模式，记录详细日志\")\n  16→    parser.add_argument(\"-v\", \"--version\", action=\"store_true\", help=\"显示版本号\")\n  17→    parser.add_argument(\"-p\", \"--prompt\", help=\"headless模式：执行一次性任务后退出（纯文本输出）\")\n  18→    parser.add_argument(\"-g\", \"--goal-rounds\", type=int, default=0,\n  19→                        help=\"headless模式：开启目标模式并设置续跑预算轮数（≥1，如 -g 10）；\"\n  20→                             \"不带则单轮执行（不注入 GoalComplete、无完成验证）\")\n  21→    parser.add_argument(\"-l\", \"--tool-log\", action=\"store_true\",\n  22→                        help=\"headless模式：显示详细工具调度日志（默认仅输出AI最终答复文本，-p 时生效）\")\n  23→    parser.add_argument(\"--rpc\", action=\"store_true\",\n  24→                        help=\"RPC模式：JSON-RPC 2.0 over stdio，供 VSCode 扩展调用（进程常驻）\")\n  25→    args = parser.parse_args()\n  26→\n  27→    if args.version:\n  28→        print(f\"narnat {__version__}\")\n  29→        return\n  30→\n  ... [截断: 已显示 30 行。文件共110行，剩余80行。使用 offset=31 参数可读取其余部分]",
+    "failed": false,
+    "diff": null
+   }
+  },
+  {
+   "type": "stream/delta",
+   "params": {
+    "text": "第一行：`\"\"\"`\n\n这是 Narnat Agent 命令行入口，负责解析参数并分派到调试、单次任务、RPC 等运行模式。"
+   }
+  },
+  {
+   "type": "stats",
+   "params": {
+    "inputTokens": 6382,
+    "outputTokens": 234,
+    "cacheRatio": 0.9515,
+    "thinkingEffort": "全开",
+    "contextRatio": 0.0064,
+    "maxOutputTokens": 128000,
+    "cost": 0.004289,
+    "balance": 0
+   }
+  },
+  {
+   "type": "turn/end",
+   "params": {
+    "reason": "done"
+   }
+  },
+  {
+   "type": "turn/begin",
+   "params": {
+    "round": 2,
+    "goal": {
+     "enabled": false,
+     "current": 0,
+     "max": 0
+    }
+   }
+  },
+  {
+   "type": "tool/call",
+   "params": {
+    "id": "call_00_ET_VPJnlsZaQasa4RxayIh44880",
+    "name": "TodoWrite",
+    "label": "更新计划",
+    "dispatch": "serial",
+    "summary": "2项",
+    "arguments": {
+     "todos": [
+      {
+       "content": "读 README",
+       "status": "pending"
+      },
+      {
+       "content": "总结项目结构",
+       "status": "pending"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "type": "todo/update",
+   "params": {
+    "todos": [
+     {
+      "content": "读 README",
+      "status": "pending"
+     },
+     {
+      "content": "总结项目结构",
+      "status": "pending"
+     }
+    ]
+   }
+  },
+  {
+   "type": "tool/result",
+   "params": {
+    "id": "call_00_ET_VPJnlsZaQasa4RxayIh44880",
+    "ok": true,
+    "durationMs": 0,
+    "output": "[计划已更新] 2 待处理 / 0 进行中 / 0 已完成",
+    "failed": false,
+    "diff": null
+   }
+  },
+  {
+   "type": "stream/delta",
+   "params": {
+    "text": "已记录这两项只是你要求记录、未被要求执行，所以都保持待处理状态，没有勾选。现在要我去读 README 并总结项目结构吗？"
+   }
+  },
+  {
+   "type": "stats",
+   "params": {
+    "inputTokens": 6592,
+    "outputTokens": 428,
+    "cacheRatio": 0.9454,
+    "thinkingEffort": "全开",
+    "contextRatio": 0.0066,
+    "maxOutputTokens": 128000,
+    "cost": 0.008921,
+    "balance": 0
+   }
+  },
+  {
+   "type": "turn/end",
+   "params": {
+    "reason": "done"
+   }
+  }
+ ]
+}
