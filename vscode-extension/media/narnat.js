@@ -2101,6 +2101,9 @@
    * 没有它，用户在界面上只看到「运行中」，不知道后端在等他回 y/n。
    */
   function showConfirm(p){
+    // 确认条插在当前正文之后：先收口，否则后续 delta 会写回上方旧气泡，
+    // 确认条看起来被"越过"了。
+    closeAssistantSegment();
     // 强制成字符串：prompt 万一不是字符串（后端版本不一致/字段被改写），
     // 下面的 replace 会抛 TypeError —— 确认条整张画不出来，而后端仍站在原地
     // 等 y/n，这一轮就废了（实测 prompt=123 时 q.innerHTML 与 appendChild
@@ -2413,9 +2416,13 @@
     chipPathEl.addEventListener('click', function (e) {
       e.stopPropagation();
       var txt = chipPathEl.getAttribute('data-path') || chipPathEl.textContent || '';
+      // 还没收到 initialize 时（或后端一直连不上），这颗胶囊里是模板占位
+      // 「工作目录」，复制它没有任何意义，更不能把它记成"原文"——否则之后
+      // 每次还原都会把真路径写回成「工作目录」。
+      if (!txt || txt === '工作目录') return;
       copyText(txt).then(function () {
         if (!chipPathEl.getAttribute('data-path')) {
-          chipPathEl.setAttribute('data-path', chipPathEl.textContent || txt);
+          chipPathEl.setAttribute('data-path', txt);
         }
         chipPathEl.textContent = '已复制路径';
         // 重新计时：连点时后一次点击要把还原时间往后推，而不是让它提前触发
@@ -2744,6 +2751,8 @@
 
   /* ---------- 命令执行 ---------- */
   function cmdMulti(cmdText, outHtml, tail, outCls){
+    // 命令回执同样是「插入到当前正文之后」的事件，先收口正文（同 cmdOne）
+    closeAssistantSegment();
     var d = document.createElement('div');
     d.className = 'cmdwrap';
     // /ls 这类多列输出靠空格对齐（见 padDisp），必须保留 pre；
@@ -2760,6 +2769,7 @@
   }
 
   function cmdResult(cmdText, icon, text, tail, cls){
+    closeAssistantSegment();
     var d = document.createElement('div');
     d.className = 'cmdwrap';
     d.innerHTML = '<div class="cmdhead"><span class="p">❯</span>' +
@@ -2774,6 +2784,11 @@
   }
 
   function cmdOne(icon, text, tail, cls){
+    // 系统行要落在「当前这一句正文」之后：不断开的话，后续 stream/delta 仍会
+    // 追加进上面那个旧气泡（renderAssistant 只认 curAssistant），屏幕上就变成
+    // 「正文（含系统行之后的全部新文字）」→「系统行」——系统行被文字越过去，
+    // 用户看到事件提示夹在句子中间。流中断重试就是这条路（先 notice 再续流）。
+    closeAssistantSegment();
     var d = document.createElement('div');
     d.className = 'sys' + (cls ? ' ' + cls : '');
     d.innerHTML = '<span class="ico">' + icon + '</span><span>' + text + '</span>' +
@@ -4037,8 +4052,10 @@
       || /api\s*key\s*(?:is\s*)?(?:invalid|empty|not\s*set|未配置|无效)/i.test(t);
     if (!isAuthError) return;
     authHintShown = true;
-    sysLine('✗', 'AI 调度失败，请检查 narnat.json 配置文件',
-      'Ctrl+Shift+P → Narnat: 打开配置文件', 'err');
+    // 后端正文里已经有「AI调度失败，请检查 narnat.json」这句结论了，系统行
+    // 不再复述一遍（同屏两遍同一句话，用户只会觉得吵）。这里只补它给不出的
+    // 东西：在 VSCode 里怎么打开那个文件。
+    sysLine('·', '打开配置文件', 'Ctrl+Shift+P → Narnat: 打开配置文件', '');
     rendered('auth/hint', { hint: '打开配置文件' });
   }
 
@@ -4169,17 +4186,28 @@
    * 收起态只有一行摘要（会被省略号截断），用户要点开才看得到到底执行了什么。
    * 优先取最有信息量的那个字段：Shell 的 command、读写工具的路径、搜索的
    * 模式词；都不是就退回整段参数 JSON。
+   *
+   * 超过 IN_MAX 就截断：Write 一次写整份文件时，content 可能是几万字符，
+   * 整段塞进 DOM（而且卡片收起时也常驻）会拖慢渲染，也让这一行失去可读性。
    */
+  var IN_MAX = 2000;
   function toolInputText(p){
     var a = p && p.arguments;
     if (!a || typeof a !== 'object') return '';
     var keys = ['command', 'file_path', 'path', 'pattern', 'query', 'url',
       'old_string', 'content', 'text'];
+    var out = '';
     for (var i = 0; i < keys.length; i++) {
       var v = a[keys[i]];
-      if (typeof v === 'string' && v) return v;
+      if (typeof v === 'string' && v) { out = v; break; }
     }
-    try { return JSON.stringify(a, null, 2); } catch (e) { return ''; }
+    if (!out) {
+      try { out = JSON.stringify(a, null, 2); } catch (e) { return ''; }
+    }
+    if (out.length > IN_MAX) {
+      out = out.slice(0, IN_MAX) + '\n…（共 ' + out.length + ' 字符，已截断）';
+    }
+    return out;
   }
 
   /** IN 段（命令 / 路径 / 参数正文），带一个复制按钮 —— 命令值得复制。 */
@@ -4270,7 +4298,14 @@
       rendered('tool/result', { id: p.id, awaiting: true });
       return;
     }
-    if (entry.row.getAttribute('data-await-confirm') === '1' && /操作已取消|需用户确认/.test(outText)) {
+    // 「取消」必须优先于任何定性判断，而且两种标记都要认。
+    // 只看 data-await-confirm 会怎样（实测）：这一行若已被收口逻辑定过性
+    //（data-await-confirm 被移除、只剩 data-await-settled），取消结果就落到
+    // 下面的「撤销定性」分支 → settled=false → 按普通成功收口，于是屏幕上
+    // 写着「0ms · 完成」（绿色），而这条命令其实被取消了。
+    if (/操作已取消|需用户确认/.test(outText) &&
+        (entry.row.getAttribute('data-await-confirm') === '1' ||
+         entry.row.getAttribute('data-await-settled') === '1')) {
       entry.row.removeAttribute('data-await-confirm');
       entry.row.removeAttribute('data-await-settled');
       // 同一条工具若之后再收到一条结果（后端的「取消」是同一个 id 的第二条
@@ -4311,7 +4346,9 @@
     var uncertain = ok && exitSaysOk && outHasFail && !!mExit;
     var ms = (typeof p.durationMs === 'number') ? p.durationMs + 'ms' : '';
     var meta = entry.row.querySelector('.meta');
-    meta.className = 'meta';
+    // 判空与同函数上面的 awaiting 分支保持一致（那里是 if (meta)）。
+    // 不能改成 return：下面还要把输出渲染进 slot，提前返回会把结果吞掉。
+    if (meta) meta.className = 'meta';
     // 有 diff 就把 +N −M 写进行头。原来行头只有「9ms」，用户要展开才知道
     // 改了几个文件里的几行——「跑过了」不等于「改对了」（实测：改完一个 bug
     // 看到 `写入 sample.js 9ms`，无法判断到底改了什么）。
@@ -4333,10 +4370,10 @@
     if (settled) {
       entry.row.removeAttribute('data-settled');
       parts.push('<span class="bad">中断后返回</span>');
-      meta.innerHTML = parts.join(' · ');
+      if (meta) meta.innerHTML = parts.join(' · ');
       // 不改 data-st：保持 err，行名继续是红的
     } else {
-      meta.innerHTML = parts.join(' · ');
+      if (meta) meta.innerHTML = parts.join(' · ');
       entry.row.setAttribute('data-st', ok ? 'ok' : 'err');
     }
 
@@ -4407,6 +4444,8 @@
 
     var target = pendingTodoRow;
     if (!target || !target.todo) {
+      // 新建计划行也是插入事件：不断开正文，后续 delta 会写回上方旧气泡
+      closeAssistantSegment();
       var wrap = document.createElement('div');
       wrap.className = 'tools';
       wrap.setAttribute('data-todo', 'true');
@@ -4441,6 +4480,8 @@
   /* ---------- 系统行 ---------- */
 
   function addSysLine(icon, text, tail, cls){
+    // 同 cmdOne：系统行前先收口正文，否则后续增量会写回上方旧气泡
+    closeAssistantSegment();
     var el = document.createElement('div');
     el.className = 'sys' + (cls ? ' ' + cls : '');
     el.innerHTML = '<span class="ico">' + icon + '</span><span>' + text + '</span>' +
@@ -4588,7 +4629,11 @@
         if (body2 && (body2.textContent || '').replace(/\s+/g, '') === flat) { dupLine = true; break; }
       }
       if (dupLine) return;
-      var isWarn = hadMark || /超出|超限|失败|拦截|中断/.test(line);
+      // 告警级别从文案推断。后端的文案精简掉 ⚠ 前缀之后，光靠「失败/超限」
+      // 这几个词会把「AI 返回空回复」「达到输出上限」「服务端繁忙」降级成
+      // 中性点号——它们和「响应流中断」一样都是这一轮没跑成，级别应当一致。
+      var isWarn = hadMark ||
+        /超出|超限|失败|拦截|中断|空回复|繁忙|上限/.test(line);
       addSysLine(isWarn ? '⚠' : '·', esc(clean), '', isWarn ? 'warn' : '');
     });
     rendered('notice', { text: text.slice(0, 200) });
@@ -4823,9 +4868,30 @@
 
   /* ---------- 错误 / 离线 ---------- */
 
+  /* 最后一条助手正文的纯文本。用于判断「这句错误是不是已经在正文里说过了」。 */
+  function lastAssistantText(){
+    var list = convo.querySelectorAll('.msg.assistant');
+    if (!list.length) return '';
+    return list[list.length - 1].textContent || '';
+  }
+
   function notifyError(p){
-    addSysLine('✗', esc((p && p.message) || '后端错误'), esc((p && p.detail) || ''), 'err');
-    rendered('error', { message: (p && p.message) || '' });
+    var msg = (p && p.message) || '后端错误';
+    // 401 这类错误后端分了两次说：正文里是一整行 `[错误: XXX]`（llm._auth_fail），
+    // 再把 `[错误: ` 和 `]` 剥掉发一条 error 通知（agent_loop._failure_text）。
+    // 界面上两处都铺就成了同一句话连说两遍——实测 401 时同屏：
+    //   [错误: AI调度失败，请检查 narnat.json 配置文件]   ← 正文
+    //   ✗ AI调度失败，请检查 narnat.json 配置文件          ← 这条
+    // authHintIfNeeded 早就按「正文说过就不复述」处理了，这里对齐同一个取舍。
+    // 只认「正文含 [错误: 前缀 且 含这条 message」的精确形态：否则正文里恰好
+    // 出现一个短词（如「失败」）就会把真正的错误整条吞掉。
+    var t = lastAssistantText();
+    if (msg && t.indexOf('[错误:') >= 0 && t.indexOf(msg) >= 0){
+      rendered('error', { message: msg, merged: true });
+      return;
+    }
+    addSysLine('✗', esc(msg), esc((p && p.detail) || ''), 'err');
+    rendered('error', { message: msg });
   }
 
   function showOffline(p){
@@ -4839,8 +4905,12 @@
     body.setAttribute('data-run', 'false');
     // 后端掉线的这条路径不走 turnEnd（没有 turn/end 事件），工具行会一直
     // 停在「执行中」。这里补一次收口，否则界面同屏写着「离线」和「执行中」。
+    // final:true 必须传：下面那条 clearConfirmBoxes 会把确认条删掉，之后
+    // 再没有任何事件能触及「等待确认」的行——不传 final，settleRunningTools
+    // 会跳过它（awaiting && !forGood → return），那一行就永久停在
+    // 「等待确认 + 执行中」，与红色「后端未连接」同屏且无法自愈。
     resetStopBtn();
-    settleRunningTools('cancelled');
+    settleRunningTools('cancelled', { final: true });
     // 确认条也要收：后端崩了就没有人再等这条 y/n 了。留着它，用户点
     // 「确认执行」只得到「已提交确认，等待后端执行…」，永远等不到回执
     //（实测：崩在等确认那一刻，离线屏上留着一张僵尸确认条）。

@@ -1,5 +1,13 @@
 """安全判定共享正则 —— 单一定义源
 
+拦截范围只有两类，且各自可配置：
+- 删除/杀进程类（match_delete）← 配置「工具.rm免确认」
+- git 类（match_git）        ← 配置「工具.git免确认」
+
+覆盖类（`>` 重定向 / copy /y / xcopy /Y / robocopy /MIR）**不再拦截**：
+终端形态的 narnat agent 从不拦它们，界面形态也不该另立一套——写日志
+`cmd > log.txt` 是日常操作，每写一次弹一次确认属过度设计。
+
 消费方（多处引用，语义必须恒等，勿再各自复制正则）：
 - tools/bash   ：Shell 删除/git 命令的免确认拦截判定
 - tools/terminal：远程命令同一套拦截判定
@@ -73,33 +81,6 @@ _KILL_CMD_POS = r"(?:^|[&|;(`])@?\s*"
 RE_KILL = re.compile(
     _KILL_CMD_POS + r"(?:taskkill|killall|kill|pkill)\b"
     + r"|" + _KILL_CMD_POS + r"(?:stop-process|terminateprocess)\b",
-    re.IGNORECASE,
-)
-
-# 会覆盖/清空已有文件的写法——原来一条都不在判定表里（实测全部直接执行）：
-#   echo hi > important.txt      截断覆盖
-#   copy /y a.txt b.txt          静默覆盖目标
-#   xcopy src dst /Y /E          覆盖同名
-#   robocopy src dst /MIR        /MIR 会删掉目标里源没有的全部文件
-# 只收「明确覆盖/删除语义」的四种，不碰 mv/move（重命名是常规操作，
-# 每次弹确认会把正常用法烦死）。
-# `>` 重定向排除 /dev/null 与 NUL（写丢弃是常见无害写法）。
-RE_OVERWRITE = re.compile(
-    # 覆盖重定向：单个 > （不是 >> 追加、不是 >= 、不是 2>&1），
-    # 目标不是 /dev/null / NUL（写丢弃是常见无害写法）。
-    # (?<!>) 必须有：只看 (?!>) 时，`>> log` 的第二个 > 会被当成覆盖。
-    # 目标用 * 不用 +：`echo x > "文件"` 里引号内容会被 _split_quoted 移到
-    # containers，outside 里 > 后面就是空串——要求 + 会把带引号的覆盖全漏掉
-    #（实测：`echo overwritten > "C:/tmp/a.txt"` 判 False）。
-    # 两个分支并列（不是 \s* 后面接 *）：单分支时 \s* 会回溯成 0 个字符，
-    # 让 `> /dev/null` 绕过 /dev/null 的排除（实测误报）。
-    r"(?<![0-9&>])>(?!>)(?!=)"
-    r"(?:\s*(?!/dev/null\b)(?!NUL\b)(?!nul\b)[^\s|&;]+|\s*$)"
-    # copy /y、xcopy ... /Y
-    + r"|\bcopy\b[^\n]*?\s/y\b"
-    + r"|\bxcopy\b[^\n]*?\s/y\b"
-    # robocopy ... /MIR
-    + r"|\brobocopy\b[^\n]*?\s/mir\b",
     re.IGNORECASE,
 )
 
@@ -232,23 +213,3 @@ def match_git(command: str) -> bool:
     if RE_GIT.search(outside):
         return True
     return any(RE_GIT.search(c) for c in containers)
-
-
-def match_overwrite(command: str) -> bool:
-    """覆盖/清空已有文件的写法判定。
-
-    这几类在任何配置下都不问就会执行（实测）：`echo hi > important.txt`
-    直接把用户文件截断，`copy /y` / `xcopy /Y` 静默覆盖目标，
-    `robocopy /MIR` 还会删掉目标目录里源没有的文件。
-
-    不受 `rm免确认` / `git免确认` 影响：那两个开关的语义是「删除/git 类少问」，
-    而这里是覆盖——用户从来没为「覆盖文件」配过免确认。
-
-    与 match_delete 一样走引号语义：`echo "a > b"` 里的 > 不算重定向。
-    """
-    if not command or not isinstance(command, str):
-        return False
-    outside, containers = _split_quoted(scan_text(command))
-    if RE_OVERWRITE.search(outside):
-        return True
-    return any(RE_OVERWRITE.search(c) for c in containers)

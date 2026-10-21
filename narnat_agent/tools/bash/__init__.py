@@ -537,17 +537,14 @@ def execute(
     # ── 安全检查：删除命令和git命令根据配置决定是否需要确认 ──
     # 后台提交与前台同一套确认（bg 管理操作无 command 自然跳过）
     # 判定走 safety.match_*（含 cmd 等价写法归一化：d^el、del.\x、del\x、!VAR! 拼接）
+    # 只有这两类：覆盖类（> 重定向 / copy /y / xcopy /Y / robocopy /MIR）不再拦截——
+    # 终端形态的 narnat agent 从不拦它们，`cmd > log.txt` 是日常写法，
+    # 每写一次弹一次确认属过度设计（实测：`eza -1 > eza_test.txt 2>&1` 被拦）。
     need_confirm = False
     tc = _tool_context
     if command and tc and not tc.rm_skip_confirm and safety.match_delete(command):
         need_confirm = True
     elif command and tc and not tc.git_skip_confirm and safety.match_git(command):
-        need_confirm = True
-    elif command and tc and safety.match_overwrite(command):
-        # 覆盖已有文件（> 重定向 / copy /y / xcopy /Y / robocopy /MIR）：
-        # 不受「rm免确认」「git免确认」影响——那两个开关从没承诺过覆盖也免问。
-        # 不拦会怎样（实测）：AI 一句 `echo hi > important.txt` 直接把用户
-        # 文件截断，Shell 侧没有 diff、没有备份，事后找不回。
         need_confirm = True
 
     if need_confirm:

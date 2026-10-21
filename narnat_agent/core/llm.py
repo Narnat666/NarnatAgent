@@ -231,15 +231,23 @@ _AUTH_ERROR_HINTS = ("401", "authentication", "unauthorized")
 
 
 def _auth_fail(status, text: str = "") -> str:
-    """认证类失败（HTTP 401 / 报文含认证特征）→ 简短整行提示；其余返回空串。
+    """认证类失败 → 简短整行提示；其余返回空串。
 
-    调用方写法是 `_auth_fail(...) or 原文错误行`：命中认证失败就不带英文报文，
-    未命中则保持原有文案（网络错误、限流等仍要给出原始信息便于排查）。
+    调用方写法是 `_auth_fail(...) or 原文错误行`：命中就不带英文报文，未命中则
+    保持原有文案（网络错误、限流等仍要给出原始信息便于排查）。
+
+    只有 HTTP 401 才有资格**整行替换**原文——那才是"密钥不对"这个确切结论。
+    非 401 只靠报文里的 401/authentication/unauthorized 子串判断时，命中并不
+    等于认证失败（代理返回的 HTML 错误页、网关的 "unauthorized" 提示、甚至 URL
+    里带 401 都会撞上），此时把原文吞掉会让用户查无可查。所以这类保留原文，
+    只在前面点一句结论。
     """
     if status == 401:
         return _AUTH_FAIL_LINE
     lowered = str(text).lower()
-    return _AUTH_FAIL_LINE if any(h in lowered for h in _AUTH_ERROR_HINTS) else ""
+    if any(h in lowered for h in _AUTH_ERROR_HINTS):
+        return "[错误: AI调度失败，请检查 narnat.json 配置文件]" + str(text)[:200]
+    return ""
 
 
 def _user_has_tool_result(user_msg: Dict[str, Any]) -> bool:

@@ -1,35 +1,59 @@
 :root{
-  /* 优先取 VSCode 主题色，浏览器预览时回退到深色 */
-  --bg: var(--vscode-editor-background, #1e1e1e);
-  --bg-elev: var(--vscode-sideBar-background, #232323);
-  --bg-hover: var(--vscode-list-hoverBackground, rgba(128,128,128,.12));
-  --bg-code: var(--vscode-textCodeBlock-background, #191919);
-  --fg: var(--vscode-editor-foreground, #cfcfcf);
-  --fg-dim: var(--vscode-descriptionForeground, #939393);
-  /* 不能用 disabledForeground：它在浅色主题下是半透明的 disabled 色，
-     实测 Light+ 下只有 2.0~2.2:1 对比度（状态栏、系统提示、占位符等 13 处
-     等同「看不见」）。descriptionForeground 是 VSCode 给次要文字定的色，
-     两种主题下都够读。层级感靠字号/字重区分，不靠把字调到看不清。 */
-  --fg-faint: var(--vscode-descriptionForeground, #939393);
-  --line: var(--vscode-panel-border, #2c2c2c);
-  --line-strong: var(--vscode-widget-border, #3c3c3c);
-  --accent: var(--vscode-textLink-foreground, #5a9fd4);
-  --ok: var(--vscode-charts-green, #5aa87a);
-  /* 不用 testing-iconPassed：它在浅色主题下是 #73c991，白底上只有 2.0:1，
-     「已复制」「✓ 复核通过」这类小字信号几乎看不出变化（实测）。
-     charts-green 浅色是 #388A34（深绿），深色是 #89D185，两套都够读。 */
-  --warn: var(--vscode-editorWarning-foreground, #c9a227);
-  --err: var(--vscode-errorForeground, #c96a6a);
+  /* 优先取 VSCode 主题色，浏览器预览时回退到 One Dark Pro 的色值。
+     层次策略与 One Dark Pro 自己一致：靠**三层底色 + 三档文字**拉开，
+     而不是靠把字调暗。它在 #282c34 底上叠 #21252b（代码/弹层）与
+     #2c313a（hover/选中），三个亮度都很接近却分得清，正是「清爽」的来源。 */
+  --bg: var(--vscode-editor-background, #282c34);
+  --bg-elev: var(--vscode-sideBar-background, #21252b);
+  --bg-hover: var(--vscode-list-hoverBackground, #2c313a);
+  /* 代码块 / 工具卡片的底：取 editorWidget 那一层（One Dark 是 #21252b）。
+     原来用 textCodeBlock.background —— One Dark Pro 没定义这个键，VSCode 给的
+     默认值与编辑器底色几乎同色，代码块看不出边界，整屏就显得平。 */
+  --bg-code: var(--vscode-editorWidget-background, var(--vscode-sideBar-background, #21252b));
+  --fg: var(--vscode-editor-foreground, #abb2bf);
+  /* 三档文字由前景色派生（见下面的 @supports）。这里先给旧内核兜底：
+     不支持 color-mix 的 webview 上三档退化为同一个前景色（层级没了但读得清），
+     而不是让 98 处 `color: var(--fg-dim)` 整条失效、退成 inherit。 */
+  --fg-dim: var(--fg);
+  --fg-faint: var(--fg);
+  --line: var(--vscode-panel-border, #3e4452);
+  --line-strong: var(--vscode-panel-border, #3e4452);
+  --accent: var(--vscode-textLink-foreground, #61afef);
+  /* 状态色直接用主题值，**不要**掺前景色：掺完 #d19a66 会变成发暗的黄褐，
+     在 #282c34 上几乎看不出是警告（实测被视觉评估点名为「暗黄看不清」）。
+     One Dark Pro 这几个色本来就是按深底选好的。 */
+  --ok: var(--vscode-charts-green, #98c379);
+  --warn: var(--vscode-editorWarning-foreground, #d19a66);
+  --err: var(--vscode-errorForeground, #e06c75);
   --add: var(--vscode-diffEditor-insertedTextBackground, rgba(90,168,122,.16));
   --del: var(--vscode-diffEditor-removedTextBackground, rgba(201,106,106,.16));
-  /* 用户气泡底色：优先主题给聊天请求准备的 chat.requestBackground，
+  /* 用户气泡底色：优先主题给聊天请求准备的 chat.requestBackground
+     （One Dark 是 #2c313c，比编辑器底略亮一档，正是气泡该有的层次），
      没有该键的主题退到 input-background，再退到抬升层。 */
   --bubble: var(--vscode-chat-requestBackground, var(--vscode-input-background, #2b2b2b));
   /* 胶囊控件底色（输入框下面的会话/路径/目标 chip）。
-     不是 hover 色——hover 色在浅色主题下几乎与背景同色，胶囊会消失。 */
+     One Dark 的 button.secondaryBackground = #30333d，比底色亮一档。 */
   --pill: var(--vscode-button-secondaryBackground, var(--vscode-badge-background, #3a3d41));
   --font:var(--vscode-font-family,-apple-system,"Segoe UI Variable Text","Segoe UI","Microsoft YaHei",sans-serif);
   --mono:var(--vscode-editor-font-family,ui-monospace,"Cascadia Mono",Consolas,"Courier New",monospace);
+}
+/* 现代内核（Chromium ≥111 / VSCode ≥1.80）才启用派生色。
+   用 @supports 而不是直接写：不支持时自定义属性仍能存下令牌，但 `color:
+   var(--fg-dim)` 在使用点会整条失效退成 inherit——三档文字的层次全丢。
+   包起来之后，旧内核自动退化为上面那组纯色兜底。 */
+@supports (color: color-mix(in srgb, red, blue)){
+  :root{
+    /* 三档文字：主题只提供一个前景色（One Dark Pro 的次要文字键
+       descriptionForeground 也是 #abb2bf，与正文同色），三处都用它就没有主次，
+       通篇一个亮度读起来「糊」。这里按 100 / 92 / 80 分三档。
+       最低档 80% 是实测下限：76% 在 #282c34 上只有 4.47:1，差一点点不到
+       WCAG AA 的 4.5（系统行/工具摘要都用这一档），80% 是 4.78:1。 */
+    --fg-dim: color-mix(in srgb, var(--fg) 92%, transparent);
+    --fg-faint: color-mix(in srgb, var(--fg) 80%, transparent);
+    /* panel.border 在 #282c34 上只有 1.5:1，做分隔线够、做卡片轮廓太弱
+       （「边界非常微弱、不够利落」）。需要更实一档的地方用这个。 */
+    --line-strong: color-mix(in srgb, var(--fg) 34%, transparent);
+  }
 }
 /* 浏览器预览：跟随系统浅色 */
 @media (prefers-color-scheme: light){
@@ -83,14 +107,18 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;pad
 .status{
   display:flex;align-items:center;gap:12px;
   max-width:680px;margin:0 auto;padding:8px 2px 0;
-  font-family:var(--mono);font-size:10.5px;color:var(--fg-faint);
+  /* 11px 而不是 10.5px：等宽字体在小字号下发虚，配上最淡那档颜色就「糊」
+     （实测被视觉评估点名）。字号提半档、标签用次要色即可，不必再加深。 */
+  font-family:var(--mono);font-size:11px;
   flex-wrap:wrap;
   /* Ctrl+A 不该把顶栏/状态栏的标签一起选进去：用户想复制的是对话内容。
      （实测原来 Ctrl+A 选中 192 个字符，开头是「Narnat / grep-ignore-case…」） */
   user-select:none;
 }
-.status .k{color:var(--fg-faint)}
-.status .v{color:var(--fg-dim)}
+.status .k{color:var(--fg-dim)}
+/* 值是用户真正要看的东西（模型名、上下文、费用），用正文色；
+   标签用次要色，两者一深一浅才读得快。 */
+.status .v{color:var(--fg)}
 .status .sep{color:var(--line-strong)}
 .status .right{margin-left:auto;display:flex;gap:12px}
 .status button.v:hover{color:var(--fg)}
@@ -199,7 +227,7 @@ body[data-real="true"] .demo-tip{display:none}
 /* 不用 <pre> 直接做容器：语言标签和复制按钮要贴在右上角，
    而 <pre> 本身 overflow-x:auto，子元素会被一起横向滚走。 */
 .code{
-  margin:10px 0 0;border:1px solid var(--line);border-radius:6px;
+  margin:10px 0 0;border:1px solid var(--line-strong);border-radius:6px;
   background:var(--bg-code);overflow:hidden;
 }
 .code-hd{
@@ -308,7 +336,8 @@ body[data-real="true"] .demo-tip{display:none}
    只加在工具行：思考行的标题本来就是「思考 3.2s · 616 字」，再加就多了一个点。 */
 .tools .row .name::after{content:"·";margin-left:8px;color:var(--fg-faint)}
 .row .arg{
-  flex:1;min-width:0;color:var(--fg-faint);
+  /* 摘要是用户要读的内容（命令、路径），不能压到最淡那一档 */
+  flex:1;min-width:0;color:var(--fg-dim);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:12px;
 }
 /* 路径类摘要（`…\sandbox\rect_area.py`）在窄面板里要保留**尾部**：
@@ -351,12 +380,12 @@ body[data-real="true"] .demo-tip{display:none}
    一个 12px 圆角、1px 描边的整体卡片，两段各带一个小标签。
    收起时只有一行，展开才铺开；卡片自身限高滚动，不把对话区顶走。 */
 .io{
-  margin-top:6px;border:1px solid var(--line);border-radius:10px;
+  margin-top:6px;border:1px solid var(--line-strong);border-radius:10px;
   background:var(--bg-code);overflow:hidden;
 }
 .io-sec{display:flex;gap:12px;padding:9px 12px;max-height:260px;overflow:auto}
 .io-sec + .io-sec{border-top:1px solid var(--line)}
-.io-lb{flex:none;color:var(--fg-faint);font-size:10px;line-height:1.7;user-select:none}
+.io-lb{flex:none;color:var(--fg-dim);font-size:10.5px;line-height:1.7;user-select:none}
 .io-tx{
   flex:1;min-width:0;font-family:var(--mono);font-size:11.5px;line-height:1.7;
   white-space:pre-wrap;word-break:break-word;color:var(--fg-dim);
@@ -374,7 +403,9 @@ body[data-real="true"] .demo-tip{display:none}
 .io-copy[data-done="true"]{color:var(--ok);opacity:1}
 /* 输出段的标签（IN 的标签在卡片内，输出块沿用原来的 .snippet 结构，
    给它同样一个小标签，两段读起来才是一套东西） */
-.io-out-lb{display:block;margin:8px 0 3px 2px}
+/* 输出段标签与 IN 标签左缘对齐：IN 在 .io-sec 的 12px 内边距里，
+   这里补同样的 12px，否则同一张卡片里 IN 缩进 12px、OUT 只缩进 2px。 */
+.io-out-lb{display:block;margin:8px 0 3px 12px}
 .snippet .ln{display:flex;padding:0 12px;white-space:pre}
 /* 行号在横向滚动时不能跟着滚走。
    diff 的每行最长 74~82 个字符，而 249px 面板一屏只放得下约 31 个字符，
@@ -417,7 +448,7 @@ body[data-real="true"] .demo-tip{display:none}
 #branchTip[data-on="true"]{display:block}
 #newBranchBtn[data-off="true"]{opacity:.45}
 .snippet .foot{
-  padding:5px 12px 0;color:var(--fg-faint);font-size:10.5px;
+  padding:5px 12px 0;color:var(--fg-dim);font-size:10.5px;
   border-top:1px solid var(--line);margin-top:6px;padding-top:6px;
 }
 .snippet .foot b{color:var(--ok);font-weight:400}
@@ -504,9 +535,10 @@ body[data-real="true"] .demo-tip{display:none}
   background:var(--vscode-input-background,var(--bg-elev));
   padding:9px 12px 7px;
 }
-/* 聚焦时用主题的 focus 边框色：input-border 在很多主题里几乎与背景同色，
-   只有换到 focusBorder 才看得出「焦点进来了」。 */
-.cbox:focus-within{border-color:var(--vscode-focusBorder,var(--accent))}
+/* 聚焦时用主题的 focus 边框色。回退不能用 accent（链接蓝）：主题没定义
+   focusBorder 时会突然冒出一圈亮蓝，在一屏灰面里格外抢眼（实测被点名
+   「视觉重量过大」）。回退到 line-strong，稳。 */
+.cbox:focus-within{border-color:var(--vscode-focusBorder,var(--line-strong))}
 .cbox textarea{
   width:100%;border:none;background:none;resize:none;outline:none;
   font:inherit;font-size:13px;line-height:1.6;color:var(--fg);
@@ -534,7 +566,9 @@ body[data-real="true"] .demo-tip{display:none}
   min-width:0;overflow:hidden;text-overflow:ellipsis;
 }
 .chip.mono{font-family:var(--mono);font-size:11px}
-.chip.on{color:var(--accent)}
+/* 选中态（目标模式开）只把文字提亮到正文档，不整块染成链接蓝：
+   一排灰胶囊里突然一块亮蓝，视觉上比它承载的信息重得多（实测被点名突兀）。 */
+.chip.on{color:var(--fg)}
 /* 目标 chip 可点开目标面板（窄面板里它是唯一的目标入口）：给出可点的光标 */
 #chipGoal{cursor:pointer}
 .chip[data-clickable="true"]{cursor:pointer}
