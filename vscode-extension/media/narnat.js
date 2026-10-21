@@ -31,8 +31,7 @@
       var dupKey = 'offline:' + type;
       if (lastOfflineHint !== dupKey) {
         lastOfflineHint = dupKey;
-        sysLine('·', '未连接后端，这个操作没有执行',
-          '面板正在尝试重连；连上后再点一次');
+        sysLine('·', '未连接后端，操作未执行', '');
         scrollBottom();
       }
       // 拦截后不会有回执：所有「等回执」的锁必须在这里解掉，
@@ -48,7 +47,6 @@
   var lastOfflineHint = '';
 
   var REAL = false;          // 收到 initialize 后切真实态（此前保留演示数据）
-  var sessHintShown = false;  // 「当前没有打开的会话」只提示一次
   var FIRST_INIT_SEEN = false; // 是否已经历过一次握手（区分冷启动与首次演示态）
   var assistantBuf = '';     // 当前助手消息正文缓冲（原始 Markdown）
   var authHintShown = false; // 本轮是否已提示过「去填 API Key」（避免重复刷）
@@ -62,11 +60,6 @@
   var lastSentMaybeAccepted = false;
   var curAssistant = null;   // 当前 .msg.assistant
   var curThink = null;       // 当前思考块
-  // 本轮是否收到过思考块；以及已提示过「模型不产思考」的模型名。
-  // 有的模型（如 deepseek-flash）本身不产思考，界面不能默不作声——
-  // 否则用户看着「思考 高」却没有思考块，会以为界面坏了。
-  var turnHadThink = false;
-  var noThinkWarnedFor = '';
   var pendingTodoRow = null; // 由 tool/call 预留的「更新计划」行，等 todo/update 填充
   var toolMap = {};          // tool id → { wrap, row, slot, isTodo }
   var sysMap = {};           // 系统行（verify / compress）句柄
@@ -839,7 +832,6 @@
     lastSentText = '';
     lastOfflineSend = { text: '', ts: 0 };
     lastSentMaybeAccepted = false;
-    sessHintShown = false;
     // 这两个行节点跟着 convo 一起被删了：不清引用会指向已脱离文档的节点
     apiKeyHintLine = null;
     cfgWarnLines = [];
@@ -1387,7 +1379,7 @@
   function atchSaveImage(file){
     var name = (file && file.name) || ('clipboard-' + Date.now() + '.png');
     if (file && file.size && file.size > ATCH_MAX_IMG) {
-      sysLine('✗', '图片太大，未添加', esc(name) + ' 超过 8MB', 'err');
+      sysLine('✗', '图片超过 8MB，未添加', esc(name), 'err');
       scrollBottom();
       return;
     }
@@ -1403,7 +1395,7 @@
       }
       atchSend('attach/save', { name: name, dataB64: b64 }, function(res){
         if (!res || res.error || !res.path) {
-          sysLine('✗', '图片存到临时目录失败', esc((res && res.error) || '未知原因'), 'err');
+          sysLine('✗', '图片保存失败', esc((res && res.error) || '未知原因'), 'err');
           scrollBottom();
           return;
         }
@@ -1445,8 +1437,7 @@
         atchSaveImage(f);
         return;
       }
-      sysLine('✗', '拿不到这个文件的路径',
-        esc(f.name || '（未命名）') + ' · 请用输入框旁的「＋附件」按钮选择', 'warn');
+      sysLine('✗', '拿不到文件路径', esc(f.name || '（未命名）'), 'warn');
       scrollBottom();
     });
     if (paths.length) atchAddPaths(paths);
@@ -1711,8 +1702,7 @@
       post('command', { command: v.replace(/^\//, '').split(/\s+/)[0].toLowerCase(),
                         args: v.replace(/^\//, '').split(/\s+/).slice(1).join(' '),
                         text: v });
-      sysLine('·', '未连接后端，命令未执行',
-        '已在尝试重连；连上后再执行一次（文字仍在输入框里）');
+      sysLine('·', '未连接后端，命令未执行', '');
       scrollBottom();
       return;
     }
@@ -1881,9 +1871,9 @@
     if (isSameSpotAsSend(ev)) {
       var lr = convo.lastElementChild;
       var dupStop = lr && lr.className.indexOf('sys') >= 0 &&
-        (lr.textContent || '').indexOf('刚发出，这一下没有停止') >= 0;
+        (lr.textContent || '').indexOf('这一下没有停止') >= 0;
       if (!dupStop) {
-        sysLine('·', '刚发出，这一下没有停止', '真要停请再点一次');
+        sysLine('·', '这一下没有停止，请再点一次', '');
         scrollBottom();
       }
       return;
@@ -1891,10 +1881,11 @@
     if (REAL) {
       // 点过一次就锁住：后端 cancel 要等这一轮真正收口（可能 1~2 秒），
       // 期间按钮还是「停止」的样子，用户会以为没点上而连点，把 cancel
-      // 请求和后续 bus y 判断搅在一起。这里立刻给出「停止中」并禁点。
+      // 请求和后续 busy 判断搅在一起。这里立刻给出「停止中」并禁点：
+      // 圆钮放不下文字，改成方块脉冲 + title 说明。
       if (btn.getAttribute('data-pending') === 'true') return;
       btn.setAttribute('data-pending', 'true');
-      btn.innerHTML = '<span class="sq"></span>停止中…';
+      btn.title = '停止中…';
       post('cancel', {});
       return;
     }
@@ -1906,12 +1897,12 @@
     scrollBottom(true);
   });
 
-  /** 一轮收口后把「停止中…」还原成「停止」。任何 turn 结束路径都要调。 */
+  /** 一轮收口后把「停止中」的状态还原。任何 turn 结束路径都要调。 */
   function resetStopBtn(){
     var btn = document.getElementById('stopBtn');
     if (!btn) return;
     btn.removeAttribute('data-pending');
-    btn.innerHTML = '<span class="sq"></span>停止';
+    btn.title = '停止';
   }
   /**
    * 刚点过停止后的短暂窗口里，忽略发送按钮的点击。
@@ -1960,9 +1951,9 @@
     if (Date.now() < sendGuardUntil) {
       var lastRow = convo.lastElementChild;
       var dup2 = lastRow && lastRow.className.indexOf('sys') >= 0 &&
-        (lastRow.textContent || '').indexOf('刚点了停止') >= 0;
+        (lastRow.textContent || '').indexOf('这一下没有发送') >= 0;
       if (!dup2) {
-        sysLine('·', '刚点了停止，这一下没有发送', '要发请再点一次发送或按 Enter');
+        sysLine('·', '这一下没有发送，请再点一次', '');
         scrollBottom();
       }
       return;
@@ -2075,24 +2066,20 @@
         }
         return;
       }
-      // 整条消息的「复制」：优先复制原始 Markdown（__copyRaw），
-      // 没有时退回可见文本——退回的文本结构会被拉平，但总比没有好。
-      var msgCopy = e.target.closest('.msg-copy');
-      if (msgCopy) {
-        var owner = msgCopy.closest('.msg');
-        if (owner) {
-          var raw = (owner.__copyRaw !== undefined && owner.__copyRaw !== null)
-            ? owner.__copyRaw : owner.textContent;
-          copyText(raw).then(function(){
-            msgCopy.setAttribute('data-done', 'true');
-            msgCopy.removeAttribute('data-fail');
+      // 工具卡片里的命令「复制」：只复制那段命令本身。
+      var ioCopy = e.target.closest('.io-copy');
+      if (ioCopy) {
+        var ioBox = ioCopy.closest('.io-sec');
+        var ioTx = ioBox ? ioBox.querySelector('.io-tx') : null;
+        if (ioTx) {
+          copyText(ioTx.textContent).then(function(){
+            ioCopy.setAttribute('data-done', 'true');
+            ioCopy.textContent = '已复制';
             setTimeout(function(){
-              msgCopy.removeAttribute('data-done');
+              ioCopy.removeAttribute('data-done');
+              ioCopy.textContent = '复制';
             }, 1200);
-          }).catch(function(){
-            msgCopy.setAttribute('data-fail', 'true');
-            setTimeout(function(){ msgCopy.removeAttribute('data-fail'); }, 1200);
-          });
+          }).catch(function(){ ioCopy.textContent = '复制失败'; });
         }
         return;
       }
@@ -2171,7 +2158,7 @@
     });
     pendingConfirmLine = null;
     if (why) {
-      sysLine('·', why, '后端已不再等待这条确认');
+      sysLine('·', why, '');
       scrollBottom();
     }
   }
@@ -2183,7 +2170,7 @@
     // 自己真批准了一次删除（实测点了就回一句「已确认执行」，实际什么都没发生）。
     if (!REAL) {
       box.parentNode.removeChild(box);
-      sysLine('·', '这是示例数据，后端未连接', '没有执行任何命令');
+      sysLine('·', '示例数据，后端未连接', '');
       scrollBottom();
       rendered('confirm/reply', { yes: yes, demo: true });
       return;
@@ -2420,13 +2407,23 @@
   if (chipPathEl) {
     chipPathEl.style.cursor = 'pointer';
     chipPathEl.title = '点击复制工作目录';
+    // 还原用的原文必须记在属性里，不能每次点击现取 chip 的文字。
+    // 现取会怎样（实测）：1.2 秒内连点两下，第二下读到的「原文」已经是
+    // 「已复制路径」，定时器随后把它还原成这句话 —— 胶囊永久停在「已复制路径」。
     chipPathEl.addEventListener('click', function (e) {
       e.stopPropagation();
-      var txt = chipPathEl.textContent || '';
+      var txt = chipPathEl.getAttribute('data-path') || chipPathEl.textContent || '';
       copyText(txt).then(function () {
-        var old = chipPathEl.textContent;
+        if (!chipPathEl.getAttribute('data-path')) {
+          chipPathEl.setAttribute('data-path', chipPathEl.textContent || txt);
+        }
         chipPathEl.textContent = '已复制路径';
-        setTimeout(function () { chipPathEl.textContent = old; }, 1200);
+        // 重新计时：连点时后一次点击要把还原时间往后推，而不是让它提前触发
+        if (chipPathEl.__restoreTimer) clearTimeout(chipPathEl.__restoreTimer);
+        chipPathEl.__restoreTimer = setTimeout(function () {
+          chipPathEl.textContent = chipPathEl.getAttribute('data-path') || '';
+          chipPathEl.__restoreTimer = null;
+        }, 1200);
       }).catch(function () { /* 复制失败就保持原样，不弹错 */ });
     });
   }
@@ -2686,7 +2683,7 @@
       // 就被砍断了，而界面上一个字都没提（实测切换后 1ms 收到 cancelled，
       // 之后 stream/delta 归零）。
       if (body.getAttribute('data-run') === 'true' && fullName !== CUR) {
-        sysLine('⚠', '正在回答中', '进入「' + fullName + '」会停止这一轮', 'warn');
+        sysLine('⚠', '正在回答中，进入「' + fullName + '」会停止这一轮', '', 'warn');
       }
       post('sessionSwitch', { name: fullName });
       return true;
@@ -2702,8 +2699,7 @@
       // 一个字都不会变。原来照样说「已进入会话 · 上下文已切换」，用户会
       // 以为切过去了、内容丢了（同一份演示数据里点 rm -rf 确认条反倒老实
       // 说明「这是示例数据」，处理方式不一致）。
-      sysLine('↳', '已进入会话：' + fullName,
-              REAL ? '上下文已切换' : '这是示例数据，后端未连接');
+      sysLine('↳', '已切换至对话 ' + fullName, '');
     }
     return true;
   }
@@ -2725,7 +2721,7 @@
     // 演示态只是在本地把它从列表里去掉，磁盘上什么都没有。
     // 不能说「退出时生效」——那暗示有个真实的延迟删除在排队（实测反过来：
     // 连上后端后 /rm 是立即删除、不可撤销）。两套语义必须说清楚。
-    if (!silent) sysLine('✓', '已从列表移除：' + fullName, '演示数据，未真正删除任何文件', 'ok');
+    if (!silent) sysLine('✓', '已移除 ' + fullName, '', 'ok');
     return true;
   }
 
@@ -2742,7 +2738,7 @@
     root.children.push({ name: n, status: 'active', time: '刚刚', count: 0 });
     CUR = root.name + '/' + n;
     renderSessions();
-    if (!silent) sysLine('⑂', '已进入探索分支：' + CUR, '/done 合并结论');
+    if (!silent) sysLine('⑂', '已切换至对话 ' + CUR, '');
     return true;
   }
 
@@ -3019,15 +3015,14 @@
         cmdResult(CMD, '✗', '会话不存在: ' + arg, '', 'err');
         return;
       }
-      cmdResult(CMD, '✓', '已从列表移除：' + arg,
-        '仅界面生效，后端未连接（真正的 /rm 是立即删除、不可撤销）', 'ok');
+      cmdResult(CMD, '✓', '已移除 ' + arg, '', 'ok');
       return;
     }
     if (cmd === 'save') {
       // 演示态没有后端，这里只动界面；回执不能写「会话已保存」，
       // 否则用户以为真存盘了（实测：后端没连上时敲 /save 会得到"已保存"）。
-      cmdResult(CMD, '✓', '会话已保存：' + (arg || CUR),
-        (REAL ? '' : '仅界面生效，后端未连接'), 'ok');
+      cmdResult(CMD, '✓', '已保存为「' + (arg || CUR) + '」',
+        (REAL ? '' : '仅界面生效'), 'ok');
       return;
     }
     if (cmd === 'explore') {
@@ -3036,11 +3031,10 @@
         return;
       }
       if (!createBranch(arg, true)) {
-        cmdResult(CMD, '✗', '创建失败',
-          CUR.indexOf('/') >= 0 ? '子会话内不能再开分支' : '名称已存在', 'err');
+        cmdResult(CMD, '✗', '创建分支失败', '', 'err');
         return;
       }
-      cmdResult(CMD, '⑂', '已进入探索分支：' + CUR, '/done 合并结论');
+      cmdResult(CMD, '⑂', '已切换至对话 ' + CUR, '');
       return;
     }
     if (cmd === 'done') {
@@ -3048,7 +3042,7 @@
         cmdResult(CMD, '✗', '当前不在探索分支中', '', 'err');
         return;
       }
-      cmdResult(CMD, '✓', '探索分支已完成，结论已合并', '主分支已追加检查点', 'ok');
+      cmdResult(CMD, '✓', '已切换至对话 ' + CUR.split('/')[0], '', 'ok');
       return;
     }
     if (cmd === 'mode') {
@@ -3072,8 +3066,7 @@
       }
       setChecked(document.getElementById('popModel'), arg);
       document.getElementById('btnModel').textContent = arg;
-      cmdResult(CMD, '✓', '已切换模型：' + arg,
-        (REAL ? '已写回 config' : '仅界面生效，后端未连接'), 'ok');
+      cmdResult(CMD, '✓', '已切换模型 ' + arg, '', 'ok');
       return;
     }
     if (cmd === 'thinking') {
@@ -3108,8 +3101,7 @@
       }
       setChecked(document.getElementById('popThink'), pick.v);
       document.getElementById('btnThink').textContent = pick.lb;
-      cmdResult(CMD, '✓', '思考强度已切换为：' + pick.lb,
-        (REAL ? '已写回 config' : '仅界面生效，后端未连接'), 'ok');
+      cmdResult(CMD, '✓', '思考强度 ' + pick.lb, '', 'ok');
       return;
     }
     if (cmd === 'goal') {
@@ -3128,8 +3120,7 @@
         return;
       }
       var onNow = document.getElementById('btnGoal').textContent.indexOf('开') >= 0;
-      cmdResult(CMD, '·', '目标模式：' + (onNow ? '已开启' : '已关闭'),
-        onNow ? '用法 /goal off' : '用法 /goal on [轮数]');
+      cmdResult(CMD, '·', '目标模式' + (onNow ? '已开启' : '已关闭'), '');
       return;
     }
     if (cmd === 'plugin') {
@@ -3167,14 +3158,13 @@
       var en = document.querySelectorAll('#popPlugin .pi[data-on="true"]').length;
       document.getElementById('btnPlugin').textContent =
         (en === tot ? '插件 ' + tot : '插件 ' + en + '/' + tot);
-      cmdResult(CMD, '✓', '插件已' + (isOn ? '开启' : '关闭') + '：' + pp[0],
-        '下一轮请求生效', 'ok');
+      cmdResult(CMD, '✓', '插件' + (isOn ? '开' : '关') + ' ' + pp[0], '', 'ok');
       return;
     }
     if (cmd === 'compact') {
       document.getElementById('ctxPct').textContent = '3%';
       // 同 compress/end：真实回执里 before/after 恒为 null，演示态也不该编数字
-      cmdResult(CMD, '✓', '压缩完成', '演示态，实际未压缩', 'ok');
+      cmdResult(CMD, '✓', '压缩完成', '仅界面', 'ok');
       return;
     }
     if (cmd === 'skill') {
@@ -3182,19 +3172,18 @@
         cmdResult(CMD, '✗', '用法: /skill &lt;名称 | 项目目录/文件.md&gt;', '', 'err');
         return;
       }
-      cmdResult(CMD, '✓', '已加载技能：' + arg, '正文已追加为 system 消息', 'ok');
+      cmdResult(CMD, '✓', '已加载技能 ' + arg, '', 'ok');
       return;
     }
     if (cmd === 'thinkback') {
-      cmdResult(CMD, '·', '思考回传：开', 'DeepSeek 工具轮次强制', '');
+      cmdResult(CMD, '·', '思考回传：开', '');
       return;
     }
     if (cmd === 'clear' || cmd === 'exit') {
-      cmdResult(CMD, '·', '在 UI 形态下不使用此命令', '面板负责显示与生命周期', '');
+      cmdResult(CMD, '·', 'UI 形态下不用此命令', '');
       return;
     }
-    cmdResult('/' + cmd, '✗', '/' + cmd + ' 未知命令',
-      '敲 /help 看全部可用命令（或直接输入 / 调出补全）', 'err');
+    cmdResult('/' + cmd, '✗', '没有这个命令：/' + cmd, '', 'err');
   }
 
   /* ---------- 会话抽屉 ---------- */
@@ -3321,7 +3310,7 @@
       // 不能完全静默——用户明明在输入框里敲了字按了 Enter，屏幕上却
       // 一点反应都没有（实测：停留超过 30 秒再按 Enter，什么都不发生）。
       if (p && !p.cancelled && String(p.value || '').trim()) {
-        sysLine('·', '刚才那次输入已超时', '请重新点一次按钮再输入');
+        sysLine('·', '输入已超时，请重新操作', '');
         scrollBottom();
       }
       return;
@@ -3354,13 +3343,13 @@
       }
       var nm = n || ('session-' + (SESS.length + 1));
       if (SESS.some(function(s){ return s.name === nm; })) {
-        sysLine('✗', '会话已存在：' + nm, '请换名');
+        sysLine('✗', '会话已存在：' + nm, '');
         return;
       }
       SESS.unshift({ name: nm, time: '刚刚', count: 0, children: [] });
       CUR = nm;
       renderSessions();
-      sysLine('＋', '已创建会话：' + nm, '可开始对话');
+      sysLine('＋', '已切换至对话 ' + nm, '');
     });
   });
 
@@ -3378,11 +3367,11 @@
       // 所以留空时要明确告诉用户原因，不能静默 return。
       if (n === null) return;
       if (!n) {
-        sysLine('·', '分支需要一个名称', '留空无法创建，请再点一次并输入名称');
+        sysLine('·', '分支名不能为空', '');
         return;
       }
       if (!createBranch(n)) {
-        sysLine('✗', '创建失败', '子会话内不能再开分支，或名称已存在');
+        sysLine('✗', '创建分支失败', '');
       }
     });
   });
@@ -3432,17 +3421,16 @@
         if (REAL) {
           run(doneBtn, '正在总结…', function(){ post('sessionDone', {}); });
         } else {
-          sysLine('✓', '探索分支已完成', '已回到 ' + CUR.split('/')[0], 'ok');
           CUR = CUR.split('/')[0];
           CUR_IS_CHILD = false;
           renderSessions();
+          sysLine('✓', '已切换至对话 ' + CUR, '');
         }
         return;
       }
       doneBtn.setAttribute('data-ask', '1');
       doneBtn.textContent = '确认合并？再点一次（不可撤销）';
-      var askLine = sysLine('⚠', '合并不可撤销',
-        '会把分支结论并进「' + (CUR.split('/')[0] || '父会话') + '」，这条分支随之消失。再点一次才执行', 'warn');
+      var askLine = sysLine('⚠', '合并不可撤销，再点一次才执行', '');
       scrollBottom();
       // 8 秒内没再点就撤销「待确认」状态，避免按钮长期停在确认态。
       // 撤销时必须把上面那条提示一起改掉：否则屏幕上一直挂着「再点一次才执行」，
@@ -3453,7 +3441,7 @@
           doneBtn.textContent = '✓ 完成并合并结论';
           if (askLine && askLine.parentNode) {
             var tail = askLine.querySelector('.tail');
-            if (tail) tail.textContent = '这次没有合并（要合并请重新点按钮，再确认一次）';
+            if (tail) tail.textContent = '这次没有合并';
             askLine.className = 'sys';
           }
         }
@@ -3470,7 +3458,7 @@
         CUR = CUR.split('/')[0];
         CUR_IS_CHILD = false;
         renderSessions();
-        sysLine('←', '已暂离分支', '内容已保留，可再点进分支继续', '');
+        sysLine('←', '已切换至对话 ' + CUR, '');
       }
     });
   })();
@@ -3487,7 +3475,7 @@
       // null = 取消；'' = 留空确认（改名不允许留空，要明确说）
       if (n === null) return;
       if (!n) {
-        sysLine('·', '新名称不能为空', '留空会得到一个没有名字的会话');
+        sysLine('·', '名称不能为空', '');
         return;
       }
       if (n === fullName) return;
@@ -3497,7 +3485,6 @@
       }
       var f = findSess(fullName);
       if (!f) return;
-      var oldName = f.child ? f.child.name : f.root.name;
       if (f.child) {
         f.child.name = n;
       } else {
@@ -3505,7 +3492,7 @@
       }
       if (CUR === fullName) CUR = n;
       renderSessions();
-      sysLine('✏', '已重命名为：' + n, '原名 ' + oldName);
+      sysLine('✏', '已重命名为 ' + n, '');
     });
   }
 
@@ -3596,8 +3583,7 @@
       // 后端起不来，只能改配置或重载窗口。
       // 那一次请求本身会失败（后端还没起来），但用户再按一次 Enter 就成了。
       post('chat', { text: wireText });
-      sysLine('·', '未连接后端，消息未发送',
-        '已在尝试重连；连上后请再发一次（文字仍在输入框里）');
+      sysLine('·', '未连接后端，消息未发送', '');
       scrollBottom();
       return;
     }
@@ -3608,18 +3594,17 @@
     openPalette(false);
     var m = document.createElement('div');
     m.className = 'msg';
+    m.setAttribute('data-role', 'user');
     // pending = 这条还没被后端接受。收到 chat/result accepted:false 时要撤回，
     // 否则「被拒绝的一句话」会以已发送的样子留在对话里、永远没有回答（实测会误导）。
     m.setAttribute('data-pending', '1');
     m.innerHTML = '<div class="text">' + esc(text) + '</div>';
     // 气泡里正文之后显示缩略图行（与输入区的 chip 共用同一套样式与缓存）
     addMsgThumbs(m, sendImgs);
-    attachCopy(m, text);
     convo.appendChild(m);
     curAssistant = null;
     assistantBuf = '';
     authHintShown = false;
-    turnHadThink = false;
     lastSentMaybeAccepted = false;
     body.setAttribute('data-run', 'true');
     scrollBottom(true);
@@ -3750,8 +3735,7 @@
       var dup = lastRow && lastRow.className.indexOf('sys') >= 0 &&
         (lastRow.textContent || '').indexOf('上一轮还在运行') >= 0;
       if (!dup) {
-        sysLine('·', '上一轮还在运行，这句话没有发出去',
-          sentText ? '已退回输入框' : '请等待或点停止');
+        sysLine('·', '上一轮还在运行，本条未发送', '');
       }
       scrollBottom();
       rendered('chat/result', { accepted: false, error: msg, busy: true });
@@ -3767,12 +3751,12 @@
     var isTimeout = /timeout|timed out|超时|无响应|未响应/i.test(String(msg));
     if (isTimeout) {
       body.setAttribute('data-run', 'true');
-      sysLine('⚠', '后端没有响应', '仍然可以点「停止」中断，或稍后再试', 'warn');
+      sysLine('⚠', '请求超时，可点停止', '');
       scrollBottom();
       rendered('chat/result', { accepted: false, error: msg, timeout: true });
       return;
     }
-    sysLine('✗', '消息未发送', esc(String(msg).slice(0, 80)), 'err');
+    sysLine('✗', '请求失败，请检查网络或配置', esc(String(msg).slice(0, 80)), 'err');
     scrollBottom();
     rendered('chat/result', { accepted: false, error: msg });
   }
@@ -3795,7 +3779,7 @@
         // 这里**不能**写「■ 已打断」：真正的收口是紧随其后的 turn/end，
         // 两处各写一次就变成两行「已打断」（实测 bgCancelled=1 时必现）。
         // 这一行只说后台任务的事，打断本身由 turn/end 那条统一说。
-        sysLine('■', '同时停止了 ' + bg + ' 个后台任务', '它们不会再有输出');
+        sysLine('■', '同时停止了 ' + bg + ' 个后台任务', '');
         scrollBottom();
       }
       // 兜底收口：后端说「已取消」了，但界面退不退出运行态全靠它随后发
@@ -3817,7 +3801,7 @@
     // 此后每条消息都被 busy 拒，而唯一能脱身的停止按钮已经没了。
     if (p && p.error) {
       resetStopBtn();
-      sysLine('⚠', '停止请求没有回应', '这一轮可能还在跑，可再点一次停止', 'err');
+      sysLine('✗', '停止失败', esc(String(p.error).slice(0, 80)), 'err');
       scrollBottom();
       rendered('cancel/result', { cancelled: false, error: String(p.error).slice(0, 200) });
       return;
@@ -3825,7 +3809,7 @@
     body.setAttribute('data-run', 'false');
     resetStopBtn();
     if (bg > 0) {
-      sysLine('■', '已停止 ' + bg + ' 个后台任务', '当前没有运行中的对话');
+      sysLine('■', '已停止 ' + bg + ' 个后台任务', '');
     } else {
       sysLine('·', '当前没有运行中的任务', '');
     }
@@ -3843,8 +3827,7 @@
     // 用户可能就是想发一个以斜杠开头的路径（这是第 3 轮就定下的行为，别退回去）。
     var looksLikePath = /[\/\\.\-]/.test(name) || name.length > 14;
     if (name && !looksLikePath && !COMMANDS.some(function(x){ return x.c.slice(1) === name; })) {
-      sysLine('✗', '没有 /' + name + ' 这个命令',
-        '输入 / 查看全部命令，或换个说法描述你的需求', 'err');
+      sysLine('✗', '没有这个命令：/' + name, '');
       scrollBottom();
       rendered('command/result', { command: name, handled: false, unknownCommand: true });
       return;
@@ -3872,12 +3855,9 @@
    * 点抽屉能回去）。
    */
   function clearScreen(){
-    var kept = CUR;
     resetConversationDom();
     authHintShown = false;
-    cmdResult('/clear', '·', '已清屏',
-      kept ? '对话内容仍在会话「' + kept + '」，点抽屉可以回去'
-           : '未保存的对话已不在显示里，重新打开也找不回');
+    cmdResult('/clear', '·', '已清屏', '');
     scrollBottom();
   }
 
@@ -4021,30 +4001,44 @@
     var host = ensureAssistant();
     resetStreamRender();
     host.innerHTML = markdownInline(assistantBuf);
-    // 轮末给这一条挂上「复制」并记住原文。流式期间不挂：那时正文还不全，
-    // 复制到的是半截，比没有更糟。
-    attachCopy(host, assistantBuf);
+  }
+
+  /**
+   * 收口当前正文段：定稿并断开引用，后续增量会另起一个气泡。
+   *
+   * 一次请求内部会有多段正文（AI 先说一句 → 调工具 → 再接着说），中间还夹着
+   * 思考块与工具行。不在这里断开会怎样（实测）：第二段正文继续追加进第一段的
+   * 气泡，几段话被拼成一整段，且整块文字都留在最上面、所有工具行排到它下面——
+   * 用户看到的是一条读不通的长文，而不是「说一句 → 做一步 → 再说一句」。
+   */
+  function closeAssistantSegment(){
+    if (curAssistant && assistantBuf) renderAssistantFinal();
+    curAssistant = null;
+    assistantBuf = '';
+    resetStreamRender();
   }
 
   /**
    * 鉴权失败时补一行可操作指引。
-   * 后端把 LLM 错误当正文流式输出，文案里只提 .narnat/config/narnat.json，
-   * 而扩展用户并不知道这个文件在哪，所以在这里给出 VSCode 内的入口。
+   * 后端把 LLM 错误当正文流式输出，只说「AI调度失败，请检查 narnat.json」，
+   * 而扩展用户并不知道这个文件怎么打开，所以在这里给出 VSCode 内的入口。
    *
    * 判据必须收紧到「后端错误行的具体形态」：早先只要正文里出现
    * api key / 接口密钥 / 401 这几个词就弹——用户让它「检查一下安全配置」，
    * 回答里提到 API Key 就被误判成「你需要配置 API Key」（实测假警报）。
-   * 现在只认后端错误前缀 `[错误: API调用失败(401` 这类，或认证失败的原文。
+   * 现在只认后端错误前缀 `[错误: API调用失败(401` / `AI调度失败` 这类。
    */
   function authHintIfNeeded(){
     if (authHintShown) return;
     var t = assistantBuf;
-    var isAuthError = /\[错误:\s*API调用失败\(\s*401/i.test(t)
+    var isAuthError = /\[错误:\s*AI\s*调度失败/i.test(t)
+      || /\[错误:\s*API调用失败\(\s*401/i.test(t)
       || /Authentication Fails/i.test(t)
       || /api\s*key\s*(?:is\s*)?(?:invalid|empty|not\s*set|未配置|无效)/i.test(t);
     if (!isAuthError) return;
     authHintShown = true;
-    sysLine('·', '需要配置 API Key', '命令面板运行「Narnat: 打开配置文件（填 API Key）」', '');
+    sysLine('✗', 'AI 调度失败，请检查 narnat.json 配置文件',
+      'Ctrl+Shift+P → Narnat: 打开配置文件', 'err');
     rendered('auth/hint', { hint: '打开配置文件' });
   }
 
@@ -4064,7 +4058,8 @@
   /* ---------- 思考块 ---------- */
 
   function beginThink(){
-    turnHadThink = true;
+    // 正文在前、思考在后时同样要断开：否则这之后的正又会追加到那段正文里
+    closeAssistantSegment();
     var wrap = document.createElement('div');
     wrap.className = 'think';
     // 与工具行一致：默认折叠，点标题展开看全文。
@@ -4161,7 +4156,40 @@
         meta.innerHTML = '<span class="bad">' + why + '</span>';
       }
       if (awaiting) entry.row.removeAttribute('data-await-confirm');
+      // 留一个痕迹：这一行是「等确认」被收口的，不是执行中被掐断。
+      // 用户之后仍可能点确认（confirm/result 与 turn/end 的先后没有保证），
+      // 真实结果到达时靠它把上面那个临时结论撤销掉（见 finishTool）。
+      if (awaiting) entry.row.setAttribute('data-await-settled', '1');
     });
+  }
+
+  /**
+   * 工具调用的「完整输入」：展开卡片里 IN 那一段的正文。
+   *
+   * 收起态只有一行摘要（会被省略号截断），用户要点开才看得到到底执行了什么。
+   * 优先取最有信息量的那个字段：Shell 的 command、读写工具的路径、搜索的
+   * 模式词；都不是就退回整段参数 JSON。
+   */
+  function toolInputText(p){
+    var a = p && p.arguments;
+    if (!a || typeof a !== 'object') return '';
+    var keys = ['command', 'file_path', 'path', 'pattern', 'query', 'url',
+      'old_string', 'content', 'text'];
+    for (var i = 0; i < keys.length; i++) {
+      var v = a[keys[i]];
+      if (typeof v === 'string' && v) return v;
+    }
+    try { return JSON.stringify(a, null, 2); } catch (e) { return ''; }
+  }
+
+  /** IN 段（命令 / 路径 / 参数正文），带一个复制按钮 —— 命令值得复制。 */
+  function ioInHtml(text){
+    if (!text) return '';
+    return '<div class="io"><div class="io-sec">' +
+      '<span class="io-lb">IN</span>' +
+      '<span class="io-tx">' + esc(text) + '</span>' +
+      '<button class="io-copy" type="button">复制</button>' +
+      '</div></div>';
   }
 
   function addToolRow(p){
@@ -4181,21 +4209,28 @@
     // `…\sandbox\rect_area.py` 显示成 `ndbox\rect_area.py\…`（实测）。
     // 前缀一个 U+200E（左到右标记）把它钉成 LTR 段落，顺序就正常了。
     if (isPath && sumText.charAt(0) === '…') sumText = '\u200E' + sumText;
+    // 工具行之前先把当前正文段收口：正文 → 工具 → 正文 才是真实顺序
+    closeAssistantSegment();
     var wrap = document.createElement('div');
     wrap.className = 'tools';
     if (isTodo) wrap.setAttribute('data-todo', 'true');
+    // 计划行的参数是整份清单，塞进 IN 段只会是一大坨 JSON，跳过
+    var inputText = isTodo ? '' : toolInputText(p);
     wrap.innerHTML = '<div class="row" data-open="' + (isTodo ? 'true' : 'false') + '" data-st="running" tabindex="0" role="button">' +
       '<span class="caret">▶</span>' +
       '<span class="name">' + esc(p.label || p.name || '工具') + '</span>' +
       '<span class="arg' + (isPath ? ' path' : '') + '">' + esc(sumText) + '</span>' +
       '<span class="meta dot-anim">执行中</span></div>' +
-      '<div class="slot">' + (isTodo ? '<div class="todo"></div><div class="extra"></div>' : '') + '</div>';
+      '<div class="slot">' +
+      (isTodo ? '<div class="todo"></div><div class="extra"></div>' : ioInHtml(inputText)) +
+      '</div>';
     convo.appendChild(wrap);
     var entry = {
       wrap: wrap,
       row: wrap.querySelector('.row'),
       slot: wrap.querySelector('.slot'),
       isTodo: isTodo,
+      input: inputText,
       todo: isTodo ? wrap.querySelector('.todo') : null,
       extra: isTodo ? wrap.querySelector('.extra') : null
     };
@@ -4237,6 +4272,7 @@
     }
     if (entry.row.getAttribute('data-await-confirm') === '1' && /操作已取消|需用户确认/.test(outText)) {
       entry.row.removeAttribute('data-await-confirm');
+      entry.row.removeAttribute('data-await-settled');
       // 同一条工具若之后再收到一条结果（后端的「取消」是同一个 id 的第二条
       // result），残留的 data-settled 会把它误判成「中断后返回」。
       // 取消是明确结论，把临时的定性标记一起清掉。
@@ -4247,7 +4283,16 @@
       rendered('tool/result', { id: p.id, cancelled: true });
       return;
     }
-    entry.row.removeAttribute('data-await-confirm');
+    // 这一行在等确认、现在拿到真实结果（用户点了确认，后端重放完毕）：
+    // 早先若被收口逻辑定过性（「未执行（确认没生效）」），那个结论已经不成立——
+    // 命令确实执行了。不清这两个标记，行头会被改写成「失败 · 中断后返回」，
+    // 而命令其实成功了（实测）。真实结果到了就以它为准。
+    if (entry.row.getAttribute('data-await-confirm') === '1' ||
+        entry.row.getAttribute('data-await-settled') === '1') {
+      entry.row.removeAttribute('data-await-confirm');
+      entry.row.removeAttribute('data-await-settled');
+      entry.row.removeAttribute('data-settled');
+    }
     // 退出码非 0 就是失败，即使后端说 ok:true。
     // 后端用「有没有框架级错误标签」判失败，Shell 的非 0 退出码不算——
     // 于是 `pytest` 因找不到文件退出 4、`git` 因冲突退出 1，界面全都显示
@@ -4295,8 +4340,11 @@
       entry.row.setAttribute('data-st', ok ? 'ok' : 'err');
     }
 
-    var html = '';
+    // 展开卡片 = IN（完整输入，见 addToolRow）+ 结果（diff 或输出）。
+    // 输入段在 addToolRow 里就画好了，这里重建整块时带上它，顺序不会乱。
+    var html = entry.isTodo ? '' : ioInHtml(entry.input);
     if (p.diff && p.diff.lines && p.diff.lines.length) {
+      html += '<div class="io-lb io-out-lb">OUT</div>';
       html += '<div class="snippet">';
       p.diff.lines.forEach(function(l){
         var cls = l.type === 'add' ? 'ln add' : (l.type === 'del' ? 'ln del' : 'ln');
@@ -4308,6 +4356,7 @@
         (p.diff.truncated ? ' · 只显示前 ' + p.diff.lines.length + ' 行改动' : '') + '</div>';
       html += '</div>';
     } else if (p.output) {
+      html += '<div class="io-lb io-out-lb">OUT</div>';
       html += '<div class="snippet out">';
       // 只铺前 40 行，但必须说清还有多少行。
       // 原来直接 slice(0, 40) 且 foot 只写「完成」——用户以为输出就这 40 行，
@@ -4528,6 +4577,17 @@
       // 文案本身常以 ⚠ 开头，别再补一个图标（否则「⚠⚠ 上下文占比超阈值」）
       var hadMark = /^[⚠!\u26a0]/.test(line);
       var clean = hadMark ? line.replace(/^[⚠!\u26a0]+\s*/, '') : line;
+      // 最近两条系统行里已有同一句话就不再画：同一件事经两条路径报两遍
+      // （如 turn/end 已写「已停止」，后端通知又来一句「已停止」）只会显得吵。
+      var prevs = convo.querySelectorAll('.sys');
+      var flat = clean.replace(/\s+/g, '');
+      var dupLine = false;
+      for (var pi = prevs.length - 1; pi >= 0 && pi >= prevs.length - 2; pi--) {
+        // 只比正文那一段：图标与尾注不参与（否则「■ 已停止」与「· 已停止」永远不相等）
+        var body2 = prevs[pi].querySelectorAll('span')[1];
+        if (body2 && (body2.textContent || '').replace(/\s+/g, '') === flat) { dupLine = true; break; }
+      }
+      if (dupLine) return;
       var isWarn = hadMark || /超出|超限|失败|拦截|中断/.test(line);
       addSysLine(isWarn ? '⚠' : '·', esc(clean), '', isWarn ? 'warn' : '');
     });
@@ -4622,7 +4682,6 @@
     // stream/delta 会新建一条助手消息，用户看到同一轮回答被劈成两个气泡
     //（前半段是重建时恢复的历史，后半段是新的）。实测：一轮正文拆成两条。
     if (p && p.resumed) {
-      turnHadThink = turnHadThink || false;
       var g = p && p.goal;
       if (g && g.enabled) {
         document.getElementById('chipGoal').textContent = '目标 ' + (g.current || 0) + '/' + (g.max || 0);
@@ -4637,11 +4696,6 @@
     curAssistant = null;
     assistantBuf = '';
     resetStreamRender();
-    // 这里不清 turnHadThink：它的语义是「这一次请求里有没有产生思考」，
-    // 而确认执行/目标模式续跑会在同一请求内再发一次 turn/begin。
-    // 在这儿清零会怎样（实测）：用户点了确认，屏幕上明明有「思考 3.3s · 292 字」，
-    // 轮末却又冒出一句「这一轮没有思考内容」——同屏自相矛盾。
-    // 真正的清零点在「用户发起新请求」处（sendChat / 命令转对话）与轮末。
     var goal = p && p.goal;
     if (goal && goal.enabled) {
       document.getElementById('chipGoal').textContent = '目标 ' + (goal.current || 0) + '/' + (goal.max || 0);
@@ -4714,15 +4768,15 @@
     if (reason === 'cancelled') {
       // 兜底收口（后端回了 cancel 却没发 turn/end）要说明白，
       // 否则用户看到的和正常打断一模一样，就分不清「真停了」和「没等到确认」。
-      addSysLine('■', '已打断',
-        cancelSettleTimerFired ? '后端没有回确认，界面已按停止处理' : '可继续输入', '');
+      addSysLine('■', '已停止',
+        cancelSettleTimerFired ? '后端无回应，界面按已停止处理' : '', '');
       cancelSettleTimerFired = false;
     } else if (reason === 'error') {
       // 出错后必须给一个「重试」出口。不给会怎样（实测）：限流/网络抖动/
       // 模型 5xx 是最常见的中断，用户唯一的补救是把刚才那段长 prompt 重新敲
       // 一遍——整条用户消息连复制按钮都没有，只能鼠标框选。
       // Cline / Roo / Cursor / Copilot Chat 都把「重试」放在错误行上。
-      var errLine = addSysLine('✗', '本轮出错', '', 'err');
+      var errLine = addSysLine('✗', '请求失败', '', 'err');
       if (errLine && lastSentText) {
         // 把这一刻的正文**捕获**进闭包，不要点的时侯再读 lastSentText。
         // 不捕获会怎样（实测）：屏幕上留着两条错误行时，点第一条的「重试」
@@ -4730,13 +4784,13 @@
         var retryText = lastSentText;
         var retryBtn = document.createElement('button');
         retryBtn.className = 'retry';
-        retryBtn.textContent = '重试这一条';
+        retryBtn.textContent = '重试';
         retryBtn.addEventListener('click', function(){
           if (body.getAttribute('data-run') === 'true') return;  // 还在跑，不重复发
           // 输入框里已有草稿时不能覆盖：那是用户正在写的新内容，
           // 覆盖掉等于把他的手稿删了（实测）。
           if (input.value.trim()) {
-            sysLine('·', '重试没有发出', '输入框里还有内容，请先清空或直接发送它', 'warn');
+            sysLine('·', '输入框有内容，未重试', '');
             scrollBottom();
             return;
           }
@@ -4752,21 +4806,8 @@
     } else if (reason === 'goal_complete') {
       addSysLine('✓', '目标已完成', '', 'ok');
     }
-    // 正常结束但整轮没有任何思考块：多半是这个模型本身不产思考。
-    // 同一个模型只提示一次，避免每轮刷屏。
-    var curModel = document.getElementById('btnModel').textContent;
-    if (REAL && !turnHadThink && (reason === 'done' || reason === 'goal_complete') &&
-        curModel && noThinkWarnedFor !== curModel) {
-      noThinkWarnedFor = curModel;
-      // 文案别说成「这个模型不产生思考块」：同一个模型前面几轮可能刚吐出
-      // 3000 字思考块，这么说会直接自相矛盾（实测用户会开始怀疑数据）。
-      // 只能说「这一轮没有」，那才是我们确实知道的事。
-      addSysLine('·', '这一轮没有思考内容', '多数问题不需要思考；换更难的题目或切档位再试', '');
-    }
     curAssistant = null;
     pendingTodoRow = null;
-    // 「这次请求有没有产生思考」的判定到此为止，下一轮重新记。
-    turnHadThink = false;
     // 正文缓冲必须清掉。不清会怎样（实测）：这一轮的正文已经在屏幕上，
     // 而 assistantBuf 还留着全文；之后任何触发整段重画的 initialize
     //（断网重连、压缩后、切会话回来）都会把 assistantBuf 当成「正在流式的
@@ -4810,27 +4851,20 @@
     // 用户重连后直接再按一次发送即可。
     var hadPending = settlePendingMessage();
     if (hadPending) {
-      sysLine('✗', '这条消息没有发出去', '已退回输入框，连上后再发一次', 'err');
+      sysLine('✗', '消息未发送', '', 'err');
       scrollBottom();
     }
-    // 文案要说人话：「界面保留演示数据」是内部术语，用户看到只会更困惑。
-    // detail 只能**补在建议之后**，不能顶掉建议——否则启动失败时
-    // 用户只看到「ENOENT」这类系统错误，没有任何「该怎么办」（实测）。
-    // 建议要按失败类型给，不能一律「检查配置」：
-    //   · ENOENT / code=2 = 找不到后端可执行文件或它不认识 --rpc 参数，
-    //     这种情况配置文件里根本没有相关项，让用户去改配置是死路
-    //     （实测：照做之后什么也没变，不知道该干什么）
-    //   · 其它（初始化失败/协议不匹配）= 配置或版本问题，指到配置与重启
-    var looksLikeSpawn = /ENOENT|code=2|不认识启动参数|启动失败/i.test(String(message) + ' ' + String(detail));
-    var advice = looksLikeSpawn
-      ? '检查配置：设置里的 narnat.rpc.executable 是否指向可用的后端（源码模式需工作区有 main.py）'
-      : '点命令面板运行「Narnat: 打开配置文件」检查配置，改完用「Narnat: 重启后端」';
-    var tail = detail ? advice + '；' + detail : advice;
+    // 只说结果 + 原因：离线就是「后端未连接」，detail 是唯一的诊断线索，
+    // 截断到一行保留。原来这里还会拼两条「该去改什么配置」的建议，
+    // 每次掉线都铺一大段，而绝大多数掉线会自己重连上。
+    var reason = String(message || '').trim();
+    if (detail) reason = reason + ' · ' + String(detail).trim();
+    reason = reason.slice(0, 160);
     if (!offlineShown) {
       offlineShown = true;
-      offlineLine = addSysLine('⚡', '离线：后端未连接 · ' + esc(message), esc(tail), 'err');
+      offlineLine = addSysLine('⚡', '后端未连接', esc(reason), 'err');
     } else if (offlineLine) {
-      updateSysLine(offlineLine, '⚡', '离线：后端未连接 · ' + esc(message), esc(tail), 'err');
+      updateSysLine(offlineLine, '⚡', '后端未连接', esc(reason), 'err');
     }
     var info = {
       message: message,
@@ -5057,7 +5091,11 @@
     if (plugins.length) applyPlugins(plugins);
     if (p && p.workdir) {
       var chips = document.querySelectorAll('.crow .chip.mono');
-      if (chips[1]) chips[1].textContent = p.workdir;
+      if (chips[1]) {
+        chips[1].textContent = p.workdir;
+        // 复制路径用的原文跟着真值走：只改文字不改这份，点复制拿到的还是旧目录
+        chips[1].setAttribute('data-path', p.workdir);
+      }
     }
 
     SESS = [];
@@ -5076,13 +5114,11 @@
     // 历史消失，屏幕上只剩一句「已连接后端」，完全不知道为什么（实测）。
     // 所以先记住原会话名，清完补一行可恢复的提示。
     if (!CUR && prevCUR && !firstInit) {
-      var lostTo = prevCUR;
       resetConversationDom();
       authHintShown = false;
       resetContextStats();
-      // 内容没有真的丢：还在会话文件里，从抽屉能点回去。
-      sysLine('·', '后端已重新连接，上下文从空开始',
-        lostTo ? '上一段内容仍在会话「' + lostTo + '」，点开抽屉可以回去' : '');
+      // 内容没有真的丢：还在会话文件里，从抽屉能点回去。一行说清即可。
+      if (prevCUR) sysLine('·', '上下文已清空', '上一段仍在会话「' + prevCUR + '」');
     }
     renderSessions();
 
@@ -5104,8 +5140,7 @@
       resetConversationDom();
       authHintShown = false;
       resetContextStats();
-      sysLine('·', '已切换到' + (CUR ? '会话「' + esc(CUR) + '」' : '一个空会话'),
-        '这个会话还没有对话内容');
+      sysLine('·', '已切换到' + (CUR ? '会话「' + esc(CUR) + '」' : '一个空会话'), '');
     }
     if (initMsgs.length) {
       var pendingBox = convo.querySelector('.confirm[data-real="true"]');
@@ -5241,21 +5276,13 @@
           scrollBottom(true);
         }
         // renderHistory 画完会把 assistantBuf 清掉，后续 stream/delta 才能正常接。
-        if (shrunk) {
-          // 内容变少必须说出来：用户上一条看到的还是 N 条，忽然只剩 M 条，
-          // 不说会以为记录丢了（其实是上下文被压缩/裁剪了）。
-          sysLine('·', '对话已被压缩，界面只保留 ' + initMsgs.length + ' 条',
-            '更早的内容仍在会话记录里，可在抽屉里点开查看');
-        } else {
-          sysLine('·', '已恢复当前对话', CUR ? '「' + CUR + '」' : '未保存的对话');
-        }
+        // 压缩后条数变少时也不再多说一句：屏幕上的内容就是当前上下文，
+        // 「已被压缩/还在记录里」属于实现细节，用户看着内容变短自然明白。
       }
     }
 
-    // 密钥为空：首屏就说清楚，别等用户发完第一条消息撞上整段英文 401 JSON。
-    // 新用户面对「Authentication Fails, Your api key: is invalid」很容易
-    // 判成"插件坏了/网络不通"，而界面上本来就有「打开配置文件（填 API Key）」
-    // 这个入口，只是从来没在首屏提过（实测）。
+    // 密钥为空：首屏就说清楚，别等用户发完第一条消息撞上 401。
+    // 一句话 + 一个动作即可：这里是状态提示，不是操作教程。
     //
     // 这一类提示是「当前状态」而不是「历史事件」，状态好了就必须撤掉。
     // 只加不删会怎样（实测）：用户填好 Key、重启后端，界面上那条
@@ -5263,8 +5290,8 @@
     dropStaleNotices(p);
 
     if (p && p.apiKeyMissing) {
-      apiKeyHintLine = sysLine('⚠', '还没填 API Key',
-        '命令面板运行「Narnat: 打开配置文件（填 API Key）」', 'warn');
+      apiKeyHintLine = sysLine('⚠', 'narnat.json 缺少接口密钥',
+        'Ctrl+Shift+P → Narnat: 打开配置文件', 'warn');
     }
 
     // 每次握手都追加一行会怎样（实测）：面板重建时宿主会连发两条
@@ -5280,20 +5307,20 @@
       var connLine = sysLine('●', connText, connTail);
       if (connLine) connLine.setAttribute('data-conn', '1');
     }
-    // 配置文件坏了会被后端「按默认配置继续」，界面上一切正常，
-    // 直到发消息收到 401——用户会去重填密钥，而真因是 JSON 语法错了。
-    // 必须在这里就说清楚。
+    // 配置文件坏了：后端会「按默认配置继续」，界面上一切正常，直到发消息
+    // 收到 401——用户会去重填密钥，而真因是 JSON 语法错了。
+    // 只给一句结论 + 一个动作：原来每个警告一行、再加一行「修好后需要重启」
+    // 和一行命令面板入口，一次启动能刷出四五行，把真正要看的东西埋了。
     var cfgWarn = (p && p.configWarnings) || [];
     if (cfgWarn.length) {
-      cfgWarn.forEach(function(w){
-        cfgWarnLines.push(sysLine('⚠', '配置文件有问题，已按默认配置启动',
-          esc(String(w).slice(0, 200)), 'err'));
-      });
-      // 不能写「保存即可生效」：后端只在进程启动时读一次配置，改完必须重启。
-      // 照着「保存即可生效」做，用户会以为已经好了，实际还在按旧配置（或默认
-      // 配置）跑，直到某天发现密钥根本没生效（实测）。
-      cfgWarnLines.push(sysLine('·', '修好后需要重启后端才生效',
-        '命令面板运行「Narnat: 重启后端」', ''));
+      // 配置整份没读进来时，「缺少接口密钥」是它的**后果**不是另一个问题，
+      // 同屏两句 narnat.json 只会让人以为要改两处。留一条带文件名的即可。
+      if (apiKeyHintLine) {
+        if (apiKeyHintLine.parentNode) apiKeyHintLine.parentNode.removeChild(apiKeyHintLine);
+        apiKeyHintLine = null;
+      }
+      cfgWarnLines.push(sysLine('⚠', 'narnat.json 有问题',
+        'Ctrl+Shift+P → Narnat: 打开配置文件', 'err'));
     }
     scrollBottom();
     rendered('initialize', {
@@ -5347,16 +5374,8 @@
     CUR_IS_CHILD = !!(p && p.isChild);
     renderSessions();
     // 冷启动（跨进程/第二天）时后端 current 是 null，对话区只剩一句
-    // 「已连接后端」——用户看不出「内容还在磁盘、点抽屉能回去」，
-    // 很容易以为记录丢了（实测）。而同进程重连有「上下文从空开始 +
-    // 上一段仍在会话 X」的说明，同一状态两种表现，更增困惑。
-    // 这里补一句「当前没有打开的会话 + 从哪进去」，一个 webview 只提示一次。
-    if (!CUR && SESS.length && !sessHintShown && FIRST_INIT_SEEN) {
-      sessHintShown = true;
-      sysLine('·', '当前没有打开的会话',
-        '已保存 ' + SESS.length + ' 个会话，点顶栏会话名（或 /ls）可以进入', '');
-      scrollBottom();
-    }
+    // 「已连接后端」——这里不再补提示：会话列表在顶栏（点会话名即见），
+    // 用户不需要被解释一遍「内容还在磁盘、点抽屉能回去」。
     // 用户已展开，但这次回来的是截断列表（切会话会触发不带 all 的刷新）：
     // 补一次 all，避免界面看起来自己收起来了。
     if (REAL && SHOW_ALL && hidden > 0) {
@@ -5386,7 +5405,7 @@
       if (name) {
         var chip = document.getElementById('chipSess');
         if (chip) chip.textContent = name;
-        sysLine('✓', '已自动保存为「' + esc(name) + '」', '点顶栏会话名可查看列表', 'ok');
+        sysLine('✓', '已保存为「' + esc(name) + '」', '', 'ok');
       }
       if (REAL) post('sessionList', {});
       rendered('session/saved', { name: name, switched: false });
@@ -5413,29 +5432,6 @@
    * 进入历史会话时若不画，界面看着像「这个会话是空的」——
    * 明明后端有 24 条消息，用户却以为丢了。
    */
-  /**
-   * 给一条消息挂上「复制」按钮，并记住它的**原始 Markdown**。
-   *
-   * 为什么需要：代码块一直有「复制」，整条回答和用户自己说的话却没有——
-   * 同一个能力只做了一半。用户要把整条回答贴到别处，只能在窄面板里框选，
-   * 中途一滚就没了；要把自己刚发的话改一个字重发，连复制都做不到。
-   *
-   * 复制原文而不是 textContent：textContent 会把 Markdown 结构（列表符号、
-   * 标题井号、表格竖线）全部拉平，贴到别处就变成一坨。
-   * 原始文本存在节点的 JS 属性上（不进 DOM 属性，避免污染 HTML）。
-   */
-  function attachCopy(node, rawText){
-    if (!node) return;
-    node.__copyRaw = String(rawText == null ? '' : rawText);
-    var btn = document.createElement('button');
-    btn.className = 'msg-copy';
-    btn.type = 'button';
-    // 文字由 CSS ::after 生成（见 .msg-copy 注释）：不能写成元素文本，
-    // 否则会混进这条消息的 textContent，污染渲染回执。
-    btn.textContent = '';
-    node.appendChild(btn);
-    node.setAttribute('data-copy', '1');
-  }
 
   /**
    * 历史消息里的思考块。
@@ -5508,12 +5504,12 @@
         }
         var u = document.createElement('div');
         u.className = 'msg';
+        u.setAttribute('data-role', 'user');
         u.innerHTML = '<div class="text">' + esc(m.text) + '</div>';
         // 历史正文里的附件清单块（- 图片：<路径>）也要画出缩略图：
         // 否则切回会话 / 重载窗口后只剩一段路径文本，看不到自己发过的图。
         // 没有该块的旧消息 → 一个节点都不加。
         addMsgThumbs(u, attachPathsInText(m.text));
-        attachCopy(u, m.text);
         convo.appendChild(u);
       } else if (m.role === 'system') {
         // 探索分支合并回来的结论（"# 子会话 [X] 结论"）。它是 system 角色
@@ -5524,21 +5520,15 @@
         n.innerHTML = '<div class="text">' + esc(m.text) + '</div>';
         convo.appendChild(n);
       } else {
-        // 助手消息不套 .text（.text 是用户消息的容器，带左侧竖线）
+        // 助手消息不套 .text（.text 是用户消息的容器）
         // 思考必须画在正文**之前**，顺序与当时流式出现的顺序一致
         if (thinkText) addHistoryThink(thinkText);
         var a = document.createElement('div');
         a.className = 'msg assistant';
         a.innerHTML = markdownInline(m.text);
-        attachCopy(a, m.text);
         convo.appendChild(a);
       }
     });
-    // 历史里的思考现在也在（见上面的 thinking 字段），只剩工具行没有落盘
-    if (msgs.length > 4) {
-      sysLine('·', '已加载 ' + msgs.length + ' 条历史消息',
-        '工具行只保留在当时的运行记录里', '');
-    }
     // 刚进入/加载一个会话，用户期待停在最新一条
     scrollBottom(true);
   }
@@ -5552,8 +5542,7 @@
     // 上一段的全部历史存进新会话（实测真的发生过）。
     if (p.action === 'sessionNew' && p.error) {
       unlockNewChat();
-      sysLine('✗', '新建对话失败',
-        esc(String(p.error).slice(0, 120)) + ' · 当前对话没有被清空', 'err');
+      sysLine('✗', '新建对话失败', esc(String(p.error).slice(0, 120)), 'err');
       scrollBottom();
       rendered('session/result', { action: 'sessionNew', error: p.error });
       return;
@@ -5605,9 +5594,9 @@
       // p.autoSaved：上一段内容被后端自动存成的会话名。
       // 必须说出来——否则用户看到对话区清空，会以为内容丢了。
       if (p.autoSaved) {
-        sysLine('＋', '已新建对话', '上一段已存为「' + esc(p.autoSaved) + '」');
+        sysLine('＋', '已新建对话', '上一轮保存为「' + esc(p.autoSaved) + '」');
       } else {
-        sysLine('＋', '已新建对话', '上下文已清空');
+        sysLine('＋', '已新建对话', '');
       }
       rendered('session/result', { action: 'sessionNew' });
       return;
@@ -5640,24 +5629,18 @@
       historyDrawn = (p.messages || []).length;
       historyDrawnFor = p.current;
       if (cutTurn) {
-        sysLine('■', '上一轮已打断', '切换会话会结束正在回答的那一轮', 'warn');
+        sysLine('■', '已停止上一轮', '');
       }
-      // 必须说出来——否则用户只是点开另一条会话看看，手头正在聊的那段
-      // 悄悄消失了，一个提示都没有（实测：磁盘上连痕迹都不留）。
-      if (p.autoSaved) {
-        sysLine('↳', '已进入会话：' + esc(p.current),
-                '上一段已存为「' + esc(p.autoSaved) + '」');
-      }
-      if (!p.messages || !p.messages.length) {
-        sysLine('↳', '已进入会话：' + esc(p.current), '这个会话还没有对话内容');
-      }
+      // 一句到底：切换结果 + （必要时）上一轮被保存成了什么名字。
+      // 空会话、打断细节都属于用户自己能看出来的事，不必逐条解释。
+      sysLine('↳', '已切换至对话 ' + esc(p.current),
+        p.autoSaved ? '上一轮保存为「' + esc(p.autoSaved) + '」' : '');
     } else if (p.action === 'sessionExplore' && p.current) {
-      sysLine('⑂', '已进入探索分支：' + esc(p.current), '/done 合并结论');
+      sysLine('⑂', '已切换至对话 ' + esc(p.current), '');
     } else if (p.action === 'sessionDone') {
       if (p.merged === false) {
         // 分支没有增量属于业务提示，不是错误：用中性行，不用红色
-        sysLine('·', p.message || '没有新的讨论内容',
-          p.current ? '已回到 ' + esc(p.current) : '');
+        sysLine('·', p.message || '没有新的讨论内容', '');
       } else {
         // /done 合并后后端 already replace_messages 成父会话了，界面必须重绘：
         // 不重绘会怎样（实测）：顶栏写着父会话、对话区还留着分支的全部内容，
@@ -5675,19 +5658,16 @@
           historyDrawn = (p.messages || []).length;
           historyDrawnFor = p.current;
         }
-        sysLine('✓', '探索分支已完成', p.current ? '已回到 ' + esc(p.current) : '', 'ok');
+        sysLine('✓', '已切换至对话 ' + esc(p.current || ''), '');
       }
     } else if (p.action === 'sessionDelete') {
       // 面板里删除是立即生效的（后端没有「退出时清理」这个时机），
       // 所以文案不能说「退出时生效」——那会让用户以为文件还在。
-      // broken：删掉的是列表里根本看不到的损坏文件（JSON 截断，或能读成
-      // JSON 但顶层不是对象）。说成「已删除会话：X」用户会以为自己删了
-      // 一条正常会话，实际那条记录早就不在列表里了。
+      // broken：删掉的是列表里根本看不到的损坏文件。
       if (p.broken) {
-        sysLine('✓', '已清理损坏的会话文件' + (p.name ? '：' + esc(p.name) : ''),
-          '它结构不合法、列表里看不到，现已删除，这个名字可以重新使用', 'ok');
+        sysLine('✓', '已删除损坏的会话文件' + (p.name ? ' ' + esc(p.name) : ''), '', 'ok');
       } else {
-        sysLine('✓', '已删除会话' + (p.name ? '：' + esc(p.name) : ''), '', 'ok');
+        sysLine('✓', '已删除 ' + (p.name ? esc(p.name) : '会话'), '', 'ok');
       }
       // 删的若是当前会话，后端已切回游离态；CUR 必须跟着走，
       // 否则列表里高亮的还是那个已经不存在的会话。
@@ -5697,14 +5677,13 @@
         resetConversationDom();
         authHintShown = false;
         body.setAttribute('data-run', 'false');
-        sysLine('·', '当前对话已被删除', '上面的内容已不在任何会话里');
         resetContextStats();
       }
       CUR = p.current || '';
       CUR_IS_CHILD = false;
       renderSessions();
     } else if (p.action === 'sessionRename') {
-      sysLine('✏', '已重命名为：' + esc(p.to || ''), '', 'ok');
+      sysLine('✏', '已重命名为 ' + esc(p.to || ''), '', 'ok');
       // 改的是当前会话时后端已把状态指到新名，CUR 同步过去
       CUR = p.current || '';
       renderSessions();
@@ -5841,6 +5820,7 @@
       var raw = p.text || ('/' + (p.command || '') + (p.args ? ' ' + p.args : ''));
       var um = document.createElement('div');
       um.className = 'msg';
+      um.setAttribute('data-role', 'user');
       // 标 data-pending：这条消息此刻只是「已提交」，后端还没接受。
       // 内层 chat/send 若被 busy 拒（运行中发一条像路径的斜杠内容就会这样），
       // 退场逻辑只认 [data-pending] 的节点——不标的话它留在对话区里，
@@ -5851,7 +5831,6 @@
       curAssistant = null;
       assistantBuf = '';
       authHintShown = false;
-      turnHadThink = false;
       lastSentMaybeAccepted = false;
       body.setAttribute('data-run', 'true');
       scrollBottom();
@@ -5903,7 +5882,7 @@
       if (needConfirm || neutral) {
         cmdResult(esc(cmdText), needConfirm ? '⚠' : '·',
           esc(lines.join('\n')),
-          needConfirm ? '这是一次确认请求，还没有删除任何东西' : '',
+          needConfirm ? '待确认，尚未执行' : '',
           needConfirm ? 'warn' : '');
       } else {
         cmdResult(esc(cmdText), '✗', esc(lines.length ? lines.join('\n') : '命令执行失败'), '', 'err');
@@ -5913,7 +5892,7 @@
       // `/thinking off` 只会得到「无效值: off」，界面上任何地方都没说
       // 「关闭」该去哪 —— 补一句指路（不新增控件、不改协议）。
       if (String(p.command || '').toLowerCase() === 'thinking') {
-        sysLine('·', '要彻底关闭思考，改配置项', '「智能体.思考.启用」= false（改完重启后端）');
+        sysLine('·', '关闭思考需改配置', '「智能体.思考.启用」= false，改完重启');
         scrollBottom();
       }
       // /compact 失败时后端也只发 compress/end{ok:null}（协议里 ok 恒为 null），
@@ -5990,7 +5969,7 @@
         // 删掉的是当前会话：状态栏那几项（上下文/缓存/费用/余额）属于这个
         // 已经不在的会话，必须清零。抽屉删除路径有这一句，/rm 这条漏了（实测）。
         resetContextStats();
-        sysLine('·', '当前对话已被删除', '上面的内容已不在任何会话里');
+        sysLine('·', '当前对话已删除', '');
       }
       if (exitLeave) {
         // 回执里没有 current，前端只能自己判断走了哪条路：
@@ -6010,8 +5989,7 @@
           renderSessions();
           resetContextStats();
           post('sessionList', {});
-          sysLine('·', '已暂离会话',
-            '这段对话还在后端内存里，接着发消息会接上；但游离态不再自动保存，关掉面板就没了', '');
+          sysLine('·', '已离开会话', '');
         }
       }
     } else {
@@ -6019,8 +5997,7 @@
       // 落到这里就成了一个勾「已执行」——屏幕上打了勾，会话没变、进程也没退，
       // 用户以为退出成功（实测）。这里说实话。
       if (String(p.command || '').toLowerCase() === 'exit') {
-        cmdResult(esc(cmdText), '·', '当前不在任何会话里',
-          '面板形态下 /exit 不退出进程；切换会话请用左下角的会话名', '');
+        cmdResult(esc(cmdText), '·', '当前不在任何会话里', '', '');
         scrollBottom();
         rendered('command/result', { command: p.command || '', ok: true, lines: 0 });
         return;
@@ -6346,6 +6323,25 @@
     }
   }
 
+  // 真身在 VSCode 里跑时，先把模板里的演示对话清掉再握手。
+  // 不清会怎样（实测两次窗口打开都命中）：面板先按演示数据画出一大坨
+  // 示例会话（用户、思考、十几个工具行、确认条），initialize 一到又整块
+  // 抹掉重画——用户看到的是「窗口一开先闪一下假对话，再变成新对话」。
+  // 演示数据只服务于 preview.html（那里没有 acquireVsCodeApi）。
+  if (vscodeApi) {
+    resetConversationDom();
+    body.setAttribute('data-real', 'true');
+    // 顶栏会话名与状态栏的数字同理：它们也是模板写死的演示值，
+    // 后端 initialize 一到就会被真值覆盖，留着只是多闪一下。
+    var demoBranch = document.querySelector('#sessBtn .branch');
+    if (demoBranch) demoBranch.textContent = '';
+    var demoChip = document.getElementById('chipSess');
+    if (demoChip) demoChip.textContent = '';
+    Array.prototype.forEach.call(
+      document.querySelectorAll('.status .right .v'),
+      function (el) { el.textContent = '—'; }
+    );
+  }
   // 握手：扩展侧收到 ready 才补发 initialize / 离线原因
   post('ready', {});
   // 面板刚打开时焦点在 <body>，用户必须连按十几次 Tab 才到得了输入框

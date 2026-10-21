@@ -1129,8 +1129,7 @@ class RpcServer:
             from .ui import emit
 
             emit("notice", {"text": (
-                f"上一轮未完全收口（已等待 {_TURN_SETTLE_TIMEOUT:g} 秒），"
-                f"已强制{action}；若新会话里出现工具记录异常，请重新新建")})
+                f"上一轮未收口（等了 {_TURN_SETTLE_TIMEOUT:g} 秒），已强制{action}")})
             return False
         # 收口后仍可能残留「assistant 带 tool_calls 但缺 tool 回复」的孤立对
         # （中断打断了工具结果回传）。走既有 repair 补齐，别另写一套：
@@ -1161,7 +1160,7 @@ class RpcServer:
         payload = {"current": self._current_path()}
         if reentered:
             payload["reentered"] = True
-            payload["notice"] = f"已重新进入已有分支 {name}（继续之前的探索，/done 合并结论）"
+            payload["notice"] = f"已重新进入分支 {name}"
         return payload
 
     def _m_session_done(self, params: Dict[str, Any]) -> Dict[str, Any]:

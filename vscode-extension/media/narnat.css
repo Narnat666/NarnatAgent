@@ -22,6 +22,12 @@
   --err: var(--vscode-errorForeground, #c96a6a);
   --add: var(--vscode-diffEditor-insertedTextBackground, rgba(90,168,122,.16));
   --del: var(--vscode-diffEditor-removedTextBackground, rgba(201,106,106,.16));
+  /* 用户气泡底色：优先主题给聊天请求准备的 chat.requestBackground，
+     没有该键的主题退到 input-background，再退到抬升层。 */
+  --bubble: var(--vscode-chat-requestBackground, var(--vscode-input-background, #2b2b2b));
+  /* 胶囊控件底色（输入框下面的会话/路径/目标 chip）。
+     不是 hover 色——hover 色在浅色主题下几乎与背景同色，胶囊会消失。 */
+  --pill: var(--vscode-button-secondaryBackground, var(--vscode-badge-background, #3a3d41));
   --font:var(--vscode-font-family,-apple-system,"Segoe UI Variable Text","Segoe UI","Microsoft YaHei",sans-serif);
   --mono:var(--vscode-editor-font-family,ui-monospace,"Cascadia Mono",Consolas,"Courier New",monospace);
 }
@@ -33,6 +39,8 @@
     --line:#ececec;--line-strong:#dcdcdc;--accent:#1a6fc4;
     --ok:#2e7d55;--warn:#8a6d1f;--err:#b04040;
     --add:#eef7f0;--del:#fdefef;
+    --bubble:#f1f3f6;
+    --pill:#e8eaee;
   }
 }
 *{box-sizing:border-box}
@@ -96,30 +104,8 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;pad
   margin-left:8px;font-size:10.5px;padding:1px 8px;border-radius:4px;
   color:var(--fg);border:1px solid var(--fg-dim);background:transparent;cursor:pointer;
 }
-/* 每条消息末尾的「复制」。
-   它曾经是绝对定位在消息右上角（top:-2px; right:0; z-index:3）——那是错的：
-   `opacity:0` 只让元素看不见，**不阻止它接收鼠标事件**。AI 直接甩一段代码
-   时，代码块正好顶在消息顶端，代码块自己的「复制」按钮中心就落在它下面，
-   实测点下去复制到的是整条回答（连 ``` 围栏），代码块按钮毫无反馈，
-   用户会以为复制坏了、反复点（按钮 32.9% 面积被盖，可见文字被盖 46%，
-   249/289/360/420/620px 五档宽度全都一样）。
-   现在改成消息内部的尾部右对齐块：不覆盖任何内容，也就没有误点可能。 */
-.msg-copy{
-  display:block;width:fit-content;margin:2px 0 0 auto;height:16px;
-  padding:0 6px;font-size:10px;line-height:16px;border-radius:3px;
-  color:var(--fg-faint);background:transparent;border:1px solid transparent;
-  opacity:0;transition:opacity .12s;cursor:pointer;
-  pointer-events:none;   /* 不可见时不吃点击，也不占 hover 判定 */
-}
-.msg:hover > .msg-copy{opacity:1;pointer-events:auto;border-color:var(--line)}
-.msg-copy:hover{color:var(--fg);border-color:var(--fg-faint)}
-.msg-copy[data-done="true"]{color:var(--ok);border-color:var(--ok);opacity:1;pointer-events:auto}
-/* 按钮文字用 CSS 生成，**不能**写成元素文本：这一条消息的 textContent
-   会被 assistantText() 用来生成渲染回执，按钮文字混进去会让回执变成
-   「……正文。复制」（实测被 ui/rpc 回归测试抓到）。生成内容不进 textContent。 */
-.msg-copy::after{content:'复制'}
-.msg-copy[data-done="true"]::after{content:'已复制'}
-.msg-copy[data-fail="true"]::after{content:'复制失败'}
+/* 复制按钮只出现在「代码块」和「命令」上：整条消息、每段正文、每个工具行
+   再各挂一个，界面上到处是按钮，反而看不出哪个才值得点。 */
 .sys .retry:hover{background:var(--bg-hover);border-color:var(--fg)}
 /* 回到底部：贴在对话区右下角，只在「用户上翻中」出现。
    不常显——常显会一直挡在最后一行文字上（尤其是 249px 的窄面板）。 */
@@ -143,31 +129,38 @@ body[data-real="true"] .demo-tip{display:none}
 
 /* ---------- 消息 ---------- */
 .msg{padding-bottom:22px}
+/* 用户消息：右侧气泡（形态对齐 dsh 的对话气泡）。
+   原来用左侧竖线标记「这句是我说的」，窄面板里一条竖线加缩进把可用宽度
+   又吃掉一截；气泡右对齐既省横向空间，也一眼分得清谁说的。 */
+.msg[data-role="user"]{
+  display:flex;flex-direction:column;align-items:flex-end;
+}
 /* 用户消息必须保留换行：粘进来一段 30 行的中文需求（一、背景／二、目标／
    验收…），发出去后会塌成一大段，回看时压根没法核对第几条说了什么。
    实测 32 行 → 显示成 1 行、高度 840px vs 应 1701px。 */
-.msg .text{
-  /* 竖线不能用 --line-strong（widget-border）：深色 #303031 on #1E1E1E 只有
-     1.26:1、浅色 #D4D4D4 on #FFF 只有 1.48:1——等于看不见。这条竖线是用户
-     消息与助手消息唯一的形状区别（助手正文没有任何左侧标记），看不出线
-     就分不出「哪句是我说的」。改用 descriptionForeground：深 6.17:1、浅 4.74:1。 */
-  border-left:2px solid var(--fg-faint);padding-left:12px;margin-left:-14px;
+.msg[data-role="user"] .text{
+  max-width:min(520px,88%);
+  padding:8px 14px;border-radius:16px;
+  background:var(--bubble);
   white-space:pre-wrap;
   /* 长串不换行的内容（URL、文件路径、base64）在 pre-wrap 下不会自动断，
      会把整个对话区撑出横向滚动条（实测贴一个长 URL 溢出 546px，面板里
      出现左右滚动）。anywhere 允许在任意位置断行，只在放不下时才生效。 */
   overflow-wrap:anywhere;
 }
-/* 探索分支合并结论：不是用户说的话，左边竖线换成强调色以示区分 */
-.msg.sys-note .text{border-left-color:var(--accent);color:var(--fg-dim)}
+/* 探索分支合并结论：不是用户说的话，用一条淡淡的分隔线示意，不做成气泡 */
+.msg.sys-note .text{
+  border-left:2px solid var(--accent);padding-left:12px;margin-left:-14px;
+  color:var(--fg-dim);white-space:pre-wrap;overflow-wrap:anywhere;
+}
 /* 没发出去的那条：明确标出来，别让用户以为已经发出去了 */
-.msg[data-failed] .text{border-left-color:var(--err);opacity:.65}
+.msg[data-failed] .text{opacity:.65}
 .msg[data-failed] .text::after{
   content:'未发送';margin-left:8px;font-size:10.5px;
   color:var(--err);border:1px solid var(--err);border-radius:3px;
   padding:0 4px;vertical-align:middle;
 }
-.msg p{margin:0 0 10px}
+.msg p{margin:0 0 16px}
 .msg p:last-child{margin-bottom:0}
 /* 无空格长 token（长 URL / 长路径 / 长 hash）必须能在容器内折行，
    否则整段对话只能横向拖动才能读完（实测 300px 宽下溢出 2355px） */
@@ -186,7 +179,7 @@ body[data-real="true"] .demo-tip{display:none}
   margin:0 0 10px;padding:2px 0 2px 12px;
   border-left:2px solid var(--fg-faint);color:var(--fg-dim);
 }
-.msg ol{margin:0 0 10px;padding-left:20px}
+.msg ol{margin:16px 0;padding-left:18px}
 .msg a{color:var(--accent);text-decoration:none}
 .msg a:hover{text-decoration:underline}
 .msg code,.think code,.tools code{
@@ -194,8 +187,8 @@ body[data-real="true"] .demo-tip{display:none}
   background:var(--bg-code);border-radius:3px;padding:1px 4px;
   border:1px solid var(--line);color:var(--fg);
 }
-.msg ul{margin:0 0 10px;padding-left:18px}
-.msg li{margin-bottom:4px}
+.msg ul{margin:16px 0;padding-left:18px}
+.msg li{margin-bottom:6px}
 .msg li::marker{color:var(--fg-faint)}
 .msg pre{
   font-family:var(--mono);font-size:11.5px;line-height:1.65;
@@ -276,35 +269,46 @@ body[data-real="true"] .demo-tip{display:none}
 .tk-del{color:var(--vscode-gitDecoration-deletedResourceForeground,#f14c4c)}
 .tk-hdr{color:var(--vscode-textLink-foreground,#569cd6)}
 .tk-meta{color:var(--fg-faint)}
-/* Markdown 表格：外层负责横向滚动，表格本身保持 table 布局 */
-.tw{margin:10px 0 0;overflow-x:auto}
-.msg table{border-collapse:collapse;font-size:11.5px;min-width:100%}
+/* Markdown 表格：形态同 dsh —— 不要竖线、不要外框，只留每行一条下边线；
+   单元格 10px/16px 内边距，首列不留左侧内边距（贴着正文左缘起排）。
+   宽度必须铺满容器（width:100%）：dsh 是宽屏网页，按内容宽（max-content）
+   排没问题；我们的面板常只有 249px，max-content 会让两列短表格只占半屏，
+   右边空一大片。内容确实放不下时由外层 .tw 横向滚动兜住。 */
+.tw{margin:16px 0 0;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain}
+.msg table{border-collapse:collapse;width:100%}
 .msg th,.msg td{
-  border:1px solid var(--line);padding:4px 9px;
-  text-align:left;vertical-align:top;
+  border:none;border-bottom:1px solid var(--line);
+  padding:10px 16px;text-align:left;vertical-align:top;
+  /* 长串不换行的内容（URL、命令）在窄面板里会撑出横滚，允许任意位置断行 */
+  overflow-wrap:anywhere;
 }
-.msg th{
-  background:var(--bg-code);color:var(--fg);
-  font-weight:600;white-space:nowrap;
-}
-.msg td{color:var(--fg-dim)}
 .msg th[data-a="center"],.msg td[data-a="center"]{text-align:center}
 .msg th[data-a="right"],.msg td[data-a="right"]{text-align:right}
+.msg th{border-bottom-color:var(--line-strong);color:var(--fg);font-weight:600}
+.msg td{color:var(--fg-dim)}
+.msg th:first-child,.msg td:first-child{padding-left:0}
+.msg td:last-child{padding-right:0}
 .msg td code{margin:0}
 
-/* ---------- 可折叠行（思考 / 工具） ---------- */
+/* ---------- 可折叠行（思考 / 工具） ----------
+   形态同 dsh 的一行式步骤行：单行 24px，收起时只显示「名称 · 摘要 状态」，
+   点整行展开成卡片看完整输入与输出。原来收起态就带一堆标点和等宽字，
+   一屏工具行读起来像日志。 */
 .row{
-  display:flex;align-items:baseline;
-  min-height:26px;padding:2px 8px 2px 0;margin-left:-8px;
+  display:flex;align-items:center;
+  min-height:24px;padding:0 8px 0 0;margin-left:-8px;
   padding-left:8px;border-radius:4px;cursor:pointer;
-  font-family:var(--mono);font-size:11.5px;
+  font-size:12px;line-height:24px;
 }
 .row:hover{background:var(--bg-hover)}
 .row .caret{flex:none;width:13px;font-size:8px;color:var(--fg-faint);transition:transform .1s}
 .row[data-open="true"] .caret{transform:rotate(90deg)}
-.row .name{flex:none;color:var(--fg-dim);padding-right:10px}
+.row .name{flex:none;color:var(--fg-dim);padding-right:8px}
+/* 名称与摘要之间的小圆点分隔（dsh 的 `name · summary`）。
+   只加在工具行：思考行的标题本来就是「思考 3.2s · 616 字」，再加就多了一个点。 */
+.tools .row .name::after{content:"·";margin-left:8px;color:var(--fg-faint)}
 .row .arg{
-  flex:1;min-width:0;color:var(--fg);
+  flex:1;min-width:0;color:var(--fg-faint);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:12px;
 }
 /* 路径类摘要（`…\sandbox\rect_area.py`）在窄面板里要保留**尾部**：
@@ -332,6 +336,8 @@ body[data-real="true"] .demo-tip{display:none}
 
 .slot{display:none;padding:4px 0 12px 21px}
 .row[data-open="true"] + .slot{display:block}
+/* 工具行的展开卡片按 dsh 的 4px 缩进贴着行首，不再用 21px 的正文缩进 */
+.tools .slot{padding:2px 0 12px 4px}
 .think .slot p{
   margin:0 0 8px;font-size:12.5px;line-height:1.8;color:var(--fg-dim);
 }
@@ -341,6 +347,34 @@ body[data-real="true"] .demo-tip{display:none}
   font-family:var(--mono);font-size:11.5px;line-height:1.7;
   background:var(--bg-code);border-radius:6px;padding:7px 0;overflow-x:auto;
 }
+/* 工具行的展开卡片：IN（完整输入）+ OUT（完整输出），形态对齐 dsh ——
+   一个 12px 圆角、1px 描边的整体卡片，两段各带一个小标签。
+   收起时只有一行，展开才铺开；卡片自身限高滚动，不把对话区顶走。 */
+.io{
+  margin-top:6px;border:1px solid var(--line);border-radius:10px;
+  background:var(--bg-code);overflow:hidden;
+}
+.io-sec{display:flex;gap:12px;padding:9px 12px;max-height:260px;overflow:auto}
+.io-sec + .io-sec{border-top:1px solid var(--line)}
+.io-lb{flex:none;color:var(--fg-faint);font-size:10px;line-height:1.7;user-select:none}
+.io-tx{
+  flex:1;min-width:0;font-family:var(--mono);font-size:11.5px;line-height:1.7;
+  white-space:pre-wrap;word-break:break-word;color:var(--fg-dim);
+}
+.io-tx.bad{color:var(--err)}
+/* 命令块右上角的复制按钮：只有代码块与命令提供复制 */
+.io-copy{
+  flex:none;align-self:flex-start;font:inherit;font-family:var(--font);
+  font-size:10px;color:var(--fg-faint);border:1px solid transparent;
+  border-radius:3px;padding:0 6px;line-height:16px;cursor:pointer;opacity:0;
+  transition:opacity .12s;
+}
+.io:hover .io-copy,.io-copy:focus-visible{opacity:1}
+.io-copy:hover{color:var(--fg);border-color:var(--line)}
+.io-copy[data-done="true"]{color:var(--ok);opacity:1}
+/* 输出段的标签（IN 的标签在卡片内，输出块沿用原来的 .snippet 结构，
+   给它同样一个小标签，两段读起来才是一套东西） */
+.io-out-lb{display:block;margin:8px 0 3px 2px}
 .snippet .ln{display:flex;padding:0 12px;white-space:pre}
 /* 行号在横向滚动时不能跟着滚走。
    diff 的每行最长 74~82 个字符，而 249px 面板一屏只放得下约 31 个字符，
@@ -486,17 +520,24 @@ body[data-real="true"] .demo-tip{display:none}
    这里只给 1px 上下内边距：光标不贴着 .cbox 的边框线。 */
 #input{padding:1px 0;outline:none}
 .cbox textarea::placeholder{color:var(--fg-faint)}
-.crow{display:flex;align-items:center;gap:6px;margin-top:5px;min-height:20px;user-select:none}
+.crow{display:flex;align-items:center;gap:6px;margin-top:5px;min-height:24px;user-select:none}
+/* 胶囊（形态同 dsh 的 Pill / PermissionSelect.trigger）：无边框、圆角=半高、
+   12px 字、左右 8px 内边距，底色是比面板略亮的一层。
+   原来是 3px 圆角的小方块，一排挤在输入框下面像标签而不像控件。 */
 .chip{
-  font-size:10.5px;color:var(--fg-dim);padding:1px 6px;
-  border-radius:3px;background:var(--bg-hover);white-space:nowrap;
+  display:inline-flex;align-items:center;
+  height:24px;padding:0 9px;border-radius:999px;
+  font-size:12px;line-height:18px;color:var(--fg-dim);
+  background:var(--pill);
+  white-space:nowrap;
   /* 会话名/路径可能很长：可以收缩，溢出用省略号而不是把 .crow 顶宽 */
   min-width:0;overflow:hidden;text-overflow:ellipsis;
 }
-.chip.mono{font-family:var(--mono)}
+.chip.mono{font-family:var(--mono);font-size:11px}
 .chip.on{color:var(--accent)}
 /* 目标 chip 可点开目标面板（窄面板里它是唯一的目标入口）：给出可点的光标 */
 #chipGoal{cursor:pointer}
+.chip[data-clickable="true"]{cursor:pointer}
 #chipGoal:hover{background:var(--bg-hover)}
 /* 插件 chip：只在窄面板出现（宽面板用状态栏里那个按钮）。
    249px 下状态栏只剩 233px，装不下「插件 4」及其分隔符（实测需要约 40px），
@@ -541,20 +582,24 @@ body[data-real="true"] .demo-tip{display:none}
 .atch img{flex:none;max-width:26px;max-height:18px;border-radius:2px;display:block}
 .atch .x{flex:none;color:var(--fg-faint);padding:0 1px;line-height:1}
 .atch .x:hover{color:var(--err)}
+/* 圆形图标按钮（形态同 dsh：附件是 28px 圆、发送是实心圆）：
+   一排胶囊 chip 后面跟两个圆钮，形状上有主次，不再是一排等大的长方形盒子。 */
 .attach-btn{
-  flex:none;font-size:11px;color:var(--fg-faint);line-height:1.6;
-  border:1px solid var(--line);border-radius:4px;padding:0 6px;
+  flex:none;display:grid;place-items:center;
+  width:24px;height:24px;border-radius:999px;
+  background:var(--pill);color:var(--fg-dim);
+  font-size:14px;line-height:1;
 }
-.attach-btn:hover{color:var(--fg);border-color:var(--line-strong)}
+.attach-btn:hover{color:var(--fg);background:var(--bg-hover)}
 /* 拖拽悬停：只换边框色，不加动画/阴影 */
 .cbox[data-drop="true"]{border-color:var(--vscode-focusBorder,var(--accent))}
 .convo[data-drop="true"]{
   outline:1px dashed var(--vscode-focusBorder,var(--accent));outline-offset:-6px;
 }
 .stop{
-  display:none;align-items:center;gap:5px;
-  font-size:11.5px;color:var(--fg-dim);
-  border:1px solid var(--line-strong);border-radius:5px;padding:2px 9px;
+  display:none;place-items:center;
+  width:24px;height:24px;border-radius:999px;
+  border:1px solid var(--line-strong);color:var(--fg-dim);
 }
 .stop:hover{color:var(--err);border-color:var(--err)}
 /* 已点过停止、等后端收口：按钮留着但按时不可点，避免连点把 cancel 请求堆在后面 */
@@ -562,13 +607,17 @@ body[data-real="true"] .demo-tip{display:none}
 .stop[data-pending="true"] .sq{animation:sqpulse 1s ease-in-out infinite}
 @keyframes sqpulse{0%,100%{opacity:.35}50%{opacity:1}}
 .stop .sq{width:7px;height:7px;background:currentColor;border-radius:1px}
-body[data-run="true"] .stop{display:inline-flex}
+body[data-run="true"] .stop{display:grid}
 body[data-run="true"] .send{display:none}
 .send{
-  font-size:11.5px;color:var(--fg-dim);
-  border:1px solid var(--line-strong);border-radius:5px;padding:2px 9px;
+  display:grid;place-items:center;
+  width:24px;height:24px;border-radius:999px;
+  background:var(--vscode-button-background,var(--accent));
+  color:var(--vscode-button-foreground,#fff);
+  font-size:13px;line-height:1;
 }
-.send:hover{color:var(--fg)}
+.send:hover{background:var(--vscode-button-hoverBackground,var(--accent))}
+.send .ar{display:block;line-height:1;transform:translateY(-.5px)}
 .kbd{font-family:var(--mono);font-size:10px;color:var(--fg-faint)}
 
 /* ---------- 命令面板 ---------- */
@@ -615,12 +664,17 @@ body[data-run="true"] .send{display:none}
 .palette .item .s{color:var(--fg-faint);font-family:var(--mono);font-size:10.5px;flex:none}
 
 /* ---------- 抽屉 ---------- */
+/* 三段式：标题 / 可滚动的历史列表 / 常驻底部操作区。
+   原来整个抽屉一起滚，底部按钮用 sticky 浮在列表上——滚历史时按钮下方
+   能看见列表内容透出来，像一块浮在半空的板子（实测）。现在让列表自己滚，
+   底部操作区是布局里的固定一段，不再覆盖任何内容。 */
 .drawer{
-  display:none;flex:none;width:262px;
-  border-left:1px solid var(--line);overflow-y:auto;padding:14px 0;
+  display:none;flex:none;width:262px;flex-direction:column;
+  border-left:1px solid var(--line);overflow:hidden;padding:14px 0 0;
   background:var(--bg);
 }
-.drawer[data-open="true"]{display:block}
+.drawer[data-open="true"]{display:flex}
+.drawer #sessList{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain}
 .dw-head{
   display:flex;align-items:center;padding:0 14px 10px;
   font-size:11px;color:var(--fg-faint);letter-spacing:.04em;
@@ -698,11 +752,11 @@ body[data-run="true"] .send{display:none}
 }
 .dw-item .asks button.y{color:var(--err);border-color:var(--err)}
 .dw-item .asks button:hover{color:var(--fg);border-color:var(--fg-dim)}
-/* 底部操作区常驻：会话多到 100+ 条时，列表会把「＋ 新建对话」推到几千像素之外
-   （实测 108 条会话时按钮在 2493px 之下，用户会以为按钮消失了） */
+/* 底部操作区：布局里的固定一段（不是浮层），上边一条分隔线，
+   滚动只发生在上面那个列表里，因此不存在「内容从按钮下面透出来」。 */
 .dw-foot{
-  padding:10px 14px 0;border-top:1px solid var(--line);margin-top:10px;
-  position:sticky;bottom:0;background:var(--bg);z-index:2;
+  flex:none;padding:10px 14px;border-top:1px solid var(--line);
+  background:var(--bg);
 }
 .dw-foot > button{
   width:100%;font-size:11.5px;color:var(--fg-dim);
@@ -862,9 +916,9 @@ body[data-run="true"] .send{display:none}
   .convo{padding:20px 12px 8px}
   /* 竖线要跟着收。它是负 margin 顶出来的（margin-left:-14px 配 .convo 的 20px
      内边距，落点 x=6）；只收 .convo 不跟着收，落点就变成 12-14=-2，
-     整条 2px 边框被裁到面板外——用户消息和助手消息唯一的外形区别就没了。
-     实测 420px（默认宽度）时 0 像素可见。这里让落点始终是 x=6。 */
-  .msg .text{margin-left:-6px}
+     整条 2px 边框被裁到面板外。这里让落点始终是 x=6。
+     用户消息已经是右对齐气泡，没有竖线，不需要这条。 */
+  .msg.sys-note .text{margin-left:-6px}
 }
 
 /* 400px：输入框下方按钮行允许换行，路径 chip 与次要控件让位 */
@@ -880,7 +934,7 @@ body[data-run="true"] .send{display:none}
   .sess .cnt{display:none}
   .bar{padding:0 8px;gap:8px}
   /* 同 520 那条：8px 内边距下把落点补回 x=6 */
-  .msg .text{margin-left:-2px}
+  .msg.sys-note .text{margin-left:-2px}
   /* 抽屉在窄面板里改成覆盖整个对话区：262px 的固定宽度会把对话挤成一条 */
   .drawer[data-open="true"]{
     position:absolute;inset:0;width:100%;z-index:15;
@@ -898,5 +952,5 @@ body[data-run="true"] .send{display:none}
   .crow .kbd{display:none}
   .status .st-cost .k{display:none}
   /* 正文再收一点内边距（竖线落点仍由上面两条 margin 规则保持 x=6） */
-  .msg .text{padding-left:10px}
+  .msg.sys-note .text{padding-left:10px}
 }

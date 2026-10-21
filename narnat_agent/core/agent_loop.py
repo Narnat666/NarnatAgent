@@ -213,12 +213,12 @@ class AgentLoop:
             #     （AI 自我运行期间不经过用户轮边界；占比由每轮 usage 到达时刷新）
             #     提示先于压缩落定到屏幕：压缩要调一次 LLM，用户需知情（headless 进日志）
             if self._compression is not None and self._compression.need_compress():
-                _notice(stream, "\n⚠ 上下文占比超阈值，正在自动压缩历史…\n")
+                _notice(stream, "\n正在压缩上下文…\n")
                 stream.flush_renderer()
                 if self._compression.mid_run_guard():
-                    _notice(stream, "  压缩完成，继续任务…\n")
+                    _notice(stream, "压缩完成\n")
                 else:
-                    _notice(stream, "  未执行压缩（无可压缩历史或压缩失败），继续本次请求…\n")
+                    _notice(stream, "压缩未执行\n")
                 stream.flush_renderer()
                 stream.begin()  # 压缩动画已停止，重启"思考中"spinner
 
@@ -330,13 +330,8 @@ class AgentLoop:
             # 本身超限，压不压都救不了，报错收尾防死循环。
             if parsed_finish_reason == "context_overflow":
                 if overflow_compacted or self._compression is None:
-                    _notice(stream,
-                        "\n\n⚠ 请求超出模型上下文限制。"
-                        "请尝试缩减本次输入，或 /save 保存会话后开启新对话。\n"
-                    )
-                    _mark_failed(stream,
-                                 "请求超出模型上下文限制（重发仍超限或压缩不可用），"
-                                 "本次请求已放弃")
+                    _notice(stream, "\n\n上下文超限，请缩短输入或开新对话\n")
+                    _mark_failed(stream, "上下文超限")
                     stream.finish(
                         self._stats.input_tokens,
                         self._stats.output_tokens,
@@ -350,18 +345,14 @@ class AgentLoop:
                 if self._logger:
                     self._logger.warning("agent_loop", "请求被拒绝: 上下文超限，执行压缩恢复")
                 stream.reset_renderer()
-                _notice(stream, "\n⚠ 上下文超限，正在自动压缩历史…\n")
+                _notice(stream, "\n上下文超限，正在压缩…\n")
                 if self._compression.compress_no_input():
                     if self._logger:
                         self._logger.info("agent_loop", "压缩恢复完成，重发请求")
-                    _notice(stream, "  压缩完成，重试请求…\n")
+                    _notice(stream, "压缩完成\n")
                     continue
-                _notice(stream,
-                    "\n\n⚠ 自动压缩失败，请求仍超出模型上下文限制。"
-                    "请尝试缩减本次输入，或 /save 保存会话后开启新对话。\n"
-                )
-                _mark_failed(stream,
-                             "自动压缩失败，请求仍超出模型上下文限制")
+                _notice(stream, "\n\n压缩失败，请求仍超限\n")
+                _mark_failed(stream, "压缩失败，请求仍超限")
                 stream.finish(
                     self._stats.input_tokens,
                     self._stats.output_tokens,
@@ -384,11 +375,9 @@ class AgentLoop:
                           if content_folds < CONTENT_REJECT_MAX_FOLDS else None)
                 if folded is None:
                     _notice(stream,
-                        "\n\n⚠ 请求被服务端内容审核拦截"
-                        + (f"，已折叠{content_folds}条工具结果仍被拦截。" if content_folds
-                           else "，上下文中没有可折叠的工具结果。")
-                        + "请检查最近的工具输出（外部网页/仓库描述等文本易被投毒），"
-                          "或 /save 保存会话后开启新对话。\n"
+                        "\n\n请求被内容审核拦截"
+                        + (f"，已折叠{content_folds}条工具结果仍被拦" if content_folds
+                           else "，没有可折叠的工具结果") + "\n"
                     )
                     if self._logger:
                         self._logger.error(
@@ -417,8 +406,8 @@ class AgentLoop:
                         f"(第{content_folds}/{CONTENT_REJECT_MAX_FOLDS}次)",
                     )
                 _notice(stream,
-                    f"\n⚠ 请求被服务端内容审核拦截，已折叠最大的工具结果"
-                    f"（{folded[1]}字符，第{content_folds}/{CONTENT_REJECT_MAX_FOLDS}次）后重试…\n"
+                    f"\n请求被内容审核拦截，已折叠最大工具结果后重试"
+                    f"（{content_folds}/{CONTENT_REJECT_MAX_FOLDS}）\n"
                 )
                 continue
 
@@ -529,8 +518,8 @@ class AgentLoop:
                     # 表格行/代码块若不清除，会与重播内容拼接重复或错乱。
                     stream.reset_renderer()
                     _notice(stream,
-                        f"\n⚠ 服务端响应流中断，约{base}s后自动重试"
-                        f"（第{stream_interrupted_retries}/{stream_retry_max}次）…\n"
+                        f"\n响应流中断，{base}s 后重试"
+                        f"（{stream_interrupted_retries}/{stream_retry_max}）\n"
                     )
                     # 退避等待期间用户可ESC取消
                     if not retry_sleep(stream_interrupted_retries - 1, lambda: stream.cancelled):
@@ -540,10 +529,10 @@ class AgentLoop:
                     continue
                 # 重试耗尽 → 报错结束（截断内容不写入历史，避免污染上下文）
                 _notice(stream,
-                    f"\n\n⚠ 服务端响应流中断，已自动重试{stream_retry_max}次仍失败，请稍后重试。\n"
+                    f"\n\n响应流中断，重试{stream_retry_max}次仍失败\n"
                 )
                 _mark_failed(stream,
-                             f"服务端响应流中断，已自动重试{stream_retry_max}次仍失败")
+                             f"响应流中断，重试{stream_retry_max}次仍失败")
                 stream.finish(
                     self._stats.input_tokens,
                     self._stats.output_tokens,
@@ -568,16 +557,16 @@ class AgentLoop:
                 # 空回复
                 self._dump_empty_debug(content_parts, tool_calls_result, parsed_finish_reason, call_usage)
                 _empty_msgs = {
-                    "stop": "⚠ AI 返回了空回复，请尝试缩短对话或稍后重试。",
-                    "max_tokens": "⚠ AI 思考超过了最大输出限制，请增大限制或缩短对话。",
-                    "length": "⚠ AI 思考超过了最大输出限制，请增大限制或缩短对话。",
-                    "content_filter": "⚠ AI 返回被安全策略拦截，请调整提问内容。",
-                    "server_busy": "⚠ 服务器繁忙，请稍后重试。",
-                    "error": "⚠ AI 调用出错，请查看上方错误信息。",
-                    "stream_interrupted": "⚠ 服务端响应流中断，请稍后重试。",
+                    "stop": "AI 返回空回复",
+                    "max_tokens": "达到输出上限，请缩短对话",
+                    "length": "达到输出上限，请缩短对话",
+                    "content_filter": "返回被安全策略拦截",
+                    "server_busy": "服务端繁忙，请稍后重试",
+                    "error": "AI 调用出错，见上方错误",
+                    "stream_interrupted": "响应流中断",
                 }
                 reason = parsed_finish_reason or "stream_interrupted"
-                msg = _empty_msgs.get(reason, f"⚠ AI 返回异常（{reason}），请稍后重试。")
+                msg = _empty_msgs.get(reason, f"AI 返回异常（{reason}）")
                 _notice(stream, f"\n\n{msg}\n")
                 stream.finish(
                     self._stats.input_tokens,
@@ -814,11 +803,15 @@ class AgentLoop:
             from ..tools.registry import execute as tool_execute
             for tc_id, (tool_name, arguments) in zip(confirm_ids, pendings):
                 self._tool_context._delete_confirmed = True
+                _t0 = time.time()
                 llm_result, color_diff = tool_execute(tool_name, arguments, self._tool_context)
+                # 真实耗时：补发的 tool/result 若固定填 0，界面行头会写「0ms」——
+                # 用户刚点完确认，看到 0 毫秒的耗时只会以为命令根本没跑（实测）。
+                elapsed_ms = int(max(0.0, time.time() - _t0) * 1000)
                 # 框架退出码标签只服务于判定，不给AI看
                 llm_result = strip_tags(llm_result)
                 self._msg_manager.append_tool_result(tc_id, llm_result)
-                replayed.append((tc_id, llm_result))
+                replayed.append((tc_id, llm_result, elapsed_ms))
                 if color_diff:
                     _stdout_write("\n".join(f"  {line}" for line in color_diff.split("\n")) + "\n\n")
             # 重放结束无条件复位：防止异常输入（未消费标志的命令）把"跳过确认"
@@ -829,16 +822,16 @@ class AgentLoop:
             for tc_id in confirm_ids:
                 msg = "[操作已取消: 此命令需用户确认]"
                 self._msg_manager.append_tool_result(tc_id, msg)
-                replayed.append((tc_id, msg))
+                replayed.append((tc_id, msg, 0))
 
         # 创建新的流式输出会话，继续agent_loop
         new_stream = self._ui.create_stream()
         hook = getattr(new_stream, "on_tool_result", None)
         if hook is not None:
-            for tc_id, result in replayed:
+            for tc_id, result, elapsed_ms in replayed:
                 failed = isinstance(result, str) and result.startswith("[错误")
                 try:
-                    hook(tool_call_id=tc_id, ok=not failed, duration_ms=0,
+                    hook(tool_call_id=tc_id, ok=not failed, duration_ms=elapsed_ms,
                          output=result if isinstance(result, str) else "",
                          failed=failed, diff=None)
                 except Exception:

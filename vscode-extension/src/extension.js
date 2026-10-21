@@ -912,9 +912,11 @@ function notifySessionAfterRestart(result, reason) {
     return;                         // 后端自己回到了某个会话，不该误报
   }
   const how = reason === 'crash' ? '后端已自动重连' : '后端已重启';
+  // 一行说清两件事：现在是新对话、上一段去哪儿找。
+  // 原来还带「已保存在列表里」「点右上角会话按钮可切回」两句，等于把
+  // 同一个意思讲三遍。
   forwardEvent({ type: 'notice', params: { text:
-    how + '，当前处于新对话；上次的会话「' + name + '」已保存在列表里，' +
-    '点右上角会话按钮可切回。' } });
+    how + '，进入新对话；上一段仍在会话「' + name + '」' } });
 }
 
 function scheduleReconnect(reason) {

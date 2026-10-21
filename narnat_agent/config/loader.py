@@ -589,24 +589,21 @@ def _load_json(config_dir: str) -> dict:
         try:
             with open(path, "r", encoding="gbk") as f:
                 data = json.load(f)
-        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, OSError) as e:
-            _warn(f"narnat.json 编码无法识别（{e}），已按默认配置启动；"
-                  f"请用 UTF-8 编码保存或删除该文件重新生成（文件: {path}）")
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, OSError):
+            _warn(f"narnat.json 编码无法识别，请用 UTF-8 重新保存（文件: {path}）")
             return {}
-    except (json.JSONDecodeError, RecursionError) as e:
+    except (json.JSONDecodeError, RecursionError):
         # RecursionError：超深嵌套（约1000层起）会在解析期抛递归异常，
         # 按"坏 JSON 自愈"同类处理（警告 + 默认配置）
-        _warn(f"narnat.json 解析失败（{e}），已按默认配置启动；"
-              f"请检查 JSON 格式，或删除该文件重新生成（文件: {path}）")
+        _warn(f"narnat.json 不是合法 JSON，请检查格式或删除后重新生成（文件: {path}）")
         return {}
     except OSError as e:
-        _warn(f"narnat.json 读取失败（{e}），已按默认配置启动（文件: {path}）")
+        _warn(f"narnat.json 读取失败（{e}）（文件: {path}）")
         return {}
     # 顶层类型防御：[]/"abc"/123/null 等非对象值会让下游 data.get() 启动崩溃，
     # 且报错不指向配置文件——此处按"坏 JSON 自愈"同类处理（警告 + 默认配置）
     if not isinstance(data, dict):
-        _warn(f"narnat.json 顶层应为对象（当前为 {type(data).__name__}），已按默认配置启动；"
-              f"请检查文件内容，或删除该文件重新生成（文件: {path}）")
+        _warn(f"narnat.json 顶层应为对象，请检查内容或删除后重新生成（文件: {path}）")
         return {}
     return data
 
@@ -626,12 +623,10 @@ def _sanitize_sections(data: dict) -> None:
     for name in list(data.keys()):
         if name in _known:
             continue
-        _warn(f"「{name}」不是已知的配置段，已忽略；"
-              f"如果是段名拼错了，请对照可用段名：{'、'.join(_DICT_SECTIONS)}")
+        _warn(f"「{name}」不是已知的配置段，已忽略")
     # 必需的「智能体」段缺失：同样会表现为「什么都没配置」
     if "智能体" not in data:
-        _warn("缺少「智能体」段，密钥与模型设置都不会生效；"
-              "请补上该段（或删除配置文件让程序重新生成）")
+        _warn("缺少「智能体」段，密钥与模型设置都不会生效")
     for name in _DICT_SECTIONS:
         if name in data and not isinstance(data[name], dict):
             _warn(f"「{name}」段格式错误（应为对象），已按默认处理")
@@ -678,8 +673,7 @@ def _build_ai_config(data: dict) -> AIConfig:
 
     protocol = ai.get("协议", DEFAULT_PROTOCOL)
     if protocol not in ("anthropic", "openai"):
-        _warn(f"「智能体.协议」值 '{protocol}' 不被识别（仅支持 anthropic / openai），"
-              f"已回退为 '{DEFAULT_PROTOCOL}'")
+        _warn(f"「智能体.协议」只支持 anthropic / openai，已回退为 '{DEFAULT_PROTOCOL}'")
         protocol = DEFAULT_PROTOCOL
     base_url = ai.get("接口地址", DEFAULT_BASE_URL)
     model, model_options = _parse_model_config(ai.get("模型"))
