@@ -107,6 +107,8 @@ narnat.exe --rpc [--projects-root <路径>]
 
 `thinking.passback`（boolean）：思考内容是否随请求**回传给模型**（对应配置 `智能体.思考.回传`，由 `/thinkback` 或 `config/set` 切换，**默认 `false`**）。它只决定"发不发"——思考内容本身始终记录在会话里，`thinking/*` 事件也照常下发（见 §4.3）。客户端可用它渲染开关状态。
 
+`inputHistory`（string[]）：输入框按 ↑ 能翻到的历史提问，**最旧在前**，最多 100 条。与终端形态读写同一份文件 `<data_dir>/.narnat_history`，所以客户端重启后照样能翻到上次的提问（服务端在每次受理 `chat/send` 正文时追加，`/` 开头的命令不记）。`initialize` 可能重复到达，客户端应整份替换而不是追加（幂等）。
+
 ### 3.2 `chat/send`
 
 发起一轮对话。**立即返回** `{"accepted":true}`，真正的产出通过通知推送，结束时发 `turn/end`。

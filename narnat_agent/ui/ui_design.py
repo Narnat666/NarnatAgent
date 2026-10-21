@@ -11,7 +11,6 @@ narnat UI - 简洁输入交互界面
   ui_design.py        ── UIInterface 总接口 + UIStreamSession
 """
 
-import os
 import sys
 import threading
 import time
@@ -98,6 +97,7 @@ from .colors import (
     PTK_PROMPT_SYMBOL, PTK_PROMPT_TEXT, PTK_PROMPT_CUSTOM,
     apply_style,
 )
+from ..core import input_history
 from ..output import _stdout_lock, write as _stdout_write, try_write as _stdout_try_write
 from .interrupt import InterruptController, _interrupt_ctrl
 from .renderer import (
@@ -592,16 +592,14 @@ def _get_prompt_style() -> Style:
 
 
 def _create_session(session_manager, data_dir: str = "") -> PromptSession:
-    if data_dir:
-        history_path = os.path.join(data_dir, ".narnat_history")
-    else:
-        history_path = os.path.join(os.path.expanduser("~"), ".narnat_history")
+    # 路径只有一处定义（core/input_history.py）：插件的 ↑ 从同一个文件读，
+    # 两处各拼一次的话，终端和面板的历史迟早会分岔。
     return PromptSession(
         style=_get_prompt_style(),
         multiline=True,
         completer=_CommandCompleter(session_manager),
         key_bindings=_make_keybindings(),
-        history=FileHistory(history_path))
+        history=FileHistory(input_history.history_path(data_dir)))
 
 
 def read_input(session: PromptSession) -> Optional[str]:

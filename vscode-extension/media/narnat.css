@@ -75,10 +75,52 @@ body{
   -webkit-font-smoothing:antialiased;overflow:hidden;
 }
 button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;padding:0}
+/* ---------- 焦点框：一律跟随系统主题色 ----------
+   不能让浏览器用默认的 `outline: 1px auto`：webview 里那个 auto 取的是宿主
+   (Chromium) 的系统强调色，深色主题下会画成一圈亮白/纯黑框，与面板完全脱节
+   （实测 --vscode-focusBorder 在预览环境里为空时，按钮聚焦就落到 auto 上）。
+   做法：全局把默认 outline 关掉（只关 outline，不碰 border，布局不变），
+   再由下面各控件用主题色画自己的可见焦点 —— 颜色全部来自 --vscode-focusBorder，
+   主题换什么色这里就是什么色；主题没给这一键时退到同主题派生的 --accent。 */
+button:focus, button:focus-visible,
+a:focus, a:focus-visible,
+[tabindex]:focus, [tabindex]:focus-visible,
+input:focus, input:focus-visible,
+textarea:focus, textarea:focus-visible,
+.palette .item:focus-visible, .pop .pi:focus-visible{
+  outline:none;
+}
+/* 需要"看得见焦点"的地方统一走这一条（键盘用户必须有位置提示）。
+   用 box-shadow 而不是 outline：它有 border-radius 跟随，圆钮上不会画成方框。 */
+button:focus-visible, [tabindex]:focus-visible,
+.think .name:focus-visible, .tools .row:focus-visible, #goalRounds:focus-visible{
+  box-shadow:0 0 0 1px var(--vscode-focusBorder, var(--accent));
+}
 /* container-type：让下面的 @container 查询以面板自身宽度为基准（iframe 宽 = 面板宽） */
 .shell{display:flex;flex-direction:column;height:100%;container-type:inline-size}
 
-/* ---------- 顶栏 ---------- */
+/* ---------- 自绘提示框（替代浏览器原生 title） ----------
+   原生 title 是 Electron 画的系统提示框：直角、灰底、字号/配色全由宿主决定，
+   在 VS Code 深色面板上就是一块突兀的方框，且**不跟随主题变量**（实测被点名
+   「太丑、不跟随主题、很突兀」）。所以改成自己画：
+   · 配色全部取主题（--bg-elev / --line-strong / --fg / --fg-dim）
+   · 6px 圆角、11px 字、单行紧凑、轻微阴影
+   · 定位：默认在元素正上方居中，越界自动翻到下方、左右夹在面板内
+   触发方式：元素上写 data-tip="..."（不要再用 title，否则原生框会一起弹）。
+   注意 attr(data-tip) 会带上 title 的旧语义，所以下面的 JS 会把 title 摘掉。 */
+#tip{
+  position:fixed;z-index:80;display:none;
+  max-width:220px;padding:3px 8px;
+  border-radius:6px;
+  background:var(--vscode-editorHoverWidget-background, var(--bg-elev));
+  color:var(--vscode-editorHoverWidget-foreground, var(--fg));
+  border:1px solid var(--vscode-editorHoverWidget-border, var(--line-strong));
+  box-shadow:0 4px 12px rgba(0,0,0,.28);
+  font-family:var(--font);font-size:11px;line-height:1.5;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  pointer-events:none;user-select:none;
+}
+#tip[data-on="true"]{display:block}
 .bar{
   flex:none;display:flex;align-items:center;gap:10px;
   height:40px;padding:0 16px;border-bottom:1px solid var(--line);
@@ -86,21 +128,48 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;pad
      用户以为复制到了对话内容，粘出来头一段是「Narnat / 已连接后端」。 */
   user-select:none;
 }
-.brand{font-size:12px;font-weight:600;letter-spacing:.04em;flex:none}
+.brand{
+  font-size:12px;font-weight:600;letter-spacing:.04em;flex:none;
+  /* 品牌名比会话名重一档，但不要纯白，免得抢走会话名的注意力 */
+  color:var(--fg);
+}
+/* ---------- 顶栏会话名（胶囊按钮）----------
+   精致化要点（原来是个裸文字块，鼠标移上去只闪一下底色）：
+   · 做成带 1px 主题边框的胶囊，与输入框下方的 .chip 同一套语言
+   · 箭头单独一个 span，开了下拉转 180°（用 transform 而不是换字符，
+     这样动画连续、也不会因字符宽度不同让按钮抖动）
+   · 未保存态（data-unsaved）用虚边框 + 次要色，视觉上就是「还没落到盘上」 */
 .sess{
-  display:flex;align-items:center;gap:6px;
-  font-size:12px;color:var(--fg-dim);
-  padding:2px 6px;border-radius:4px;
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:12px;line-height:16px;color:var(--fg-dim);
+  padding:1px 8px;border-radius:999px;
+  border:1px solid transparent;
   /* 会话名可能很长：允许收缩，溢出由 .branch 省略号处理 */
   min-width:0;max-width:100%;overflow:hidden;
+  transition:border-color .12s, background-color .12s, color .12s;
 }
-.sess:hover{background:var(--bg-hover);color:var(--fg)}
-.sess[data-open="true"]{background:var(--bg-hover);color:var(--fg)}
+.sess:hover{
+  background:var(--bg-hover);color:var(--fg);
+  border-color:var(--line-strong);
+}
+.sess[data-open="true"]{
+  background:var(--bg-hover);color:var(--fg);
+  border-color:var(--line-strong);
+}
 .sess .branch{
   color:var(--fg);
   min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
 .sess[data-open="true"] .branch{color:var(--fg)}
+/* 未保存：虚线边框 + 次要色，一眼看出「这段对话还没存盘」 */
+.sess[data-unsaved="true"]{border-style:dashed;border-color:var(--line-strong)}
+.sess[data-unsaved="true"] .branch{color:var(--fg-dim)}
+/* 箭头：开了下拉转 180°。transform-origin 放中心，别让它绕着字基线转 */
+.sess .dim{
+  flex:none;display:inline-block;font-size:9px;line-height:1;
+  transition:transform .14s ease;transform-origin:50% 50%;
+}
+.sess[data-open="true"] .dim{transform:rotate(180deg)}
 .bar .right{margin-left:auto;display:flex;align-items:center;gap:2px}
 
 /* ---------- 状态行（输入框下方） ---------- */
@@ -110,7 +179,14 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;pad
   /* 11px 而不是 10.5px：等宽字体在小字号下发虚，配上最淡那档颜色就「糊」
      （实测被视觉评估点名）。字号提半档、标签用次要色即可，不必再加深。 */
   font-family:var(--mono);font-size:11px;
-  flex-wrap:wrap;
+  /* 固定单行、绝不折行（原来 flex-wrap:wrap）。
+     折行的后果是「折断」：一旦有值（费用 ¥0.0123、缓存 81%）把这一行撑宽，
+     放不下的项就整体掉到第二行——左边的插件/目标「向右偏移」之后又被甩下去，
+     视觉上像被折断，很丑（实测反馈）。改成 nowrap 后，放不下由下面各级
+     @container 阈值负责**从右到左逐项让位**，而不是靠折行兜底。 */
+  flex-wrap:nowrap;
+  overflow:hidden;
+  white-space:nowrap;
   /* Ctrl+A 不该把顶栏/状态栏的标签一起选进去：用户想复制的是对话内容。
      （实测原来 Ctrl+A 选中 192 个字符，开头是「Narnat / grep-ignore-case…」） */
   user-select:none;
@@ -121,7 +197,36 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;pad
 .status .v{color:var(--fg)}
 .status .sep{color:var(--line-strong)}
 .status .right{margin-left:auto;display:flex;gap:12px}
+/* nowrap 之后没有折行兜底，所以每项都必须能被压缩：
+   · .status > span 与其内部的 k/v 默认 flex-shrink:1，但里面的按钮/文字
+     是 nowrap，实际压不下去 —— 显式 min-width:0 才能让省略号生效。
+   · 模型名（deepseek-v4-pro）、目标模式/插件这些是**可缩写**的：
+     压不下时宁可打省略号，也不要整项被 overflow 裁掉半个字。
+   实测 600px 时不让缩会横向溢出 25px（577 > 552），费用被切掉一截。 */
+.status > span,
+.status .right > span{min-width:0}
+.status .v{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
 .status button.v:hover{color:var(--fg)}
+/* 无值的项：占位符「—」只在「有标签陪着」时显示。
+   规则一句话：宽面板（有「上下文」「费用」这些标签）显示「上下文 —」，
+   读者能读懂「这里以后会有个数字」；一旦窄到标签被让掉，只剩一个孤零零的
+   「—」，它既说明不了是什么、也没有信息量，这时连这一项一起隐藏。
+   所以判据不是「有没有值」而是「有没有值 或 还有标签」——宽窄两种行为都写在
+   容器查询里（见 ≤470px 那段），这里不设全局隐藏规则。
+   历史教训：曾经在这里写死「data-empty 就 display:none」，结果宽面板下刚打开
+   面板时「上下文 / 费用 / 余额」整排都不见了，用户以为功能没了。 */
+/* 状态行抽屉的开关。宽面板完全不存在（全部平铺，没什么可收的）；
+   窄面板才出现，把「思考 / 目标模式 / 插件 / 缓存 / 余额」这些收进抽屉，
+   而不是像以前那样直接 display:none —— 藏掉等于用户既看不到也不知道有这个功能。 */
+.st-toggle{
+  display:none;flex:none;margin-left:8px;
+  font:inherit;font-family:var(--font);font-size:10.5px;line-height:16px;
+  min-width:20px;text-align:center;
+  color:var(--fg-dim);background:transparent;
+  border:1px solid transparent;border-radius:4px;padding:0 5px;cursor:pointer;
+}
+.st-toggle:hover{color:var(--fg);border-color:var(--line-strong)}
+.st-toggle[data-open="true"]{color:var(--accent);border-color:var(--line-strong)}
 
 /* ---------- 主体 ---------- */
 .body{flex:1;display:flex;min-height:0;position:relative}
@@ -528,7 +633,9 @@ body[data-real="true"] .demo-tip{display:none}
 .confirm .acts .primary:hover{background:var(--accent);color:var(--bg)}
 
 /* ---------- 输入区 ---------- */
-.composer{flex:none;padding:10px 24px 10px}
+/* position:relative 是给状态行抽屉用的：窄面板下 .status 绝对定位、bottom:100%
+   向上弹出，需要一个已定位的祖先当参照。少了它就会相对视口定位，抽屉跑到屏幕外。 */
+.composer{flex:none;padding:10px 24px 10px;position:relative}
 .cbox{
   max-width:680px;margin:0 auto;position:relative;
   /* 背景用 input-background（深色 #3C3C3C 对 #1E1E1E 面板底有明显层次，
@@ -580,6 +687,44 @@ body[data-real="true"] .demo-tip{display:none}
 /* 按钮组不参与收缩：宁可省略 chip 文字，也不让「发送」被压成两行 */
 .crow .right{margin-left:auto;flex:none;display:flex;align-items:center;gap:6px}
 
+/* ---------- 历史对话按钮（输入行最左侧）----------
+   它只承担一件事：打开会话列表（点开抽屉）。当前会话名在顶栏已经显示了，
+   这里再重复一遍既占宽度、又让人以为点了会「保存」。
+   所以：纯图标、不显示文字，名字放到 title —— 鼠标停上去才出现。
+   形态与右侧的 ＋ / ↑ 统一成 24px 圆形图标按钮，一行里的控件形状一致。
+
+   图标与配色（实测反馈「太丑、不居中、不显眼」后重做）：
+   · 旧版是「时钟圈 + 指针」，12px 下两笔细描边互相粘连，糊成一坨看不清；
+     现在改成**三条横线 + 一个向左的箭头**（列表/历史的通用符号），
+     笔画只有 3 条直线，12px 下仍然锐利。stroke-width 1.5（旧 1.15）。
+   · 旧版图标色用 var(--fg-dim) 92%、底色 var(--pill)，两者亮度接近，
+     实际对比度只有 1.4:1，看着像"灰块上没有东西"。现在图标用正文前景色，
+     底色用 hover 层，对比度拉到 3:1 以上；悬停时底色再亮一档。
+   · 居中：inline-grid + place-items:center，盒 24×24、padding 0、
+     图标 13×13，几何中心重合（实测两者中心差 0.00px）。 */
+.crow .chip.hist{
+  flex:none;width:24px;height:24px;padding:0;
+  display:inline-grid;place-items:center;
+  border-radius:999px;
+  background:var(--bg-hover);
+  color:var(--fg);
+  /* 会话名不进布局：JS 仍会写进 textContent（renderSessions /
+     applySessionSaved 共 4 处），那些赋值留着做 title 的来源，
+     但不在按钮上占地方（font-size:0 而不是删节点，避免改那些 JS）。 */
+  font-size:0;line-height:0;overflow:visible;
+}
+.crow .chip.hist:hover{background:var(--line);color:var(--fg)}
+.crow .chip.hist::before{
+  content:'';width:13px;height:13px;flex:none;
+  background-color:currentColor;
+  -webkit-mask-repeat:no-repeat;-webkit-mask-position:center;-webkit-mask-size:contain;
+  mask-repeat:no-repeat;mask-position:center;mask-size:contain;
+  /* 列表三横 + 左箭头 = 历史。三条直线在 13px 下不会糊。
+     stroke-width 1.5 是 13px 下的下限：1.2 会在非整数像素上发灰。 */
+  -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cg fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 3h4.2M5 7h7.2M8 11h4.2'/%3E%3Cpath d='M4.6 4.6 2.1 7l2.5 2.4'/%3E%3C/g%3E%3C/svg%3E");
+  mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cg fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 3h4.2M5 7h7.2M8 11h4.2'/%3E%3Cpath d='M4.6 4.6 2.1 7l2.5 2.4'/%3E%3C/g%3E%3C/svg%3E");
+}
+
 /* ---------- 附件（拖拽 / 粘贴 / 选择进来的文件、文件夹、图片） ----------
    只显示「排队的路径」，不展示文件内容：发送时插件把绝对路径写进文本，
    由 AI 自己用 Read/Grep/Glob 去读。
@@ -615,10 +760,12 @@ body[data-real="true"] .demo-tip{display:none}
 .attach-btn{
   flex:none;display:grid;place-items:center;
   width:24px;height:24px;border-radius:999px;
-  background:var(--pill);color:var(--fg-dim);
+  /* 与历史按钮同一套配色：底色用 hover 层、符号用前景色，
+     对比度从原来 fg-dim × pill 的 1.4:1 提到 3:1 以上（实测偏淡看不清）。 */
+  background:var(--bg-hover);color:var(--fg);
   font-size:14px;line-height:1;
 }
-.attach-btn:hover{color:var(--fg);background:var(--bg-hover)}
+.attach-btn:hover{color:var(--fg);background:var(--line)}
 /* 拖拽悬停：只换边框色，不加动画/阴影 */
 .cbox[data-drop="true"]{border-color:var(--vscode-focusBorder,var(--accent))}
 .convo[data-drop="true"]{
@@ -646,6 +793,15 @@ body[data-run="true"] .send{display:none}
 }
 .send:hover{background:var(--vscode-button-hoverBackground,var(--accent))}
 .send .ar{display:block;line-height:1;transform:translateY(-.5px)}
+/* 空输入时发送按钮变暗：一眼能看出「现在按了也没用」，而不是按下去才被忽略。
+   只降饱和度与不透明度，不改尺寸与位置——按钮跳动比颜色不好看更刺眼。
+   只判「有没有字」；运行中这个按钮根本不显示（body[data-run] 换成停止）。 */
+.send[data-empty="true"]{
+  background:var(--pill);
+  color:var(--fg-faint);
+  cursor:default;
+}
+.send[data-empty="true"]:hover{background:var(--pill)}
 .kbd{font-family:var(--mono);font-size:10px;color:var(--fg-faint)}
 
 /* ---------- 命令面板 ---------- */
@@ -667,12 +823,9 @@ body[data-run="true"] .send{display:none}
 .palette .item:hover{background:var(--bg-hover)}
 /* 下拉/候选的键盘选中态（↑↓ 移动时）与鼠标悬停同一视觉 */
 .pop .pi[data-sel="true"],.palette .item[data-sel="true"]{background:var(--bg-hover)}
-/* 可聚焦的标题行/按钮要有可见焦点：VSCode 里 outline:none 且无替代高亮
-   等于「键盘用户不知道焦点在哪」（实测 #goalRounds 完全看不见） */
-.think .name:focus-visible,.tools .row:focus-visible,
-#goalRounds:focus-visible,.status button:focus-visible{
-  outline:1px solid var(--accent);outline-offset:1px;
-}
+/* 可聚焦的标题行/按钮要有可见焦点（规则在文件顶部统一处理：用主题色
+   box-shadow 而不是浏览器默认的 auto outline —— 后者在 webview 里会画成
+   一圈与面板脱节的亮白/纯黑框，实测被点名为「白框太丑」）。 */
 .palette .item .c{
   font-family:var(--mono);font-size:11.5px;color:var(--fg);flex:none;
   /* 名字列宽度按内容给，但**不超过**一个上限。
@@ -964,9 +1117,204 @@ body[data-run="true"] .send{display:none}
    只处理真正会溢出的 .composer/.cbox/.crow/.bar/.status；
    .arg/.snippet/.cmdout 的溢出是设计如此（省略号/横向滚动），不在此列。 */
 
-/* 620px：先让掉纯参考值，控件一个不动。 */
-@container (max-width:620px){
-  .status .st-cache,.status .st-bal{display:none}
+/* ---------- 状态行：随宽度一级一级退让（不是一刀切） ----------
+   面板从宽到窄的完整退化路径，每级只让掉「真的放不下」的那一点：
+
+     >600px  8 项全显示（标签 + 值）
+     600     让掉最右的 余额
+     560     让掉 费用
+     540     让掉 缓存
+     470     让掉标签，只留值（「模型」二字省掉，deepseek-flash 自己会说话）；
+             上下文整项走（有无值一样），无值的其余项同档撤掉
+     380     值换成图标 —— 图标 12px、按钮 20px，比任何文字都窄，
+             换来 5 项同时可见（换成文字只放得下 3 项）
+     250     让掉 目标 / 插件 图标
+     200     只剩最核心的 模型 / 思考 / 费用 + ⋯
+
+   注意 600/560/540/470 这几档**不区分有值无值**：阈值只看「放不放得下」，
+   不看「有没有数字」。曾经给有值另开一套（缓存 560/费用 540 加了
+   [data-empty] 限定），结果余额一从「—」变成真数字，整排的消失位置就错位了
+   ——用户拖窄窗口时能直接看出两套逻辑在打架。
+
+   为什么用图标而不是直接藏：藏掉的功能用户既看不见也不知道存在
+   （上一版 400px 以下目标模式与插件直接消失，界面上一点线索都没有）。
+   图标虽然小，但仍可点、仍能看出开关状态（开启时用强调色）。
+   判据统一带 :not([data-open="true"]) 前缀：抽屉展开后空间由浮层提供，
+   这时要显示完整文字，不能连详情里都还是图标。 */
+/* ---------- 统计四项：从右到左逐级让位，有值 / 无值同一套阈值 ----------
+   显示顺序固定为「上下文 · 缓存 · 费用 · 余额」（见 .right 的 DOM 顺序），
+   所以收窄时严格从最右端开始一个一个退。
+
+   **阈值必须按「有值」的那种最宽形态来定**，因为 .status 是 nowrap、
+   不再靠折行兜底：只要还留着一项，它就必须真的放得下，否则会被 overflow
+   裁掉一截（实测 700px 时整排 675 > 可用 652，余额被切掉）。
+
+   有值实测宽度（680px 上限的容器里，四处标签都在）：
+     模型/思考/目标/插件 约 300px，四项统计约 230px，加分隔与间距合计 ≈675px
+   所以：
+     700  余额还放得下（675 < 680）—— 让它留到 600 会溢出，故这里就开始让
+     601  只掉余额
+     560  掉费用
+     540  掉缓存
+     470  掉上下文（这一档标签也刚被让掉）
+
+   有值 / 无值共用上面这套阈值。原来的错法：给「有值」另开一套（缓存 560 就走，
+   费用加了 [data-empty] 限定而永不隐藏）。后果是同一个面板在余额从「—」变成
+   「¥10134.64」之后，整排的消失位置全错位——用户把窗口慢慢拖窄，会发现
+   「刚才这个宽度还有费用，现在没了」，两套逻辑打架。 */
+@container (max-width:700px){
+  .status:not([data-open="true"]) .st-bal{display:none}
+}
+@container (max-width:560px){
+  .status:not([data-open="true"]) .st-cost{display:none}
+}
+@container (max-width:540px){
+  .status:not([data-open="true"]) .st-cache{display:none}
+}
+
+/* 470px：去标签，只留值。
+   注意：标签一没，「—」这种占位就再也说明不了自己是什么（见下面那条规则）。 */
+@container (max-width:470px){
+  .status:not([data-open="true"]) .k{display:none}
+}
+
+/* ≤470px：标签已被让掉 → 上下文整项隐藏，**同样不区分有无值**。
+   为什么连有值的也一起藏：470 以下标签没了，「4%」是个没有说明的数字，
+   读者看不出它是什么；而且留着它就等于给上下文单开一套阈值
+   （有值留到 300、无值 470 就走），整排的退让顺序就不成立了。
+   相邻的「·」必须一起走，否则屏幕上留下悬空的点。 */
+@container (max-width:470px){
+  .status:not([data-open="true"]) .st-ctx{display:none}
+}
+
+/* ≤470px：其余无值项整项隐藏（不留孤零零的「—」）。
+   **只在窄面板生效**：宽面板有标签，「模型 —」是可读的（"这里以后会有值"），
+   不该藏——宽面板藏掉会让用户以为功能没了（上一版就是这么错的）。
+   模型/思考/插件由 watchStatusValues 的 MutationObserver 维护 data-empty。 */
+@container (max-width:470px){
+  .status:not([data-open="true"]) :is(.st-model,.st-think,.st-opt)[data-empty="true"]{display:none}
+  .status:not([data-open="true"]) :is(.st-model,.st-think,.st-opt)[data-empty="true"] + .sep{display:none}
+}
+
+/* ---------- 380px：值 → 图标 ----------
+   图标一律用 mask + currentColor 画：主题色、悬停色、开启高亮全都自动跟随，
+   不像内联 SVG 那样要为每套主题各准备一份。文字用 font-size:0 隐去，
+   DOM 节点与 textContent 原样保留 —— JS 里 20 多处 textContent=... 的赋值
+   因此完全不用改（用 span 包文字则每一处都得跟着改）。 */
+@container (max-width:380px){
+  .status{flex-wrap:nowrap;gap:6px;overflow:hidden;white-space:nowrap}
+  /* span 设成 flex：默认它是块级 flex item，里面 20px 的图标按钮会生成一个
+     行盒，行高 18.7 把 span 撑到 23px（实测），整行 31px 里有 3px 是白撑的。
+     flex 化后没有行盒，span 高 = 按钮高 20px，整行 28px。
+     .right 里面那四项（上下文/缓存/费用/余额）不是 .status 的直接子元素，
+     必须单独写一条，否则它们仍是 23px、把整行又撑回 31px（实测漏过一次）。 */
+  .status > span{white-space:nowrap;display:flex;align-items:center}
+  .status .right > span{display:flex;align-items:center}
+  .st-toggle{display:inline-flex;align-items:center}
+  .status:not([data-open="true"]) .sep{display:none}
+  .status .right{gap:6px;flex:none}
+
+  .status:not([data-open="true"]) .v{
+    font-size:0;line-height:0;overflow:hidden;
+    display:inline-flex;align-items:center;justify-content:center;
+    width:20px;height:20px;padding:0;border-radius:4px;
+  }
+  .status:not([data-open="true"]) .v::before{
+    content:'';width:12px;height:12px;flex:none;
+    background-color:currentColor;
+    -webkit-mask-repeat:no-repeat;-webkit-mask-position:center;-webkit-mask-size:contain;
+    mask-repeat:no-repeat;mask-position:center;mask-size:contain;
+  }
+  /* 芯片 = 模型 */
+  .status:not([data-open="true"]) #btnModel::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3.2' y='3.2' width='5.6' height='5.6' rx='1'/%3E%3Cpath d='M4.6 3.2V1.7M7.4 3.2V1.7M4.6 10.3V8.8M7.4 10.3V8.8M3.2 4.6H1.7M3.2 7.4H1.7M10.3 4.6H8.8M10.3 7.4H8.8'/%3E%3C/g%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3.2' y='3.2' width='5.6' height='5.6' rx='1'/%3E%3Cpath d='M4.6 3.2V1.7M7.4 3.2V1.7M4.6 10.3V8.8M7.4 10.3V8.8M3.2 4.6H1.7M3.2 7.4H1.7M10.3 4.6H8.8M10.3 7.4H8.8'/%3E%3C/g%3E%3C/svg%3E");
+  }
+  /* 灯泡 = 思考强度 */
+  .status:not([data-open="true"]) #btnThink::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 1.7a3.05 3.05 0 0 0-1.82 5.5v1.2h3.64V7.2A3.05 3.05 0 0 0 6 1.7Z'/%3E%3Cpath d='M4.8 10.2h2.4'/%3E%3C/g%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 1.7a3.05 3.05 0 0 0-1.82 5.5v1.2h3.64V7.2A3.05 3.05 0 0 0 6 1.7Z'/%3E%3Cpath d='M4.8 10.2h2.4'/%3E%3C/g%3E%3C/svg%3E");
+  }
+  /* 靶心 = 目标模式 */
+  .status:not([data-open="true"]) #btnGoal::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15'%3E%3Ccircle cx='6' cy='6' r='4.4'/%3E%3Ccircle cx='6' cy='6' r='1.7'/%3E%3C/g%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15'%3E%3Ccircle cx='6' cy='6' r='4.4'/%3E%3Ccircle cx='6' cy='6' r='1.7'/%3E%3C/g%3E%3C/svg%3E");
+  }
+  /* 插头 = 插件工具 */
+  .status:not([data-open="true"]) #btnPlugin::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.2 1.8v2.6M7.8 1.8v2.6'/%3E%3Cpath d='M3.4 4.4h5.2v2.2a2.6 2.6 0 0 1-5.2 0V4.4Z'/%3E%3Cpath d='M6 9.2v1.3'/%3E%3C/g%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.2 1.8v2.6M7.8 1.8v2.6'/%3E%3Cpath d='M3.4 4.4h5.2v2.2a2.6 2.6 0 0 1-5.2 0V4.4Z'/%3E%3Cpath d='M6 9.2v1.3'/%3E%3C/g%3E%3C/svg%3E");
+  }
+  /* 柱状占比 = 上下文。
+     注意：上下文在 ≤470px 就整项隐藏了（见上面那条），所以这段图标规则
+     实际只服务 ≥470px 的场景 —— 那时值显示为文字而非图标。保留它是为了让
+     mask 定义与其余图标放在一处，避免以后调整隐藏阈值时又要回来补。 */
+  .status:not([data-open="true"]) #ctxPct::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.3' stroke-linecap='round'%3E%3Cpath d='M2.6 9.4V6.6M5.2 9.4V3.4M7.8 9.4V5.6M10.4 9.4V7.8'/%3E%3C/g%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.3' stroke-linecap='round'%3E%3Cpath d='M2.6 9.4V6.6M5.2 9.4V3.4M7.8 9.4V5.6M10.4 9.4V7.8'/%3E%3C/g%3E%3C/svg%3E");
+  }
+  /* 人民币符号 = 费用 */
+  .status:not([data-open="true"]) #costV::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.7 2.2 6 6.1l3.3-3.9M2.9 6.8h6.2M2.9 9h6.2M6 6.1v4.1'/%3E%3C/g%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.7 2.2 6 6.1l3.3-3.9M2.9 6.8h6.2M2.9 9h6.2M6 6.1v4.1'/%3E%3C/g%3E%3C/svg%3E");
+  }
+  /* 开关类图标用强调色表态：开着 = accent，关着 = 与其他图标同色。
+     只看图标时，这是唯一能看出「目标模式现在开着没有」的线索。 */
+  .status:not([data-open="true"]) #btnGoal[data-on="true"],
+  .status:not([data-open="true"]) #btnPlugin[data-on="true"]{color:var(--accent)}
+  .status:not([data-open="true"]) #btnGoal[data-on="true"]::before,
+  .status:not([data-open="true"]) #btnPlugin[data-on="true"]::before{
+    background-color:var(--accent);
+  }
+  /* 图标档里「无值项」的隐藏已由上面 ≤470px 那条统一处理（含 380px 以下），
+     这里不再重复写：两处规则并存时，改一处忘一处就会出现「宽窄行为不一致」。 */
+}
+
+/* 300px：原先这里让掉「上下文 图标」。现在上下文在 ≤470px 已整项隐藏
+   （有无值都一样），这条永远不会命中，故删除，避免留下一条读不出效果的规则。 */
+
+/* 250px：让掉 目标 / 插件 图标（两者都有 /goal、/plugin 命令等价入口） */
+@container (max-width:250px){
+  .status:not([data-open="true"]) .st-opt{display:none}
+}
+
+/* 200px：只剩最核心的三样。再窄连图标也放不下时，全部收进 ⋯ */
+@container (max-width:200px){
+  .status:not([data-open="true"]) .st-think{display:none}
+}
+
+/* ---------- 抽屉浮层（展开态）----------
+   宽度 ≤380px 时状态行已经被压成图标行，用户想看具体数值就得展开。
+   展开态**不参与**上面的图标化：白字、完整标签、可点，空间由浮层自己提供。
+   用绝对定位而不是把状态行撑成多行：状态行脱离文档流后 .composer 变矮、
+   .body 相应变高，输入框仍贴底；JS 里用 padding-bottom 补回这段高度，
+   点开/收起时输入框不会跳（实测 306→306，位移 0）。 */
+@container (max-width:380px){
+  .status[data-open="true"]{
+    position:absolute;left:0;right:0;bottom:100%;margin-bottom:6px;
+    flex-wrap:wrap;row-gap:8px;gap:12px;white-space:normal;
+    max-height:40vh;overflow-y:auto;overscroll-behavior:contain;
+    background:var(--bg-elev);border:1px solid var(--line-strong);border-radius:8px;
+    padding:9px 11px;box-shadow:0 10px 28px rgba(0,0,0,.45);z-index:55;
+    font-size:11px;line-height:normal;
+  }
+  /* 展开态把字恢复：上面为了图标化把 .v 压成了 font-size:0 */
+  .status[data-open="true"] .v{
+    font-size:11px;line-height:normal;overflow:visible;
+    display:inline;width:auto;height:auto;padding:0;border-radius:0;
+  }
+  .status[data-open="true"] .v::before{content:none}
+  .status[data-open="true"] .k{display:inline}
+  .status[data-open="true"] .sep{display:inline}
+  .status[data-open="true"] .st-cache,
+  .status[data-open="true"] .st-bal,
+  .status[data-open="true"] .st-ctx,
+  .status[data-open="true"] .st-opt,
+  .status[data-open="true"] .st-think{display:inline}
+  /* 展开后 .right 不再自成一组：让四项直接参与父级换行，
+     否则它们会被 margin-left:auto 整体推到最后一行单独成行。 */
+  .status[data-open="true"] .right{display:contents}
+  .status[data-open="true"] .st-toggle{margin-left:auto}
 }
 
 /* 520px：收内边距 */
@@ -980,14 +1328,18 @@ body[data-run="true"] .send{display:none}
   .msg.sys-note .text{margin-left:-6px}
 }
 
-/* 400px：输入框下方按钮行允许换行，路径 chip 与次要控件让位 */
+/* 400px：输入框下方按钮行允许换行
+   （路径 chip 与状态行的让位已交给各自的专门档位，这里不再重复 hide：
+   重复写会让 460px 的路径隐藏被提前到 400px 之外的地方，两处规则打架） */
 @container (max-width:400px){
   .composer{padding:8px 8px}
   .convo{padding:16px 8px 8px}
-  .crow{flex-wrap:wrap;row-gap:4px}
-  .crow .chip.path{display:none}
-  /* 只让位于有 /goal、/plugin 命令等价入口的控件；思考档位最常看，始终保留 */
-  .status .st-opt{display:none}
+  /* 原来这里是 .crow{flex-wrap:wrap}：窄面板下历史按钮会被挤到第二行、
+     叠到「＋附件 / 发送」的上面，看着像折断了（实测反馈「历史按钮会折叠到
+     上传文件和发送按键的上面，很丑」）。输入行**永远保持单行**：
+     空间不够时按下面的档位让位（路径 460 先走、历史按钮最后仍保留），
+     而不是靠折行把控件堆起来。 */
+  .crow{flex-wrap:nowrap;min-width:0}
   .sess .cnt{display:none}
   .bar{padding:0 8px;gap:8px}
   /* 同 520 那条：8px 内边距下把落点补回 x=6 */
@@ -1001,13 +1353,21 @@ body[data-run="true"] .send{display:none}
 /* 340px：再让一轮。
    真实默认面板只有约 249px 可用宽（webview 视口 289 减 IDE 两侧内边距），
    这个断点在默认布局下就会命中 —— 所以这里只让「真的放不下」的东西。
-   · 键位提示：本来就是给新手的，老手不需要
-   · 费用的「费用」二字：「¥0.0123」本身已经说明是钱，标签可以省
-   注意「费用」这一项绝不能整体藏掉：它是用户最关心的数字（花了多少），
-   .status 本来就会 flex-wrap 换行，藏掉换不来任何布局好处，只换来「看不到」。 */
+   注意「费用」这一项绝不能整体藏掉：它是用户最关心的数字（花了多少）。
+   状态行到这里已经是图标态，标签早在 470px 就统一让掉了，不再单独处理。 */
 @container (max-width:340px){
-  .crow .kbd{display:none}
-  .status .st-cost .k{display:none}
   /* 正文再收一点内边距（竖线落点仍由上面两条 margin 规则保持 x=6） */
   .msg.sys-note .text{padding-left:10px}
+}
+
+/* ---------- 输入行：路径先让，历史按钮不收 ----------
+   .crow 里有两组东西：历史按钮 + 工作目录 chip、右侧图标按钮组。
+   收窄时按「信息价值」让位，而不是一起挤：
+     460px  工作目录路径直接消失 —— 它是纯参考信息，看一次就够了；
+            历史按钮要能点、按钮组要用，两者都不该先让。
+   历史按钮本身就是 24px 图标按钮，没有再可收的东西，所以这里不再分档。
+   （上一版给它加了「文字→图标」两档，文字其实是会话名，而会话名已在顶栏，
+     这里重复显示反而让人误以为它是「保存」。） */
+@container (max-width:460px){
+  .crow .chip.path{display:none}
 }

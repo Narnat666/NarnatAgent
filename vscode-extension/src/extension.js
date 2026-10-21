@@ -1928,7 +1928,9 @@ function handleMessage(msg, source) {
     return;
   }
   if (msg.type === 'clipboard/write') {
-    /* 网页里「选中 → 右键复制」拿不到内容的唯一可靠出路。
+    /* 网页里「选中 → 右键复制」拿不到内容的唯一可靠出路；面板里的
+     * 「复制」按钮也走这条（webview 内 navigator.clipboard 会被沙箱权限
+     * 拒绝，按钮就成了点了没反应的摆设）。
      *
      * 为什么 webview 内自己写不了：右键菜单是 Electron 的原生菜单，
      * 它调用的是 host 侧的复制动作；渲染进程 `copy` 事件里
@@ -1936,12 +1938,33 @@ function handleMessage(msg, source) {
      * 结果就是「能选中、粘贴为空白」，且全程不报错（实测）。
      *
      * 所以改由宿主写：webview 只发原文，这里用 vscode.env.clipboard。
-     * 这是官方 API，不受 iframe 沙箱的剪贴板权限限制。 */
+     * 这是官方 API，不受 iframe 沙箱的剪贴板权限限制。
+     *
+     * 带 id 的是「复制按钮」发起的，要回执（写失败必须让界面说失败，
+     * 不能只在界面上点亮「已复制」）；不带 id 的是选中即复制，静默即可。 */
     const p = msg.params || {};
     const text = typeof p.text === 'string' ? p.text : '';
-    if (text) {
-      Promise.resolve(vscode.env.clipboard.writeText(text)).catch(() => { /* 写失败无从补救，静默 */ });
+    const reqId = p.id;
+    if (!text) {
+      if (reqId !== undefined) {
+        broadcast({ type: 'clipboard/written', params: { id: reqId, ok: false } });
+      }
+      return;
     }
+    Promise.resolve()
+      .then(() => vscode.env.clipboard.writeText(text))
+      .then(
+        () => true,
+        (err) => {
+          console.warn('[narnat] 写剪贴板失败：', err && err.message ? err.message : err);
+          return false;
+        }
+      )
+      .then((ok) => {
+        if (reqId !== undefined) {
+          broadcast({ type: 'clipboard/written', params: { id: reqId, ok: ok } });
+        }
+      });
     return;
   }
   if (msg.type === 'prompt') {

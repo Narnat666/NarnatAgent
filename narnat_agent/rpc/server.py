@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 from .protocol import get_transport
 from .ui import RpcUI
 from ..config.defaults import DEFAULT_THINKING_PASSBACK
+from ..core.input_history import append_history, history_path, load_history
 
 PROTOCOL_VERSION = 1
 
@@ -446,6 +447,9 @@ class RpcServer:
             # 而不是等用户发完第一条消息、撞上整段英文 401 JSON 才知道
             #（新用户很容易把它判成"插件坏了"）。
             "apiKeyMissing": not bool(_model_api_key(self._config)),
+            # 输入框按 ↑ 能翻到的历史（最旧在前）。与终端形态同一份文件，
+            # 所以关掉 VSCode/重连后照样翻得到上次的提问。
+            "inputHistory": load_history(history_path(self._config.paths.data_dir), 100),
         }
 
     def _kick_balance_probe(self) -> None:
@@ -459,8 +463,13 @@ class RpcServer:
 
         def _probe():
             try:
+                # 用 round=1 是因为它必然触发查询（stats.fetch_balance 里
+                # 「没查到过就立刻查」）。旧实现按 round%10==0 判，这里传 1
+                # 永远不成立 —— 这个探针自始至终一次都没查过，界面只能显示 0。
                 self._stats.fetch_balance(api_key, 1)
-                if self._stats.balance <= 0:
+                # 判 balance_known 而不是 balance > 0：账户真的花光时也该
+                # 如实推 ¥0.00，而不是留着「—」让人以为没查到。
+                if not self._stats.balance_known:
                     return
                 # 与 RpcStream.finish 走同一条下发通道（ui.emit_stats，内容相同则去重），
                 # 界面收到即显示
@@ -570,6 +579,11 @@ class RpcServer:
             with self._turn_lock:
                 self._turn_active = False
             raise RpcError(-32603, f"chat/send: 投递失败: {e}")
+        # 记进输入历史（与终端形态同一个文件）。放在投递成功之后：被 busy 拒掉
+        # 的那条从没发给模型，进了历史用户下次按 ↑ 会以为自己问过。
+        # / 开头的命令走上面提前 return 的分支，天然不记（面板的 ↑ 也不在 /
+        # 开头时翻历史，两边一致）。写失败不影响本条消息（append_history 不抛）。
+        append_history(history_path(self._config.paths.data_dir), text)
         return {"accepted": True}
 
     def _m_chat_cancel(self, params: Dict[str, Any]) -> Dict[str, Any]:

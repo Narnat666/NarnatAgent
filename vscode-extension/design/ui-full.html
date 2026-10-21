@@ -82,10 +82,52 @@ body{
   -webkit-font-smoothing:antialiased;overflow:hidden;
 }
 button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;padding:0}
+/* ---------- 焦点框：一律跟随系统主题色 ----------
+   不能让浏览器用默认的 `outline: 1px auto`：webview 里那个 auto 取的是宿主
+   (Chromium) 的系统强调色，深色主题下会画成一圈亮白/纯黑框，与面板完全脱节
+   （实测 --vscode-focusBorder 在预览环境里为空时，按钮聚焦就落到 auto 上）。
+   做法：全局把默认 outline 关掉（只关 outline，不碰 border，布局不变），
+   再由下面各控件用主题色画自己的可见焦点 —— 颜色全部来自 --vscode-focusBorder，
+   主题换什么色这里就是什么色；主题没给这一键时退到同主题派生的 --accent。 */
+button:focus, button:focus-visible,
+a:focus, a:focus-visible,
+[tabindex]:focus, [tabindex]:focus-visible,
+input:focus, input:focus-visible,
+textarea:focus, textarea:focus-visible,
+.palette .item:focus-visible, .pop .pi:focus-visible{
+  outline:none;
+}
+/* 需要"看得见焦点"的地方统一走这一条（键盘用户必须有位置提示）。
+   用 box-shadow 而不是 outline：它有 border-radius 跟随，圆钮上不会画成方框。 */
+button:focus-visible, [tabindex]:focus-visible,
+.think .name:focus-visible, .tools .row:focus-visible, #goalRounds:focus-visible{
+  box-shadow:0 0 0 1px var(--vscode-focusBorder, var(--accent));
+}
 /* container-type：让下面的 @container 查询以面板自身宽度为基准（iframe 宽 = 面板宽） */
 .shell{display:flex;flex-direction:column;height:100%;container-type:inline-size}
 
-/* ---------- 顶栏 ---------- */
+/* ---------- 自绘提示框（替代浏览器原生 title） ----------
+   原生 title 是 Electron 画的系统提示框：直角、灰底、字号/配色全由宿主决定，
+   在 VS Code 深色面板上就是一块突兀的方框，且**不跟随主题变量**（实测被点名
+   「太丑、不跟随主题、很突兀」）。所以改成自己画：
+   · 配色全部取主题（--bg-elev / --line-strong / --fg / --fg-dim）
+   · 6px 圆角、11px 字、单行紧凑、轻微阴影
+   · 定位：默认在元素正上方居中，越界自动翻到下方、左右夹在面板内
+   触发方式：元素上写 data-tip="..."（不要再用 title，否则原生框会一起弹）。
+   注意 attr(data-tip) 会带上 title 的旧语义，所以下面的 JS 会把 title 摘掉。 */
+#tip{
+  position:fixed;z-index:80;display:none;
+  max-width:220px;padding:3px 8px;
+  border-radius:6px;
+  background:var(--vscode-editorHoverWidget-background, var(--bg-elev));
+  color:var(--vscode-editorHoverWidget-foreground, var(--fg));
+  border:1px solid var(--vscode-editorHoverWidget-border, var(--line-strong));
+  box-shadow:0 4px 12px rgba(0,0,0,.28);
+  font-family:var(--font);font-size:11px;line-height:1.5;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  pointer-events:none;user-select:none;
+}
+#tip[data-on="true"]{display:block}
 .bar{
   flex:none;display:flex;align-items:center;gap:10px;
   height:40px;padding:0 16px;border-bottom:1px solid var(--line);
@@ -93,21 +135,48 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;pad
      用户以为复制到了对话内容，粘出来头一段是「Narnat / 已连接后端」。 */
   user-select:none;
 }
-.brand{font-size:12px;font-weight:600;letter-spacing:.04em;flex:none}
+.brand{
+  font-size:12px;font-weight:600;letter-spacing:.04em;flex:none;
+  /* 品牌名比会话名重一档，但不要纯白，免得抢走会话名的注意力 */
+  color:var(--fg);
+}
+/* ---------- 顶栏会话名（胶囊按钮）----------
+   精致化要点（原来是个裸文字块，鼠标移上去只闪一下底色）：
+   · 做成带 1px 主题边框的胶囊，与输入框下方的 .chip 同一套语言
+   · 箭头单独一个 span，开了下拉转 180°（用 transform 而不是换字符，
+     这样动画连续、也不会因字符宽度不同让按钮抖动）
+   · 未保存态（data-unsaved）用虚边框 + 次要色，视觉上就是「还没落到盘上」 */
 .sess{
-  display:flex;align-items:center;gap:6px;
-  font-size:12px;color:var(--fg-dim);
-  padding:2px 6px;border-radius:4px;
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:12px;line-height:16px;color:var(--fg-dim);
+  padding:1px 8px;border-radius:999px;
+  border:1px solid transparent;
   /* 会话名可能很长：允许收缩，溢出由 .branch 省略号处理 */
   min-width:0;max-width:100%;overflow:hidden;
+  transition:border-color .12s, background-color .12s, color .12s;
 }
-.sess:hover{background:var(--bg-hover);color:var(--fg)}
-.sess[data-open="true"]{background:var(--bg-hover);color:var(--fg)}
+.sess:hover{
+  background:var(--bg-hover);color:var(--fg);
+  border-color:var(--line-strong);
+}
+.sess[data-open="true"]{
+  background:var(--bg-hover);color:var(--fg);
+  border-color:var(--line-strong);
+}
 .sess .branch{
   color:var(--fg);
   min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
 .sess[data-open="true"] .branch{color:var(--fg)}
+/* 未保存：虚线边框 + 次要色，一眼看出「这段对话还没存盘」 */
+.sess[data-unsaved="true"]{border-style:dashed;border-color:var(--line-strong)}
+.sess[data-unsaved="true"] .branch{color:var(--fg-dim)}
+/* 箭头：开了下拉转 180°。transform-origin 放中心，别让它绕着字基线转 */
+.sess .dim{
+  flex:none;display:inline-block;font-size:9px;line-height:1;
+  transition:transform .14s ease;transform-origin:50% 50%;
+}
+.sess[data-open="true"] .dim{transform:rotate(180deg)}
 .bar .right{margin-left:auto;display:flex;align-items:center;gap:2px}
 
 /* ---------- 状态行（输入框下方） ---------- */
@@ -117,7 +186,14 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;pad
   /* 11px 而不是 10.5px：等宽字体在小字号下发虚，配上最淡那档颜色就「糊」
      （实测被视觉评估点名）。字号提半档、标签用次要色即可，不必再加深。 */
   font-family:var(--mono);font-size:11px;
-  flex-wrap:wrap;
+  /* 固定单行、绝不折行（原来 flex-wrap:wrap）。
+     折行的后果是「折断」：一旦有值（费用 ¥0.0123、缓存 81%）把这一行撑宽，
+     放不下的项就整体掉到第二行——左边的插件/目标「向右偏移」之后又被甩下去，
+     视觉上像被折断，很丑（实测反馈）。改成 nowrap 后，放不下由下面各级
+     @container 阈值负责**从右到左逐项让位**，而不是靠折行兜底。 */
+  flex-wrap:nowrap;
+  overflow:hidden;
+  white-space:nowrap;
   /* Ctrl+A 不该把顶栏/状态栏的标签一起选进去：用户想复制的是对话内容。
      （实测原来 Ctrl+A 选中 192 个字符，开头是「Narnat / grep-ignore-case…」） */
   user-select:none;
@@ -128,7 +204,36 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;pad
 .status .v{color:var(--fg)}
 .status .sep{color:var(--line-strong)}
 .status .right{margin-left:auto;display:flex;gap:12px}
+/* nowrap 之后没有折行兜底，所以每项都必须能被压缩：
+   · .status > span 与其内部的 k/v 默认 flex-shrink:1，但里面的按钮/文字
+     是 nowrap，实际压不下去 —— 显式 min-width:0 才能让省略号生效。
+   · 模型名（deepseek-v4-pro）、目标模式/插件这些是**可缩写**的：
+     压不下时宁可打省略号，也不要整项被 overflow 裁掉半个字。
+   实测 600px 时不让缩会横向溢出 25px（577 > 552），费用被切掉一截。 */
+.status > span,
+.status .right > span{min-width:0}
+.status .v{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
 .status button.v:hover{color:var(--fg)}
+/* 无值的项：占位符「—」只在「有标签陪着」时显示。
+   规则一句话：宽面板（有「上下文」「费用」这些标签）显示「上下文 —」，
+   读者能读懂「这里以后会有个数字」；一旦窄到标签被让掉，只剩一个孤零零的
+   「—」，它既说明不了是什么、也没有信息量，这时连这一项一起隐藏。
+   所以判据不是「有没有值」而是「有没有值 或 还有标签」——宽窄两种行为都写在
+   容器查询里（见 ≤470px 那段），这里不设全局隐藏规则。
+   历史教训：曾经在这里写死「data-empty 就 display:none」，结果宽面板下刚打开
+   面板时「上下文 / 费用 / 余额」整排都不见了，用户以为功能没了。 */
+/* 状态行抽屉的开关。宽面板完全不存在（全部平铺，没什么可收的）；
+   窄面板才出现，把「思考 / 目标模式 / 插件 / 缓存 / 余额」这些收进抽屉，
+   而不是像以前那样直接 display:none —— 藏掉等于用户既看不到也不知道有这个功能。 */
+.st-toggle{
+  display:none;flex:none;margin-left:8px;
+  font:inherit;font-family:var(--font);font-size:10.5px;line-height:16px;
+  min-width:20px;text-align:center;
+  color:var(--fg-dim);background:transparent;
+  border:1px solid transparent;border-radius:4px;padding:0 5px;cursor:pointer;
+}
+.st-toggle:hover{color:var(--fg);border-color:var(--line-strong)}
+.st-toggle[data-open="true"]{color:var(--accent);border-color:var(--line-strong)}
 
 /* ---------- 主体 ---------- */
 .body{flex:1;display:flex;min-height:0;position:relative}
@@ -535,7 +640,9 @@ body[data-real="true"] .demo-tip{display:none}
 .confirm .acts .primary:hover{background:var(--accent);color:var(--bg)}
 
 /* ---------- 输入区 ---------- */
-.composer{flex:none;padding:10px 24px 10px}
+/* position:relative 是给状态行抽屉用的：窄面板下 .status 绝对定位、bottom:100%
+   向上弹出，需要一个已定位的祖先当参照。少了它就会相对视口定位，抽屉跑到屏幕外。 */
+.composer{flex:none;padding:10px 24px 10px;position:relative}
 .cbox{
   max-width:680px;margin:0 auto;position:relative;
   /* 背景用 input-background（深色 #3C3C3C 对 #1E1E1E 面板底有明显层次，
@@ -587,6 +694,44 @@ body[data-real="true"] .demo-tip{display:none}
 /* 按钮组不参与收缩：宁可省略 chip 文字，也不让「发送」被压成两行 */
 .crow .right{margin-left:auto;flex:none;display:flex;align-items:center;gap:6px}
 
+/* ---------- 历史对话按钮（输入行最左侧）----------
+   它只承担一件事：打开会话列表（点开抽屉）。当前会话名在顶栏已经显示了，
+   这里再重复一遍既占宽度、又让人以为点了会「保存」。
+   所以：纯图标、不显示文字，名字放到 title —— 鼠标停上去才出现。
+   形态与右侧的 ＋ / ↑ 统一成 24px 圆形图标按钮，一行里的控件形状一致。
+
+   图标与配色（实测反馈「太丑、不居中、不显眼」后重做）：
+   · 旧版是「时钟圈 + 指针」，12px 下两笔细描边互相粘连，糊成一坨看不清；
+     现在改成**三条横线 + 一个向左的箭头**（列表/历史的通用符号），
+     笔画只有 3 条直线，12px 下仍然锐利。stroke-width 1.5（旧 1.15）。
+   · 旧版图标色用 var(--fg-dim) 92%、底色 var(--pill)，两者亮度接近，
+     实际对比度只有 1.4:1，看着像"灰块上没有东西"。现在图标用正文前景色，
+     底色用 hover 层，对比度拉到 3:1 以上；悬停时底色再亮一档。
+   · 居中：inline-grid + place-items:center，盒 24×24、padding 0、
+     图标 13×13，几何中心重合（实测两者中心差 0.00px）。 */
+.crow .chip.hist{
+  flex:none;width:24px;height:24px;padding:0;
+  display:inline-grid;place-items:center;
+  border-radius:999px;
+  background:var(--bg-hover);
+  color:var(--fg);
+  /* 会话名不进布局：JS 仍会写进 textContent（renderSessions /
+     applySessionSaved 共 4 处），那些赋值留着做 title 的来源，
+     但不在按钮上占地方（font-size:0 而不是删节点，避免改那些 JS）。 */
+  font-size:0;line-height:0;overflow:visible;
+}
+.crow .chip.hist:hover{background:var(--line);color:var(--fg)}
+.crow .chip.hist::before{
+  content:'';width:13px;height:13px;flex:none;
+  background-color:currentColor;
+  -webkit-mask-repeat:no-repeat;-webkit-mask-position:center;-webkit-mask-size:contain;
+  mask-repeat:no-repeat;mask-position:center;mask-size:contain;
+  /* 列表三横 + 左箭头 = 历史。三条直线在 13px 下不会糊。
+     stroke-width 1.5 是 13px 下的下限：1.2 会在非整数像素上发灰。 */
+  -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cg fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 3h4.2M5 7h7.2M8 11h4.2'/%3E%3Cpath d='M4.6 4.6 2.1 7l2.5 2.4'/%3E%3C/g%3E%3C/svg%3E");
+  mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cg fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 3h4.2M5 7h7.2M8 11h4.2'/%3E%3Cpath d='M4.6 4.6 2.1 7l2.5 2.4'/%3E%3C/g%3E%3C/svg%3E");
+}
+
 /* ---------- 附件（拖拽 / 粘贴 / 选择进来的文件、文件夹、图片） ----------
    只显示「排队的路径」，不展示文件内容：发送时插件把绝对路径写进文本，
    由 AI 自己用 Read/Grep/Glob 去读。
@@ -622,10 +767,12 @@ body[data-real="true"] .demo-tip{display:none}
 .attach-btn{
   flex:none;display:grid;place-items:center;
   width:24px;height:24px;border-radius:999px;
-  background:var(--pill);color:var(--fg-dim);
+  /* 与历史按钮同一套配色：底色用 hover 层、符号用前景色，
+     对比度从原来 fg-dim × pill 的 1.4:1 提到 3:1 以上（实测偏淡看不清）。 */
+  background:var(--bg-hover);color:var(--fg);
   font-size:14px;line-height:1;
 }
-.attach-btn:hover{color:var(--fg);background:var(--bg-hover)}
+.attach-btn:hover{color:var(--fg);background:var(--line)}
 /* 拖拽悬停：只换边框色，不加动画/阴影 */
 .cbox[data-drop="true"]{border-color:var(--vscode-focusBorder,var(--accent))}
 .convo[data-drop="true"]{
@@ -653,6 +800,15 @@ body[data-run="true"] .send{display:none}
 }
 .send:hover{background:var(--vscode-button-hoverBackground,var(--accent))}
 .send .ar{display:block;line-height:1;transform:translateY(-.5px)}
+/* 空输入时发送按钮变暗：一眼能看出「现在按了也没用」，而不是按下去才被忽略。
+   只降饱和度与不透明度，不改尺寸与位置——按钮跳动比颜色不好看更刺眼。
+   只判「有没有字」；运行中这个按钮根本不显示（body[data-run] 换成停止）。 */
+.send[data-empty="true"]{
+  background:var(--pill);
+  color:var(--fg-faint);
+  cursor:default;
+}
+.send[data-empty="true"]:hover{background:var(--pill)}
 .kbd{font-family:var(--mono);font-size:10px;color:var(--fg-faint)}
 
 /* ---------- 命令面板 ---------- */
@@ -674,12 +830,9 @@ body[data-run="true"] .send{display:none}
 .palette .item:hover{background:var(--bg-hover)}
 /* 下拉/候选的键盘选中态（↑↓ 移动时）与鼠标悬停同一视觉 */
 .pop .pi[data-sel="true"],.palette .item[data-sel="true"]{background:var(--bg-hover)}
-/* 可聚焦的标题行/按钮要有可见焦点：VSCode 里 outline:none 且无替代高亮
-   等于「键盘用户不知道焦点在哪」（实测 #goalRounds 完全看不见） */
-.think .name:focus-visible,.tools .row:focus-visible,
-#goalRounds:focus-visible,.status button:focus-visible{
-  outline:1px solid var(--accent);outline-offset:1px;
-}
+/* 可聚焦的标题行/按钮要有可见焦点（规则在文件顶部统一处理：用主题色
+   box-shadow 而不是浏览器默认的 auto outline —— 后者在 webview 里会画成
+   一圈与面板脱节的亮白/纯黑框，实测被点名为「白框太丑」）。 */
 .palette .item .c{
   font-family:var(--mono);font-size:11.5px;color:var(--fg);flex:none;
   /* 名字列宽度按内容给，但**不超过**一个上限。
@@ -971,9 +1124,204 @@ body[data-run="true"] .send{display:none}
    只处理真正会溢出的 .composer/.cbox/.crow/.bar/.status；
    .arg/.snippet/.cmdout 的溢出是设计如此（省略号/横向滚动），不在此列。 */
 
-/* 620px：先让掉纯参考值，控件一个不动。 */
-@container (max-width:620px){
-  .status .st-cache,.status .st-bal{display:none}
+/* ---------- 状态行：随宽度一级一级退让（不是一刀切） ----------
+   面板从宽到窄的完整退化路径，每级只让掉「真的放不下」的那一点：
+
+     >600px  8 项全显示（标签 + 值）
+     600     让掉最右的 余额
+     560     让掉 费用
+     540     让掉 缓存
+     470     让掉标签，只留值（「模型」二字省掉，deepseek-flash 自己会说话）；
+             上下文整项走（有无值一样），无值的其余项同档撤掉
+     380     值换成图标 —— 图标 12px、按钮 20px，比任何文字都窄，
+             换来 5 项同时可见（换成文字只放得下 3 项）
+     250     让掉 目标 / 插件 图标
+     200     只剩最核心的 模型 / 思考 / 费用 + ⋯
+
+   注意 600/560/540/470 这几档**不区分有值无值**：阈值只看「放不放得下」，
+   不看「有没有数字」。曾经给有值另开一套（缓存 560/费用 540 加了
+   [data-empty] 限定），结果余额一从「—」变成真数字，整排的消失位置就错位了
+   ——用户拖窄窗口时能直接看出两套逻辑在打架。
+
+   为什么用图标而不是直接藏：藏掉的功能用户既看不见也不知道存在
+   （上一版 400px 以下目标模式与插件直接消失，界面上一点线索都没有）。
+   图标虽然小，但仍可点、仍能看出开关状态（开启时用强调色）。
+   判据统一带 :not([data-open="true"]) 前缀：抽屉展开后空间由浮层提供，
+   这时要显示完整文字，不能连详情里都还是图标。 */
+/* ---------- 统计四项：从右到左逐级让位，有值 / 无值同一套阈值 ----------
+   显示顺序固定为「上下文 · 缓存 · 费用 · 余额」（见 .right 的 DOM 顺序），
+   所以收窄时严格从最右端开始一个一个退。
+
+   **阈值必须按「有值」的那种最宽形态来定**，因为 .status 是 nowrap、
+   不再靠折行兜底：只要还留着一项，它就必须真的放得下，否则会被 overflow
+   裁掉一截（实测 700px 时整排 675 > 可用 652，余额被切掉）。
+
+   有值实测宽度（680px 上限的容器里，四处标签都在）：
+     模型/思考/目标/插件 约 300px，四项统计约 230px，加分隔与间距合计 ≈675px
+   所以：
+     700  余额还放得下（675 < 680）—— 让它留到 600 会溢出，故这里就开始让
+     601  只掉余额
+     560  掉费用
+     540  掉缓存
+     470  掉上下文（这一档标签也刚被让掉）
+
+   有值 / 无值共用上面这套阈值。原来的错法：给「有值」另开一套（缓存 560 就走，
+   费用加了 [data-empty] 限定而永不隐藏）。后果是同一个面板在余额从「—」变成
+   「¥10134.64」之后，整排的消失位置全错位——用户把窗口慢慢拖窄，会发现
+   「刚才这个宽度还有费用，现在没了」，两套逻辑打架。 */
+@container (max-width:700px){
+  .status:not([data-open="true"]) .st-bal{display:none}
+}
+@container (max-width:560px){
+  .status:not([data-open="true"]) .st-cost{display:none}
+}
+@container (max-width:540px){
+  .status:not([data-open="true"]) .st-cache{display:none}
+}
+
+/* 470px：去标签，只留值。
+   注意：标签一没，「—」这种占位就再也说明不了自己是什么（见下面那条规则）。 */
+@container (max-width:470px){
+  .status:not([data-open="true"]) .k{display:none}
+}
+
+/* ≤470px：标签已被让掉 → 上下文整项隐藏，**同样不区分有无值**。
+   为什么连有值的也一起藏：470 以下标签没了，「4%」是个没有说明的数字，
+   读者看不出它是什么；而且留着它就等于给上下文单开一套阈值
+   （有值留到 300、无值 470 就走），整排的退让顺序就不成立了。
+   相邻的「·」必须一起走，否则屏幕上留下悬空的点。 */
+@container (max-width:470px){
+  .status:not([data-open="true"]) .st-ctx{display:none}
+}
+
+/* ≤470px：其余无值项整项隐藏（不留孤零零的「—」）。
+   **只在窄面板生效**：宽面板有标签，「模型 —」是可读的（"这里以后会有值"），
+   不该藏——宽面板藏掉会让用户以为功能没了（上一版就是这么错的）。
+   模型/思考/插件由 watchStatusValues 的 MutationObserver 维护 data-empty。 */
+@container (max-width:470px){
+  .status:not([data-open="true"]) :is(.st-model,.st-think,.st-opt)[data-empty="true"]{display:none}
+  .status:not([data-open="true"]) :is(.st-model,.st-think,.st-opt)[data-empty="true"] + .sep{display:none}
+}
+
+/* ---------- 380px：值 → 图标 ----------
+   图标一律用 mask + currentColor 画：主题色、悬停色、开启高亮全都自动跟随，
+   不像内联 SVG 那样要为每套主题各准备一份。文字用 font-size:0 隐去，
+   DOM 节点与 textContent 原样保留 —— JS 里 20 多处 textContent=... 的赋值
+   因此完全不用改（用 span 包文字则每一处都得跟着改）。 */
+@container (max-width:380px){
+  .status{flex-wrap:nowrap;gap:6px;overflow:hidden;white-space:nowrap}
+  /* span 设成 flex：默认它是块级 flex item，里面 20px 的图标按钮会生成一个
+     行盒，行高 18.7 把 span 撑到 23px（实测），整行 31px 里有 3px 是白撑的。
+     flex 化后没有行盒，span 高 = 按钮高 20px，整行 28px。
+     .right 里面那四项（上下文/缓存/费用/余额）不是 .status 的直接子元素，
+     必须单独写一条，否则它们仍是 23px、把整行又撑回 31px（实测漏过一次）。 */
+  .status > span{white-space:nowrap;display:flex;align-items:center}
+  .status .right > span{display:flex;align-items:center}
+  .st-toggle{display:inline-flex;align-items:center}
+  .status:not([data-open="true"]) .sep{display:none}
+  .status .right{gap:6px;flex:none}
+
+  .status:not([data-open="true"]) .v{
+    font-size:0;line-height:0;overflow:hidden;
+    display:inline-flex;align-items:center;justify-content:center;
+    width:20px;height:20px;padding:0;border-radius:4px;
+  }
+  .status:not([data-open="true"]) .v::before{
+    content:'';width:12px;height:12px;flex:none;
+    background-color:currentColor;
+    -webkit-mask-repeat:no-repeat;-webkit-mask-position:center;-webkit-mask-size:contain;
+    mask-repeat:no-repeat;mask-position:center;mask-size:contain;
+  }
+  /* 芯片 = 模型 */
+  .status:not([data-open="true"]) #btnModel::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3.2' y='3.2' width='5.6' height='5.6' rx='1'/%3E%3Cpath d='M4.6 3.2V1.7M7.4 3.2V1.7M4.6 10.3V8.8M7.4 10.3V8.8M3.2 4.6H1.7M3.2 7.4H1.7M10.3 4.6H8.8M10.3 7.4H8.8'/%3E%3C/g%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3.2' y='3.2' width='5.6' height='5.6' rx='1'/%3E%3Cpath d='M4.6 3.2V1.7M7.4 3.2V1.7M4.6 10.3V8.8M7.4 10.3V8.8M3.2 4.6H1.7M3.2 7.4H1.7M10.3 4.6H8.8M10.3 7.4H8.8'/%3E%3C/g%3E%3C/svg%3E");
+  }
+  /* 灯泡 = 思考强度 */
+  .status:not([data-open="true"]) #btnThink::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 1.7a3.05 3.05 0 0 0-1.82 5.5v1.2h3.64V7.2A3.05 3.05 0 0 0 6 1.7Z'/%3E%3Cpath d='M4.8 10.2h2.4'/%3E%3C/g%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 1.7a3.05 3.05 0 0 0-1.82 5.5v1.2h3.64V7.2A3.05 3.05 0 0 0 6 1.7Z'/%3E%3Cpath d='M4.8 10.2h2.4'/%3E%3C/g%3E%3C/svg%3E");
+  }
+  /* 靶心 = 目标模式 */
+  .status:not([data-open="true"]) #btnGoal::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15'%3E%3Ccircle cx='6' cy='6' r='4.4'/%3E%3Ccircle cx='6' cy='6' r='1.7'/%3E%3C/g%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15'%3E%3Ccircle cx='6' cy='6' r='4.4'/%3E%3Ccircle cx='6' cy='6' r='1.7'/%3E%3C/g%3E%3C/svg%3E");
+  }
+  /* 插头 = 插件工具 */
+  .status:not([data-open="true"]) #btnPlugin::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.2 1.8v2.6M7.8 1.8v2.6'/%3E%3Cpath d='M3.4 4.4h5.2v2.2a2.6 2.6 0 0 1-5.2 0V4.4Z'/%3E%3Cpath d='M6 9.2v1.3'/%3E%3C/g%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.2 1.8v2.6M7.8 1.8v2.6'/%3E%3Cpath d='M3.4 4.4h5.2v2.2a2.6 2.6 0 0 1-5.2 0V4.4Z'/%3E%3Cpath d='M6 9.2v1.3'/%3E%3C/g%3E%3C/svg%3E");
+  }
+  /* 柱状占比 = 上下文。
+     注意：上下文在 ≤470px 就整项隐藏了（见上面那条），所以这段图标规则
+     实际只服务 ≥470px 的场景 —— 那时值显示为文字而非图标。保留它是为了让
+     mask 定义与其余图标放在一处，避免以后调整隐藏阈值时又要回来补。 */
+  .status:not([data-open="true"]) #ctxPct::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.3' stroke-linecap='round'%3E%3Cpath d='M2.6 9.4V6.6M5.2 9.4V3.4M7.8 9.4V5.6M10.4 9.4V7.8'/%3E%3C/g%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.3' stroke-linecap='round'%3E%3Cpath d='M2.6 9.4V6.6M5.2 9.4V3.4M7.8 9.4V5.6M10.4 9.4V7.8'/%3E%3C/g%3E%3C/svg%3E");
+  }
+  /* 人民币符号 = 费用 */
+  .status:not([data-open="true"]) #costV::before{
+    -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.7 2.2 6 6.1l3.3-3.9M2.9 6.8h6.2M2.9 9h6.2M6 6.1v4.1'/%3E%3C/g%3E%3C/svg%3E");
+    mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.7 2.2 6 6.1l3.3-3.9M2.9 6.8h6.2M2.9 9h6.2M6 6.1v4.1'/%3E%3C/g%3E%3C/svg%3E");
+  }
+  /* 开关类图标用强调色表态：开着 = accent，关着 = 与其他图标同色。
+     只看图标时，这是唯一能看出「目标模式现在开着没有」的线索。 */
+  .status:not([data-open="true"]) #btnGoal[data-on="true"],
+  .status:not([data-open="true"]) #btnPlugin[data-on="true"]{color:var(--accent)}
+  .status:not([data-open="true"]) #btnGoal[data-on="true"]::before,
+  .status:not([data-open="true"]) #btnPlugin[data-on="true"]::before{
+    background-color:var(--accent);
+  }
+  /* 图标档里「无值项」的隐藏已由上面 ≤470px 那条统一处理（含 380px 以下），
+     这里不再重复写：两处规则并存时，改一处忘一处就会出现「宽窄行为不一致」。 */
+}
+
+/* 300px：原先这里让掉「上下文 图标」。现在上下文在 ≤470px 已整项隐藏
+   （有无值都一样），这条永远不会命中，故删除，避免留下一条读不出效果的规则。 */
+
+/* 250px：让掉 目标 / 插件 图标（两者都有 /goal、/plugin 命令等价入口） */
+@container (max-width:250px){
+  .status:not([data-open="true"]) .st-opt{display:none}
+}
+
+/* 200px：只剩最核心的三样。再窄连图标也放不下时，全部收进 ⋯ */
+@container (max-width:200px){
+  .status:not([data-open="true"]) .st-think{display:none}
+}
+
+/* ---------- 抽屉浮层（展开态）----------
+   宽度 ≤380px 时状态行已经被压成图标行，用户想看具体数值就得展开。
+   展开态**不参与**上面的图标化：白字、完整标签、可点，空间由浮层自己提供。
+   用绝对定位而不是把状态行撑成多行：状态行脱离文档流后 .composer 变矮、
+   .body 相应变高，输入框仍贴底；JS 里用 padding-bottom 补回这段高度，
+   点开/收起时输入框不会跳（实测 306→306，位移 0）。 */
+@container (max-width:380px){
+  .status[data-open="true"]{
+    position:absolute;left:0;right:0;bottom:100%;margin-bottom:6px;
+    flex-wrap:wrap;row-gap:8px;gap:12px;white-space:normal;
+    max-height:40vh;overflow-y:auto;overscroll-behavior:contain;
+    background:var(--bg-elev);border:1px solid var(--line-strong);border-radius:8px;
+    padding:9px 11px;box-shadow:0 10px 28px rgba(0,0,0,.45);z-index:55;
+    font-size:11px;line-height:normal;
+  }
+  /* 展开态把字恢复：上面为了图标化把 .v 压成了 font-size:0 */
+  .status[data-open="true"] .v{
+    font-size:11px;line-height:normal;overflow:visible;
+    display:inline;width:auto;height:auto;padding:0;border-radius:0;
+  }
+  .status[data-open="true"] .v::before{content:none}
+  .status[data-open="true"] .k{display:inline}
+  .status[data-open="true"] .sep{display:inline}
+  .status[data-open="true"] .st-cache,
+  .status[data-open="true"] .st-bal,
+  .status[data-open="true"] .st-ctx,
+  .status[data-open="true"] .st-opt,
+  .status[data-open="true"] .st-think{display:inline}
+  /* 展开后 .right 不再自成一组：让四项直接参与父级换行，
+     否则它们会被 margin-left:auto 整体推到最后一行单独成行。 */
+  .status[data-open="true"] .right{display:contents}
+  .status[data-open="true"] .st-toggle{margin-left:auto}
 }
 
 /* 520px：收内边距 */
@@ -987,14 +1335,18 @@ body[data-run="true"] .send{display:none}
   .msg.sys-note .text{margin-left:-6px}
 }
 
-/* 400px：输入框下方按钮行允许换行，路径 chip 与次要控件让位 */
+/* 400px：输入框下方按钮行允许换行
+   （路径 chip 与状态行的让位已交给各自的专门档位，这里不再重复 hide：
+   重复写会让 460px 的路径隐藏被提前到 400px 之外的地方，两处规则打架） */
 @container (max-width:400px){
   .composer{padding:8px 8px}
   .convo{padding:16px 8px 8px}
-  .crow{flex-wrap:wrap;row-gap:4px}
-  .crow .chip.path{display:none}
-  /* 只让位于有 /goal、/plugin 命令等价入口的控件；思考档位最常看，始终保留 */
-  .status .st-opt{display:none}
+  /* 原来这里是 .crow{flex-wrap:wrap}：窄面板下历史按钮会被挤到第二行、
+     叠到「＋附件 / 发送」的上面，看着像折断了（实测反馈「历史按钮会折叠到
+     上传文件和发送按键的上面，很丑」）。输入行**永远保持单行**：
+     空间不够时按下面的档位让位（路径 460 先走、历史按钮最后仍保留），
+     而不是靠折行把控件堆起来。 */
+  .crow{flex-wrap:nowrap;min-width:0}
   .sess .cnt{display:none}
   .bar{padding:0 8px;gap:8px}
   /* 同 520 那条：8px 内边距下把落点补回 x=6 */
@@ -1008,29 +1360,40 @@ body[data-run="true"] .send{display:none}
 /* 340px：再让一轮。
    真实默认面板只有约 249px 可用宽（webview 视口 289 减 IDE 两侧内边距），
    这个断点在默认布局下就会命中 —— 所以这里只让「真的放不下」的东西。
-   · 键位提示：本来就是给新手的，老手不需要
-   · 费用的「费用」二字：「¥0.0123」本身已经说明是钱，标签可以省
-   注意「费用」这一项绝不能整体藏掉：它是用户最关心的数字（花了多少），
-   .status 本来就会 flex-wrap 换行，藏掉换不来任何布局好处，只换来「看不到」。 */
+   注意「费用」这一项绝不能整体藏掉：它是用户最关心的数字（花了多少）。
+   状态行到这里已经是图标态，标签早在 470px 就统一让掉了，不再单独处理。 */
 @container (max-width:340px){
-  .crow .kbd{display:none}
-  .status .st-cost .k{display:none}
   /* 正文再收一点内边距（竖线落点仍由上面两条 margin 规则保持 x=6） */
   .msg.sys-note .text{padding-left:10px}
+}
+
+/* ---------- 输入行：路径先让，历史按钮不收 ----------
+   .crow 里有两组东西：历史按钮 + 工作目录 chip、右侧图标按钮组。
+   收窄时按「信息价值」让位，而不是一起挤：
+     460px  工作目录路径直接消失 —— 它是纯参考信息，看一次就够了；
+            历史按钮要能点、按钮组要用，两者都不该先让。
+   历史按钮本身就是 24px 图标按钮，没有再可收的东西，所以这里不再分档。
+   （上一版给它加了「文字→图标」两档，文字其实是会话名，而会话名已在顶栏，
+     这里重复显示反而让人误以为它是「保存」。） */
+@container (max-width:460px){
+  .crow .chip.path{display:none}
 }
 </style>
 </head>
 <body data-run="false">
+<div id="tip" data-on="false"></div>
 <div class="shell">
 
   <!-- 顶栏。会话名留空：真实值由 initialize / session/list 填，
        这里不写任何演示会话名（写了会在握手前闪一下别人的会话）。 -->
   <header class="bar">
     <div class="brand">Narnat</div>
-    <button class="sess" id="sessBtn">
+    <button class="sess" id="sessBtn" data-unsaved="true">
       <span class="branch"></span>
       <span class="cnt"></span>
-      <span class="dim">▾</span>
+      <!-- 箭头默认朝上（收起态），展开时 CSS 转 180° 变朝下。
+           用 ▴/▾ 两套字符的话，两者字形宽度略有差异，切换时按钮会横向抖一下。 -->
+      <span class="dim">▴</span>
     </button>
   </header>
 
@@ -1075,36 +1438,40 @@ body[data-run="true"] .send{display:none}
       <textarea id="input" rows="1" placeholder=""></textarea>
 
       <div class="crow">
-        <span class="chip mono" id="chipSess"></span>
+        <span class="chip mono hist" id="chipSess" data-tip="历史对话" role="button" tabindex="0"></span>
         <!-- 工作目录：这只是占位。真实态由 initialize 的 params.workdir 覆盖
              （见 applyInitialize）。占位不用任何真实路径——写死一个具体机器的目录，
              换台机器/换个位置的人会以为那是自己的目录，而实际工作目录在别处。 -->
         <span class="chip mono path">工作目录</span>
         <div class="right">
-          <button class="attach-btn" id="attachBtn" title="添加文件 / 文件夹 / 图片" aria-label="添加附件">＋</button>
-          <span class="kbd">Enter 发送</span>
-          <button class="stop" id="stopBtn" title="停止" aria-label="停止"><span class="sq"></span></button>
-          <button class="send" id="sendBtn" title="发送（Enter）" aria-label="发送"><span class="ar">↑</span></button>
+          <button class="attach-btn" id="attachBtn" data-tip="添加附件" aria-label="添加附件">＋</button>
+          <button class="stop" id="stopBtn" data-tip="停止" aria-label="停止"><span class="sq"></span></button>
+          <button class="send" id="sendBtn" data-tip="发送" aria-label="发送" data-empty="true"><span class="ar">↑</span></button>
         </div>
       </div>
     </div>
 
     <!-- 状态行。初值一律留空/占位符：真实值由 initialize 的 model/thinking/goal/
          plugins 与 stats 通知填写。写死演示值会在握手前闪出别人的模型名与花费。 -->
-    <div class="status">
-      <span class="st-core"><span class="k">模型</span> <button class="v" id="btnModel">—</button></span>
+    <div class="status" id="statusBar" data-open="false">
+      <span class="st-core st-model"><span class="k">模型</span> <button class="v" id="btnModel" data-tip="切换模型">—</button></span>
       <span class="sep">·</span>
-      <span class="st-core"><span class="k">思考</span> <button class="v" id="btnThink">—</button></span>
+      <!-- st-think：窄面板收起态把它一起收进抽屉（见 .st-toggle 那段 CSS） -->
+      <span class="st-core st-think"><span class="k">思考</span> <button class="v" id="btnThink" data-tip="思考强度">—</button></span>
       <span class="sep st-opt">·</span>
-      <span class="st-opt"><button class="v" id="btnGoal">目标模式 关</button></span>
+      <span class="st-opt"><button class="v" id="btnGoal" data-tip="目标模式">目标模式 关</button></span>
       <span class="sep st-opt">·</span>
-      <span class="st-opt"><button class="v" id="btnPlugin">插件 —</button></span>
+      <span class="st-opt"><button class="v" id="btnPlugin" data-tip="插件开关">插件 —</button></span>
       <div class="right">
-        <span class="st-core"><span class="k">上下文</span> <span class="v" id="ctxPct">—</span></span>
-        <span class="st-info st-cache"><span class="k">缓存</span> <span class="v">—</span></span>
-        <span class="st-info st-cost"><span class="k">费用</span> <span class="v" id="costV">—</span></span>
-        <span class="st-info st-bal"><span class="k">余额</span> <span class="v">—</span></span>
+        <span class="st-core st-ctx" data-empty="true"><span class="k">上下文</span> <span class="v" id="ctxPct" data-tip="上下文占用">—</span></span>
+        <span class="st-info st-cache" data-empty="true"><span class="k">缓存</span> <span class="v" data-tip="缓存命中率">—</span></span>
+        <span class="st-info st-cost" data-empty="true"><span class="k">费用</span> <span class="v" id="costV" data-tip="累计费用">—</span></span>
+        <span class="st-info st-bal" data-empty="true"><span class="k">余额</span> <span class="v" data-tip="账户余额">—</span></span>
       </div>
+      <!-- 抽屉开关：只有窄到开始丢图标时才出现。点开把收起来的项一次性摊在浮层里。 -->
+      <button class="st-toggle" id="stToggle" data-open="false"
+              data-tip="状态详情" aria-label="状态详情"
+              aria-expanded="false" aria-controls="statusBar">⋯</button>
     </div>
   </footer>
 
@@ -1306,12 +1673,43 @@ body[data-run="true"] .send{display:none}
   }
 
   /**
-   * 写剪贴板。VSCode webview 里 navigator.clipboard 多数情况可用，
-   * 但它要求安全上下文——预览/降级宿主里可能没有，所以保留 execCommand 兜底，
-   * 否则复制按钮在里面就是个点了没反应的死按钮。
+   * 走宿主的剪贴板写入。真正的 VSCode 面板里只有这条路可靠：
+   * webview 是沙箱 iframe，navigator.clipboard 在部分宿主/权限策略下会以
+   * NotAllowedError（"Document is not focused" 等）拒绝，而 Promise 一拒，
+   * 按钮就成了「点了没反应的摆设」（用户实测反馈）。
+   * vscode.env.clipboard 是官方 API，不受 iframe 权限影响。
+   * 带回执：写失败要如实显示「复制失败」，不能骗用户已复制。
    */
-  function copyText(text) {
-    var s = String(text === undefined || text === null ? '' : text);
+  var clipSeq = 0;
+  var clipWaiters = {};
+  function copyViaHost(text) {
+    return new Promise(function (resolve, reject) {
+      var id = ++clipSeq;
+      var timer = setTimeout(function () {
+        delete clipWaiters[id];
+        reject(new Error('host clipboard timeout'));
+      }, 1500);
+      clipWaiters[id] = function (ok) {
+        clearTimeout(timer);
+        ok ? resolve() : reject(new Error('host clipboard failed'));
+      };
+      post('clipboard/write', { text: text, id: id });
+    });
+  }
+  /** 宿主回执：clipboard/written {id, ok} */
+  function onClipboardWritten(p) {
+    var id = p && p.id;
+    var cb = clipWaiters[id];
+    if (!cb) return;
+    delete clipWaiters[id];
+    cb(p.ok === true);
+  }
+
+  /**
+   * 在 webview 内部自己写剪贴板（无宿主时用：预览页、回放测试）。
+   * navigator.clipboard 要求安全上下文，没有就退到 execCommand。
+   */
+  function copyTextLocal(s) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       return navigator.clipboard.writeText(s);
     }
@@ -1327,6 +1725,20 @@ body[data-run="true"] .send{display:none}
       document.body.removeChild(ta);
       ok ? resolve() : reject(new Error('execCommand copy failed'));
     });
+  }
+
+  /**
+   * 写剪贴板（复制按钮共用）。
+   * 真实面板优先走宿主；宿主不可用或失败时再退回 webview 内部实现，
+   * 保证「预览/回放」这类没有宿主的场景仍然能复制。
+   */
+  function copyText(text) {
+    var s = String(text === undefined || text === null ? '' : text);
+    if (!s) return Promise.reject(new Error('nothing to copy'));
+    if (vscodeApi) {
+      return copyViaHost(s).catch(function () { return copyTextLocal(s); });
+    }
+    return copyTextLocal(s);
   }
 
   /* 鼠标选中 → 右键「复制」拿不到内容的问题。
@@ -2370,12 +2782,11 @@ body[data-run="true"] .send{display:none}
     inp.addEventListener('pointerdown', closeOnFocus);
   })();
 
-  /* 顶栏会话名：点了开「子会话」下拉，不再开会话抽屉（抽屉入口在输入行的会话名 chip）。
-     未保存（游离态）时没有会话，子会话无从谈起 —— 直接不弹。
-     有名字就弹：有子会话列出来，没有就写「无子会话」。 */
+  /* 顶栏会话名：点了开「子会话」下拉，不再开会话抽屉（抽屉入口在输入行的历史按钮）。
+     未保存（游离态）时没有子会话，但**下拉照样要开**：里面写「还未保存」，
+     否则按钮点下去毫无反应、箭头也不翻，用户只会以为它坏了。 */
   sessBtnEl.addEventListener('click', function(e){
     e.stopPropagation();
-    if (!CUR) return;
     renderChildPop();
     showPop(sessBtnEl, 'popChild');
   });
@@ -2439,7 +2850,37 @@ body[data-run="true"] .send{display:none}
     input.style.overflowY = input.scrollHeight > max ? 'auto' : 'hidden';
   }
 
+  /**
+   * 发送按钮的「空/有字」外观。
+   *
+   * 空输入时按钮变暗：一眼看出「现在按了也没用」，而不是按下去才被无声忽略。
+   * 只改颜色（data-empty → CSS），不改尺寸/位置：按钮跳动比颜色不好看更刺眼。
+   * 只判有没有字；运行中这个按钮本身是隐藏的（body[data-run] 换成停止按钮）。
+   */
+  function refreshSendState(){
+    var b = document.getElementById('sendBtn');
+    if (!b) return;
+    b.setAttribute('data-empty', input.value.trim() ? 'false' : 'true');
+  }
+  /* 让「发完就清空」这类程序化改动也走同一条路：直接写 input.value 不会触发
+     input 事件，发送按钮就会停在亮态（看着像「还能再发一条」）。原来是在两处
+     手动补调 refreshSendState()，容易漏；这里从源头兜住，新增清空点不必记得补。 */
+  (function watchInputValue(){
+    var desc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+    if (!desc || !desc.set) return;   // 环境不支持就退回手动调用，不抛错
+    Object.defineProperty(input, 'value', {
+      configurable: true,
+      get: function () { return desc.get.call(this); },
+      set: function (v) {
+        desc.set.call(this, v);
+        refreshSendState();
+      }
+    });
+  })();
+
   input.addEventListener('input', autoGrowInput);
+  input.addEventListener('input', refreshSendState);
+  refreshSendState();
   // 面板宽度变化时占位符可能从一行变两行（或反过来），
   // 只在 input 事件里调是跟不上的。
   window.addEventListener('resize', function () { autoGrowInput(); });
@@ -2519,12 +2960,12 @@ body[data-run="true"] .send{display:none}
       var n = document.createElement('span');
       n.className = 'n';
       n.textContent = a.name || a.path;
-      n.title = a.path || '';
+      n.setAttribute('data-tip', a.path || '');
       el.appendChild(n);
       var x = document.createElement('button');
       x.className = 'x';
       x.type = 'button';
-      x.title = '移除';
+      x.setAttribute('data-tip', '移除');
       x.textContent = '×';
       x.addEventListener('click', function(){
         ATCH = ATCH.filter(function(it){ return it.id !== a.id; });
@@ -2841,7 +3282,7 @@ body[data-run="true"] .send{display:none}
       var n = document.createElement('span');
       n.className = 'n';
       n.textContent = String(p).split(/[\\/]/).pop() || p;
-      n.title = p;
+      n.setAttribute('data-tip', p);
       el.appendChild(n);
       box.appendChild(el);
       atchThumbOf(p, function(url){
@@ -2857,15 +3298,78 @@ body[data-run="true"] .send{display:none}
     return box;
   }
 
+  /**
+   * 状态行「这一项有没有真值」的统一维护。
+   *
+   * 模型 / 思考 / 插件 三项没有 data-empty 属性（它们的值是按钮文字，被 14 处
+   * JS 直接赋值），所以在窄面板（470~381px，标签已让掉）会出现一个孤零零的
+   * 「—」或「插件 —」。逐个改那 14 处赋值太容易漏，这里用 MutationObserver
+   * 盯着这几个按钮的文本：一变更就把 data-empty 标到外层那一项上，
+   * 隐藏规则交给 CSS（见 @container 470~381px 那段）。
+   *
+   * 「没真值」的判定：文本为空、或等于占位符（「—」/「插件 —」）。
+   * 只 observer 这几个节点，开销与状态行更新频率同级（每轮几次）。
+   */
+  function watchStatusValues() {
+    var targets = [
+      { id: 'btnModel', empty: function (t) { return !t || t === '—' || t === '-'; } },
+      { id: 'btnThink', empty: function (t) { return !t || t === '—' || t === '-'; } },
+      { id: 'btnPlugin', empty: function (t) {
+        return !t || /^插件\s*(—|-)?$/.test(t) || t === '插件';
+      } },
+      { id: 'btnGoal', empty: function (t) { return !t || t === '目标模式 —'; } }
+    ];
+    targets.forEach(function (t) {
+      var btn = document.getElementById(t.id);
+      if (!btn) return;
+      var box = btn.closest('.st-core, .st-opt, .st-think') || btn.parentNode;
+      function sync() {
+        var txt = (btn.textContent || '').trim();
+        box.setAttribute('data-empty', t.empty(txt) ? 'true' : 'false');
+      }
+      sync();
+      try {
+        new MutationObserver(sync).observe(btn, {
+          childList: true, characterData: true, subtree: true
+        });
+      } catch (err) { /* 没有 MutationObserver 就退回只在初始化时判一次 */ }
+    });
+  }
+  watchStatusValues();
+
+  /**
+   * 写输入行最左侧那个「历史对话」按钮。
+   * 按钮本身不显示文字（纯图标，会话名在顶栏已经有了），名字放进 title：
+   * 鼠标停上去才出现。JS 里原有的那几处赋值统一走这里，就不会出现
+   * 「名字变了但 title 还是旧的」——title 是用户唯一能看到名字的地方，
+   * 过期等于说谎。
+   * @param {string} name 会话名；空串 = 未保存
+   */
+  function setChipSess(name) {
+    var el = document.getElementById('chipSess');
+    if (!el) return;
+    var n = String(name == null ? '' : name);
+    el.textContent = n;
+    // 提示文案要精简：原生框时代这里塞了「历史对话 · 当前：xxx（点击打开会话列表）」
+    // 三段话，框又长又丑。现在只留「历史对话」，当前会话名交给 aria-label
+    // （读屏软件仍能念出完整信息，视觉上不占地方）。
+    el.setAttribute('data-tip', '历史对话');
+    el.setAttribute('aria-label', '历史对话，当前 ' + (n || '未保存') + '，点击打开会话列表');
+  }
+
   /* ---------- 输入历史（上下键调出） ----------
-     HIST 是「按 ↑ 能翻到的提问」列表，最旧在前。两个来源：
-     ① 本次面板生命周期内发出的（pushHistory）；
-     ② 后端历史里 role=user 的消息（seedHistory）—— 重载窗口、切会话、
-        重启后端之后 ① 是空的，只靠它的话按 ↑ 什么都翻不到，
-        而用户明明刚在这个会话里问过一堆问题。
+     HIST 是「按 ↑ 能翻到的提问」列表，最旧在前。来源有三个：
+     ① 磁盘上的全局历史（initialize 的 inputHistory，与终端形态同一个
+        `<data_dir>/.narnat_history`）—— 关掉 VSCode、重连后端都还在，
+        单独存一份 HIST_PERSIST，因为 initialize 会重复到达且要幂等；
+     ② 当前会话里 role=user 的消息（seedHistory 传进来的 msgs）；
+     ③ 本次面板生命周期内发出的（pushHistory，只活在内存里）。
+     换会话、新建对话**不再清空**：用户要的是「我上次问过的都能 ↑ 翻回来」，
+     而不是「只有当前会话的提问」。旧设计（换会话后旧会话的提问不该出现）已废弃。
      只放用户真正打的文字：目标模式注入的内部指令（`[自动续跑]…`）
      不是用户输入，翻出来会让他以为自己说过那句话。 */
   var HIST = [];          // 已提交的输入，最旧在前
+  var HIST_PERSIST = [];  // 磁盘全局历史（后端 inputHistory），最旧在前
   var HIST_MAX = 100;
   var histIdx = -1;       // -1 = 不在浏览历史（正在打新的）
   var histDraft = '';     // 开始浏览前正在打的内容，↓ 回到这里
@@ -2883,26 +3387,48 @@ body[data-run="true"] .send{display:none}
   }
 
   /**
-   * 用后端历史消息重建 HIST。
-   *
-   * 只在「拿到一份完整历史」时调用（initialize 的 session.messages、
-   * sessionSwitch/sessionDone 的 messages）。整份替换而不是追加：
-   * 换会话后旧会话的提问不该出现在新会话的 ↑ 里。
-   * @param {Array} msgs 后端历史（role/text）
+   * 合并「全局历史 + 本次传入的会话消息」→ 新的 HIST。
+   * 规则：同一文本只留一份（位置靠后的胜出）、保持最旧在前、超长从头截。
+   * 一次遍历从尾往头去重，避免二次拼接把顺序弄错。
    */
-  function seedHistory(msgs){
-    if (!Array.isArray(msgs)) return;
-    var list = [];
-    msgs.forEach(function(m){
+  function mergeHistory(persist, msgs){
+    var out = [];
+    (persist || []).forEach(function(t){
+      var s = String(t == null ? '' : t).trim();
+      if (s) out.push(s);
+    });
+    (msgs || []).forEach(function(m){
       if (!m || m.role !== 'user') return;
       var t = String(m.text == null ? '' : m.text).trim();
       if (!t) return;
       if (isGoalInjection(t)) return;      // 内部注入的指令不算用户提问
-      if (list.length && list[list.length - 1] === t) return;
-      list.push(t);
+      out.push(t);
     });
-    if (list.length > HIST_MAX) list = list.slice(-HIST_MAX);
-    HIST = list;
+    var seen = [];
+    var rev = [];
+    for (var i = out.length - 1; i >= 0; i--) {
+      if (seen.indexOf(out[i]) >= 0) continue;
+      seen.push(out[i]);
+      rev.push(out[i]);
+    }
+    rev.reverse();
+    if (rev.length > HIST_MAX) rev = rev.slice(-HIST_MAX);
+    return rev;
+  }
+
+  /**
+   * 用「全局历史 + 后端历史消息」重算 HIST。
+   *
+   * 只在「拿到一份历史」时调用（initialize 的 session.messages、
+   * sessionSwitch/sessionDone 与 /cd 的 messages）。原来这里是整份替换，
+   * 换会话就把旧会话的提问全扔掉——用户明确要全局（跨会话、跨重启都能 ↑），
+   * 所以现在改成以 HIST_PERSIST 为底再叠本次消息；seedHistory([])
+   * （新建对话）= 只留全局历史。
+   * @param {Array} msgs 后端历史（role/text）
+   */
+  function seedHistory(msgs){
+    if (!Array.isArray(msgs)) return;
+    HIST = mergeHistory(HIST_PERSIST, msgs);
     histIdx = -1;
     histDraft = '';
   }
@@ -2974,6 +3500,9 @@ body[data-run="true"] .send{display:none}
     input.value = '';
     input.style.height = '21px';
     input.style.overflowY = 'hidden';
+    // 程序化清空不触发 input 事件：发送按钮的亮暗得手动同步一次，
+    // 否则发完之后按钮还亮着（看着像「还能再发一条」）。
+    refreshSendState();
     if (REAL) {
       // /ls 与 /help 走本地渲染，不发后端。
       // 为什么：后端回的是纯文本 lines，靠空格对齐，中英混排必然错列
@@ -3162,7 +3691,7 @@ body[data-run="true"] .send{display:none}
       // 圆钮放不下文字，改成方块脉冲 + title 说明。
       if (btn.getAttribute('data-pending') === 'true') return;
       btn.setAttribute('data-pending', 'true');
-      btn.title = '停止中…';
+      btn.setAttribute('data-tip', '停止中…');
       post('cancel', {});
       return;
     }
@@ -3179,7 +3708,7 @@ body[data-run="true"] .send{display:none}
     var btn = document.getElementById('stopBtn');
     if (!btn) return;
     btn.removeAttribute('data-pending');
-    btn.title = '停止';
+    btn.setAttribute('data-tip', '停止');
   }
   /**
    * 刚点过停止后的短暂窗口里，忽略发送按钮的点击。
@@ -3549,6 +4078,79 @@ body[data-run="true"] .send{display:none}
   });
 
 
+  /**
+   * 自绘提示框：接管所有 data-tip，**不再用原生 title**。
+   *
+   * 为什么不用 title：那是 Electron 的系统提示框，直角 + 系统配色 + 字号固定，
+   * 在深色面板上很突兀，也无法跟随 VS Code 主题（实测被点名「太丑、不跟随主题」）。
+   * 这里的实现要点：
+   *   · 事件委托（mouseover/mouseout 冒泡）：会话列表、工具行都是 innerHTML
+   *     重建的，逐个 addEventListener 会随重绘丢失，委托一次就够。
+   *   · 只认最近的 data-tip 祖先，且要判断「鼠标确实是从外面进来的」——
+   *     mouseover 在子元素之间移动也会冒泡，不判 relatedTarget 会疯狂闪烁。
+   *   · 定位：优先在元素上方居中；越界翻到下方；左右夹在视口内。
+   *   · 触摸/键盘：focusin 也给提示（键盘用户 Tab 到图标上看得到说明）。
+   */
+  var tipEl = document.getElementById('tip');
+  var tipFor = null;
+  var tipTimer = 0;
+  function hideTip() {
+    if (tipTimer) { clearTimeout(tipTimer); tipTimer = 0; }
+    tipFor = null;
+    if (tipEl) tipEl.setAttribute('data-on', 'false');
+  }
+  function showTip(el) {
+    if (!tipEl || !el) return;
+    var text = el.getAttribute('data-tip') || '';
+    if (!text) { hideTip(); return; }
+    tipFor = el;
+    tipEl.textContent = text;
+    tipEl.setAttribute('data-on', 'true');
+    var r = el.getBoundingClientRect();
+    var tr = tipEl.getBoundingClientRect();
+    var vw = window.innerWidth, vh = window.innerHeight;
+    // 左右：以元素中心对齐，再夹在视口内（留 4px 余量，贴边不切断圆角）
+    var left = r.left + r.width / 2 - tr.width / 2;
+    left = Math.max(4, Math.min(left, vw - tr.width - 4));
+    // 上下：优先上方；上方放不下就翻到下方；都放不下就压在上方边界内
+    var top = r.top - tr.height - 6;
+    if (top < 4) top = Math.min(r.bottom + 6, vh - tr.height - 4);
+    tipEl.style.left = Math.round(left) + 'px';
+    tipEl.style.top = Math.round(top) + 'px';
+  }
+  function tipTarget(node) {
+    return (node && node.closest) ? node.closest('[data-tip]') : null;
+  }
+  document.addEventListener('mouseover', function (e) {
+    var el = tipTarget(e.target);
+    if (!el || el === tipFor) return;
+    // 鼠标在这块元素内部移动时 relatedTarget 仍属于它 → 视为没离开，不重算
+    var from = tipTarget(e.relatedTarget);
+    if (from === el) return;
+    if (tipTimer) { clearTimeout(tipTimer); tipTimer = 0; }
+    showTip(el);
+  });
+  document.addEventListener('mouseout', function (e) {
+    var el = tipTarget(e.target);
+    if (!el) return;
+    var to = tipTarget(e.relatedTarget);
+    if (to === el) return;       // 还在同一块里
+    if (el === tipFor) hideTip();
+  });
+  document.addEventListener('focusin', function (e) {
+    var el = tipTarget(e.target);
+    if (el) showTip(el);
+  });
+  document.addEventListener('focusout', hideTip);
+  // 滚动/改宽度时提示框会错位，直接收掉比追着跑更干净
+  document.addEventListener('scroll', hideTip, true);
+  window.addEventListener('resize', hideTip);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') hideTip();
+  });
+  // 点任何地方都收（点完按钮提示立刻消失，否则会盖在刚弹出的下拉上）
+  document.addEventListener('mousedown', hideTip, true);
+
   /* ---------- 下拉面板 ---------- */
   var popMap = { btnModel: 'popModel', btnThink: 'popThink', btnGoal: 'popGoal', btnPlugin: 'popPlugin' };
   var openPop = null;
@@ -3556,6 +4158,10 @@ body[data-run="true"] .send{display:none}
   function closePop(){
     if (openPop) {
       openPop.setAttribute('data-open', 'false');
+      // 触发按钮上的 data-open 一起复位：箭头靠它旋转（见 .sess[data-open] .dim）
+      var owner = openPop.__owner;
+      if (owner && owner.setAttribute) owner.setAttribute('data-open', 'false');
+      openPop.__owner = null;
       openPop = null;
     }
   }
@@ -3584,6 +4190,10 @@ body[data-run="true"] .send{display:none}
       if (childW > avail - 4) childW = avail - 4;
     }
     pop.setAttribute('data-open', 'true');
+    // 记住是谁触发、并在它身上也标 data-open：箭头旋转、按钮高亮都读这个属性。
+    // 只给 .pop 设属性的话，按钮上永远读不到"已展开"，箭头就一直是朝下的常态。
+    pop.__owner = btn;
+    if (btn && btn.setAttribute) btn.setAttribute('data-open', 'true');
     if (pop.id === 'popChild') {
       // 子会话下拉从顶栏按钮**向下**展开：它是全屏最靠上的控件，下方才是空余空间。
       // 沿用「向上弹」那套算法会怎样（实测）：anchorTop 取到按钮自身的 top(≈20)，
@@ -3674,17 +4284,25 @@ body[data-run="true"] .send{display:none}
   var chipSessEl = document.getElementById('chipSess');
   if (chipSessEl) {
     chipSessEl.style.cursor = 'pointer';
-    // 顶栏会话名改成开「子会话」下拉后，这里就是会话抽屉的入口
-    chipSessEl.title = '点击打开会话列表';
-    chipSessEl.addEventListener('click', function (e) {
+    // 顶栏会话名改成开「子会话」下拉后，这里就是会话抽屉的入口。
+    // **不要**在这里写死 title：setChipSess 会按当前会话名生成
+    // 「历史对话 · 当前：xxx（点击打开会话列表）」，写死会把它冲掉。
+    function openHistDrawer(e) {
       e.stopPropagation();
       setDrawer(drawer.getAttribute('data-open') !== 'true');
+    }
+    chipSessEl.addEventListener('click', openHistDrawer);
+    // role=button + tabindex=0 就必须能用键盘触发，否则键盘用户停在这里按 Enter 没反应
+    chipSessEl.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      openHistDrawer(e);
     });
   }
   var chipPathEl = document.querySelector('.crow .chip.path');
   if (chipPathEl) {
     chipPathEl.style.cursor = 'pointer';
-    chipPathEl.title = '点击复制工作目录';
+    chipPathEl.setAttribute('data-tip', '复制工作目录');
     // 还原用的原文必须记在属性里，不能每次点击现取 chip 的文字。
     // 现取会怎样（实测）：1.2 秒内连点两下，第二下读到的「原文」已经是
     // 「已复制路径」，定时器随后把它还原成这句话 —— 胶囊永久停在「已复制路径」。
@@ -3718,9 +4336,65 @@ body[data-run="true"] .send{display:none}
         !e.target.closest('.cbox')) {
       openPalette(false);
     }
+    // 状态行抽屉：点别处收起。抽屉里的模型/思考按钮会打开 .pop，
+    // 点 pop 里的条目不该把抽屉一起关掉（用户还要接着看别的项），所以放行 .pop。
+    if (stDrawerOpen() && !e.target.closest('.status') && !e.target.closest('.pop')) {
+      setStDrawer(false);
+    }
   });
 
   window.addEventListener('resize', closePop);
+
+  /* ---------- 状态行抽屉（窄面板）----------
+     窄面板下状态行固定单行，只留「模型 · 上下文 · 费用」；思考/目标模式/插件/
+     缓存/余额收进这个「⋯」，点开整条状态行变成浮层摊平 8 项（CSS 见窄宽度段）。
+     收起规则的判据统一在 CSS 里（.status:not([data-open="true"]) ...），
+     所以这里只负责 data-open，不必逐个元素 show/hide —— 也就不会出现
+     「JS 显示回来的项和 CSS 又藏掉」这种两套规则打架。 */
+  var statusBar = document.querySelector('.status');
+  var stToggle = document.getElementById('stToggle');
+  var composerEl = document.querySelector('.composer');
+  function stDrawerOpen(){
+    return !!statusBar && statusBar.getAttribute('data-open') === 'true';
+  }
+  function setStDrawer(on){
+    if (!statusBar) return;
+    // 展开前先量高度：一旦 data-open=true，状态行就变绝对定位、脱离文档流，
+    // .composer 少掉这 20 多像素，输入框会整体上移/下移一下（实测 288→333，
+    // 位移 45px，正是收起态那行的高度）。用 padding-bottom 把这段空间补回来，
+    // 输入框就钉在原位不动。量必须在改 data-open **之前**。
+    if (composerEl) {
+      if (composerEl.__stBasePad === undefined) {
+        composerEl.__stBasePad = parseFloat(getComputedStyle(composerEl).paddingBottom) || 0;
+      }
+      if (on && !stDrawerOpen()) {
+        var h = statusBar.getBoundingClientRect().height;
+        composerEl.style.paddingBottom = (composerEl.__stBasePad + h) + 'px';
+      } else if (!on) {
+        composerEl.style.paddingBottom = composerEl.__stBasePad + 'px';
+      }
+    }
+    statusBar.setAttribute('data-open', on ? 'true' : 'false');
+    if (stToggle) {
+      stToggle.setAttribute('data-open', on ? 'true' : 'false');
+      stToggle.setAttribute('aria-expanded', on ? 'true' : 'false');
+      stToggle.textContent = on ? '收起' : '⋯';
+    }
+    // 抽屉收起时顺手关掉从抽屉里打开的下拉：否则弹层失去锚点飘在原处，
+    // 用户既看不出它属于谁，也点不到触发它的按钮。
+    if (!on) closePop();
+  }
+  if (stToggle) {
+    stToggle.addEventListener('click', function(e){
+      // 不 stopPropagation 的话，下面那条「点别处收起」会立刻把它关回去
+      e.stopPropagation();
+      setStDrawer(!stDrawerOpen());
+    });
+  }
+  document.addEventListener('keydown', function(e){
+    if (e.key !== 'Escape' || !stDrawerOpen()) return;
+    setStDrawer(false);
+  });
 
   function setChecked(pop, v){
     Array.prototype.forEach.call(pop.querySelectorAll('.pi'), function(pi){
@@ -3852,13 +4526,13 @@ body[data-run="true"] .send{display:none}
     // 子会话条目只显示子会话名本身：缩进已经表明从属关系，
     // 再挂一遍「父/子」全路径在 249px 里只剩几个字。data-name 仍是全路径。
     var shownName = o.sub ? String(fullName).split('/').slice(1).join('/') : fullName;
-    out += '<span class="n" title="' + esc(fullName) + '">' + esc(shownName) + '</span>';
+    out += '<span class="n" data-tip="' + esc(fullName) + '">' + esc(shownName) + '</span>';
     // 有子会话才出现的展开标记：点它展开/收起该会话的分支，不影响「点整行进会话」。
     // 不显示的话（改动前）分支在列表里完全没有入口，用户只能记得敲 /ls --all。
     if (o.branchCount) {
       var open = !!EXPANDED[fullName];
       out += '<span class="br" data-branch="1" data-open="' + (open ? 'true' : 'false') +
-        '" title="' + (open ? '收起分支' : '展开 ' + o.branchCount + ' 个分支') + '">' +
+        '" data-tip="' + (open ? '收起分支' : '展开 ' + o.branchCount + ' 个分支') + '">' +
         '⑂' + o.branchCount + (open ? '▾' : '▸') + '</span>';
     }
     // ghost：父会话文件已不在，只剩子会话。别让它显示成一个正常空会话。
@@ -3937,10 +4611,19 @@ body[data-run="true"] .send{display:none}
       }
     }
 
-    // 游离态（尚未 /save）时 CUR 为空：显示「未保存」，不能留着模拟会话名
-    var sessLabel = CUR || (REAL ? '(未保存)' : '');
+    // 游离态（尚未 /save）时 CUR 为空：显示「未保存」，不能留着模拟会话名。
+    // 文案用「未保存」而不是「(未保存)」：括号在窄面板里很占位，且胶囊边框 +
+    // 虚线样式已经足够说明状态（见 .sess[data-unsaved]）。
+    var unsaved = !CUR;
+    var sessLabel = CUR || (REAL ? '未保存' : '');
     document.querySelector('#sessBtn .branch').textContent = sessLabel;
-    document.getElementById('chipSess').textContent = sessLabel;
+    // 未保存态交给 CSS：虚线边框 + 次要色，点开下拉也能读到「还未保存」
+    var sessBtnBox = document.getElementById('sessBtn');
+    if (sessBtnBox) sessBtnBox.setAttribute('data-unsaved', unsaved ? 'true' : 'false');
+    // 传给 setChipSess 的必须是**真会话名**（空串 = 未保存）：
+    // 把「未保存」当名字传进去，历史按钮的 aria-label 会念成
+    // 「当前 未保存」，虽然不通但也别造假数据。
+    setChipSess(CUR);
     // 是否是分支：真实态听后端的 isChild（名字里的 / 不代表分支，
     // 否则 /save fix/a/b 这种会话会被误判、把「新建探索分支」禁用掉）；
     // 模拟态没有后端，退回按 / 推断。
@@ -3973,6 +4656,17 @@ body[data-run="true"] .send{display:none}
     var foot = document.getElementById('childFoot');
     if (!box) return;
     var rootName = String(CUR || '').split('/')[0];
+    // 未保存（游离态）：没有会话、更没有子会话，但下拉**照样要能开**——
+    // 原来这里直接 return 让按钮点了毫无反应，箭头也不翻，用户以为按钮坏了。
+    // 现在明确写一句「还未保存」，顺手把「怎么保存」也告诉用户。
+    if (!rootName) {
+      box.innerHTML = '<div class="pi" data-empty="true">' +
+        '<span class="ck"></span><span class="lb">还未保存</span></div>';
+      if (foot) {
+        foot.textContent = '这段对话还没存到磁盘：输入 /save 或点抽屉里的「保存当前为…」';
+      }
+      return;
+    }
     var root = SESS.filter(function(s){ return s.name === rootName; })[0];
     var kids = (root && root.children) || [];
     box.innerHTML = '';
@@ -3995,7 +4689,7 @@ body[data-run="true"] .send{display:none}
       // 只显示名字：状态（已完成/待完成）与条数在这么窄的下拉里挤得名字只剩
       // 几个字，而用户点开这个列表的唯一目的就是「找那条会话」。
       d.innerHTML = '<span class="ck">' + (isCur ? '✓' : '') + '</span>' +
-        '<span class="lb" title="' + esc(full) + '">' + esc(c.name) + '</span>';
+        '<span class="lb" data-tip="' + esc(full) + '">' + esc(c.name) + '</span>';
       d.addEventListener('click', function(){
         closePop();
         if (isCur) return;
@@ -5033,6 +5727,9 @@ body[data-run="true"] .send{display:none}
     input.value = '';
     input.style.height = '21px';
     input.style.overflowY = 'hidden';
+    // 程序化清空不触发 input 事件：发送按钮的亮暗得手动同步一次，
+    // 否则发完之后按钮还亮着（看着像「还能再发一条」）。
+    refreshSendState();
     openPalette(false);
     var m = document.createElement('div');
     m.className = 'msg';
@@ -6111,6 +6808,28 @@ body[data-run="true"] .send{display:none}
   /* ---------- 统计 ---------- */
 
   /**
+   * 写状态行里的一项，同时维护 data-empty。
+   *
+   * data-empty="true" 时 CSS 把整项藏掉：还没有真值时显示一个孤零零的「—」
+   * 毫无信息量，窄面板下标签又被让掉，屏幕上就剩「— —」几个破折号并排
+   * （用户原话：非常丑陋）。所以「没值」= 整项不显示，而不是显示占位符。
+   * 同一个函数负责赋值与清空，就不会出现「有值却仍被藏」或「清了却还在」。
+   *
+   * @param {string} sel  这一项的 .v 选择器
+   * @param {string|null} text  null/'' = 清空（整项隐藏）
+   */
+  function setStatValue(sel, text) {
+    var v = document.querySelector(sel);
+    if (!v) return;
+    var box = v.closest('[data-empty]') || v.parentNode;
+    var has = text !== null && text !== undefined && text !== '';
+    v.textContent = has ? text : '—';
+    if (box && box.setAttribute) {
+      box.setAttribute('data-empty', has ? 'false' : 'true');
+    }
+  }
+
+  /**
    * 把状态栏的统计清零。
    *
    * 上下文、缓存、费用、余额全是「这个后端进程」的内存累计值：换会话、
@@ -6119,40 +6838,44 @@ body[data-run="true"] .send{display:none}
    * 屏幕上留着已死进程的「缓存 80% ¥0.5000」，而新进程从 0 开始计费——
    * 用户看到一个自己并没花过的金额（实测）。
    * 等新会话/新进程第一轮 stats 到达再更新。
+   * 清空 = 传 null，整项隐藏（不是留着「—」占位）。
    */
   function resetContextStats() {
-    var el = document.getElementById('ctxPct');
-    if (el) el.textContent = '—';
-    var vCache = document.querySelector('.status .st-cache .v');
-    if (vCache) vCache.textContent = '—';
-    var vCost = document.querySelector('.status .st-cost .v');
-    if (vCost) vCost.textContent = '¥0.0000';
-    var vBal = document.querySelector('.status .st-bal .v');
-    if (vBal) vBal.textContent = '—';
+    setStatValue('.status .st-ctx .v', null);
+    setStatValue('.status .st-cache .v', null);
+    setStatValue('.status .st-cost .v', null);
+    setStatValue('.status .st-bal .v', null);
+    balanceSeen = false;
   }
 
   function applyStats(p){
     if (!p) return;
     // 按类名定位而不是「第几个 .v」：缓存/费用/余额会按面板宽度整块隐藏，
     // 用下标既容易随结构调整错位，也看不出改的是哪一项。
-    var vCache = document.querySelector('.status .st-cache .v');
-    var vCost = document.querySelector('.status .st-cost .v');
-    var vBal = document.querySelector('.status .st-bal .v');
+    var vCache = '.status .st-cache .v';
+    var vCost = '.status .st-cost .v';
+    var vBal = '.status .st-bal .v';
     if (typeof p.contextRatio === 'number') {
       // 取整会让 0.4%~1.4% 全都显示成「1%」——窗口 100 万 token 时，
       // 连聊十轮都还是「1%」，这个数字就成了装饰，起不到「快到 50%，该压缩了」的预警作用。
-      // 1% 以下给一位小数，能看出它在动。
+      // 1% 以下给一位小数，能看出它在动；1% 以上取整（4.2% → 4%）。
       var pct = p.contextRatio * 100;
-      document.getElementById('ctxPct').textContent =
-        (pct < 1 ? pct.toFixed(1) : String(Math.round(pct))) + '%';
+      setStatValue('.status .st-ctx .v',
+        (pct < 1 ? pct.toFixed(1) : String(Math.round(pct))) + '%');
     }
-    if (typeof p.cacheRatio === 'number' && vCache) {
-      vCache.textContent = Math.round(p.cacheRatio * 100) + '%';
+    if (typeof p.cacheRatio === 'number') {
+      setStatValue(vCache, Math.round(p.cacheRatio * 100) + '%');
     }
-    if (typeof p.cost === 'number' && vCost) {
-      vCost.textContent = '¥' + p.cost.toFixed(4);
+    // 费用为 0 时显示「—」而不是「¥0.0000」。
+    // 后端把 cost 恒发成数字（`round(float(cost or 0.0), 6)`），刚打开面板、
+    // 还没发生任何调用时它就是 0 —— 这时写「¥0.0000」会让用户以为已经计费了，
+    // 而且和其余三项的「—」不一致（实测反馈「一开始费用怎么显示 0.00」）。
+    // 费用是累计值、单调不减，所以「0」只可能是「还没花」，不存在余额那种
+    // 「真的花光了」的歧义，直接判 >0 即可。
+    if (typeof p.cost === 'number' && p.cost > 0) {
+      setStatValue(vCost, '¥' + p.cost.toFixed(4));
     }
-    if (typeof p.balance === 'number' && vBal) {
+    if (typeof p.balance === 'number') {
       // 后端把 balance 恒发成数字（ui.py:615 `round(float(balance or 0.0), 4)`），
       // 所以 0 有两种含义：还没查到、以及真的花光了。原来一律当成没查到
       //（`if (p.balance > 0)` 才写），代价是余额真的归零之后屏幕上一直挂着
@@ -6161,15 +6884,17 @@ body[data-run="true"] .send{display:none}
       // 那就是真花光了，必须如实说。
       if (p.balance > 0) {
         balanceSeen = true;
-        vBal.textContent = '¥' + p.balance.toFixed(2);
+        setStatValue(vBal, '¥' + p.balance.toFixed(2));
       } else if (balanceSeen) {
-        vBal.textContent = '¥0.00';
+        setStatValue(vBal, '¥0.00');
       }
     }
     if (p.thinkingEffort) {
       document.getElementById('btnThink').textContent = p.thinkingEffort;
     }
-    rendered('stats', { context: document.getElementById('ctxPct').textContent });
+    rendered('stats', {
+      context: (document.querySelector('.status .st-ctx .v') || {}).textContent || ''
+    });
   }
 
   /* ---------- 一轮开始 / 结束 ---------- */
@@ -6678,6 +7403,20 @@ body[data-run="true"] .send{display:none}
     //   ② 运行中且已画过历史：后端多出来的那些，对话区已经实时画过，只更新计数
     //   ③ 其余（空闲 / 全新 webview 还没画过）：整体重画，拿到最新一版
     var initMsgs = (session && session.messages) || [];
+    // ↑ 能翻到的提问来自磁盘上的全局输入历史（与终端形态同一个文件）。
+    // initialize 会在重载窗口、重连后端时**重复到达**：整份替换而不是追加，
+    // 所以同一份重复灌不会让列表变长或乱序（幂等）。
+    if (p && Array.isArray(p.inputHistory)) {
+      var persist = [];
+      p.inputHistory.forEach(function(t){
+        var s = String(t == null ? '' : t).trim();
+        if (s) persist.push(s);
+      });
+      if (persist.length > HIST_MAX) persist = persist.slice(-HIST_MAX);
+      HIST_PERSIST = persist;
+      // 会话历史这条分支可能不重画（已画过），但 HIST 必须跟着刷新
+      seedHistory(initMsgs);
+    }
     // 后端说「当前会话就是空的」时也必须清屏。
     // 原来整段逻辑包在 `if (initMsgs.length)` 里，0 条就直接跳过：若这次握手
     // 把当前会话换成一个空会话，顶栏变了、对话区还留着上一个会话的整段内容
@@ -6803,7 +7542,7 @@ body[data-run="true"] .send{display:none}
         historyDrawnFor = histSess;
         authHintShown = false;
         renderHistory(initMsgs);
-        // ↑ 能翻到的提问跟着换成这个会话的历史：重载后 HIST 本来是空的
+        // ↑ 能翻到的提问：全局历史 + 这个会话的提问（重载后 HIST 本来是空的）
         seedHistory(initMsgs);
         if (keepBuf && !bufAlreadyInHist) {
           assistantBuf = keepBuf;
@@ -6944,8 +7683,7 @@ body[data-run="true"] .send{display:none}
     if (!switched) {
       // 已写盘、状态还没切：先把名字显示出来（用户最急着确认的就是这个）
       if (name) {
-        var chip = document.getElementById('chipSess');
-        if (chip) chip.textContent = name;
+        setChipSess(name);
         sysLine('✓', '已保存为「' + esc(name) + '」', '', 'ok');
       }
       if (REAL) post('sessionList', {});
@@ -6961,8 +7699,7 @@ body[data-run="true"] .send{display:none}
       renderSessions();
       var br = document.querySelector('#sessBtn .branch');
       if (br) br.textContent = cur;
-      var chip2 = document.getElementById('chipSess');
-      if (chip2) chip2.textContent = cur;
+      setChipSess(cur);
     }
     if (REAL) post('sessionList', {});
     rendered('session/saved', { name: name, switched: true, current: cur });
@@ -7129,7 +7866,7 @@ body[data-run="true"] .send{display:none}
       authHintShown = false;
       CUR = '';
       CUR_IS_CHILD = false;
-      // 新对话没有历史：↑ 不该翻到上一个会话的提问
+      // 新对话本身没有消息，但 ↑ 仍要能翻到磁盘上的全局历史（用户要的全局）
       seedHistory([]);
       body.setAttribute('data-run', 'false');
       resetContextStats();
@@ -7161,7 +7898,7 @@ body[data-run="true"] .send{display:none}
       resetContextStats();
       renderSessions();
       renderHistory(p.messages);
-      // 换成这个会话的提问历史（否则 ↑ 翻到的是上一个会话说过的话）
+      // 这个会话的提问也叠进来（全局历史保留，见 seedHistory）
       seedHistory(p.messages);
       // 窄面板里抽屉是覆盖全宽的浮层：不自动收起的话，历史虽然画好了却被它
       // 盖住 —— 用户点了会话、回执也到了，屏幕上还是那张列表，只能自己找 ×
@@ -7859,6 +8596,7 @@ body[data-run="true"] .send{display:none}
       case 'attach/checked': atchOnReply(msg.params || {}); break;
       case 'attach/saved': atchOnReply(msg.params || {}); break;
       case 'attach/thumbResult': atchOnReply(msg.params || {}); break;
+      case 'clipboard/written': onClipboardWritten(msg.params || {}); break;
       case 'command/result': applyCommandResult(msg.params || {}); break;
       case 'config/result': applyConfigResult(msg.params || {}); break;
       case 'chat/result': applyChatResult(msg.params || {}); break;

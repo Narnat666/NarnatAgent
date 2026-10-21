@@ -95,7 +95,7 @@ class StatsTracker:
         self._total_cache_tokens = 0   # 累计缓存命中token
         self._total_cost = 0.0
         self._balance_to_show = 0.0
-        self._balance_fresh = False   # 本轮是否刚查询到余额（决定统计栏是否显示）
+        self._balance_known = False   # 是否曾经成功查到过余额（持久，见 fetch_balance）
 
     def update(self, usage: dict) -> None:
         """更新token统计（每轮LLM返回后调用）
@@ -242,17 +242,33 @@ class StatsTracker:
             return False
 
     def fetch_balance(self, api_key: str, round_num: int, interval: int = 10) -> None:
-        """每N轮查询一次余额；仅查询成功那一轮的统计栏显示余额，其余轮次不显示。
+        """每N轮查询一次余额。
 
-        每轮都会被调用（Agent.run 逐轮传入轮次），故在此重置本轮新鲜位：
-        非查询轮与查询失败轮均不显示，避免把陈旧余额当成当前值反复显示。
+        两个「一直显示 0」的坑，都是这里造成的：
+
+        1. 原来无条件按 `round_num % interval == 0` 判，而 round_num 从 1 开始，
+           于是**前 9 轮一次都不查**。插件界面的余额是常驻状态项，用户开面板
+           做快速验证时永远等不到第 10 条消息，看到的就是空/0（实测反馈
+           「余额一直显示是 0」）。现在改成：从没查到过就立刻查，查到过才按
+           轮次间隔刷新。
+
+        2. 原来用一个「本轮是否刚查询」的瞬时标记控制 balance，每轮先置 False，
+           于是没查的轮次 balance 一律读成 0.0。
+           等于拿 0.0 同时表示「本轮没查」和「余额真的是 0」，前端无法区分——
+           它一旦见过正数，就会把后续每一个「没查」都读成「真花光了」，
+           于是 ¥10134.68 只闪一轮，之后永久钉在 ¥0.00（实测就是这个现象）。
+           现在 `_balance_known` 持久标记「查到过」，balance 返回最后一次
+           查到的真实值，0.0 只剩「账户真的没钱了」一个含义。
         """
-        self._balance_fresh = False
-        if api_key and round_num % interval == 0:
-            bal = fetch_balance(api_key, self._balance_cfg)
-            if bal:
-                self._balance_to_show = bal["total"]
-                self._balance_fresh = True
+        if not api_key:
+            return
+        # 没查到过（首次 / 之前全部失败）→ 立刻查，不等间隔
+        if self._balance_known and round_num % interval != 0:
+            return
+        bal = fetch_balance(api_key, self._balance_cfg)
+        if bal:
+            self._balance_to_show = bal["total"]
+            self._balance_known = True
 
     @property
     def input_tokens(self) -> int:
@@ -274,6 +290,20 @@ class StatsTracker:
         return self._total_cost
 
     @property
+    def balance_known(self) -> bool:
+        """是否成功查到过余额。
+
+        调用方靠它区分 balance==0 的两种含义：还没查到（该重试 / 该显示「—」），
+        还是账户真的为 0（该如实显示 ¥0.00 并提示充值）。
+        """
+        return self._balance_known
+
+    @property
     def balance(self) -> float:
-        """统计栏余额：仅本轮刚查询到余额时返回数值，其余轮次返回 0（界面据此不显示）"""
-        return self._balance_to_show if self._balance_fresh else 0.0
+        """最后一次查询成功的余额（0.0 = 账户真的为 0 或从未查到过）。
+
+        不再随「本轮是否刚查」归零：余额是账户属性，不会因为你这一轮没查
+        就变成 0。归零还有个更坏的后果——前端把 0 读成「钱花光了」，
+        于是一直显示 ¥0.00（见 fetch_balance 注释）。
+        """
+        return self._balance_to_show if self._balance_known else 0.0
