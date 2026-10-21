@@ -7,8 +7,54 @@
 <link rel="stylesheet" href="media/narnat.css">
 </head>
 <body data-run="false" data-preview="true">
+<!--
+  浏览器预览入口（无后端）。只在本文件里加载 media/narnat.demo.js ——
+  演示对话与会话列表都在那份文件里，它不进 vsix（见 .vscodeignore），
+  所以正式插件里既不会显示演示数据，产物里也不存在这些数据。
+  顺序要紧：demo.js 必须在 narnat.js 之前，后者启动时读 window.NARNAT_DEMO
+  决定初始会话列表与当前会话名。
+-->
 <script src="media/narnat.body.js"></script>
 <script>document.write(window.NARNAT_BODY);</script>
+<script src="media/narnat.demo.js"></script>
+<script>
+  // 把演示对话灌进空的 #convo（生产骨架里它是空的）
+  if (window.NARNAT_DEMO && window.NARNAT_DEMO.convo) {
+    document.getElementById('convo').innerHTML = window.NARNAT_DEMO.convo;
+  }
+  // 模型/思考/插件三个下拉的条目同样由后端重建，生产模板里是空的；
+  // 预览没有后端，这里补上演示条目，否则点开是空面板。
+  (function () {
+    function fill(popId, items, withPrice) {
+      var pop = document.getElementById(popId);
+      if (!pop) return;
+      var anchor = pop.querySelector('.pd');
+      items.forEach(function (it, i) {
+        var d = document.createElement('div');
+        d.className = 'pi';
+        d.setAttribute('data-v', it.v);
+        d.setAttribute('data-on', i === 0 ? 'true' : 'false');
+        d.innerHTML = '<span class="ck">' + (i === 0 ? '✓' : '') + '</span>' +
+          '<span class="lb">' + it.lb + '</span>' +
+          (withPrice && it.sd ? '<span class="sd">' + it.sd + '</span>' : '');
+        pop.insertBefore(d, anchor);
+      });
+    }
+    fill('popModel', [
+      { v: 'deepseek-chat', lb: 'deepseek-chat', sd: '¥1/¥2' },
+      { v: 'deepseek-reasoner', lb: 'deepseek-reasoner', sd: '¥2/¥8' },
+      { v: 'claude-sonnet', lb: 'claude-sonnet', sd: '¥3/¥15' },
+      { v: 'kimi-k2', lb: 'kimi-k2', sd: '¥4/¥16' }
+    ], true);
+    fill('popThink', [
+      { v: 'low', lb: '低' }, { v: 'medium', lb: '中' }, { v: 'high', lb: '高' }
+    ], false);
+    fill('popPlugin', [
+      { v: 'terminal', lb: '终端' }, { v: 'serial', lb: '串口' },
+      { v: 'mcp', lb: 'MCP' }, { v: 'web_search', lb: '联网搜索' }
+    ], false);
+  })();
+</script>
 <script src="media/narnat.js"></script>
 </body>
 </html>

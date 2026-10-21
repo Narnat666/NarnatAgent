@@ -1,12 +1,12 @@
 """安全判定共享正则 —— 单一定义源
 
 拦截范围只有两类，且各自可配置：
-- 删除/杀进程类（match_delete）← 配置「工具.rm免确认」
-- git 类（match_git）        ← 配置「工具.git免确认」
+- 删除类（match_delete）← 配置「工具.rm免确认」
+- git 类（match_git）  ← 配置「工具.git免确认」
 
-覆盖类（`>` 重定向 / copy /y / xcopy /Y / robocopy /MIR）**不再拦截**：
-终端形态的 narnat agent 从不拦它们，界面形态也不该另立一套——写日志
-`cmd > log.txt` 是日常操作，每写一次弹一次确认属过度设计。
+不拦截的（与终端形态一致，界面形态不另立一套）：
+- 覆盖类：`>` 重定向 / copy /y / xcopy /Y / robocopy /MIR
+- 杀进程类：taskkill / kill / pkill / killall / Stop-Process / TerminateProcess
 
 消费方（多处引用，语义必须恒等，勿再各自复制正则）：
 - tools/bash   ：Shell 删除/git 命令的免确认拦截判定
@@ -64,25 +64,6 @@ RE_DELETE = re.compile(
 
 # 匹配 git 命令的简单正则（出现 git 即命中）
 RE_GIT = re.compile(r"\bgit\b", re.IGNORECASE)
-
-# 杀进程类命令：与删除同级——不可撤销，而且会连带杀掉看不见的东西。
-# 原来一条都不在判定表里（实测全部直接执行）：AI 排查「端口占用」时先
-# tasklist 找到 python.exe 的 PID，紧接着 taskkill /PID <pid> /F ——
-# **没有确认条**，那个 PID 正是它自己的后端，后端立刻退出、面板掉线，
-# 这一轮没有 turn/end，用户只能干等超时。
-# 这类命令的错误代价是「整个会话被打断」，远超一次确认的打扰。
-#
-# 判定比删除更严：必须是**命令位置**，不能出现在普通参数位。
-# 删除词（rm/del）几乎不会作为参数出现，但 kill 会——`grep kill app.log`、
-# `findstr kill`、`Select-String kill` 都是正常排查操作，若沿用 _CMD_POS
-# （含裸空白）会被误判成删除、headless 下直接取消执行（实测）。
-# 这里只认行首或命令连接符（& | ; ( `）之后，连接符与命令名之间允许空白。
-_KILL_CMD_POS = r"(?:^|[&|;(`])@?\s*"
-RE_KILL = re.compile(
-    _KILL_CMD_POS + r"(?:taskkill|killall|kill|pkill)\b"
-    + r"|" + _KILL_CMD_POS + r"(?:stop-process|terminateprocess)\b",
-    re.IGNORECASE,
-)
 
 # cmd 延迟展开变量引用（!VAR!）与 set 赋值：单独出现均为正常文本（如
 # `echo "wow!nice!"`、`cmd /v:on /c "set PATH=…;!PATH! && …"`）；
@@ -190,17 +171,16 @@ def _segment_hits(segment: str) -> bool:
 def match_delete(command: str) -> bool:
     """删除类命令判定（含 ^ 归一化、引号语义结构化、变量拼接条件拦截）。
 
-    杀进程（taskkill / Stop-Process / pkill …）也归在这里：对用户来说
-    「删掉一个文件」和「杀掉一个进程」都是不可撤销的破坏，代价同级。
+    只判「删文件/删目录」这一族。杀进程（taskkill / kill / Stop-Process …）
+    **不在此列**：它照样执行、不问确认。终端形态的 narnat agent 从不拦它，
+    界面形态也不该另立一套。
     """
     if not command or not isinstance(command, str):
         return False
     outside, containers = _split_quoted(scan_text(command))
     if _segment_hits(outside):
         return True
-    if RE_KILL.search(outside):
-        return True
-    if any(_segment_hits(c) or RE_KILL.search(c) for c in containers):
+    if any(_segment_hits(c) for c in containers):
         return True
     return False
 

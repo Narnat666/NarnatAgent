@@ -235,6 +235,10 @@ body[data-real="true"] .demo-tip{display:none}
   padding:4px 10px;border-bottom:1px solid var(--line);
   font-family:var(--mono);font-size:10.5px;line-height:1.6;
   color:var(--fg-faint);background:var(--bg-elev);
+  /* 工具栏不参与文字选中：Ctrl+A / 框选整条消息时，「js」「换行」「复制」
+     会混进复制出来的代码里（实测复制结果是
+     「…\n\njs\n换行\n复制\nvar x = 1;…」）。代码才是要复制的目标。 */
+  user-select:none;
 }
 .code-hd .lang{flex:1;text-transform:lowercase;letter-spacing:.03em}
 .code-copy,.code-wrap{
@@ -569,17 +573,7 @@ body[data-real="true"] .demo-tip{display:none}
 /* 选中态（目标模式开）只把文字提亮到正文档，不整块染成链接蓝：
    一排灰胶囊里突然一块亮蓝，视觉上比它承载的信息重得多（实测被点名突兀）。 */
 .chip.on{color:var(--fg)}
-/* 目标 chip 可点开目标面板（窄面板里它是唯一的目标入口）：给出可点的光标 */
-#chipGoal{cursor:pointer}
 .chip[data-clickable="true"]{cursor:pointer}
-#chipGoal:hover{background:var(--bg-hover)}
-/* 插件 chip：只在窄面板出现（宽面板用状态栏里那个按钮）。
-   249px 下状态栏只剩 233px，装不下「插件 4」及其分隔符（实测需要约 40px），
-   而 400px 断点又把整个 .st-opt 隐藏了 → 界面上一个插件入口都没有，
-   用户只能靠 /plugin 命令（而界面上没写这个命令）。
-   文案固定写「插件」不带计数：计数由状态栏按钮持有，两处各写一份必然不同步。 */
-#chipPlugin{display:none;flex:none;cursor:pointer}
-#chipPlugin:hover{background:var(--bg-hover)}
 /* 收缩优先级：会话名先让 → 路径次之（留 3em 不至于整块消失）→ 目标状态不让 */
 .crow .chip.on{flex:none}
 .crow .chip.path{flex-shrink:2;min-width:3em}
@@ -726,6 +720,24 @@ body[data-run="true"] .send{display:none}
   color:var(--fg);
 }
 .dw-item .m{flex:none;font-family:var(--mono);font-size:10px;color:var(--fg-faint)}
+/* 行内绝对定位元素（删除确认行、子会话竖线）的定位基准 */
+.dw-item{position:relative}
+/* 分支展开标记：有子会话才出现。可点、不抢名字宽度（flex:none），
+   hover 变亮提示可点。⑂N 表示有 N 个子会话，▸/▾ 表示展开状态。 */
+.dw-item .br{
+  flex:none;font-family:var(--mono);font-size:10px;
+  color:var(--fg-faint);cursor:pointer;padding:0 1px;
+}
+.dw-item .br:hover{color:var(--accent)}
+.dw-item .br[data-open="true"]{color:var(--accent)}
+/* 子会话条目：缩进 + 前面一条短竖线，让它明显从属于上一行。
+   名字里带「父/子」全路径太长，缩进后只显示子会话名更易读。 */
+.dw-item.dw-sub{padding-left:26px}
+.dw-item.dw-sub::before{
+  content:"";position:absolute;left:14px;top:2px;bottom:2px;width:1px;
+  background:var(--line-strong);
+}
+.dw-item.dw-sub .n{color:var(--fg-dim);font-weight:400}
 /* 当前会话：只留左侧细色条 + 加粗，不加圆点等额外符号 */
 .dw-item[data-cur="true"]{background:var(--bg-hover);color:var(--fg)}
 .dw-item[data-cur="true"] .n{font-weight:600}
@@ -743,23 +755,11 @@ body[data-run="true"] .send{display:none}
 .dw-more:hover{background:var(--bg-hover);color:var(--fg)}
 .dw-more::before{content:"▾";font-size:9px;color:var(--fg-faint)}
 .dw-more[data-more="0"]::before{content:"▴"}
-/* hover 出来的「改名 / 删除」浮在右侧，不参与 flex 挤压。
-   原来它占着 flex 位，鼠标一移上去名字区就从 184px 掉到 104px——
-   用户正在辨认那个被省略的长名字，名字自己又变短了。 */
-.dw-item{position:relative}
-.dw-item .acts{
-  display:none;gap:5px;flex:none;
-  position:absolute;right:8px;top:50%;transform:translateY(-50%);
-  background:var(--bg);padding-left:4px;
-}
-.dw-item:hover .acts{display:flex}
-.dw-item .acts button{
-  font-size:10px;border:1px solid var(--line-strong);border-radius:3px;
-  padding:0 6px;color:var(--fg-faint);
-}
-.dw-item .acts button:hover{color:var(--fg);border-color:var(--fg-dim)}
-.dw-item .acts button.rn:hover{color:var(--accent);border-color:var(--accent)}
-.dw-item .acts button.del:hover{color:var(--err);border-color:var(--err)}
+/* 「改名 / 删除」改由**右键菜单**唤起（见 .dw-menu），不再 hover 浮在行内。
+   原来 hover 显示时它们绝对定位在右侧，正好压住行尾的时间与分支标记
+   「⑂2 ▸」，用户点不到那个标记（实测）——而列表里没有别处能展开分支。
+   hover 还有一个毛病：鼠标扫过列表时一个个按钮跳出来，视觉上很吵。 */
+.dw-item .acts{display:none}
 /* 删除确认行必须与「删除」按钮**完全不重叠**，因此它固定钉在条目左缘。
    踩过两次：
    ① 原来是流内 flex 项 + margin-left:auto（靠右）——与「删除」按钮横向重叠 6px，
@@ -786,6 +786,21 @@ body[data-run="true"] .send{display:none}
 }
 .dw-item .asks button.y{color:var(--err);border-color:var(--err)}
 .dw-item .asks button:hover{color:var(--fg);border-color:var(--fg-dim)}
+/* 会话行右键菜单（改名 / 删除）。fixed 定位到鼠标处，点别处或 Esc 关闭。
+   用右键而不是 hover 的理由见上面 .dw-item .acts 的注释。 */
+.ctx{
+  display:none;position:fixed;z-index:70;
+  min-width:96px;padding:4px;
+  background:var(--bg-elev);border:1px solid var(--line-strong);
+  border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.45);
+}
+.ctx[data-open="true"]{display:block}
+.ctx-item{
+  padding:5px 10px;border-radius:4px;font-size:12px;
+  color:var(--fg-dim);cursor:pointer;white-space:nowrap;
+}
+.ctx-item:hover{background:var(--bg-hover);color:var(--fg)}
+.ctx-item[data-act="delete"]:hover{color:var(--err)}
 /* 底部操作区：布局里的固定一段（不是浮层），上边一条分隔线，
    滚动只发生在上面那个列表里，因此不存在「内容从按钮下面透出来」。 */
 .dw-foot{
@@ -817,6 +832,16 @@ body[data-run="true"] .send{display:none}
   max-height:calc(100vh - 24px);overflow-y:auto;overscroll-behavior:contain;
 }
 .pop[data-open="true"]{display:block}
+/* 子会话下拉（顶栏会话名点开）：
+   1) 宽度由 showPop 决定（跟随触发按钮 / 至少 150px），所以这里要解掉 .pop 的
+      min-width:196px，否则窄按钮下永远撑到 196px，看起来比按钮宽一截；
+   2) 条目只显示名字，因此不做省略号截断——名字长到放不下时整块横向可拖：
+      .pi 保持面板宽，.lb 不收缩不截断，溢出部分由 .pop 的滚动条展示。 */
+#popChild{min-width:0;overflow-x:auto;overscroll-behavior:contain}
+#popChild .pt,#popChild .pd{white-space:nowrap}
+#popChild .pi .lb{
+  flex:0 0 auto;overflow:visible;text-overflow:clip;white-space:nowrap;
+}
 .pop .pt{
   font-size:10px;color:var(--fg-faint);padding:5px 8px 4px;letter-spacing:.05em;
 }
@@ -963,8 +988,6 @@ body[data-run="true"] .send{display:none}
   .crow .chip.path{display:none}
   /* 只让位于有 /goal、/plugin 命令等价入口的控件；思考档位最常看，始终保留 */
   .status .st-opt{display:none}
-  /* 状态栏的插件按钮在这里让掉了，界面上必须补一个入口（见 #chipPlugin 注释） */
-  #chipPlugin{display:inline-block}
   .sess .cnt{display:none}
   .bar{padding:0 8px;gap:8px}
   /* 同 520 那条：8px 内边距下把落点补回 x=6 */

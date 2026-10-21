@@ -1927,6 +1927,23 @@ function handleMessage(msg, source) {
     requestReconnect('webview');
     return;
   }
+  if (msg.type === 'clipboard/write') {
+    /* 网页里「选中 → 右键复制」拿不到内容的唯一可靠出路。
+     *
+     * 为什么 webview 内自己写不了：右键菜单是 Electron 的原生菜单，
+     * 它调用的是 host 侧的复制动作；渲染进程 `copy` 事件里
+     * `clipboardData.setData()` 写的只是一份临时数据，原生菜单读不到，
+     * 结果就是「能选中、粘贴为空白」，且全程不报错（实测）。
+     *
+     * 所以改由宿主写：webview 只发原文，这里用 vscode.env.clipboard。
+     * 这是官方 API，不受 iframe 沙箱的剪贴板权限限制。 */
+    const p = msg.params || {};
+    const text = typeof p.text === 'string' ? p.text : '';
+    if (text) {
+      Promise.resolve(vscode.env.clipboard.writeText(text)).catch(() => { /* 写失败无从补救，静默 */ });
+    }
+    return;
+  }
   if (msg.type === 'prompt') {
     // 用 VSCode 原生输入框，而不是 webview 里自绘的小表单：
     // 原生的跟随主题、居中、自带确定/取消、Esc 关闭、有校验提示位，

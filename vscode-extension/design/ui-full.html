@@ -242,6 +242,10 @@ body[data-real="true"] .demo-tip{display:none}
   padding:4px 10px;border-bottom:1px solid var(--line);
   font-family:var(--mono);font-size:10.5px;line-height:1.6;
   color:var(--fg-faint);background:var(--bg-elev);
+  /* 工具栏不参与文字选中：Ctrl+A / 框选整条消息时，「js」「换行」「复制」
+     会混进复制出来的代码里（实测复制结果是
+     「…\n\njs\n换行\n复制\nvar x = 1;…」）。代码才是要复制的目标。 */
+  user-select:none;
 }
 .code-hd .lang{flex:1;text-transform:lowercase;letter-spacing:.03em}
 .code-copy,.code-wrap{
@@ -576,17 +580,7 @@ body[data-real="true"] .demo-tip{display:none}
 /* 选中态（目标模式开）只把文字提亮到正文档，不整块染成链接蓝：
    一排灰胶囊里突然一块亮蓝，视觉上比它承载的信息重得多（实测被点名突兀）。 */
 .chip.on{color:var(--fg)}
-/* 目标 chip 可点开目标面板（窄面板里它是唯一的目标入口）：给出可点的光标 */
-#chipGoal{cursor:pointer}
 .chip[data-clickable="true"]{cursor:pointer}
-#chipGoal:hover{background:var(--bg-hover)}
-/* 插件 chip：只在窄面板出现（宽面板用状态栏里那个按钮）。
-   249px 下状态栏只剩 233px，装不下「插件 4」及其分隔符（实测需要约 40px），
-   而 400px 断点又把整个 .st-opt 隐藏了 → 界面上一个插件入口都没有，
-   用户只能靠 /plugin 命令（而界面上没写这个命令）。
-   文案固定写「插件」不带计数：计数由状态栏按钮持有，两处各写一份必然不同步。 */
-#chipPlugin{display:none;flex:none;cursor:pointer}
-#chipPlugin:hover{background:var(--bg-hover)}
 /* 收缩优先级：会话名先让 → 路径次之（留 3em 不至于整块消失）→ 目标状态不让 */
 .crow .chip.on{flex:none}
 .crow .chip.path{flex-shrink:2;min-width:3em}
@@ -733,6 +727,24 @@ body[data-run="true"] .send{display:none}
   color:var(--fg);
 }
 .dw-item .m{flex:none;font-family:var(--mono);font-size:10px;color:var(--fg-faint)}
+/* 行内绝对定位元素（删除确认行、子会话竖线）的定位基准 */
+.dw-item{position:relative}
+/* 分支展开标记：有子会话才出现。可点、不抢名字宽度（flex:none），
+   hover 变亮提示可点。⑂N 表示有 N 个子会话，▸/▾ 表示展开状态。 */
+.dw-item .br{
+  flex:none;font-family:var(--mono);font-size:10px;
+  color:var(--fg-faint);cursor:pointer;padding:0 1px;
+}
+.dw-item .br:hover{color:var(--accent)}
+.dw-item .br[data-open="true"]{color:var(--accent)}
+/* 子会话条目：缩进 + 前面一条短竖线，让它明显从属于上一行。
+   名字里带「父/子」全路径太长，缩进后只显示子会话名更易读。 */
+.dw-item.dw-sub{padding-left:26px}
+.dw-item.dw-sub::before{
+  content:"";position:absolute;left:14px;top:2px;bottom:2px;width:1px;
+  background:var(--line-strong);
+}
+.dw-item.dw-sub .n{color:var(--fg-dim);font-weight:400}
 /* 当前会话：只留左侧细色条 + 加粗，不加圆点等额外符号 */
 .dw-item[data-cur="true"]{background:var(--bg-hover);color:var(--fg)}
 .dw-item[data-cur="true"] .n{font-weight:600}
@@ -750,23 +762,11 @@ body[data-run="true"] .send{display:none}
 .dw-more:hover{background:var(--bg-hover);color:var(--fg)}
 .dw-more::before{content:"▾";font-size:9px;color:var(--fg-faint)}
 .dw-more[data-more="0"]::before{content:"▴"}
-/* hover 出来的「改名 / 删除」浮在右侧，不参与 flex 挤压。
-   原来它占着 flex 位，鼠标一移上去名字区就从 184px 掉到 104px——
-   用户正在辨认那个被省略的长名字，名字自己又变短了。 */
-.dw-item{position:relative}
-.dw-item .acts{
-  display:none;gap:5px;flex:none;
-  position:absolute;right:8px;top:50%;transform:translateY(-50%);
-  background:var(--bg);padding-left:4px;
-}
-.dw-item:hover .acts{display:flex}
-.dw-item .acts button{
-  font-size:10px;border:1px solid var(--line-strong);border-radius:3px;
-  padding:0 6px;color:var(--fg-faint);
-}
-.dw-item .acts button:hover{color:var(--fg);border-color:var(--fg-dim)}
-.dw-item .acts button.rn:hover{color:var(--accent);border-color:var(--accent)}
-.dw-item .acts button.del:hover{color:var(--err);border-color:var(--err)}
+/* 「改名 / 删除」改由**右键菜单**唤起（见 .dw-menu），不再 hover 浮在行内。
+   原来 hover 显示时它们绝对定位在右侧，正好压住行尾的时间与分支标记
+   「⑂2 ▸」，用户点不到那个标记（实测）——而列表里没有别处能展开分支。
+   hover 还有一个毛病：鼠标扫过列表时一个个按钮跳出来，视觉上很吵。 */
+.dw-item .acts{display:none}
 /* 删除确认行必须与「删除」按钮**完全不重叠**，因此它固定钉在条目左缘。
    踩过两次：
    ① 原来是流内 flex 项 + margin-left:auto（靠右）——与「删除」按钮横向重叠 6px，
@@ -793,6 +793,21 @@ body[data-run="true"] .send{display:none}
 }
 .dw-item .asks button.y{color:var(--err);border-color:var(--err)}
 .dw-item .asks button:hover{color:var(--fg);border-color:var(--fg-dim)}
+/* 会话行右键菜单（改名 / 删除）。fixed 定位到鼠标处，点别处或 Esc 关闭。
+   用右键而不是 hover 的理由见上面 .dw-item .acts 的注释。 */
+.ctx{
+  display:none;position:fixed;z-index:70;
+  min-width:96px;padding:4px;
+  background:var(--bg-elev);border:1px solid var(--line-strong);
+  border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.45);
+}
+.ctx[data-open="true"]{display:block}
+.ctx-item{
+  padding:5px 10px;border-radius:4px;font-size:12px;
+  color:var(--fg-dim);cursor:pointer;white-space:nowrap;
+}
+.ctx-item:hover{background:var(--bg-hover);color:var(--fg)}
+.ctx-item[data-act="delete"]:hover{color:var(--err)}
 /* 底部操作区：布局里的固定一段（不是浮层），上边一条分隔线，
    滚动只发生在上面那个列表里，因此不存在「内容从按钮下面透出来」。 */
 .dw-foot{
@@ -824,6 +839,16 @@ body[data-run="true"] .send{display:none}
   max-height:calc(100vh - 24px);overflow-y:auto;overscroll-behavior:contain;
 }
 .pop[data-open="true"]{display:block}
+/* 子会话下拉（顶栏会话名点开）：
+   1) 宽度由 showPop 决定（跟随触发按钮 / 至少 150px），所以这里要解掉 .pop 的
+      min-width:196px，否则窄按钮下永远撑到 196px，看起来比按钮宽一截；
+   2) 条目只显示名字，因此不做省略号截断——名字长到放不下时整块横向可拖：
+      .pi 保持面板宽，.lb 不收缩不截断，溢出部分由 .pop 的滚动条展示。 */
+#popChild{min-width:0;overflow-x:auto;overscroll-behavior:contain}
+#popChild .pt,#popChild .pd{white-space:nowrap}
+#popChild .pi .lb{
+  flex:0 0 auto;overflow:visible;text-overflow:clip;white-space:nowrap;
+}
 .pop .pt{
   font-size:10px;color:var(--fg-faint);padding:5px 8px 4px;letter-spacing:.05em;
 }
@@ -970,8 +995,6 @@ body[data-run="true"] .send{display:none}
   .crow .chip.path{display:none}
   /* 只让位于有 /goal、/plugin 命令等价入口的控件；思考档位最常看，始终保留 */
   .status .st-opt{display:none}
-  /* 状态栏的插件按钮在这里让掉了，界面上必须补一个入口（见 #chipPlugin 注释） */
-  #chipPlugin{display:inline-block}
   .sess .cnt{display:none}
   .bar{padding:0 8px;gap:8px}
   /* 同 520 那条：8px 内边距下把落点补回 x=6 */
@@ -1000,317 +1023,19 @@ body[data-run="true"] .send{display:none}
 <body data-run="false">
 <div class="shell">
 
-  <!-- 顶栏 -->
+  <!-- 顶栏。会话名留空：真实值由 initialize / session/list 填，
+       这里不写任何演示会话名（写了会在握手前闪一下别人的会话）。 -->
   <header class="bar">
     <div class="brand">Narnat</div>
     <button class="sess" id="sessBtn">
-      <span class="branch">grep-ignore-case</span>
-      <span class="cnt">· 3 个分支</span>
+      <span class="branch"></span>
+      <span class="cnt"></span>
       <span class="dim">▾</span>
     </button>
   </header>
 
-  <!-- 演示数据标识：连上后端后 body[data-real="true"] 会隐藏它。
-       不加标识的话，后端启动慢时用户会把这段示例当成自己的历史会话。 -->
-  <div class="demo-tip" id="demoTip">示例数据 · 正在连接后端…</div>
-
   <div class="body">
-    <main class="convo" id="convo">
-
-      <!-- 用户 -->
-      <div class="msg" data-role="user">
-        <div class="text">给 grep 加一个忽略大小写的参数，改完跑测试确认没坏。顺便看看后台任务和串口那几个工具现在什么状态。</div>
-      </div>
-
-      <!-- 思考 -->
-      <div class="think" data-open="false">
-        <div class="row">
-          <span class="caret">▶</span>
-          <span class="name">思考 3.2s · 616 字</span>
-        </div>
-        <div class="slot">
-          <p>用户要给 grep 加参数。参数定义在 <code>DEFINITION["function"]["parameters"]</code>，执行层不用动。</p>
-          <p>校验复用现成的 <code>to_bool</code>，不要自己写字符串归一化，否则 <code>"false"</code> 会被当成真值。</p>
-          <p>改完跑测试。仓库里可能没有 tests 目录，需要先确认测试入口。</p>
-        </div>
-      </div>
-
-      <!-- 计划 -->
-      <div class="tools">
-        <div class="row" data-open="true" tabindex="0" role="button">
-          <span class="caret">▶</span>
-          <span class="name">更新计划</span>
-          <span class="arg">4 项 · 1 完成</span>
-          <span class="meta">1ms</span>
-        </div>
-        <div class="slot">
-          <div class="todo">
-            <div class="done"><span class="mk">✓</span>读 grep 参数定义</div>
-            <div class="now"><span class="mk">●</span>正在新增 ignore_case 参数</div>
-            <div><span class="mk">○</span>跑测试</div>
-            <div><span class="mk">○</span>检查后台任务与串口状态</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 只读阶段 -->
-      <div class="tools">
-        <div class="row" data-open="false" tabindex="0" role="button">
-          <span class="caret">▶</span>
-          <span class="name">读取</span>
-          <span class="arg">narnat_agent/tools/grep/__init__.py</span>
-          <span class="meta">11ms</span>
-        </div>
-        <div class="slot">
-          <div class="snippet">
-            <div class="ln"><span class="no">226</span><span class="tx">"description": "文件过滤，如*.py、src/*.c"</span></div>
-            <div class="ln"><span class="no">227</span><span class="tx">"type": "string"</span></div>
-            <div class="ln"><span class="no">228</span><span class="tx">},</span></div>
-            <div class="ln"><span class="no">229</span><span class="tx">"head_limit": {</span></div>
-            <div class="foot">343 行 · 已读 226–229（共 5 处匹配）</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="tools">
-        <div class="row" data-open="false" tabindex="0" role="button">
-          <span class="caret">▶</span>
-          <span class="name">搜索内容</span>
-          <span class="arg">to_bool</span>
-          <span class="meta">8ms</span>
-        </div>
-        <div class="slot">
-          <div class="snippet">
-            <div class="ln"><span class="no">24</span><span class="tx"><span class="dim">param_utils.py:</span>def <mark>to_bool</mark>(value, default=False):</span></div>
-            <div class="ln"><span class="no">31</span><span class="tx"><span class="dim">bash/__init__.py:</span>background = <mark>to_bool</mark>(args.get("background"))</span></div>
-            <div class="foot">2 个文件 · 2 处匹配</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="tools">
-        <div class="row" data-open="false" tabindex="0" role="button">
-          <span class="caret">▶</span>
-          <span class="name">搜索文件</span>
-          <span class="arg">narnat_agent/tools/**/__init__.py</span>
-          <span class="meta">6ms</span>
-        </div>
-        <div class="slot">
-          <div class="snippet">
-            <div class="ln"><span class="tx">narnat_agent/tools/bash/__init__.py</span></div>
-            <div class="ln"><span class="tx">narnat_agent/tools/edit/__init__.py</span></div>
-            <div class="ln"><span class="tx">narnat_agent/tools/grep/__init__.py</span></div>
-            <div class="ln"><span class="tx dim">… 另有 9 个</span></div>
-            <div class="foot">12 个文件</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 系统事件：压缩。
-           不写「42 条 → 9 条」：协议里 before/after 恒为 null（后端没带），
-           真实面板永远显示不出条数（实测）。演示数据写具体数字会让验收者
-           以为这个形态是可达的。 -->
-      <div class="sys ok">
-        <span class="ico">✓</span>
-        <span>压缩完成</span>
-        <span class="tail">12.4s</span>
-      </div>
-
-      <!-- 写入阶段 -->
-      <div class="tools">
-        <div class="row" data-open="true" tabindex="0" role="button">
-          <span class="caret">▶</span>
-          <span class="name">编辑</span>
-          <span class="arg">narnat_agent/tools/grep/__init__.py</span>
-          <span class="meta">+4 −1 · 9ms</span>
-        </div>
-        <div class="slot">
-          <div class="snippet">
-            <div class="ln del"><span class="no">229</span><span class="tx">"type": "string"</span></div>
-            <div class="ln add"><span class="no">229</span><span class="tx">"type": "string",</span></div>
-            <div class="ln add"><span class="no">230</span><span class="tx">"ignore_case": {</span></div>
-            <div class="ln add"><span class="no">231</span><span class="tx">"type": "boolean",</span></div>
-            <div class="ln add"><span class="no">232</span><span class="tx">"description": "忽略大小写（等价 rg -i）",</span></div>
-            <div class="ln"><span class="no">233</span><span class="tx">},</span></div>
-          </div>
-        </div>
-      </div>
-
-      <div class="tools">
-        <div class="row" data-open="false" tabindex="0" role="button">
-          <span class="caret">▶</span>
-          <span class="name">写入</span>
-          <span class="arg">narnat_agent/tools/grep/_ignore_case.py</span>
-          <span class="meta">新建 · 21 行 · 7ms</span>
-        </div>
-        <div class="slot">
-          <div class="snippet">
-            <div class="ln"><span class="no">1</span><span class="tx">from ..param_utils import to_bool</span></div>
-            <div class="ln"><span class="no">2</span><span class="tx"></span></div>
-            <div class="ln"><span class="no">3</span><span class="tx">def resolve(args):</span></div>
-            <div class="ln"><span class="no">4</span><span class="tx">    return to_bool(args.get("ignore_case"))</span></div>
-            <div class="foot">21 行 · 已创建</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 串行阶段 -->
-      <div class="tools">
-        <div class="row" data-open="false" tabindex="0" role="button">
-          <span class="caret">▶</span>
-          <span class="name">执行命令</span>
-          <span class="arg">python -m pytest tests/ -q</span>
-          <span class="meta">exit 0 · 3.2s</span>
-        </div>
-        <div class="slot">
-          <div class="snippet out">
-            <div class="ln"><span class="tx">............                              [100%]</span></div>
-            <div class="ln"><span class="tx">12 passed in 3.18s</span></div>
-            <div class="foot">退出码 <b>0</b> · 无 stderr</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 失败的工具 -->
-      <div class="tools">
-        <div class="row" data-open="false" data-st="err">
-          <span class="caret">▶</span>
-          <span class="name">执行命令</span>
-          <span class="arg">git push origin main</span>
-          <span class="meta"><span class="bad">exit 128</span> · 1.1s</span>
-        </div>
-        <div class="slot">
-          <div class="snippet out">
-            <div class="ln"><span class="tx">fatal: unable to access remote</span></div>
-            <div class="foot">退出码 <span class="err-tx">128</span></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 后台任务 -->
-      <div class="tools">
-        <div class="row" data-open="true" tabindex="0" role="button">
-          <span class="caret">▶</span>
-          <span class="name">执行命令</span>
-          <span class="arg">后台提交 npm run dev</span>
-          <span class="meta">bg1 · 运行中</span>
-        </div>
-        <div class="slot">
-          <div class="snippet out">
-            <div class="ln"><span class="tx">VITE v5.4.2  ready in 412 ms</span></div>
-            <div class="ln"><span class="tx">➜  Local:   http://localhost:5173/</span></div>
-            <div class="foot">bg1 · 已运行 18s · 输出写入 .narnat/logs/bg1.log</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 串口 / SSH -->
-      <div class="tools">
-        <div class="row" data-open="false" tabindex="0" role="button">
-          <span class="caret">▶</span>
-          <span class="name">串口</span>
-          <span class="arg">COM3 @115200 执行命令</span>
-          <span class="meta">↑42B ↓118B · 880ms</span>
-        </div>
-        <div class="slot">
-          <div class="snippet out">
-            <div class="ln"><span class="tx">$ AT+VER</span></div>
-            <div class="ln"><span class="tx">+VER: 2.1.4</span></div>
-            <div class="ln"><span class="tx">OK</span></div>
-            <div class="foot">COM3 · 8N1 · 无流控</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="tools">
-        <div class="row" data-open="false" tabindex="0" role="button">
-          <span class="caret">▶</span>
-          <span class="name">终端</span>
-          <span class="arg">connect [dev1] root@10.0.0.9</span>
-          <span class="meta">412ms</span>
-        </div>
-        <div class="slot">
-          <div class="snippet out">
-            <div class="ln"><span class="tx">Linux build-server 6.1.0 #1 SMP x86_64</span></div>
-            <div class="foot">[dev1] · 会话保持 · 可用于后续 exec</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="tools">
-        <div class="row" data-open="false" tabindex="0" role="button">
-          <span class="caret">▶</span>
-          <span class="name">联网搜索</span>
-          <span class="arg">vscode webview CSP nonce</span>
-          <span class="meta">1.4s</span>
-        </div>
-        <div class="slot">
-          <div class="snippet">
-            <div class="ln"><span class="tx">Webview API · 官方文档</span></div>
-            <div class="ln"><span class="tx dim">code.visualstudio.com</span></div>
-            <div class="ln"><span class="tx"></span></div>
-            <div class="ln"><span class="tx">CSP and nonces · 安全指南</span></div>
-            <div class="foot">5 条结果 · 用时 1.4s</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- MCP -->
-      <div class="tools">
-        <div class="row" data-open="false" tabindex="0" role="button">
-          <span class="caret">▶</span>
-          <span class="name">MCP</span>
-          <span class="arg">connect sysplorer (python mcp_server.py)</span>
-          <span class="meta">1.8s</span>
-        </div>
-        <div class="slot">
-          <div class="snippet out">
-            <div class="ln"><span class="tx">已注册 7 个工具</span></div>
-            <div class="foot">服务器 sysplorer · 状态 已连接</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 目标模式续跑 -->
-      <div class="sys">
-        <span class="ico">↻</span>
-        <span>目标未完成，自动续跑</span>
-        <span class="tail">第 2 / 10 轮</span>
-      </div>
-
-      <!-- 复核 -->
-      <div class="sys ok">
-        <span class="ico">✓</span>
-        <span>复核通过 · 3/3</span>
-        <span class="tail">6.5s</span>
-      </div>
-
-      <!-- 助手结论 -->
-      <div class="msg">
-        <p>改完了：新增 <code>ignore_case</code> 布尔参数并透传给 ripgrep 的 <code>-i</code>，12 项测试全部通过。</p>
-        <p>后台任务 <code>bg1</code> 仍在跑，串口 <code>COM3</code> 与远程 <code>dev1</code> 会话都保持连接。需要我把这个参数同步加进 <code>Glob</code> 吗？</p>
-      </div>
-
-      <!-- 打断提示 -->
-      <div class="sys">
-        <span class="ico">■</span>
-        <span>已打断</span>
-        <span class="tail">可继续输入</span>
-      </div>
-
-      <!-- 待确认命令（演示态样例；切真实态时移除，真实确认由 confirm/request 动态生成） -->
-      <div class="confirm" id="confirmDemo">
-        <div class="q">即将删除 3 个文件，确认执行？</div>
-        <div class="cmd">rm -rf .narnat/data/sessions/old-1.json
-rm -rf .narnat/data/sessions/old-2.json
-rm -rf .narnat/data/sessions/old-3.json</div>
-        <div class="acts">
-          <button class="primary" data-cf="y">确认执行</button>
-          <button data-cf="n">取消</button>
-        </div>
-      </div>
-
-    </main>
+    <main class="convo" id="convo"></main>
 
     <!-- 回到底部：用户往上翻看旧内容后，跟随会停（这是对的），但界面上
          原来没有任何回头路——249px 侧边栏里一轮 200 行输出要往下滚十几屏。
@@ -1350,13 +1075,11 @@ rm -rf .narnat/data/sessions/old-3.json</div>
       <textarea id="input" rows="1" placeholder=""></textarea>
 
       <div class="crow">
-        <span class="chip mono" id="chipSess">grep-ignore-case</span>
-        <!-- 工作目录：这只是演示占位。真实态由 initialize 的 params.workdir 覆盖
+        <span class="chip mono" id="chipSess"></span>
+        <!-- 工作目录：这只是占位。真实态由 initialize 的 params.workdir 覆盖
              （见 applyInitialize）。占位不用任何真实路径——写死一个具体机器的目录，
              换台机器/换个位置的人会以为那是自己的目录，而实际工作目录在别处。 -->
         <span class="chip mono path">工作目录</span>
-        <span class="chip on" id="chipGoal">目标 关</span>
-        <span class="chip" id="chipPlugin">插件</span>
         <div class="right">
           <button class="attach-btn" id="attachBtn" title="添加文件 / 文件夹 / 图片" aria-label="添加附件">＋</button>
           <span class="kbd">Enter 发送</span>
@@ -1366,18 +1089,20 @@ rm -rf .narnat/data/sessions/old-3.json</div>
       </div>
     </div>
 
+    <!-- 状态行。初值一律留空/占位符：真实值由 initialize 的 model/thinking/goal/
+         plugins 与 stats 通知填写。写死演示值会在握手前闪出别人的模型名与花费。 -->
     <div class="status">
-      <span class="st-core"><span class="k">模型</span> <button class="v" id="btnModel">deepseek-chat</button></span>
+      <span class="st-core"><span class="k">模型</span> <button class="v" id="btnModel">—</button></span>
       <span class="sep">·</span>
-      <span class="st-core"><span class="k">思考</span> <button class="v" id="btnThink">高</button></span>
+      <span class="st-core"><span class="k">思考</span> <button class="v" id="btnThink">—</button></span>
       <span class="sep st-opt">·</span>
       <span class="st-opt"><button class="v" id="btnGoal">目标模式 关</button></span>
       <span class="sep st-opt">·</span>
-      <span class="st-opt"><button class="v" id="btnPlugin">插件 12</button></span>
+      <span class="st-opt"><button class="v" id="btnPlugin">插件 —</button></span>
       <div class="right">
-        <span class="st-core"><span class="k">上下文</span> <span class="v" id="ctxPct">12%</span></span>
-        <span class="st-info st-cache"><span class="k">缓存</span> <span class="v">80%</span></span>
-        <span class="st-info st-cost"><span class="k">费用</span> <span class="v" id="costV">¥0.0123</span></span>
+        <span class="st-core"><span class="k">上下文</span> <span class="v" id="ctxPct">—</span></span>
+        <span class="st-info st-cache"><span class="k">缓存</span> <span class="v">—</span></span>
+        <span class="st-info st-cost"><span class="k">费用</span> <span class="v" id="costV">—</span></span>
         <span class="st-info st-bal"><span class="k">余额</span> <span class="v">—</span></span>
       </div>
     </div>
@@ -1385,21 +1110,17 @@ rm -rf .narnat/data/sessions/old-3.json</div>
 
 </div>
 
-<!-- ---------- 下拉面板 ---------- -->
+<!-- ---------- 下拉面板 ----------
+     模型 / 思考 / 插件三项的条目一律由后端 initialize 重建
+     （rebuildModelPop / rebuildThinkPop / applyPlugins），模板里不放任何演示条目：
+     写死几个模型名和编造的价格，在握手前会当成真实可选项展示出来。 -->
 <div class="pop" id="popModel">
   <div class="pt">模型</div>
-  <div class="pi" data-on="true" data-v="deepseek-chat"><span class="ck">✓</span><span class="lb">deepseek-chat</span><span class="sd">¥1/¥2</span></div>
-  <div class="pi" data-v="deepseek-reasoner"><span class="ck"></span><span class="lb">deepseek-reasoner</span><span class="sd">¥2/¥8</span></div>
-  <div class="pi" data-v="claude-sonnet"><span class="ck"></span><span class="lb">claude-sonnet</span><span class="sd">¥3/¥15</span></div>
-  <div class="pi" data-v="kimi-k2"><span class="ck"></span><span class="lb">kimi-k2</span><span class="sd">¥4/¥16</span></div>
   <div class="pd">切换后立即生效，并写回 config.</div>
 </div>
 
 <div class="pop" id="popThink">
   <div class="pt">思考强度</div>
-  <div class="pi" data-v="low"><span class="ck"></span><span class="lb">低</span></div>
-  <div class="pi" data-v="medium"><span class="ck"></span><span class="lb">中</span></div>
-  <div class="pi" data-on="true" data-v="high"><span class="ck">✓</span><span class="lb">高</span></div>
   <div class="pd">直接影响 token 消耗与推理深度。彻底关闭请改配置「智能体.思考.启用」= false。</div>
 </div>
 
@@ -1414,11 +1135,20 @@ rm -rf .narnat/data/sessions/old-3.json</div>
 
 <div class="pop" id="popPlugin">
   <div class="pt">插件工具 · 关闭后不再发给模型</div>
-  <div class="pi" data-on="true" data-v="terminal"><span class="sw" data-on="true">on</span><span class="lb">终端</span><span class="sd">SSH</span></div>
-  <div class="pi" data-on="true" data-v="serial"><span class="sw" data-on="true">on</span><span class="lb">串口</span><span class="sd">COM</span></div>
-  <div class="pi" data-on="true" data-v="mcp"><span class="sw" data-on="true">on</span><span class="lb">MCP</span><span class="sd">服务器</span></div>
-  <div class="pi" data-on="true" data-v="web_search"><span class="sw" data-on="true">on</span><span class="lb">联网搜索</span><span class="sd">AnySearch</span></div>
   <div class="pd">已建立的连接不受影响。</div>
+</div>
+
+<!-- 顶栏会话名点开：当前会话的子会话列表（内容由 renderChildPop 重建） -->
+<div class="pop" id="popChild">
+  <div class="pt">子会话</div>
+  <div id="childList"></div>
+  <div class="pd" id="childFoot"></div>
+</div>
+
+<!-- 会话行的右键菜单：改名 / 删除。平时不存在于屏幕上，右键某一行才出现。 -->
+<div class="ctx" id="sessMenu" data-open="false">
+  <div class="ctx-item" data-act="rename">改名</div>
+  <div class="ctx-item" data-act="delete">删除</div>
 </div>
 
 <script>
@@ -1598,6 +1328,60 @@ rm -rf .narnat/data/sessions/old-3.json</div>
       ok ? resolve() : reject(new Error('execCommand copy failed'));
     });
   }
+
+  /* 鼠标选中 → 右键「复制」拿不到内容的问题。
+   *
+   * 现象：文字能用鼠标选中、高亮也对，但粘贴出来是空的。
+   * 原因：webview 是沙箱 iframe，右键菜单是 Electron 的**原生菜单**，
+   * 它复制什么由宿主决定；渲染进程 `copy` 事件里 setData 写的只是临时数据，
+   * 原生菜单读不到 —— 结果就是「能选中、粘贴为空白」，而且全程不报错。
+   * 上面 copyText（复制按钮用的）走 navigator.clipboard，所以按钮是好的。
+   *
+   * 修法：选中后主动把选区发给宿主，由宿主用 vscode.env.clipboard 写，
+   * 那是官方 API，不受 iframe 剪贴板权限限制。
+   * 时机用 mouseup / keyup：用户刚选完就写，随后的右键「粘贴」拿到的就是它。
+   * 只在**真的产生新选区**时发，避免每次点击都写一次剪贴板。 */
+  var lastCopiedSel = '';
+  function pushSelectionToHost(){
+    var sel = '';
+    try { sel = String(window.getSelection() || ''); } catch (err) { return; }
+    if (!sel) { lastCopiedSel = ''; return; }
+    /* 选区落在输入框**内部**时才不接管：那是用户在编辑自己打的字，
+       复制该由浏览器/输入框自己处理。
+       注意判据必须是「选区在不在输入框里」，不能只看 activeElement ——
+       面板启动时会把焦点放到 #input，而用户完全可能没在里面打字、
+       只是在对话区框选一段回答；只判 activeElement 会把这种正常复制挡掉
+       （实测：activeElement 恒为 input，clipCount 永远是 0）。 */
+    try {
+      var ae = document.activeElement;
+      if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) {
+        var s = window.getSelection();
+        if (s && s.rangeCount) {
+          var node = s.getRangeAt(0).commonAncestorContainer;
+          var host = node && (node.nodeType === 1 ? node : node.parentNode);
+          if (host && (host === ae || (ae.contains && ae.contains(host)))) return;
+        }
+      }
+    } catch (err) { /* 取不到就按「不在输入框」处理，宁可多写一次剪贴板 */ }
+    if (sel === lastCopiedSel) return;
+    lastCopiedSel = sel;
+    if (vscodeApi) vscodeApi.postMessage({ type: 'clipboard/write', params: { text: sel } });
+  }
+  document.addEventListener('mouseup', function(){ setTimeout(pushSelectionToHost, 0); });
+  document.addEventListener('keyup', function(e){
+    // 只有选择类按键才需要（Shift+方向键、Ctrl+A）
+    if (e.shiftKey || e.key === 'a' || e.key === 'A') setTimeout(pushSelectionToHost, 0);
+  });
+  /* Ctrl+C 兜底：某些环境下用户习惯按快捷键，走同一条宿主通道。
+     有选区时拦下默认行为，避免它又走那条静默失败的原生通路。 */
+  document.addEventListener('copy', function(e){
+    var sel = '';
+    try { sel = String(window.getSelection() || ''); } catch (err) { sel = ''; }
+    if (!sel) return;
+    if (vscodeApi) vscodeApi.postMessage({ type: 'clipboard/write', params: { text: sel } });
+    lastCopiedSel = sel;
+    e.preventDefault();
+  });
 
   /* ---------- Markdown 表格 ---------- */
 
@@ -2556,6 +2340,14 @@ rm -rf .narnat/data/sessions/old-3.json</div>
       e.preventDefault();
       return;
     }
+    // 右键菜单是最上层：先关它，再依次收下拉/抽屉/候选面板。
+    // 不放在最前面会怎样：菜单开着按 Esc，抽屉先被收掉，菜单还浮在屏幕上。
+    var ctxMenu = document.getElementById('sessMenu');
+    if (ctxMenu && ctxMenu.getAttribute('data-open') === 'true') {
+      ctxMenu.setAttribute('data-open', 'false');
+      e.preventDefault();
+      return;
+    }
     if (drawer.getAttribute('data-open') === 'true') { setDrawer(false); e.preventDefault(); return; }
     if (palette.getAttribute('data-open') === 'true') { openPalette(false); e.preventDefault(); return; }
   }, true);
@@ -2578,9 +2370,14 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     inp.addEventListener('pointerdown', closeOnFocus);
   })();
 
+  /* 顶栏会话名：点了开「子会话」下拉，不再开会话抽屉（抽屉入口在输入行的会话名 chip）。
+     未保存（游离态）时没有会话，子会话无从谈起 —— 直接不弹。
+     有名字就弹：有子会话列出来，没有就写「无子会话」。 */
   sessBtnEl.addEventListener('click', function(e){
     e.stopPropagation();
-    setDrawer(drawer.getAttribute('data-open') !== 'true');
+    if (!CUR) return;
+    renderChildPop();
+    showPop(sessBtnEl, 'popChild');
   });
 
   // 命令面板「Narnat: 切换调度面板」→ 宿主 postMessage {type:'toggleInspector'}。
@@ -2605,6 +2402,15 @@ rm -rf .narnat/data/sessions/old-3.json</div>
 
   input.addEventListener('input', function(){
     palSel = 0;
+    /* 用户真在打字 → 退出历史浏览状态。
+       不退出会怎样（实测）：按 ↑ 翻出一条旧提问（histIdx 变成 >=0），
+       接着把它改成 `/`，此时补全面板已经弹出，但方向键要用的那条分支
+       有 `histIdx === -1` 这个前提 —— 于是 ↑↓ 既选不了候选、也不再翻历史，
+       用户以为「敲 / 之后上下键失灵」。终端里也是这个语义：
+       一旦开始编辑，历史浏览就结束了。
+       程序化赋值（historyStep 里 input.value = ...）不会触发 input 事件，
+       所以这里不会把自己的历史浏览打断。 */
+    histIdx = -1;
     refreshPalette();
   });
 
@@ -3051,12 +2857,20 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     return box;
   }
 
-  /* ---------- 输入历史（上下键调出） ---------- */
+  /* ---------- 输入历史（上下键调出） ----------
+     HIST 是「按 ↑ 能翻到的提问」列表，最旧在前。两个来源：
+     ① 本次面板生命周期内发出的（pushHistory）；
+     ② 后端历史里 role=user 的消息（seedHistory）—— 重载窗口、切会话、
+        重启后端之后 ① 是空的，只靠它的话按 ↑ 什么都翻不到，
+        而用户明明刚在这个会话里问过一堆问题。
+     只放用户真正打的文字：目标模式注入的内部指令（`[自动续跑]…`）
+     不是用户输入，翻出来会让他以为自己说过那句话。 */
   var HIST = [];          // 已提交的输入，最旧在前
   var HIST_MAX = 100;
   var histIdx = -1;       // -1 = 不在浏览历史（正在打新的）
   var histDraft = '';     // 开始浏览前正在打的内容，↓ 回到这里
 
+  /** 追加一条历史（不重置浏览状态以外的任何东西） */
   function pushHistory(text){
     var t = String(text || '').trim();
     if (!t) return;
@@ -3064,6 +2878,31 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     if (HIST.length && HIST[HIST.length - 1] === t) return;
     HIST.push(t);
     if (HIST.length > HIST_MAX) HIST.shift();
+    histIdx = -1;
+    histDraft = '';
+  }
+
+  /**
+   * 用后端历史消息重建 HIST。
+   *
+   * 只在「拿到一份完整历史」时调用（initialize 的 session.messages、
+   * sessionSwitch/sessionDone 的 messages）。整份替换而不是追加：
+   * 换会话后旧会话的提问不该出现在新会话的 ↑ 里。
+   * @param {Array} msgs 后端历史（role/text）
+   */
+  function seedHistory(msgs){
+    if (!Array.isArray(msgs)) return;
+    var list = [];
+    msgs.forEach(function(m){
+      if (!m || m.role !== 'user') return;
+      var t = String(m.text == null ? '' : m.text).trim();
+      if (!t) return;
+      if (isGoalInjection(t)) return;      // 内部注入的指令不算用户提问
+      if (list.length && list[list.length - 1] === t) return;
+      list.push(t);
+    });
+    if (list.length > HIST_MAX) list = list.slice(-HIST_MAX);
+    HIST = list;
     histIdx = -1;
     histDraft = '';
   }
@@ -3246,7 +3085,12 @@ rm -rf .narnat/data/sessions/old-3.json</div>
         // 下拉和抽屉完全不理 Esc（实测：连按 4 次 Esc，模型下拉一直开着，
         // 只有改用鼠标点空白处才关得掉），键盘用户会以为界面卡住了。
         // 确认条不参与：它代表后端在等 y/n，关掉就等于永久不回话。
-        // 顺序：命令候选 → 下拉 → 抽屉，一次一层。
+        // 顺序：右键菜单 → 命令候选 → 下拉 → 抽屉，一次一层。
+        var ctxM = document.getElementById('sessMenu');
+        if (ctxM && ctxM.getAttribute('data-open') === 'true') {
+          ctxM.setAttribute('data-open', 'false');
+          return;
+        }
         if (paletteVisible()) { openPalette(false); return; }
         if (openPop) { closePop(); return; }
         if (drawer.getAttribute('data-open') === 'true') { setDrawer(false); return; }
@@ -3258,14 +3102,23 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     // 2) 面板没开
     if (e.key === 'Escape') {
       // 同 1)：没有候选可关时，继续往下一层收
+      var ctxM2 = document.getElementById('sessMenu');
+      if (ctxM2 && ctxM2.getAttribute('data-open') === 'true') {
+        ctxM2.setAttribute('data-open', 'false');
+        return;
+      }
       if (openPop) { closePop(); return; }
       if (drawer.getAttribute('data-open') === 'true') { setDrawer(false); return; }
       openPalette(false);
       return;
     }
     // 上下键调出输入历史（像终端那样）。多行输入时让给光标移动。
+    // 输入以 / 开头时不翻历史：那是命令补全的地盘（上面那条分支处理有候选的
+    // 情形），连一个候选都没有时（比如只敲了 "/" 又删掉字符）翻历史会把
+    // 「/」直接换成一条旧提问，用户以为自己的输入被吃了（实测）。
     if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
-        input.value.indexOf('\n') < 0) {
+        input.value.indexOf('\n') < 0 &&
+        input.value.trim().charAt(0) !== '/') {
       if (historyStep(e.key === 'ArrowUp' ? -1 : 1)) {
         e.preventDefault();
         return;
@@ -3712,8 +3565,38 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     if (!pop) return;
     if (openPop === pop) { closePop(); return; }
     closePop();
-    pop.setAttribute('data-open', 'true');
     var r = btn.getBoundingClientRect();
+    // 子会话下拉的宽度等于触发它的顶栏会话名按钮，但不小于 150px。
+    // 这个下限是「左名字 + 右状态」两列各能读到几个字的极限，再窄读不出内容。
+    // 注意：判据是**面板宽度**而不是按钮宽度 —— 会话名短（"alpha" → 按钮 63px）
+    // 时面板本身很宽，下拉按 150px 展开完全放得下，此时不该隐藏
+    //（实测按按钮宽判会把 700px 面板下的下拉也误藏）。
+    var childW = 0;
+    if (pop.id === 'popChild') {
+      // 判据用 .shell 的实际宽度，不能用 window.innerWidth：webview 的 innerWidth
+      // 未必等于面板宽（探测环境里两者就不同），拿错了会让阈值形同失效。
+      var shellEl = document.querySelector('.shell');
+      var avail = shellEl ? shellEl.getBoundingClientRect().width : window.innerWidth;
+      // 180px 以下不弹：扣掉左右内边距后可用宽已不足 150px，展开的下拉必然
+      // 被裁掉一截或被迫横向拖，读不出内容。
+      if (avail < 180) return;
+      childW = Math.max(150, Math.round(r.width));
+      if (childW > avail - 4) childW = avail - 4;
+    }
+    pop.setAttribute('data-open', 'true');
+    if (pop.id === 'popChild') {
+      // 子会话下拉从顶栏按钮**向下**展开：它是全屏最靠上的控件，下方才是空余空间。
+      // 沿用「向上弹」那套算法会怎样（实测）：anchorTop 取到按钮自身的 top(≈20)，
+      // maxHeight 只剩 80px，三四条子会话就要滚动 —— 而子会话本来就少，
+      // 用户要的是一眼全看完再点。
+      // 高度给足（视口下方剩余全部），子会话少时自然全部展开，多了才滚。
+      pop.style.maxHeight = Math.max(120, window.innerHeight - r.bottom - 12) + 'px';
+      pop.style.top = Math.round(r.bottom + 6) + 'px';
+      pop.style.left = Math.max(2, Math.min(r.left,
+        window.innerWidth - pop.offsetWidth - 12)) + 'px';
+      openPop = pop;
+      return;
+    }
     // 弹层必须停在**输入区之上**，不能盖住输入框和发送/停止按钮。
     // 只按按钮位置往上弹会怎样（实测，249px 真机默认宽）：弹层 y=632..758，
     // 而输入框 697..718、停止按钮 723..748 全在它下面 —— 用户点输入框继续打字，
@@ -3727,6 +3610,8 @@ rm -rf .narnat/data/sessions/old-3.json</div>
       if (ct < anchorTop) anchorTop = ct;
     }
     pop.style.maxHeight = Math.max(80, anchorTop - 14) + 'px';
+    // 子会话下拉宽度锁定成按钮宽度；名字放不下不截断，交给 #popChild 的 overflow-x 横向拖。
+    pop.style.width = childW ? childW + 'px' : '';
     // 左边也要夹在面板内：下拉 min-width:196px，面板窄于 208px 时
     // min(r.left, innerWidth-196-12) 恒为负数，左侧一整截跑到面板外面
     // （实测 180px 面板 → left=-28，28px 不可见、模型名前几个字看不到）。
@@ -3782,52 +3667,18 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     }
   });
 
-  // 输入框那一行的「目标 开/关」chip 也能点开目标面板。
-  // 面板窄于 400px 时状态栏里的「目标模式」按钮整个被让位掉，这个 chip
-  // 就成了屏幕上唯一还看得见的目标入口——它原来只是个不可点的 span，
-  // 用户点它毫无反应，只能改去敲 /goal（实测 300px 宽时 #btnGoal 尺寸为 0）。
-  var chipGoalEl = document.getElementById('chipGoal');
-  if (chipGoalEl) {
-    chipGoalEl.addEventListener('click', function(e){
-      e.stopPropagation();
-      showPop(this, 'popGoal');
-    });
-  }
-  // 同上：窄面板里状态栏的「插件」按钮被让位掉，这个 chip 是唯一入口
-  var chipPluginEl = document.getElementById('chipPlugin');
-  if (chipPluginEl) {
-    chipPluginEl.addEventListener('click', function(e){
-      e.stopPropagation();
-      showPop(this, 'popPlugin');
-    });
-  }
-  /* 这两个 chip 是 <span>，不在 Tab 序列里 —— 249px 下状态栏对应的按钮
-     被 @container 让位成 0×0，键盘用户此时**根本没有**目标模式/插件的入口
-     （只能记得去敲 /goal、/plugin）。给它们 tabindex + role，并把 Enter/空格
-     转成点击，复用同一套逻辑。 */
-  [chipGoalEl, chipPluginEl].forEach(function (el) {
-    if (!el) return;
-    el.setAttribute('tabindex', '0');
-    el.setAttribute('role', 'button');
-    el.addEventListener('keydown', function (e) {
-      if (e.key !== 'Enter' && e.key !== ' ') return;
-      if (e.repeat) return;
-      e.preventDefault();
-      showPop(el, el.id === 'chipGoal' ? 'popGoal' : 'popPlugin');
-    });
-  });
-  /* 输入行的会话名 / 工作目录 chip 长得跟上面两个能点的 chip 完全一样，
+  /* 输入行的会话名 / 工作目录 chip 长得跟状态栏那两个能点的按钮完全一样，
      点了却什么都不发生（实测 cursor:auto、无监听器）。会话名接开抽屉，
      路径接复制——这是用户点它们时唯一说得通的期待。
      工作目录不能改（改目录要重开会话，属另一件事），所以只给复制。 */
   var chipSessEl = document.getElementById('chipSess');
   if (chipSessEl) {
     chipSessEl.style.cursor = 'pointer';
+    // 顶栏会话名改成开「子会话」下拉后，这里就是会话抽屉的入口
     chipSessEl.title = '点击打开会话列表';
     chipSessEl.addEventListener('click', function (e) {
       e.stopPropagation();
-      var sb = document.getElementById('sessBtn');
-      if (sb) sb.click();
+      setDrawer(drawer.getAttribute('data-open') !== 'true');
     });
   }
   var chipPathEl = document.querySelector('.crow .chip.path');
@@ -3924,8 +3775,6 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     if (REAL) postConfigSet('goal', { enabled: v === 'on', maxRounds: Number(rounds) });
     var btn = document.getElementById('btnGoal');
     btn.textContent = v === 'on' ? '目标模式 开 · 0/' + rounds : '目标模式 关';
-    var chip = document.getElementById('chipGoal');
-    if (chip) chip.textContent = v === 'on' ? '目标 开' : '目标 关';
     closePop();
   });
 
@@ -3967,28 +3816,24 @@ rm -rf .narnat/data/sessions/old-3.json</div>
   });
 
   /* ---------- 会话数据与渲染 ---------- */
-  // 模拟态的示例数据（真实态由后端 session/list 覆盖）
-  var SESS = [
-    { name: 'grep-ignore-case', time: '14:32', count: 28,
-      children: [
-        { name: 'try-regex', status: 'completed', time: '14:20' },
-        { name: 'alt-approach', status: 'active', time: '14:25', count: 12 }
-      ] },
-    { name: 'ui-webview', time: '11:05', count: 64, children: [] },
-    { name: 'refactor-tools', time: '10-16', count: 41, children: [] },
-    { name: 'theme-tokens', time: '10-15', count: 22, children: [] },
-    { name: 'docs-audit', time: '10-14', count: 18, children: [] },
-    { name: 'perf-probe', time: '10-12', count: 33, children: [] },
-    { name: 'legacy-cleanup', time: '10-09', count: 7, children: [] },
-    { name: 'proto-e2e', time: '10-08', count: 5, children: [] }
-  ];
+  /* 生产态这里必须是空的：会话列表完全由后端 session/list 填写。
+     演示数据只活在 design/demo-convo.html → media/narnat.demo.js 里，
+     由 preview.html 通过 window.NARNAT_DEMO 注入（vsix 不含该文件）。
+     曾经把示例会话写死在这个数组里会怎样（实测）：刚启动点顶栏会话名，
+     子会话下拉里列出 try-regex、alt-approach 两条根本不存在的分支。 */
+  var DEMO = window.NARNAT_DEMO || null;
+  var SESS = (DEMO && DEMO.sessions) || [];
   // 抽屉里默认显示多少个父会话（其余折叠成一行「展开其余 N 条」）
   var VISIBLE_SESSIONS = 6;
   // 后端因截断没给的会话条数（只给计数，不给内容），「展开其余 N 条」要用
   var SESS_HIDDEN = 0;
-  var CUR = 'grep-ignore-case';
+  var CUR = (DEMO && DEMO.current) || '';
   // 用户点了「展开」后置 true：真实态发 session/list{all:true}，模拟态直接全显示
   var SHOW_ALL = false;
+  /* 哪些父会话的分支在抽屉里展开着（key = 父会话名）。
+     只影响列表显示，不改变当前会话，也不需要问后端——children 本来就在
+     session/list 里给了。 */
+  var EXPANDED = {};
 
   function sessMeta(s){
     return s.time || '';
@@ -3998,17 +3843,28 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     var o = opts || {};
     // data-name 必须转义：会话名里可能有 "，不转义会把属性截断
     //（`a"b` → data-name="a"，该会话从此点不进去），还会让名字里的 HTML 注入进 DOM
-    var out = '<div class="dw-item" data-name="' + esc(fullName) + '"' +
+    var out = '<div class="dw-item' + (o.sub ? ' dw-sub' : '') +
+      '" data-name="' + esc(fullName) + '"' +
       (o.cur ? ' data-cur="true"' : '') +
       (o.ghost ? ' data-ghost="true"' : '') + '>';
     // title 给完整名字：249px 里长名字一律省略号，hover 出来的「改名/删除」
     // 又浮在右端盖住一截，靠原生 tooltip 才能读全（省掉一次点进去再退出来）
-    out += '<span class="n" title="' + esc(fullName) + '">' + esc(fullName) + '</span>';
+    // 子会话条目只显示子会话名本身：缩进已经表明从属关系，
+    // 再挂一遍「父/子」全路径在 249px 里只剩几个字。data-name 仍是全路径。
+    var shownName = o.sub ? String(fullName).split('/').slice(1).join('/') : fullName;
+    out += '<span class="n" title="' + esc(fullName) + '">' + esc(shownName) + '</span>';
+    // 有子会话才出现的展开标记：点它展开/收起该会话的分支，不影响「点整行进会话」。
+    // 不显示的话（改动前）分支在列表里完全没有入口，用户只能记得敲 /ls --all。
+    if (o.branchCount) {
+      var open = !!EXPANDED[fullName];
+      out += '<span class="br" data-branch="1" data-open="' + (open ? 'true' : 'false') +
+        '" title="' + (open ? '收起分支' : '展开 ' + o.branchCount + ' 个分支') + '">' +
+        '⑂' + o.branchCount + (open ? '▾' : '▸') + '</span>';
+    }
     // ghost：父会话文件已不在，只剩子会话。别让它显示成一个正常空会话。
     out += '<span class="m">' + esc(o.ghost ? '无记录' : metaText) + '</span>';
-    out += '<span class="acts">' +
-      '<button class="rn">改名</button>' +
-      '<button class="del">删除</button></span>';
+    // 改名 / 删除不再放在行内（hover 会盖住分支标记），改由右键菜单唤起。
+    // 这里只留删除的行内二次确认条：右键「删除」后仍需用户点一次「是」。
     out += '<span class="asks"><span>删除？</span><button class="y">是</button><button>否</button></span>';
     out += '</div>';
     return out;
@@ -4016,9 +3872,15 @@ rm -rf .narnat/data/sessions/old-3.json</div>
 
   function renderSessions(){
     /* 会话列表：一列扁平，仿 Copilot 的历史面板。
-       分支（子会话）不进列表——它们是探索时的临时产物，/done 后结论就
-       合并回父会话了，常驻列表只会让「哪条是我的对话」变成猜谜。
-       要分支可在输入框用 /ls --all 或在会话里 /explore。 */
+       分支（子会话）默认折叠不占位，但**有入口**：有分支的会话名后面挂一个
+       「⑂N ▸」标记，点它就地展开该会话的子会话（缩进显示），再点收起。
+       完全不给入口会怎样（改动前就是这样）：用户在抽屉里找不到分支，
+       只能记得去输入框敲 /ls --all 或 /explore，而界面上没有任何提示。
+       当前所在的那条若是子会话，进抽屉时自动把它父会话展开好，
+       否则用户会看到「顶栏写着 alpha/beta，列表里却只有 alpha」。 */
+    // 当前在子会话里 → 自动展开它的父会话
+    if (CUR.indexOf('/') >= 0) EXPANDED[CUR.split('/')[0]] = true;
+
     var all = SESS.slice();
     var shown = SHOW_ALL ? all : all.slice(0, VISIBLE_SESSIONS);
     /* 后端默认只把「更早」的 3 条塞进 SESS，其余的都只是 hidden 计数。
@@ -4030,7 +3892,18 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     var html = '';
 
     shown.forEach(function(s){
-      html += itemHtml(s.name, sessMeta(s), { cur: s.name === CUR, ghost: !!s.ghost });
+      var kids = s.children || [];
+      html += itemHtml(s.name, sessMeta(s), {
+        cur: s.name === CUR, ghost: !!s.ghost, branchCount: kids.length
+      });
+      if (kids.length && EXPANDED[s.name]) {
+        kids.forEach(function(c){
+          var full = s.name + '/' + c.name;
+          html += itemHtml(full, c.time || '', {
+            cur: full === CUR, sub: true
+          });
+        });
+      }
     });
 
     if (rest > 0) {
@@ -4087,6 +3960,52 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     // （「3 个分支」但列表里只有 3 条对话，用户会以为是两回事）
     var spans = document.querySelectorAll('#sessBtn span');
     if (spans[1]) spans[1].textContent = '';
+  }
+
+  /* 顶栏「子会话」下拉的内容。
+     当前会话可能是根（CUR="alpha"），也可能本身就在分支里（CUR="alpha/beta"）：
+     后一种情况该看的是同一个根的兄弟分支，所以一律先取根名再列它的全部子会话，
+     并把当前所在的那条标出来。
+     条目带完整「父/子」路径——后端 resolve_session_name 认这个写法，
+     只写子会话名会找不到（同名子会话可以存在于不同父会话下）。 */
+  function renderChildPop(){
+    var box = document.getElementById('childList');
+    var foot = document.getElementById('childFoot');
+    if (!box) return;
+    var rootName = String(CUR || '').split('/')[0];
+    var root = SESS.filter(function(s){ return s.name === rootName; })[0];
+    var kids = (root && root.children) || [];
+    box.innerHTML = '';
+    if (!kids.length) {
+      var empty = document.createElement('div');
+      empty.className = 'pi';
+      empty.setAttribute('data-empty', 'true');
+      empty.innerHTML = '<span class="ck"></span><span class="lb">无子会话</span>';
+      box.appendChild(empty);
+      if (foot) foot.textContent = '当前会话没有分支。';
+      return;
+    }
+    kids.forEach(function(c){
+      var full = rootName + '/' + c.name;
+      var isCur = full === CUR;
+      var d = document.createElement('div');
+      d.className = 'pi';
+      d.setAttribute('data-v', full);
+      d.setAttribute('data-on', isCur ? 'true' : 'false');
+      // 只显示名字：状态（已完成/待完成）与条数在这么窄的下拉里挤得名字只剩
+      // 几个字，而用户点开这个列表的唯一目的就是「找那条会话」。
+      d.innerHTML = '<span class="ck">' + (isCur ? '✓' : '') + '</span>' +
+        '<span class="lb" title="' + esc(full) + '">' + esc(c.name) + '</span>';
+      d.addEventListener('click', function(){
+        closePop();
+        if (isCur) return;
+        enterSess(full, false);
+      });
+      box.appendChild(d);
+    });
+    if (foot) {
+      foot.textContent = kids.length + ' 个子会话 · 点击进入';
+    }
   }
 
   function findSess(fullName){
@@ -4550,7 +4469,6 @@ rm -rf .narnat/data/sessions/old-3.json</div>
         setChecked(document.getElementById('popGoal'), g);
         var btn = document.getElementById('btnGoal');
         btn.textContent = g === 'on' ? '目标模式 开 · 0/' + rounds : '目标模式 关';
-        document.getElementById('chipGoal').textContent = g === 'on' ? '目标 开' : '目标 关';
         if (g === 'on') {
           cmdResult(CMD, '✓', '目标模式已开启', '轮数上限 ' + rounds, 'ok');
         } else {
@@ -4653,20 +4571,24 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     if (!item) return;
     var full = item.getAttribute('data-name');
 
+    // 分支展开/收起：优先于整行点击判断，否则点标记会顺带进会话。
+    // 只改本地折叠状态并重绘，不发请求——子会话数据已经在 session/list 里。
+    var br = e.target.closest('.br');
+    if (br) {
+      e.stopPropagation();
+      if (EXPANDED[full]) delete EXPANDED[full];
+      else EXPANDED[full] = true;
+      renderSessions();
+      rendered('session/branchToggle', { name: full, open: !!EXPANDED[full] });
+      return;
+    }
+
     // 这一条已经被点过一次（删除已提交 / 正在等回执）：整条不再响应任何点击。
     // 不锁会怎样（实测）：连点「删除」→「是」的第二下，同坐标已经变成
     // 该条目的「改名」按钮，于是弹出 4 个改名输入框（宿主 showInputBox 是
     // 模态的，会真的排队弹 4 次），而会话其实已经删掉了。
     if (isSessLocked(full)) return;
 
-    if (e.target.closest('.rn')) {
-      doRename(full);
-      return;
-    }
-    if (e.target.closest('.del')) {
-      item.setAttribute('data-del', 'ask');
-      return;
-    }
     if (e.target.closest('.asks')) {
       if (e.target.classList.contains('y')) {
         item.setAttribute('data-del', '');
@@ -4678,12 +4600,84 @@ rm -rf .narnat/data/sessions/old-3.json</div>
       }
       return;
     }
-    if (e.target.closest('.acts')) {
-      enterSess(full);
-      return;
-    }
     enterSess(full);
   });
+
+  /* ---------- 会话行的右键菜单（改名 / 删除） ----------
+     入口换成右键，解决两个问题：
+     ① hover 出来的两个按钮绝对定位在行尾，正好盖住分支标记「⑂2 ▸」，
+        用户点不到它（那是列表里唯一的展开入口）；
+     ② 鼠标扫过列表时按钮逐个跳出，视觉噪音大。
+     右键的目标行记在 menuTarget 里：菜单本身是独立节点，点击时靠它认人。 */
+  var sessMenuEl = document.getElementById('sessMenu');
+  var menuTarget = '';
+
+  function closeSessMenu(){
+    if (!sessMenuEl) return;
+    sessMenuEl.setAttribute('data-open', 'false');
+    menuTarget = '';
+  }
+
+  function openSessMenu(x, y, full){
+    if (!sessMenuEl) return;
+    menuTarget = full;
+    // 先显示再量尺寸：display:none 时 offsetWidth 是 0，夹不出正确位置
+    sessMenuEl.setAttribute('data-open', 'true');
+    var w = sessMenuEl.offsetWidth;
+    var h = sessMenuEl.offsetHeight;
+    // 贴边时往内夹，避免菜单跑出面板（249px 下很容易超右边界）
+    var left = Math.max(2, Math.min(x, window.innerWidth - w - 6));
+    var top = Math.max(2, Math.min(y, window.innerHeight - h - 6));
+    sessMenuEl.style.left = left + 'px';
+    sessMenuEl.style.top = top + 'px';
+  }
+
+  document.getElementById('sessList').addEventListener('contextmenu', function(e){
+    var item = e.target.closest('.dw-item');
+    if (!item) return;
+    // 屏蔽宿主/浏览器自带的右键菜单，否则会盖在我们的菜单上
+    e.preventDefault();
+    e.stopPropagation();
+    openSessMenu(e.clientX, e.clientY, item.getAttribute('data-name') || '');
+  });
+
+  if (sessMenuEl) {
+    sessMenuEl.addEventListener('click', function(e){
+      var it = e.target.closest('.ctx-item');
+      if (!it) return;
+      var act = it.getAttribute('data-act');
+      var full = menuTarget;
+      closeSessMenu();
+      if (!full) return;
+      if (act === 'rename') {
+        doRename(full);
+        return;
+      }
+      // 删除仍走「行内二次确认」那条既有路径：
+      // 直接把 data-del="ask" 打回该行，用户可以确认也可以反悔，
+      // 比右键菜单里再弹一层确认更省事，也复用了已经验证过的删除逻辑。
+      var row = null;
+      var rows = document.querySelectorAll('#sessList .dw-item');
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i].getAttribute('data-name') === full) { row = rows[i]; break; }
+      }
+      if (row) row.setAttribute('data-del', 'ask');
+    });
+  }
+
+  /* 点别处 / 按 Esc / 滚列表 都关掉右键菜单。
+     不关会怎样：菜单留着盖在列表上，下一次点行会点进菜单而不是进会话。 */
+  document.addEventListener('click', function(e){
+    if (!sessMenuEl || sessMenuEl.getAttribute('data-open') !== 'true') return;
+    if (e.target.closest('#sessMenu')) return;
+    closeSessMenu();
+  });
+  document.addEventListener('contextmenu', function(e){
+    if (!sessMenuEl || sessMenuEl.getAttribute('data-open') !== 'true') return;
+    if (e.target.closest('#sessList') || e.target.closest('#sessMenu')) return;
+    closeSessMenu();
+  });
+  document.getElementById('sessList').addEventListener('scroll', closeSessMenu);
 
   /* ---------- 原生输入框（保存为 / 新建分支 / 重命名 共用） ---------- */
   var newSessBtn = document.getElementById('newSessBtn');
@@ -4902,12 +4896,19 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     });
   })();
 
-  /** 重命名会话（列表里 hover 出现「改名」按钮） */
+  /** 重命名会话（会话行右键菜单里的「改名」） */
   function doRename(fullName){
+    /* 子会话（alpha/gamma）只把「gamma」放进输入框并作为新名字提交：
+       初值给全路径会让人以为要连父会话名一起写，而输进去的新名字一旦带 /，
+       改的就不再是这条子会话了（后端会把 / 前面的部分当父会话）。
+       提交时若当前是子会话，新名字里的 / 一律去掉，只改它自己那一段。 */
+    var parts = String(fullName).split('/');
+    var isSub = parts.length > 1;
+    var curName = isSub ? parts.slice(1).join('/') : fullName;
     askText({
-      title: '重命名会话',
+      title: isSub ? '重命名子会话' : '重命名会话',
       placeholder: '新名称',
-      value: fullName,
+      value: curName,
       // 改名不能留空（留空会得到一个没有名字的会话）
       requireValue: true
     }).then(function(n){
@@ -4917,9 +4918,10 @@ rm -rf .narnat/data/sessions/old-3.json</div>
         sysLine('·', '名称不能为空', '');
         return;
       }
-      if (n === fullName) return;
+      if (isSub) n = n.split('/').pop();
+      if (n === curName) return;
       if (REAL) {
-        post('sessionRename', { name: fullName, to: n });
+        post('sessionRename', { name: fullName, to: isSub ? parts[0] + '/' + n : n });
         return;
       }
       var f = findSess(fullName);
@@ -4961,6 +4963,7 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     // 模拟态：清空对话区、回到未保存状态
     resetConversationDom();
     CUR = '';
+    seedHistory([]);
     renderSessions();
     sysLine('＋', '已新建对话', '上下文已清空');
   }
@@ -5413,6 +5416,9 @@ rm -rf .narnat/data/sessions/old-3.json</div>
   }
 
   function renderAssistant(){
+    // 正文开写 = 这段思考结束了（后端此刻也会发 thinking/end，但这里先收口
+    // 能保证 DOM 顺序一定是 思考 → 正文，而不是正文先出现、思考块后补）
+    closeThinkSegment();
     var host = ensureAssistant();
     if (!mdLockNode) {
       // 第一次渲染：切成「前缀容器 + 尾巴容器」。分开是为了让前缀
@@ -5501,6 +5507,16 @@ rm -rf .narnat/data/sessions/old-3.json</div>
   function beginThink(){
     // 正文在前、思考在后时同样要断开：否则这之后的正又会追加到那段正文里
     closeAssistantSegment();
+    /* 同一段思考里 begin 重复到达时，复用它而不是新建第二块。
+       后端 on_thinking_delta 有 _thinking_started 守卫，正常不会重发；但事件
+       重放、宿主补发、面板重建都可能让它再来一次。新建会怎样（实测）：
+       屏幕上出现两块思考，第一块永远停在「思考中 · N 字」（data-stream 不摘），
+       后半段内容跑到第二块里——用户看到一段思考被劈成两半、前一半永远在转。 */
+    if (curThink) {
+      rendered('thinking/begin', { open: curThink.wrap.getAttribute('data-open') === 'true',
+                                   reused: true });
+      return;
+    }
     var wrap = document.createElement('div');
     wrap.className = 'think';
     // 与工具行一致：默认折叠，点标题展开看全文。
@@ -5511,9 +5527,35 @@ rm -rf .narnat/data/sessions/old-3.json</div>
       '<span class="caret">▶</span><span class="name">思考中</span></div>' +
       '<div class="slot"><p></p></div>';
     convo.appendChild(wrap);
-    curThink = { wrap: wrap, p: wrap.querySelector('.slot p'), buf: '' };
+    curThink = { wrap: wrap, p: wrap.querySelector('.slot p'), buf: '', t0: Date.now() };
     scrollBottom();
     rendered('thinking/begin', { open: false });
+  }
+
+  /** 把当前思考块收口成「思考 N s · N 字」并断开引用。
+   *
+   *  为什么需要「本地收口」而不只依赖后端的 thinking/end：
+   *  后端 `_end_thinking()` 只在三种时机被调 —— 收到正文流、轮末、中断。
+   *  于是「思考 → 工具调用 → 思考 → 工具调用」这种一轮里多次思考、
+   *  期间没有正文的序列，整轮只有一次 begin、末尾才有 end。
+   *  接着往下走会怎样（实测）：后面每段思考的 delta 都追加进同一块，
+   *  合并成一大段（看到「思考中 · 6870 字」这种），而且因为没到轮末，
+   *  data-stream 摘不掉，标题永远停在「思考中」。
+   *  正确形态是「思考一段 → 做一步 → 再思考一段」各自成块，
+   *  所以插入任何非思考内容（工具行 / 正文 / 系统行）时在这里就地收口。
+   *  @param {number} [ms] 后端给的耗时；没给就用本地计时
+   *  @param {number} [chars] 后端给的字数；没给就用本地缓冲长度 */
+  function closeThinkSegment(ms, chars){
+    if (!curThink) return;
+    var n = (typeof chars === 'number') ? chars : curThink.buf.length;
+    var dur = (typeof ms === 'number')
+      ? ms
+      : (curThink.t0 ? (Date.now() - curThink.t0) : 0);
+    curThink.wrap.removeAttribute('data-stream');
+    curThink.wrap.querySelector('.name').textContent =
+      '思考' + (dur ? ' ' + (dur / 1000).toFixed(1) + 's' : '') + ' · ' + n + ' 字';
+    curThink = null;
+    rendered('thinking/closed', { chars: n, durationMs: dur });
   }
 
   function appendThink(p){
@@ -5531,16 +5573,14 @@ rm -rf .narnat/data/sessions/old-3.json</div>
       rendered('thinking/end', { text: '', chars: 0 });
       return;
     }
-    var chars = (p && typeof p.chars === 'number') ? p.chars : curThink.buf.length;
-    var ms = (p && typeof p.durationMs === 'number') ? p.durationMs : 0;
     var text = curThink.buf;
-    curThink.wrap.removeAttribute('data-stream');
-    curThink.p.textContent = text;
-    curThink.wrap.querySelector('.name').textContent =
-      '思考' + (ms ? ' ' + (ms / 1000).toFixed(1) + 's' : '') + ' · ' + chars + ' 字';
-    curThink = null;
+    // 后端给了 chars/durationMs 就用它的（那是权威值），否则退回本地计数
+    closeThinkSegment(
+      (p && typeof p.durationMs === 'number') ? p.durationMs : undefined,
+      (p && typeof p.chars === 'number') ? p.chars : undefined
+    );
     scrollBottom();
-    rendered('thinking/end', { text: text, chars: chars });
+    rendered('thinking/end', { text: text, chars: text.length });
   }
 
   /* ---------- 工具行 ---------- */
@@ -5663,6 +5703,9 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     if (isPath && sumText.charAt(0) === '…') sumText = '\u200E' + sumText;
     // 工具行之前先把当前正文段收口：正文 → 工具 → 正文 才是真实顺序
     closeAssistantSegment();
+    // 思考也要收口：思考 → 工具 → 思考 里，后端整轮只发一次 thinking/end，
+    // 不收口的话后一段思考会追加进同一块（实测合并成「思考中 · 6870 字」）
+    closeThinkSegment();
     var wrap = document.createElement('div');
     wrap.className = 'tools';
     if (isTodo) wrap.setAttribute('data-todo', 'true');
@@ -5906,6 +5949,8 @@ rm -rf .narnat/data/sessions/old-3.json</div>
   function addSysLine(icon, text, tail, cls){
     // 同 cmdOne：系统行前先收口正文，否则后续增量会写回上方旧气泡
     closeAssistantSegment();
+    // 思考同理：系统行插进来就是「这件事之间断了一次」，前后思考不该粘一起
+    closeThinkSegment();
     var el = document.createElement('div');
     el.className = 'sys' + (cls ? ' ' + cls : '');
     el.innerHTML = '<span class="ico">' + icon + '</span><span>' + text + '</span>' +
@@ -6153,7 +6198,6 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     if (p && p.resumed) {
       var g = p && p.goal;
       if (g && g.enabled) {
-        document.getElementById('chipGoal').textContent = '目标 ' + (g.current || 0) + '/' + (g.max || 0);
         document.getElementById('btnGoal').textContent =
           '目标模式 开 · ' + (g.current || 0) + '/' + (g.max || 0);
       }
@@ -6167,7 +6211,6 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     resetStreamRender();
     var goal = p && p.goal;
     if (goal && goal.enabled) {
-      document.getElementById('chipGoal').textContent = '目标 ' + (goal.current || 0) + '/' + (goal.max || 0);
       document.getElementById('btnGoal').textContent =
         '目标模式 开 · ' + (goal.current || 0) + '/' + (goal.max || 0);
     }
@@ -6429,7 +6472,6 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     document.getElementById('btnGoal').textContent = enabled
       ? '目标模式 开 · ' + current + '/' + max
       : '目标模式 关';
-    document.getElementById('chipGoal').textContent = enabled ? '目标 开' : '目标 关';
     var roundsInput = document.getElementById('goalRounds');
     if (roundsInput) roundsInput.value = String(max);
   }
@@ -6454,6 +6496,23 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     });
     document.getElementById('btnPlugin').textContent =
       enabled === plugins.length ? '插件 ' + plugins.length : '插件 ' + enabled + '/' + plugins.length;
+  }
+
+  /**
+   * 清掉对话区里可能残留的连接状态行。
+   *
+   * 这个函数的存在是为了兼容「旧版本写过、新版不再写」的情况：用户升级前
+   * 打开的会话里可能已经有一条 `● 已连接后端 · v16.8.0 · 协议 1`，
+   * 升级后重绘历史时它不会被历史覆盖（历史是消息，这条是系统行）——
+   * 所以要主动扫掉，不能只做到「以后不再写」。
+   * 现在界面上不再显示这句话：它每次开面板都占第一屏最显眼的位置，
+   * 而「连上了」这件事没有可动作性；真正要看的是「没连上」，那有离线横幅。
+   */
+  function dropConnLine(){
+    Array.prototype.forEach.call(
+      convo.querySelectorAll('.sys[data-conn="1"]'),
+      function(el){ if (el.parentNode) el.parentNode.removeChild(el); }
+    );
   }
 
   /**
@@ -6547,17 +6606,10 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     // 隐藏「示例数据」提示条
     body.setAttribute('data-real', 'true');
     if (firstInit) {
-      // 首次切真实态：把演示对话/工具/计划/系统行全部清空
+      // 首次切真实态：把对话区的任何残留清空（生产骨架本来就是空的，
+      // preview 演示态注入的内容也在这里让位）
       resetConversationDom();
       SHOW_ALL = false;
-      // 状态栏里的百分比/费用是演示占位值（模板里写死「上下文 12%」「缓存 80%」「¥0.0123」）。
-      // 不清掉会一直挂着这些假数字，直到第一次 stats 到达才被覆盖——
-      // 用户第一眼看的就是它（实测：新窗口显示「上下文 12%」）。
-      var demoVals = document.querySelectorAll('.status .right .v');
-      Array.prototype.forEach.call(demoVals, function(el){ el.textContent = '—'; });
-      // 真实态不该留演示用的假确认块（「即将删除 3 个文件」会误导用户）
-      var demo = document.getElementById('confirmDemo');
-      if (demo) demo.parentNode.removeChild(demo);
     }
 
     var model = (p && p.model) || {};
@@ -6751,6 +6803,8 @@ rm -rf .narnat/data/sessions/old-3.json</div>
         historyDrawnFor = histSess;
         authHintShown = false;
         renderHistory(initMsgs);
+        // ↑ 能翻到的提问跟着换成这个会话的历史：重载后 HIST 本来是空的
+        seedHistory(initMsgs);
         if (keepBuf && !bufAlreadyInHist) {
           assistantBuf = keepBuf;
           renderAssistant();
@@ -6788,19 +6842,12 @@ rm -rf .narnat/data/sessions/old-3.json</div>
         'Ctrl+Shift+P → Narnat: 打开配置文件', 'warn');
     }
 
-    // 每次握手都追加一行会怎样（实测）：面板重建时宿主会连发两条
-    // initialize（缓存的 lastInit + 补拉的 fresh），屏幕上就固定出现两行
-    // 「● 已连接后端」，看起来像重连了两次。同一状态只留一行。
-    var connText = '已连接后端';
-    var connTail = 'v' + ((p && p.version) || '?') + ' · 协议 ' + ((p && p.protocol) || '?');
-    var prevConn = convo.querySelector('.sys[data-conn="1"]');
-    if (prevConn) {
-      updateSysLine(prevConn, '●', connText, connTail, '');
-      prevConn.setAttribute('data-conn', '1');
-    } else {
-      var connLine = sysLine('●', connText, connTail);
-      if (connLine) connLine.setAttribute('data-conn', '1');
-    }
+    /* 不再在对话区写「已连接后端 · v16.8.0 · 协议 1」这一行。
+       理由：正常使用时它每开一个面板就出现一次，占着第一屏最显眼的位置，
+       而它承载的信息（连上了、版本号、协议号）对用户没有任何可动作性——
+       真正需要知道的是「没连上」，那有独立的离线横幅。
+       宿主重连时会把上一行删掉（见 dropConnLine），不会留下过期的状态。 */
+    dropConnLine();
     // 配置文件坏了：后端会「按默认配置继续」，界面上一切正常，直到发消息
     // 收到 401——用户会去重填密钥，而真因是 JSON 语法错了。
     // 只给一句结论 + 一个动作：原来每个警告一行、再加一行「修好后需要重启」
@@ -7082,6 +7129,8 @@ rm -rf .narnat/data/sessions/old-3.json</div>
       authHintShown = false;
       CUR = '';
       CUR_IS_CHILD = false;
+      // 新对话没有历史：↑ 不该翻到上一个会话的提问
+      seedHistory([]);
       body.setAttribute('data-run', 'false');
       resetContextStats();
       renderSessions();
@@ -7112,6 +7161,8 @@ rm -rf .narnat/data/sessions/old-3.json</div>
       resetContextStats();
       renderSessions();
       renderHistory(p.messages);
+      // 换成这个会话的提问历史（否则 ↑ 翻到的是上一个会话说过的话）
+      seedHistory(p.messages);
       // 窄面板里抽屉是覆盖全宽的浮层：不自动收起的话，历史虽然画好了却被它
       // 盖住 —— 用户点了会话、回执也到了，屏幕上还是那张列表，只能自己找 ×
       // 或按 Esc 才知道进去了（实测 249/320px 都这样）。
@@ -7149,6 +7200,7 @@ rm -rf .narnat/data/sessions/old-3.json</div>
           resetContextStats();
           renderSessions();
           renderHistory(p.messages);
+          seedHistory(p.messages);
           historyDrawn = (p.messages || []).length;
           historyDrawnFor = p.current;
         }
@@ -7243,7 +7295,6 @@ rm -rf .narnat/data/sessions/old-3.json</div>
       if (mCur) curNow = parseInt(mCur[1], 10) || 0;
       document.getElementById('btnGoal').textContent = gon
         ? '目标模式 开 · ' + curNow + '/' + gr : '目标模式 关';
-      document.getElementById('chipGoal').textContent = gon ? '目标 开' : '目标 关';
       setChecked(document.getElementById('popGoal'), gon ? 'on' : 'off');
       var grin = document.getElementById('goalRounds');
       if (grin) grin.value = String(gr);
@@ -7455,6 +7506,7 @@ rm -rf .narnat/data/sessions/old-3.json</div>
       cmdMulti(esc(cmdText), cmdLines, '', 'cmdout--wrap');
       if (cdSwitched && p.messages && p.messages.length) {
         renderHistory(p.messages);
+        seedHistory(p.messages);
         // 同 sessionSwitch：画完必须记账，否则下一个 initialize 会清空重画
         historyDrawn = p.messages.length;
         historyDrawnFor = CUR;
@@ -7817,24 +7869,28 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     }
   }
 
-  // 真身在 VSCode 里跑时，先把模板里的演示对话清掉再握手。
-  // 不清会怎样（实测两次窗口打开都命中）：面板先按演示数据画出一大坨
-  // 示例会话（用户、思考、十几个工具行、确认条），initialize 一到又整块
-  // 抹掉重画——用户看到的是「窗口一开先闪一下假对话，再变成新对话」。
-  // 演示数据只服务于 preview.html（那里没有 acquireVsCodeApi）。
+  /* 真身在 VSCode 里跑时，把可能存在的演示态注入物清掉再握手。
+     生产骨架本身已经不含任何演示数据（模板里 #convo 是空的、会话名与状态栏是
+     空/占位符、SESS 与 CUR 初值为空），这里只兜住一种情况：
+     同一个 webview 里先加载过 preview 的演示数据（window.NARNAT_DEMO 存在）——
+     那时要把它彻底抹掉，不能留在正式面板上。 */
   if (vscodeApi) {
     resetConversationDom();
     body.setAttribute('data-real', 'true');
-    // 顶栏会话名与状态栏的数字同理：它们也是模板写死的演示值，
-    // 后端 initialize 一到就会被真值覆盖，留着只是多闪一下。
-    var demoBranch = document.querySelector('#sessBtn .branch');
-    if (demoBranch) demoBranch.textContent = '';
-    var demoChip = document.getElementById('chipSess');
-    if (demoChip) demoChip.textContent = '';
-    Array.prototype.forEach.call(
-      document.querySelectorAll('.status .right .v'),
-      function (el) { el.textContent = '—'; }
-    );
+    if (DEMO) {
+      // 演示注入物（会话列表/当前会话/占位状态值）一律清空，等 initialize 填真值
+      DEMO = null;
+      window.NARNAT_DEMO = null;
+      SESS = [];
+      CUR = '';
+      CUR_IS_CHILD = false;
+      SESS_HIDDEN = 0;
+      var demoBranch = document.querySelector('#sessBtn .branch');
+      if (demoBranch) demoBranch.textContent = '';
+      var demoChip = document.getElementById('chipSess');
+      if (demoChip) demoChip.textContent = '';
+      renderSessions();
+    }
   }
   // 握手：扩展侧收到 ready 才补发 initialize / 离线原因
   post('ready', {});

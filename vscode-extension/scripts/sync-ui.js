@@ -42,6 +42,44 @@ if (typeof module !== 'undefined' && module.exports) {
 `;
 fs.writeFileSync(path.join(ROOT, 'media/narnat.body.js'), bodyJs, 'utf8');
 
+// ── 演示数据：只给 preview.html，不进 vsix ──
+// 生产骨架（narnat.body.js）里一个演示节点都没有：模板的 #convo 是空的，
+// 会话列表来自后端，会话名/状态栏是空或占位符。演示内容全部搬到
+// design/demo-convo.html，在这里生成 media/narnat.demo.js。
+// .vscodeignore 已排除 media/narnat.demo.js 与 preview.html —— 打包进插件
+// 的产物里根本不存在这些演示数据，不是「显示了再擦掉」。
+const demoPath = path.join(ROOT, 'design/demo-convo.html');
+const demoHtml = fs.existsSync(demoPath) ? toLf(fs.readFileSync(demoPath, 'utf8')).trim() : '';
+const demoJs = `'use strict';
+// 预览专用演示数据 —— 由 design/demo-convo.html 生成。
+// 只被 preview.html 加载；不进 vsix（见 .vscodeignore），生产面板永远看不到它。
+var DEMO = {
+  convo: ${JSON.stringify(demoHtml)},
+  current: 'grep-ignore-case',
+  sessions: [
+    { name: 'grep-ignore-case', time: '14:32', count: 28,
+      children: [
+        { name: 'try-regex', status: 'completed', time: '14:20' },
+        { name: 'alt-approach', status: 'active', time: '14:25', count: 12 }
+      ] },
+    { name: 'ui-webview', time: '11:05', count: 64, children: [] },
+    { name: 'refactor-tools', time: '10-16', count: 41, children: [] },
+    { name: 'theme-tokens', time: '10-15', count: 22, children: [] },
+    { name: 'docs-audit', time: '10-14', count: 18, children: [] },
+    { name: 'perf-probe', time: '10-12', count: 33, children: [] },
+    { name: 'legacy-cleanup', time: '10-09', count: 7, children: [] },
+    { name: 'proto-e2e', time: '10-08', count: 5, children: [] }
+  ]
+};
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = DEMO;
+} else {
+  window.NARNAT_DEMO = DEMO;
+}
+`;
+fs.writeFileSync(path.join(ROOT, 'media/narnat.demo.js'), demoJs, 'utf8');
+console.log('demo bytes', demoHtml.length, '(仅 preview.html 使用)');
+
 console.log('css lines', css.split('\n').length);
 console.log('js lines', js.split('\n').length);
 console.log('body bytes', body.length);

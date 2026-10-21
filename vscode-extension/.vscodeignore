@@ -16,6 +16,10 @@ output/**
 # 本地浏览器预览入口：插件运行时不加载它（webview 用的是 media/ 下的产物），
 # 进包只是白占体积，还会让装完的人在扩展目录里看到一堆开发用文件。
 preview.html
+# 演示数据（示例对话 + 测试会话列表）：只给 preview.html 用。
+# 必须排除 —— 演示/测试数据不能出现在正式插件里，连产物里都不该有。
+media/narnat.demo.js
+design/demo-convo.html
 # 上一次打包的产物不能被打进新的包，否则 vsix 会自己套自己越滚越大
 *.vsix
 package-lock.json

@@ -31,12 +31,24 @@ function getHtml(webview, extensionUri) {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:;">
 <title>Narnat</title>
 <link rel="stylesheet" href="${cssUri}">
+<!-- 防闪烁（FOUC）：webview 里样式表走 vscode-resource 协议异步取，
+     取回来之前浏览器会先把整页 HTML 当纯文本画出来 —— 用户看到「满屏文字闪一下」。
+     这里先把 html 藏起来，等样式表就绪后再显形。
+     显形由下面的行内脚本完成：经典脚本会等前面的样式表加载完才执行，
+     所以那一刻样式一定已经生效。 -->
+<style nonce="${nonce}">
+  html{visibility:hidden}
+  html.narnat-ready{visibility:visible}
+</style>
+<!-- 脚本被禁用时不能永久隐藏（那等于白屏，比闪烁更糟），这里解掉 -->
+<noscript><style>html{visibility:visible}</style></noscript>
 </head>
 <body data-run="false">
 ${BODY}
+<script nonce="${nonce}">document.documentElement.classList.add('narnat-ready');</script>
 <script nonce="${nonce}" src="${jsUri}"></script>
 </body>
 </html>`;
