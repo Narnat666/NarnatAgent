@@ -2,10 +2,13 @@
 
 8 固定槽位 bg1~bg8：一任务一文件 bgN.log（复用前旧结果先归档为
 bgN.log.<seq>.prev，永不静默丢失），结果落在系统临时目录下本会话
-专属子目录 narnat_bg_<随机>（每进程唯一）：
+专属子目录 narnat_bg_<pid>_<随机>（每进程唯一）：
 - 不进用户工作目录：叉窗强杀残留也不会污染项目/桌面，仅占临时目录
 - 每进程唯一：同项目多 agent、父子 agent 天然互不抢目录
-- 过期清扫：会话启动时清理历史强杀残留（保活期外未动过的目录）
+- 陈旧清扫：进程启动时清理强杀残留（目录名里的 pid 已不存在 + 目录超过
+  24 小时未动，两条同时满足才删——并行实例正在用的目录绝不动）
+- 退出回收：正常退出删除本进程目录（SIGTERM/atexit + shutdown 收尾），
+  被强杀收不到钩子时留给下次启动的陈旧清扫
 AI 用 Read/Grep 按 submit/status 返回的绝对路径读取结果文件，
 从不接触文件管理。
 
@@ -29,11 +32,15 @@ AI 用 Read/Grep 按 submit/status 返回的绝对路径读取结果文件，
 - 超大输出截断：主文件 50MB 封顶，其后输出滚动进内存尾部缓冲(1MB)，
   收口时落盘 bgN.log.tail —— 错误信息常在尾部，截断也不丢。
 - 会话结束硬兜底：cleanup_all 杀全部 running 进程树 + 清目录 + 重建槽位表。
+- 进程退出收尾：shutdown_cleanup 同步终止本进程全部后台任务（先优雅
+  terminate → 300ms 宽限 → 按 pid 强杀整棵树），再删本进程临时目录。
 """
 
+import atexit
 import codecs
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -51,8 +58,9 @@ TAIL_BYTES = 1 * 1024 * 1024       # 截断后滚动保留的尾部缓冲
 DRAIN_GRACE = 0.3                  # 管道收口宽限（秒）
 TAIL_SUFFIX = ".tail"
 
-BG_DIR_PREFIX = "narnat_bg_"       # 会话临时目录前缀（过期清扫按它识别自家目录）
-BG_STALE_SECONDS = 7 * 24 * 3600   # 强杀残留保活期：目录超过此时间未动即清扫
+BG_DIR_PREFIX = "narnat_bg_"       # 会话临时目录前缀（陈旧清扫按它识别自家目录）
+BG_STALE_SECONDS = 24 * 3600       # 陈旧清扫保活期：目录超过此时间未动才可能被清
+SHUTDOWN_GRACE = 0.3               # 退出时优雅终止的宽限（秒），超时即强杀进程树
 
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
@@ -61,12 +69,15 @@ STATUS_CANCELLED = "cancelled"
 
 # 结果根目录：首次使用时创建本会话专属临时目录（此后 AI 的 cd 不影响结果路径）
 _base_dir: Optional[str] = None
+_exit_hooks_done = False
 
 
 def _root_dir() -> str:
     global _base_dir
     if _base_dir is None:
-        _base_dir = tempfile.mkdtemp(prefix=BG_DIR_PREFIX)
+        # 目录名带 pid：崩溃残留可被后来者判定「创建者已不存在」后回收
+        _base_dir = tempfile.mkdtemp(prefix=f"{BG_DIR_PREFIX}{os.getpid()}_")
+        _register_exit_hooks()
         _sweep_stale()
     return _base_dir
 
@@ -75,28 +86,146 @@ def _bg_dir() -> str:
     return _root_dir()
 
 
-def _sweep_stale() -> None:
-    """清扫历史强杀残留：系统临时目录下保活期外未动过的 narnat_bg_* 目录。
+def _register_exit_hooks() -> None:
+    """注册退出清理钩子（幂等）：正常退出时回收后台任务 + 删本进程临时目录。
 
-    三道防线防误删（自上而下）：
+    覆盖解释器正常退出（含 SystemExit 后的收尾）与 SIGTERM；SIGTERM 钩子
+    仅当仍是默认处理且当前在主线程时才装（signal 只允许主线程）。
+    被 TerminateProcess 强杀时没有钩子可跑，残留交给下次启动的陈旧清扫。
+    """
+    global _exit_hooks_done
+    if _exit_hooks_done:
+        return
+    _exit_hooks_done = True
+    try:
+        atexit.register(shutdown_cleanup)
+    except Exception:
+        pass
+    try:
+        if (sys.platform != "win32"
+                and threading.current_thread() is threading.main_thread()
+                and signal.getsignal(signal.SIGTERM) == signal.SIG_DFL):
+            signal.signal(signal.SIGTERM, _on_sigterm)
+    except Exception:
+        pass
+
+
+def _on_sigterm(signum, _frame) -> None:
+    """SIGTERM：清本进程临时目录后按默认语义终止（行为与未装钩子一致）。
+
+    这里只删目录、不取槽位锁：信号处理可能打断持锁中的代码，同线程重入
+    非重入锁会直接挂死进程——残留目录由下次启动的陈旧清扫兜底。
+    """
+    _wipe_dir()
+    try:
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+    except Exception:
+        pass
+
+
+def _log_err(msg: str) -> None:
+    """清理失败的 stderr 日志（用户排查用）。
+
+    日志本身绝不允许再抛——清理失败的影响面必须止于「残留目录晚点回收」，
+    连一行日志都打不出来时也不能打断启动流程。
+    """
+    try:
+        print(f"[narnat] {msg}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
+def _wipe_dir() -> None:
+    """删除本进程的临时目录（幂等，失败记日志后忽略）。
+
+    只删本进程创建的这一个目录：不创建（从未用过后台任务时无事可做）、
+    不遍历临时目录、不碰其它实例的 narnat_bg_*。
+    """
+    d = _base_dir
+    if not d:
+        return
+    try:
+        shutil.rmtree(d, ignore_errors=True)
+    except Exception as e:
+        # 非 OSError（rmtree 内部逻辑异常等）也不会传出去：这里在 prepare()
+        # 与退出钩子上都被调用，一抛就直接挡住后端启动/退出。
+        _log_err(f"清理本进程临时目录失败（已忽略）: {type(e).__name__}: {e}")
+
+
+def _pid_alive(pid: int) -> bool:
+    """pid 对应进程是否仍存在。拿不到信息一律返回 True（宁可少删，不可误删）。"""
+    if pid <= 0:
+        return True
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            if not handle:
+                return False
+            try:
+                code = wintypes.DWORD()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return True
+                return code.value == STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return True
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except Exception:
+        return True
+
+
+def _dir_pid(name: str) -> Optional[int]:
+    """从目录名 narnat_bg_<pid>_<随机> 解析创建者 pid；解析不出返 None。"""
+    token = name[len(BG_DIR_PREFIX):].split("_", 1)[0]
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
+
+def _sweep_stale() -> None:
+    """清扫陈旧残留：临时目录下「创建者已不存在」且「超过保活期未动」的目录。
+
+    删除判据两条必须同时满足（缺一不删）：
+    1. 目录名里的 pid 已不存在（创建它的进程没了）；
+    2. 目录 mtime 超过 BG_STALE_SECONDS（24 小时）。
+    各层防线防误删（自上而下）：
+    0. 名称不以 narnat_bg_ 开头 → 不是自家的，跳过（绝不删别的东西）；
     1. 目录 mtime 在保活期内（近期有提交/归档）→ 会话活跃，跳过；
     2. 目录内任一文件在保活期内（长跑任务只更新日志文件 mtime）→ 活跃，跳过；
     3. 判定过期后先原子改名再删：目录内若仍有活跃写入（打开的文件句柄），
        Windows 下改名必然失败 → 放弃删除；改名成功（真孤儿/纯旧日志）才删。
        Linux 无句柄锁（POSIX 语义），本防线不生效——尽力而为。
-    任何失败一律放弃，绝不强行删除；最坏后果仅是旧日志（会话级临时结果）
-    延迟回收，不影响任何功能。
+    幂等、异常一律吞掉并记日志：清扫失败绝不能挡住启动（本函数在
+    prepare() 里被调用，异常一冒泡就到 agent.run() 的 try 之外，
+    直接挡住后端启动），最坏后果只是旧日志延迟回收。
     """
     try:
         now = time.time()
         tmp = tempfile.gettempdir()
         for name in os.listdir(tmp):
             if not name.startswith(BG_DIR_PREFIX):
-                continue
+                continue  # 防线0：不是自家的目录，永不触碰
             p = os.path.join(tmp, name)
             try:
                 if now - os.path.getmtime(p) <= BG_STALE_SECONDS:
                     continue  # 防线1：目录近期有提交/归档
+                pid = _dir_pid(name)
+                if pid is not None and _pid_alive(pid):
+                    continue  # 创建者还在跑（并行实例正在用），绝不动
                 if _has_fresh_file(p, now):
                     continue  # 防线2：长跑任务日志仍在持续落盘
                 # 防线3：先原子改名再删。目录内有打开句柄（活跃写入）时
@@ -107,10 +236,14 @@ def _sweep_stale() -> None:
                 except OSError:
                     continue
                 shutil.rmtree(trash, ignore_errors=True)
-            except OSError:
-                pass
-    except OSError:
-        pass
+            except Exception as e:
+                # 单个目录出任何问题（含非 OSError）都只跳过它，不影响同轮其它目录
+                _log_err(f"陈旧目录清扫失败（跳过 {name}）: "
+                         f"{type(e).__name__}: {e}")
+    except Exception as e:
+        # 整轮失败（如临时目录不可读）：只记一行，绝不向上抛
+        _log_err(f"陈旧目录清扫整轮失败（已忽略，不影响启动）: "
+                 f"{type(e).__name__}: {e}")
 
 
 def _has_fresh_file(p: str, now: float) -> bool:
@@ -162,13 +295,6 @@ def _ensure_dir() -> str:
     d = _bg_dir()
     os.makedirs(d, exist_ok=True)
     return d
-
-
-def _wipe_dir() -> None:
-    try:
-        shutil.rmtree(_bg_dir(), ignore_errors=True)
-    except OSError:
-        pass
 
 
 def _archive_old(slot: _Slot, min_bytes: int) -> str:
@@ -681,8 +807,147 @@ def cleanup_all() -> None:
 
 
 def prepare() -> None:
-    """会话开始预清：清空上次残留（异常退出场景），确保干净开局。"""
+    """会话开始预清：清空上次残留（异常退出场景），确保干净开局。
+
+    清完立刻重建本进程目录：目录从会话一开始就存在（后台日志与退出回收
+    的落点固定），不必等第一次提交。
+    """
     _wipe_dir()
+    _ensure_dir()
+
+
+def _win_descendants(root_pid: int) -> List[int]:
+    """Windows：快照里 root_pid 的全部后代 pid（不含自身，父可已退出）。
+
+    优雅 terminate 只结束直接子进程（cmd.exe），孙进程会变成「父 pid 已
+    不存在」的孤儿——此后 taskkill /T 再也枚举不到它们。故强杀前先按
+    Toolhelp 快照的父子链把整棵树找出来。快照里的 ppid 是创建时记下的
+    值，父进程已退出也能对上。
+    """
+    if sys.platform != "win32":
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        TH32CS_SNAPPROCESS = 0x00000002
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snap or snap == wintypes.HANDLE(-1).value:
+            return []
+        parent_of = {}
+        try:
+            entry = _PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+            ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+            while ok:
+                parent_of[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+                ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snap)
+        out: List[int] = []
+        frontier = [int(root_pid)]
+        while frontier:
+            cur = frontier.pop()
+            for pid, ppid in parent_of.items():
+                if ppid == cur and pid not in out:
+                    out.append(pid)
+                    frontier.append(pid)
+        return out
+    except Exception:
+        return []
+
+
+def _taskkill_pids(pids: List[int]) -> None:
+    """Windows：一次 taskkill /F 批量终止（按 pid，绝不按进程名）。"""
+    args = ["taskkill", "/F"]
+    for p in pids:
+        args += ["/PID", str(int(p))]
+    try:
+        subprocess.run(args, capture_output=True, timeout=10)
+    except Exception:
+        pass
+
+
+def _force_kill_tree(root_pids: List[int]) -> None:
+    """强杀进程树（只按 pid）。Windows 后代先进名单（先子后父），POSIX 用进程组。"""
+    roots = [int(p) for p in root_pids if p]
+    if not roots:
+        return
+    if sys.platform == "win32":
+        pids: List[int] = []
+        for root in roots:
+            for child in _win_descendants(root):
+                if child not in pids:
+                    pids.append(child)
+        pids += [p for p in roots if p not in pids]
+        _taskkill_pids(pids)
+        return
+    for root in roots:
+        try:
+            # 提交时 start_new_session：子进程自成进程组，killpg 即整棵树
+            os.killpg(os.getpgid(root), signal.SIGKILL)
+            continue
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            os.kill(root, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def shutdown_cleanup(grace: float = SHUTDOWN_GRACE) -> int:
+    """进程退出前收尾：终止本进程全部后台任务 + 删本进程临时目录。
+
+    先优雅（terminate 直接子进程）→ 宽限 grace → 按 pid 强杀整棵进程树。
+    只动 _slots 进程表里由本进程 Popen 出来的子进程（及其后代），绝不按
+    名字杀——同机并行会话的后端与它们提交的任务一律不受影响。
+    与 cancel_all 的区别：cancel_all 是「取消」语义、发完就走（后台线程）；
+    这里是退出前的同步收尾，必须确保子进程真的没了——父进程一退，它们
+    就成了 ppid 指向空号的孤儿（实测后端退出后仍有 cmd.exe 在跑）。
+
+    返回强制终止的后台任务数（供退出 stderr 行使用）。
+    """
+    with _lock:
+        tasks = [(s.proc, s.proc.pid) for s in _slots if s.proc is not None]
+        for s in _slots:
+            if s.status == STATUS_RUNNING:
+                s.cancel_flag = True
+    # 只处理仍在跑的：已终态的任务早就结束了，不该计入「强制终止」
+    alive = [(proc, pid) for proc, pid in tasks if proc.poll() is None]
+    for proc, _pid in alive:
+        try:
+            proc.terminate()  # 优雅：先给它一个正常结束的机会
+        except Exception:
+            pass
+    if alive:
+        deadline = time.time() + max(0.0, grace)
+        while time.time() < deadline and any(proc.poll() is None for proc, _p in alive):
+            time.sleep(0.02)
+        _force_kill_tree([pid for _proc, pid in alive])
+    # 句柄不关 → Windows 下 rmtree 删不掉本进程目录
+    with _lock:
+        for s in _slots:
+            if s.fh is not None:
+                try:
+                    s.fh.close()
+                except Exception:
+                    pass
+                s.fh = None
+    _wipe_dir()
+    return len(alive)
 
 
 # ═══════════════════════════════════════════════════════════════

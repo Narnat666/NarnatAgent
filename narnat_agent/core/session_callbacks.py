@@ -9,6 +9,7 @@
 SessionManager 持有共享资源，状态对象通过 manager 引用访问。
 """
 
+import hashlib
 import json
 import os
 import time
@@ -18,13 +19,35 @@ from ..config.session_store import (
     save_session, load_session, delete_session,
     list_sessions_tree, format_session_tree,
     format_session_summary, load_session_meta, session_exists,
+    validate_session_name,
+    # 文件指纹 = 冲突检测的唯一口径。实现放在 config/session_store（save_session
+    # 自己也要用它，顶层反向 import 会成环），这里作为模块级函数对外暴露：
+    # 全仓凡是要签名的地方都从这里取，别各写一套。
+    file_signature, session_signature,
 )
+from ..config.defaults import DEFAULT_THINKING_PASSBACK
 from ..config.skill_store import load_skill, list_skill_tree
 from ..output import write as _stdout_write, D, R
 from ..tools.registry import (
     PLUGIN_TOOL_NAMES as _PLUGIN_TOOL_NAMES, get_capability as _get_capability,
 )
-from .message_list import MessageList
+from .message_list import MessageList, split_loaded_history
+
+
+def messages_fingerprint(msgs) -> str:
+    """消息列表的内容指纹（全仓唯一的摘要口径，稳定且与键序无关）。
+
+    用途：判断「这次要保存的内容」与「carry_over 已经存下的那一份」是不是
+    同一份。不能用布尔标记——它是跨段泄漏的根源：carry_over 置位后没人复位，
+    新一段对话（内容明明不同）被误判成"已存过"，整段永不落盘。
+    用 sha256(json.dumps(sort_keys=True)) 而非 id/hash()：进程重启后仍可比较，
+    且与字典键插入顺序无关（同一份消息即使键序不同也判为相同）。
+    """
+    try:
+        payload = json.dumps(msgs, ensure_ascii=False, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        payload = repr(msgs)
+    return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()
 
 
 def _format_messages_text(messages: list) -> str:
@@ -52,6 +75,11 @@ def _format_messages_text(messages: list) -> str:
 # 数据丢了都不知道（实测：文件被占用导致写入失败，界面一片安静）。
 _NOTIFY_HOOK: Optional[Callable[[str], None]] = None
 
+# 「会话已另存到新名字」通道（P0-1 冲突另存）。core 不 import rpc，
+# 由 RPC 层注册后补发一条 session/saved{name, current, switched:true}，
+# 让界面把当前会话指到内容实际所在的会话。
+_RESAVED_HOOK: Optional[Callable[[str], None]] = None
+
 
 def set_notify_hook(fn: Optional[Callable[[str], None]]) -> None:
     """注册界面提示通道（RPC 层启动时注册，把提示推成 notice 通知）。"""
@@ -59,10 +87,38 @@ def set_notify_hook(fn: Optional[Callable[[str], None]]) -> None:
     _NOTIFY_HOOK = fn
 
 
+def set_resaved_hook(fn: Optional[Callable[[str], None]]) -> None:
+    """注册「会话因冲突另存」通道（RPC 层启动时注册，推成 session/saved）。"""
+    global _RESAVED_HOOK
+    _RESAVED_HOOK = fn
+
+
+# Windows MAX_PATH=260；这里留出会话目录与 ".<pid>.tmp" 后缀的余量
+_MAX_PATH_HINT = 240
+
+
+def readable_save_error(err: str) -> str:
+    """把「会话名过长撞 Windows MAX_PATH」的 OSError 翻成用户能看懂的一句话。
+
+    Windows 上 open() 对超长路径报 [Errno 2] No such file or directory
+    （WinError 3 被映射成 ENOENT），与「目录不存在」同一个 errno 号——
+    用户只看到一句无从下手的系统错误，不知道该改什么。原始错误串保留在
+    末尾供排查（errno 与完整路径都在里面）。
+    """
+    if not err or "errno 2" not in err.lower():
+        return err
+    paths = err.split("'")[1::2]
+    if not paths or max(len(p) for p in paths) < _MAX_PATH_HINT:
+        return err
+    return ("会话名过长，超出 Windows 路径长度上限，请换短一些的名字后重试"
+            f"（原始错误: {err}）")
+
+
 def _report_save_error(err: str) -> None:
     """会话落盘失败提示：打印到终端，避免保存失败被静默吞掉（数据丢失无感知）"""
     if not err:
         return
+    err = readable_save_error(err)
     _stdout_write(f"  {D}⚠ 会话保存失败: {err}{R}\n")
     hook = _NOTIFY_HOOK
     if hook is not None:
@@ -70,6 +126,40 @@ def _report_save_error(err: str) -> None:
             hook(f"⚠ 会话保存失败: {err}")
         except Exception:
             pass
+
+
+def _report_conflict_notice(name: str) -> None:
+    """「已另存」提示：内容没丢，但不在用户以为的那个会话里了，必须说出来。
+
+    两个窗口切到同一个会话各聊各的时，后写的一方不覆盖对方，而是另存成
+    "X (2)"。不说的话用户回到 X 只看到对方的内容，会以为自己刚聊的那轮被
+    吞了——正是这个 bug 的原始观感。终端打一行，面板额外推 notice 与
+    session/saved（界面据此把当前会话指到新名字）。
+    """
+    text = f'[提示: 检测到另一个实例正在写该会话，本次内容已另存为 "{name}"]'
+    _stdout_write(f"  {D}{text}{R}\n")
+    _fire_hook(_NOTIFY_HOOK, text)
+    _fire_hook(_RESAVED_HOOK, name)
+
+
+def _report_exit_save_error(err: str) -> None:
+    """退出落盘失败提示。
+
+    退出时用户可能已经看不到界面了，但必须留痕：RPC 模式下 stdout 已被
+    改道到 stderr（见 rpc/protocol.py 的 _StdoutProxy），终端形态直接打在
+    屏幕上，两种形态都能看到这一行。
+    """
+    _stdout_write(f"  {D}⚠ 退出前保存会话失败: {readable_save_error(err)}{R}\n")
+
+
+def _fire_hook(hook, *args) -> None:
+    """回调自身异常不能影响保存/退出流程"""
+    if hook is None:
+        return
+    try:
+        hook(*args)
+    except Exception:
+        pass
 
 
 # 插件工具名称 → 说明（/plugin 状态表展示用；名称与顺序来源 registry.PLUGIN_TOOL_NAMES，
@@ -120,9 +210,30 @@ def _persist_config(config_dir: str, mutate) -> str:
 # 一旦允许保存/改名为该名称，删除它就会清空整个会话库——入口处直接拒绝（大小写不敏感）
 _RESERVED_SESSION_NAMES = frozenset(["--all"])
 
+# 会话名长度上限。Windows 单段文件名上限约 255 字符，而名字还要拼上会话库
+# 的绝对路径前缀与 ".json"/".json.tmp" 后缀，光看名字本身看不出会超；
+# 超了之后报的是 `[Errno 2] No such file or directory: 'E:\...\<300 字>.json'`
+# ——一句带完整磁盘路径的系统错误，用户既看不懂也改不动。
+# 取 120：留足前缀与后缀余量，又宽于任何正常命名（LLM 命名与首句截断都远短于此）。
+_MAX_SESSION_NAME_LEN = 120
+
 
 def _check_reserved_session_name(name: str) -> str:
-    """会话名保留字校验；命中返回错误文案，否则返回""。"""
+    """会话名校验；命中返回错误文案，否则返回""。
+
+    这是所有「写会话名」入口的唯一校验点：/save（NoSession/RootSession）、
+    /explore、session/rename、自动命名（AutoSaveManager）、
+    新建对话的兜底保存（carry_over / exit_flush）都经这里。别在别处再写一套——
+    少堵一处就会在磁盘上留下删不掉的 .tmp 残骸（实测）。
+    非法字符、过长、保留字分开报原因，用户才知道该改什么。
+    """
+    if isinstance(name, str) and len(name) > _MAX_SESSION_NAME_LEN:
+        # 长度先判：超长名往下走只会在建文件时炸出带绝对路径的 errno
+        return (f"[错误: 会话名过长（最多 {_MAX_SESSION_NAME_LEN} 字，"
+                f"当前 {len(name)} 字），请缩短后重试]")
+    bad = validate_session_name(name)
+    if bad:
+        return bad
     if name.strip().lower() in _RESERVED_SESSION_NAMES:
         return f"[错误: '{name}' 为保留名称（/rm --all 表示全部删除），请换一个名称]"
     return ""
@@ -142,6 +253,26 @@ def _quick_session_name(msgs, limit: int = 24) -> str:
         if text:
             return text[:limit] + ("…" if len(text) > limit else "")
     return ""
+
+
+def unique_session_name(narnat_dir: str, base: str,
+                        parent: Optional[str] = None) -> str:
+    """把 base 变成会话库里未被占用的名字：撞名就追加 " (2)"、" (3)"…
+
+    全仓**唯一**的撞名兜底，两条自动命名路径都必须走这里：
+    `NoSession.carry_over()`（新建对话/切走前的快速名）与
+    `AutoSaveManager._do_save()`（轮末的 LLM 命名）。
+    此前两处各写一套，弱的那套（重名直接放弃保存）正好落在更关键的
+    「新建对话」路径上：默认阈值下第二段整段不落盘，磁盘上无文件、
+    界面还显示「上下文已清空」。
+    parent 非空 = 按子会话命名空间判重（子会话目录下同名才算撞名）。
+    序号到 999 仍撞名时返回最后一个候选，由 save_session 的重名检测
+    兜底——绝不静默覆盖既有会话。
+    """
+    name, i = base, 2
+    while session_exists(narnat_dir, name, parent=parent) and i < 1000:
+        name, i = f"{base} ({i})", i + 1
+    return name
 
 
 # ── 命令元数据（单表）：{命令: (默认说明, {状态覆盖说明})} ──
@@ -217,7 +348,18 @@ class SessionState:
 
         游离态这里什么都不做：轮末每轮都会调它，若在此处保存，未保存的
         对话会「每轮刷出一个新会话」。游离态的兜底保存在
-        NoSession.carry_over()，只由「新建对话」显式触发。
+        NoSession.carry_over()，只由「要离开游离态」的动作显式触发
+        （新建对话 / `/cd` 切走，两条入口都走 NoSession.enter 或 on_new）。
+        """
+        return None
+
+    def exit_flush(self) -> Optional[str]:
+        """退出前的同步落盘。返回实际写入的会话名（没写则 None）。
+
+        与 auto_save 的区别：**不依赖 LLM 命名**、必须是同步的纯本地写。
+        进程马上要 os._exit，后台命名线程等不到，必须先把手上的内容落盘
+        （P0-3：轮末自动保存没跑完就关窗口，最后一段整段丢失且退出码为 0）。
+        默认无事可做，由各状态自己实现。
         """
         return None
 
@@ -245,7 +387,9 @@ class NoSession(SessionState):
         return _commands_for("no_session")
 
     def save(self, name: str) -> str:
-        msgs = self._mgr.get_messages()
+        # 完整历史（归档 + 当前）：与 _persist / carry_over / exit_flush 同一口径。
+        # 用 get_messages()（压缩后的上下文）另存会让新文件丢掉压缩前的原文。
+        msgs = self._mgr.get_full_messages()
         if not any(m.get("role") == "user" for m in msgs):
             return "没有对话内容，无需保存"
         if not name:
@@ -261,23 +405,28 @@ class NoSession(SessionState):
                     f"（如需覆盖请先 /rm {name} 删除）]")
         err = save_session(self._mgr.narnat_dir, name, msgs)
         if err:
-            return err
+            return readable_save_error(err)
         new_state = self._mgr.create_root_state(name)
         self._mgr.switch_state(new_state)
         return ""
 
     def carry_over(self):
-        """新建对话前的兜底保存：把游离态这段内容存成一条会话。
+        """离开游离态前的兜底保存：把游离态这段内容存成一条会话。
 
-        只由 on_new 显式调用，**不**覆盖 auto_save：
+        由「要离开游离态」的动作显式调用：`on_new`（新建对话）与
+        `NoSession.enter`（`/cd` 切走）；`session/switch` 经 on_enter 走同一条
+        `enter`，不再单独调一次（两处都调会存出两份）。**不**覆盖 auto_save：
         轮末的 on_auto_save 也会调 auto_save，若把逻辑放进 auto_save，
         游离态就变成「每轮结束都存一个新会话」，会刷出一堆碎会话
         （实测过：「记忆蓝莓」「蓝莓记忆测试」并存）。
 
         返回存出的会话名（没存则 None），供界面告诉用户存到哪了。
-        不切状态：调用方随后自己把状态换成新的 NoSession。
+        不切状态：调用方随后自己把状态换成新的 NoSession / 目标会话。
         """
-        msgs = self._mgr.get_messages()
+        # 完整历史（归档 + 当前）：与 _persist / AutoSaveManager 的写盘口径
+        # 一致——三处任一少了归档，压缩过的历史就会漏一段；指纹也必须基于
+        # 同一份内容，否则 carry_over 与后台自动保存互相认不出、重复写一份。
+        msgs = self._mgr.get_full_messages()
         if not any(m.get("role") == "user" for m in msgs):
             return None  # 只有 system prompt，没什么可存
         if self._mgr._auto_save_done and self._mgr._pending_auto_save_name:
@@ -286,22 +435,71 @@ class NoSession(SessionState):
         # 注意这里不能只判断 _auto_save_done：
         # 它只是「线程已启动」，线程可能还在跑 LLM 命名、甚至已失败。
         # 此时若跳过保存，用户点「新建」就丢了这一段（实测宿主里连做几段后复现）。
-        # 用 _carried_over 通知后台线程：这段已由这里存下，别重复写。
+        # 用内容指纹通知后台线程：这段已由这里存下，别重复写（比布尔标记严格——
+        # 只有后台线程要存的内容与这里存的完全相同才算"重复"）。
         # 用快速截断命名，不走 LLM：这个调用发生在「新建对话」的同步路径上，
         # 走 LLM 会让按钮转很久（实测连做几段后像卡死）。
-        name = _quick_session_name(msgs)
-        if not name or _check_reserved_session_name(name):
+        base = _quick_session_name(msgs)
+        if not base or _check_reserved_session_name(base):
             return None
-        if session_exists(self._mgr.narnat_dir, name):
-            return None
+        # 撞名（同一句开头连着开好几段时必然发生）必须追加序号照样存下，
+        # 不能像以前那样直接放弃——那是整段对话永久不落盘。
+        # expected_signature=""：这段内容本该落到一个还不存在的文件，由
+        # save_session 用 O_EXCL 原子占名字——两个实例同时给同一句开头保存时，
+        # 后到的一方不会覆盖先到的，而是自动另存成 "X (2)"。
+        name = unique_session_name(self._mgr.narnat_dir, base)
+        out: Dict[str, Any] = {}
         try:
-            err = save_session(self._mgr.narnat_dir, name, msgs)
+            err = save_session(self._mgr.narnat_dir, name, msgs,
+                               expected_signature="", result=out)
         except Exception:
             return None
         if err:
+            _report_save_error(err)
             return None
+        name = out.get("name") or name
         # 通知后台自动保存线程：这段已经被这里存下，别再写一份
-        self._mgr._carried_over = True
+        self._mgr._carried_over_fingerprint = messages_fingerprint(msgs)
+        self._mgr._last_saved_fingerprint = self._mgr._carried_over_fingerprint
+        # 记下「存成了哪个名字」：后台线程指纹命中（内容与这份完全相同）时
+        # 要把会话状态切到这份会话，否则用户停在游离态、后续内容谁都不管
+        self._mgr._carried_over_name = name
+        return name
+
+    def exit_flush(self) -> Optional[str]:
+        """退出兜底：用快速截断名把这一段同步存下来（不调 LLM）。
+
+        与 carry_over 同一套逻辑（快速名 + unique_session_name + save_session），
+        多一条判据「这段内容已经在磁盘上了」：轮末自动保存的后台线程可能已经
+        写过同一个指纹而状态还没切过来（切状态在写盘之后），此时再存一份就会
+        凭空多出一个会话文件——正常退出不该产生多余文件。
+        """
+        msgs = self._mgr.get_full_messages()
+        if not any(m.get("role") == "user" for m in msgs):
+            return None   # 只有 system prompt，没什么可存
+        # 「已在磁盘上」的判据用内容指纹，两种口径都比一次：轮末自动保存线程
+        # 写的是当前上下文（get_messages），这里写的是完整历史（含压缩归档），
+        # 压缩过的会话两者不同，只比一种会把已落盘的这一段再存一份。
+        saved_fp = self._mgr._last_saved_fingerprint
+        fingerprint = messages_fingerprint(msgs)
+        if saved_fp and saved_fp in (fingerprint,
+                                     messages_fingerprint(self._mgr.get_messages())):
+            return None
+        base = _quick_session_name(msgs)
+        if not base or _check_reserved_session_name(base):
+            return None
+        name = unique_session_name(self._mgr.narnat_dir, base)
+        out: Dict[str, Any] = {}
+        err = save_session(self._mgr.narnat_dir, name, msgs,
+                           expected_signature="", result=out)
+        if err:
+            _report_exit_save_error(err)
+            return None
+        name = out.get("name") or name
+        self._mgr._last_saved_fingerprint = fingerprint
+        # 通知可能还在跑的后台命名线程：这段已存下，别再写一份（与 carry_over 同一机制）
+        self._mgr._carried_over_fingerprint = fingerprint
+        self._mgr._carried_over_name = name
         return name
 
     def show(self, args: str = "") -> str:
@@ -333,6 +531,21 @@ class NoSession(SessionState):
             new_msgs, load_err = load_session(self._mgr.narnat_dir, target_name)
             if load_err:
                 return load_err
+        # 切走之前先把游离态这一段兜底存下来：与 on_new / session/switch 完全一致，
+        # 复用同一个 carry_over（不复制逻辑）。必须赶在 replace_messages 之前——
+        # 之后 MessageList 已经是目标会话的内容，刚聊的这段再也取不回来
+        # （P0：默认 自动保存=false 时状态长期停在 NoSession，敲 /cd 就整段丢）。
+        saved = None
+        try:
+            saved = self.carry_over()
+        except Exception:
+            saved = None
+        # 存成了哪个名字要如实告诉用户：终端直接打这一行（RPC 形态下同一次
+        # print 被 exec_command 捕获进 /cd 回执的 lines），名字另存进
+        # _last_auto_saved，供 RPC 回执的 autoSaved 字段用（core 不 import rpc）。
+        self._mgr._last_auto_saved = saved
+        if saved:
+            _stdout_write(f"  {D}上一段对话已自动保存为: {saved}{R}\n")
         self._mgr.replace_messages(new_msgs)
         if target_parent is not None:
             new_state = self._mgr.create_child_state(target_name, target_parent)
@@ -377,27 +590,62 @@ class RootSession(SessionState):
         self._name = name
         self._status: Optional[str] = None
         self._summary: Optional[str] = None
-        self._msg_count: int = len(mgr.get_messages())
+        # 基线与 _persist 的比较口径必须一致（全量历史）：压缩过的会话载入后
+        # 「当前上下文」只是摘要 + 保留尾部，按它取基线会让下一次落盘把
+        # 「历史本来就更多」误判成「有新内容」，把 completed 状态刷成 active
+        self._msg_count: int = len(mgr.get_full_messages())
+        # 本进程最近一次读/写这个会话文件时的指纹：_persist 用它判断磁盘是否
+        # 已被另一个实例改过（两个窗口切到同一会话各聊各的 → 后写者整段覆盖）。
+        self._sig: str = session_signature(mgr.narnat_dir, name)
 
     def available_commands(self) -> Dict[str, str]:
         return _commands_for("root")
 
-    def _persist(self):
-        msgs = self._mgr.get_messages()
+    def _persist(self) -> str:
+        """落盘当前会话，返回 ""=成功 / 非空=可读失败原因。
+
+        带上「上次读/写该文件时的指纹」写盘：磁盘指纹与之不符说明另一个实例
+        （另一个窗口/后端）也在这个会话里写，直接覆盖会让对方刚写的那一整段
+        静默消失。此时 save_session 改为另存成 "X (2)"，这里把状态与提示
+        一并切到新名字（否则下一轮又会另存一份）。
+        """
+        # 落盘用完整历史（归档 + 当前）：压缩只替换「发给模型的上下文」，
+        # 用户看得见的会话文件必须保留压缩前的原文，否则翻历史就少了内容。
+        msgs = self._mgr.get_full_messages()
         if len(msgs) > self._msg_count and self._status in ("new", "completed"):
             self._status = "active"
+        out: Dict[str, Any] = {}
         err = save_session(self._mgr.narnat_dir, self._name, msgs,
                            status=self._status or "active",
-                           summary=self._summary)
+                           summary=self._summary,
+                           expected_signature=self._sig,
+                           result=out)
         _report_save_error(err)
         self._msg_count = len(msgs)
+        if err:
+            self._mgr._last_save_error = err
+            return err
+        self._mgr._last_save_error = ""
+        # 写完立刻更新签名：自己紧接着再写一次不能算「被外部改动」（同进程不误判）
+        self._sig = out.get("signature") or self._sig
+        if out.get("conflict"):
+            self._adopt_saved_name(out.get("name"))
+        return err
+
+    def _adopt_saved_name(self, name: Optional[str]) -> None:
+        """冲突另存后把状态指到实际写入的那个会话，并告诉用户内容去了哪。"""
+        if not name or name == self._name:
+            return
+        self._name = name
+        _report_conflict_notice(name)
 
     def save(self, name: str) -> str:
+        # _persist 的失败原因必须如实回给调用方：吞掉就等于「写盘失败仍回
+        # ok:true + 会话已保存」（P1，实测 WinError 5 时依然报成功）。
         if not name:
-            self._persist()
-            return ""
+            return readable_save_error(self._persist())
         if name == self._name:
-            self._persist()
+            return readable_save_error(self._persist())
         else:
             err = _check_reserved_session_name(name)
             if err:
@@ -405,10 +653,12 @@ class RootSession(SessionState):
             if session_exists(self._mgr.narnat_dir, name):
                 return (f"[错误: 会话 '{name}' 已存在，请换名保存，或 /cd {name} 进入已有会话"
                         f"（如需覆盖请先 /rm {name} 删除）]")
-            msgs = self._mgr.get_messages()
+            # 完整历史（归档 + 当前）：与 _persist 同一口径。用压缩后的上下文
+            # 另存会让新文件丢掉压缩前的原文（P1，实测）。
+            msgs = self._mgr.get_full_messages()
             err = save_session(self._mgr.narnat_dir, name, msgs)
             if err:
-                return err
+                return readable_save_error(err)
             new_state = self._mgr.create_root_state(name)
             self._mgr.switch_state(new_state)
         return ""
@@ -478,33 +728,85 @@ class RootSession(SessionState):
         return f"会话不存在: {name}"
 
     def explore(self, name: str) -> str:
+        """创建探索分支 / 进入已有分支。
+
+        分支文件已存在时按状态分流，**绝不**再用父会话快照覆盖它：
+        completed 一律拒绝，active/new 走「继续之前的分支」（读回分支自己
+        的内容）。此前 completed 被当作「允许重开」而直接覆盖，一次同名
+        /explore 就把已完成分支的原文从磁盘上永久抹掉（P0，实测重开
+        「分支甲」后 C02 全库零命中）。
+        """
+        name = (name or "").strip()
         if not name:
-            return "[错误: 请指定分支名称]"
+            # 不带名：用父会话内容自动命名；撞名由 unique_session_name 换序号
+            name = self._auto_branch_name()
+            if not name:
+                return ("[错误: 父会话还没有对话内容，无法自动命名分支，"
+                        "请手动指定: /explore <名称>]")
         err = _check_reserved_session_name(name)
         if err:
             return err
         if name == self._name:
             return f"[错误: 分支名不可与父会话同名（'{name}'），请换一个名称]"
         if session_exists(self._mgr.narnat_dir, name, parent=self._name):
-            meta = load_session_meta(self._mgr.narnat_dir, name, parent=self._name)
-            if meta.get("status") != "completed":
-                return (f"[错误: 分支 '{name}' 已存在且尚未完成。请换名，"
-                        f"或 /cd {self._name}/{name} 进入该分支继续]")
-            # completed：允许重开（第二轮探索的既有工作流）
+            return self._reenter_branch(name)
+        return self._create_branch(name)
+
+    def _auto_branch_name(self) -> str:
+        """自动命名分支：父会话首条用户消息截断，在子会话命名空间内取未占用序号。"""
+        base = _quick_session_name(self._mgr.get_full_messages())
+        # 首句为空、与父会话同名（子命名空间里也会撞名）、或本身非法时才换种子名
+        if not base or base == self._name or _check_reserved_session_name(base):
+            base = "分支"
+        return unique_session_name(self._mgr.narnat_dir, base, parent=self._name)
+
+    def _create_branch(self, name: str) -> str:
+        """全新分支：以父会话当前快照为起点建文件（仅在此名字还不存在时调用）。"""
         self._persist()
-        msgs = [dict(m) for m in self._mgr.get_messages()]
-        parent_msg_count = len(msgs)
+        # 分支文件写父会话的完整历史（归档 + 当前）：父会话压缩过时
+        # get_messages() 只剩「摘要 + 保留尾部」，拿它当起点等于把父会话压缩前
+        # 的原文从分支里删掉（与 done() 同一个 P0 类缺陷）
+        msgs = self._mgr.get_full_messages()
+        # 增量基准必须是当前上下文的下标（done() 在上下文上切片，压缩后由
+        # reset_after_compact 重置到摘要边界）；用全量条数会让 target 恒为空
+        parent_msg_count = len(self._mgr.get_messages())
         err = save_session(self._mgr.narnat_dir, name, msgs, parent=self._name,
                            status="new", parent_msg_count=parent_msg_count,
                            last_summarized_at=parent_msg_count)
         if err:
-            return err
+            return readable_save_error(err)
         new_msgs, err = load_session(self._mgr.narnat_dir, name, parent=self._name)
         if err:
             return err
         self._mgr.replace_messages(new_msgs)
         new_state = self._mgr.create_child_state(name, self._name)
         self._mgr.switch_state(new_state)
+        return ""
+
+    def _reenter_branch(self, name: str) -> str:
+        """进入已存在的分支（继续之前那次探索）。
+
+        completed = 已完成并合并：拒绝。拿父会话快照覆盖它，等于把那整段
+        探索原文从磁盘上抹掉，用户再也找不到（P0）。
+        active / new = 还活着：读回分支文件自己的内容重建子会话状态，
+        不写分支文件一个字节。
+        """
+        meta = load_session_meta(self._mgr.narnat_dir, name, parent=self._name)
+        if meta.get("status") == "completed":
+            return (f"[错误: 分支 '{name}' 已完成并合并，重新创建会覆盖它的原文。"
+                    f"请换个名字，或先 /rm {self._name}/{name} 删除它]")
+        self._persist()
+        new_msgs, err = load_session(self._mgr.narnat_dir, name, parent=self._name)
+        if err:
+            return err
+        self._mgr.replace_messages(new_msgs)
+        new_state = self._mgr.create_child_state(name, self._name)
+        self._mgr.switch_state(new_state)
+        # 回执必须说清这是「重进」而不是新建：终端打这一行（RPC 形态下同一行
+        # 被 exec_command 收进回执 lines），名字与条数照实给，用户才知道
+        # 自己看到的是之前那段探索
+        _stdout_write(f"  {D}已重新进入已有分支: {name}"
+                      f"（{len(new_msgs)} 条消息，/done 合并结论）{R}\n")
         return ""
 
     def exit(self) -> Tuple[str, Optional[SessionState]]:
@@ -514,7 +816,25 @@ class RootSession(SessionState):
         return ("", NoSession(self._mgr))
 
     def auto_save(self):
-        self._persist()
+        """落盘并回传会话名（供 on_new 告诉界面「上一段已存为 X」）。
+
+        已在会话里时这一段是写回原文件而非新建，但界面同样需要知道内容落在
+        哪个会话：返回 None 会让 session/new 的 autoSaved 恒为 null（阈值 0
+        时轮末自动保存已先切到会话，carry_over 不再发生），用户就以为这段
+        没保存。空对话不回报名字，与 carry_over 的「没什么可存」同一口径。
+        落盘失败时必须回 None（失败原因已由 _persist → _report_save_error 推给
+        界面）：回名字就等于告诉用户「已自动保存为 X」，而磁盘上什么都没有（实测）。
+        """
+        if not any(m.get("role") == "user" for m in self._mgr.get_messages()):
+            return None
+        if self._persist():
+            return None
+        return self._name
+
+    def exit_flush(self) -> Optional[str]:
+        """退出兜底：直接写回自己这个文件（不新建会话，重复退出也只多一次覆盖写）。"""
+        err = self._persist()
+        return None if err else self._name
 
     def session_name(self) -> Optional[str]:
         return self._name
@@ -589,23 +909,45 @@ class ChildSession(SessionState):
         self._parent_msg_count: int = meta.get("parent_msg_count") or 0
         self._last_summarized_at: int = (meta.get("last_summarized_at")
                                          or self._parent_msg_count)
-        self._msg_count: int = len(mgr.get_messages())
+        # 同 RootSession._msg_count：基线取全量历史，与 ChildSession._persist 同口径
+        self._msg_count: int = len(mgr.get_full_messages())
+        # 本进程最近一次读/写该分支文件时的指纹（同 RootSession._sig）
+        self._sig: str = session_signature(mgr.narnat_dir, name, parent=parent)
 
     def available_commands(self) -> Dict[str, str]:
         return _commands_for("child")
 
     def _persist(self):
-        msgs = self._mgr.get_messages()
+        # 落盘用完整历史（归档 + 当前），理由同 RootSession._persist
+        msgs = self._mgr.get_full_messages()
         if len(msgs) > self._msg_count and self._status in ("new", "completed"):
             self._status = "active"
+        out: Dict[str, Any] = {}
         err = save_session(self._mgr.narnat_dir, self._name, msgs,
                            parent=self._parent,
                            status=self._status or "active",
                            summary=self._summary,
                            parent_msg_count=self._parent_msg_count,
-                           last_summarized_at=self._last_summarized_at)
+                           last_summarized_at=self._last_summarized_at,
+                           expected_signature=self._sig,
+                           result=out)
         _report_save_error(err)
         self._msg_count = len(msgs)
+        if err:
+            self._mgr._last_save_error = err
+            return err
+        self._mgr._last_save_error = ""
+        self._sig = out.get("signature") or self._sig
+        if out.get("conflict"):
+            self._adopt_saved_name(out.get("name"))
+        return err
+
+    def _adopt_saved_name(self, name: Optional[str]) -> None:
+        """冲突另存后把状态指到实际写入的分支名（仍在同一个父会话下）。"""
+        if not name or name == self._name:
+            return
+        self._name = name
+        _report_conflict_notice(name)
 
     def show(self, args: str = "") -> str:
         tree = list_sessions_tree(self._mgr.narnat_dir)
@@ -648,7 +990,15 @@ class ChildSession(SessionState):
         # target 为空判断（_persist 已把有续聊消息的 completed 恢复为 active，
         # 提前守卫会与"续聊后第二轮合并"语义自相矛盾，并在无新消息时误报
         # "不可重复 /done"）
+        # 两条口径分工必须分清：
+        #   msgs      = 当前上下文（发给模型的那份），parent_msg_count /
+        #               last_summarized_at 都是它的下标（压缩后由
+        #               reset_after_compact 重置到摘要边界），切片只能用它；
+        #   full_msgs = 完整历史（归档 + 当前），写分支文件只能用它——用压缩后
+        #               的上下文写盘会把分支文件从 15 条截成 4 条，压缩前原文
+        #               永久消失（P0，自动压缩与手动 /compact 各复现一次）
         msgs = list(self._mgr.get_messages())
+        full_msgs = self._mgr.get_full_messages()
         parent_msg_count = self._parent_msg_count
         if parent_msg_count == 0:
             for i, m in enumerate(msgs):
@@ -691,19 +1041,30 @@ class ChildSession(SessionState):
         parent_msgs.append({"role": "system",
             "content": f"# 子会话 [{self._name}]{round_label} 结论\n\n{summary}"})
         err = save_session(self._mgr.narnat_dir, self._parent, parent_msgs)
-        _report_save_error(err)
+        if err:
+            # 父会话没写成就绝不能把分支标成 completed：结论没落到父会话里，
+            # 标了之后「已完成」与实际内容不符，用户还收到「结论已合并」的假成功
+            # （P1）。这里如实回错误，分支状态与增量基准原样保留，可以重试 /done。
+            _report_save_error(err)
+            return (f"合并失败：父会话「{self._parent}」写入失败"
+                    f"（{readable_save_error(err)}）；分支未标记完成，可重试 /done")
 
         self._last_summarized_at = len(msgs)
         self._status = "completed"
         self._summary = summary
         # 分支文件写内存全量（权威版本）：磁盘版可能落后于内存（消息未持久化
         # 时读取会把它回退为旧版，而 last_summarized_at 按内存长度记，内容与
-        # 基准错位导致后续增量被静默跳过）
-        err = save_session(self._mgr.narnat_dir, self._name, msgs,
+        # 基准错位导致后续增量被静默跳过）。全量 = 归档 + 当前（压缩前的原文
+        # 在归档里），与 _persist / carry_over / exit_flush 同一口径
+        err = save_session(self._mgr.narnat_dir, self._name, full_msgs,
                            parent=self._parent, status="completed", summary=summary,
                            parent_msg_count=self._parent_msg_count,
                            last_summarized_at=self._last_summarized_at)
         _report_save_error(err)
+        # 这次写盘不经过 _persist，签名要跟着更新，否则后续 _persist 会把「自己
+        # 刚写的」判成被外部改动，又另存一份 "X (2)"
+        self._sig = session_signature(self._mgr.narnat_dir, self._name,
+                                      parent=self._parent)
 
         self._mgr.replace_messages(parent_msgs)
         new_state = self._mgr.create_root_state(self._parent)
@@ -723,7 +1084,25 @@ class ChildSession(SessionState):
         return ("", new_state)
 
     def auto_save(self):
-        self._persist()
+        """落盘并回传会话名（与 RootSession.auto_save 同一口径）。
+
+        返回 None 会让分支内「新建对话」的 `autoSaved` 恒为 null：内容其实已经
+        写进 `父/分支.json`，界面却说不出存在哪（实测 E1 FAIL）。名字是
+        session_name() 的裸名，父会话由 session_parent() 提供，与 RootSession
+        回裸名、上层用 `父/子` 拼 current 的既有约定一致。
+        空对话不回报名字；落盘失败必须回 None（原因已由 _persist →
+        _report_save_error 推给界面）：回名字等于谎报「已自动保存为 X」。
+        """
+        if not any(m.get("role") == "user" for m in self._mgr.get_messages()):
+            return None
+        if self._persist():
+            return None
+        return self._name
+
+    def exit_flush(self) -> Optional[str]:
+        """退出兜底：直接写回自己的分支文件（不新建会话、不切状态）。"""
+        err = self._persist()
+        return None if err else self._name
 
     def reset_after_compact(self):
         """压缩后重设增量合并基准。
@@ -783,7 +1162,7 @@ class SessionManager:
         self._get_thinking_effort = thinking_effort_getter
         self._set_thinking_effort = thinking_effort_setter
         self._thinking_options = thinking_options or {"high": "高", "max": "全开"}
-        self._get_thinking_passback = thinking_passback_getter or (lambda: True)
+        self._get_thinking_passback = thinking_passback_getter or (lambda: DEFAULT_THINKING_PASSBACK)
         self._set_thinking_passback = thinking_passback_setter
         self._get_model = model_getter
         self._set_model = model_setter
@@ -804,10 +1183,22 @@ class SessionManager:
         self._skill_ignore_dirs = tuple(skill_ignore_dirs or ())
         self._auto_save_done: bool = False
         self._pending_auto_save_name: Optional[str] = None
-        # 最近一次「新建对话」时自动存下的会话名（None=没存），供界面回执用
+        # 最近一次「离开游离态」（新建对话 / /cd 切走）时兜底存下的会话名
+        # （None=没存），供界面回执告诉用户内容落到哪个会话
         self._last_auto_saved: Optional[str] = None
-        # carry_over 已把这一段落盘 → 后台自动保存线程完成时据此跳过写盘，避免重复
-        self._carried_over: bool = False
+        # carry_over 已把这一段落盘 → 后台自动保存线程写盘前据此跳过，
+        # 避免同一个对话出现两份记录。存的是「已落盘那份消息的指纹」而非布尔：
+        # 布尔会跨段泄漏（新一段内容不同却被跳过，永不落盘）。
+        self._carried_over_fingerprint: Optional[str] = None
+        # 指纹对应的会话名（carry_over 存成了哪个名字）。指纹命中时后台线程
+        # 靠它把状态切到这份会话——只跳过写盘会把用户留在游离态。
+        self._carried_over_name: Optional[str] = None
+        # 最近一次成功落盘的那份内容指纹。退出兜底（exit_flush）据此判断
+        # 「这一段已经在磁盘上了」——不判就会在正常退出时多存出一个会话文件。
+        self._last_saved_fingerprint: Optional[str] = None
+        # 最近一次 _persist 的失败原因（""=上次写盘成功）。退出提示要说出
+        # 「为什么没存下」，而 auto_save() 只回 None，原因只能从这里带走。
+        self._last_save_error: str = ""
         self.pending_deletes: Set[Tuple[str, Optional[str]]] = set()
         self._state: SessionState = NoSession(self)
         # 目标模式状态：_goal_enabled=开关；_goal_max_rounds=临时轮数覆盖（0=用配置默认值）；
@@ -820,13 +1211,32 @@ class SessionManager:
         """返回 messages 的浅拷贝列表（供状态类读取/保存使用）"""
         return self._messages.view().to_list()
 
+    def get_full_messages(self) -> List[Dict[str, Any]]:
+        """返回完整历史（归档 + 当前）的浅拷贝列表，供展示/落盘使用。
+
+        与 get_messages() 的区别：压缩把当前上下文换成「摘要 + 保留尾部」后，
+        被替换掉的原文只在归档里——展示/落盘必须走这里，否则用户翻历史看不
+        到压缩前的原文。给模型的上下文仍走 get_message_list().view()。
+        """
+        return self._messages.full_history()
+
     def get_message_list(self):
         """返回 MessageList 引用（供 Agent 直接调用 LLM 等场景）"""
         return self._messages
 
     def replace_messages(self, new_msgs: List[Dict[str, Any]]):
+        # 切换/载入会话：归档属于上一段会话，必须先清空，否则完整历史会把两个
+        # 会话的内容拼在一起。
+        self._messages.clear_archive()
+        # 落盘文件是全量历史（提示词 + 归档 + 当前），载入时拆回两半：
+        # 摘要边界之前的历史进归档（展示/落盘保留，不发给模型），这样重进压缩过的
+        # 会话不会把上下文从摘要态膨胀回全量、也不会让摘要夹在历史中游被再次摘要。
+        # 首条系统提示词由拆分解法保证存在且只有一条（缺了就补 config 的）。
+        current, archived = split_loaded_history(new_msgs, self._messages.system_prompt)
+        self._messages.replace_all(current)
+        if archived:
+            self._messages.archive(archived)
         # 恢复历史会话时占比从 0 开始（历史 token 数未持久化），第一轮回复结束后恢复真实值
-        self._messages.replace_all(new_msgs)
         # 会话切换：上一会话的占比/告警标记必须复位，否则新加载会话被残留
         # 占比误触发压缩、首次告警不再提示（coordinator 经 assembly 注入复位回调）
         if self._context_reset is not None:
@@ -905,6 +1315,9 @@ class SessionManager:
         return self._state.show(args)
 
     def on_enter(self, name: str) -> str:
+        # 「上一段兜底保存名」只对本条命令有效：逐次复位，免得上一次的旧名字
+        # 被当成这次的结果回给用户（NoSession.enter 会重新填）。
+        self._last_auto_saved = None
         return self._state.enter(name)
 
     def on_delete(self, name: str) -> str:
@@ -939,7 +1352,28 @@ class SessionManager:
         return msg
 
     def on_auto_save(self):
-        self._state.auto_save()
+        """落盘当前内容，返回实际写入的会话名（没存或写盘失败则 None）。
+
+        返回值是「是否真的落盘成功」的唯一判据：退出提示必须据此打印，
+        不能再拿 state.session_name() 当成功依据——写盘失败时它照样有名字，
+        于是出现「会话已自动保存: X」而磁盘上什么都没有（P1）。
+        """
+        return self._state.auto_save()
+
+    def exit_flush(self) -> Optional[str]:
+        """退出前的同步落盘（不依赖 LLM 命名、毫秒级纯本地写）。
+
+        必须在 os._exit 之前由调用方（rpc/server._finish、agent 退出分支）
+        在当前线程同步调用：轮末自动保存是后台线程里的网络请求，退出时等不到
+        它，原来那一段就整段随进程消失（P0-3，退出码还是 0）。两种状态都覆盖：
+        游离态用快速截断名另存成一条会话，已在会话/分支里则写回自己那个文件。
+        返回实际写入的会话名（没写则 None）。
+        """
+        try:
+            return self._state.exit_flush()
+        except Exception as e:
+            _report_exit_save_error(f"{type(e).__name__}: {e}")
+            return None
 
     def on_new(self) -> str:
         """新建对话：回到游离态并清空上下文。
@@ -954,12 +1388,13 @@ class SessionManager:
         存下的名字记在 _last_auto_saved 里，好让界面告诉用户存到哪了。
         """
         self._last_auto_saved = None
-        # 清上一段可能遗留的「已由 carry_over 存下」标记
-        self._carried_over = False
+        # 清上一段可能遗留的「已由 carry_over 存下」指纹（连同它的会话名）
+        self._carried_over_fingerprint = None
+        self._carried_over_name = None
         try:
             saved = self._state.auto_save()
             if saved is None and isinstance(self._state, NoSession):
-                saved = self._state.carry_over()   # 存下时会置 _carried_over=True
+                saved = self._state.carry_over()   # 存下时会记下那份消息的指纹
             self._last_auto_saved = saved
         except Exception:
             # 落盘失败不该挡住「新建」这个动作本身
@@ -1017,14 +1452,16 @@ class SessionManager:
     def on_thinkback(self, action: str) -> str:
         """思考回传开关：/thinkback 查状态，/thinkback on|off 切换并持久化。
 
-        关闭后：真实思考内容不再捕获/回传（省上下文）；
-        repair 合成的安全空块仍始终回传（400兜底，零上下文占用）。
+        只控制「是否把思考内容随请求回传给模型」，与「是否记录思考」无关：
+        无论开关状态，模型思考内容都会写入会话记录（供界面查看/回放）。
+        关闭（默认）：思考不回传（省上下文）；repair 合成的安全空块仍始终
+        回传（400兜底，零上下文占用）。
         """
         current = self._get_thinking_passback()
         act = action.strip().lower()
         if not act:
             state = "开" if current else "关"
-            return f"思考回传: {state}（/thinkback on|off 切换）"
+            return f"思考回传: {state}（/thinkback on|off 切换；关闭时思考仍记录到会话，只是不发给模型）"
         if act in ("on", "off"):
             target = act == "on"
             if self._set_thinking_passback:
@@ -1037,7 +1474,9 @@ class SessionManager:
             suffix = f"（{err}，仅本次会话有效）" if err else ""
             if current == target:
                 return f"思考回传已是{'开启' if target else '关闭'}状态{suffix}"
-            return f"思考回传已{'开启' if target else '关闭'}{suffix}"
+            if target:
+                return f"思考回传已开启：思考内容将随请求发给模型{suffix}"
+            return f"思考回传已关闭：思考内容仍会记录到会话，只是不再发给模型{suffix}"
         return f"无效值: {act}（可用: on / off）"
 
     def on_mode(self, name: str) -> str:

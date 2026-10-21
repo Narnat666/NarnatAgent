@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional
 
 from ..config.defaults import COMPRESS_PROMPT
 from ..tools.token_estimate import estimate_message_tokens
+from .message_list import COMPACTION_SUMMARY_PREFIX
 
 # 估价统一走 tools/token_estimate.py 的混合密度启发式（CJK≈0.7/字、其余≈0.25/字符，
 # 对齐官方 harness token-meter 思路）。此前固定 4 字符/token 对中文低估约 3 倍，
@@ -124,7 +125,8 @@ class Compressor:
         """
         messages = [{"role": "system", "content": system_prompt}]
         if summary:
-            messages.append({"role": "system", "content": f"# 上一轮对话成果\n\n{summary}"})
+            messages.append({"role": "system",
+                             "content": f"{COMPACTION_SUMMARY_PREFIX}\n\n{summary}"})
         for m in (tail_messages or []):
             if m.get("role") != "system":
                 messages.append(m)

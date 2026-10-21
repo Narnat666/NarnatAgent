@@ -37,9 +37,19 @@ const NO_PACKAGE = process.argv.includes('--no-package');
 const EXE = path.resolve(arg('--exe', path.join(REPO, 'output', 'narnat.exe')));
 
 let failed = 0;
-function ck(name, ok, detail) {
-  console.log((ok ? 'PASS ' : 'FAIL ') + name + (detail ? ' → ' + detail : ''));
-  if (!ok) failed++;
+let criticalFailed = 0;
+/**
+ * isCritical：关键校验（exe 可执行、支持 --rpc、RPC 方法集完整）。
+ * 关键校验一旦 FAIL 就中止，绝不继续把 exe 复制进 bin/、也不重新打包 vsix——
+ * 否则上一次的好产物会被坏产物覆盖（实测：bin 被 0 字节 exe 覆盖后仍报 PASS）。
+ */
+function ck(name, ok, detail, isCritical) {
+  console.log((ok ? 'PASS ' : 'FAIL ') + name +
+    (isCritical ? '（关键校验）' : '') + (detail ? ' → ' + detail : ''));
+  if (!ok) {
+    failed++;
+    if (isCritical) criticalFailed++;
+  }
 }
 
 /**
@@ -49,7 +59,7 @@ function ck(name, ok, detail) {
  * 参数错误（-32602）、业务拒绝（-32000）都说明方法存在。
  */
 function probeRpcMethods(exe, methods) {
-  const out = { notFound: [], error: '' };
+  const out = { notFound: [], responses: 0, error: '' };
   const os = require('os');
   let tmpHome;
   try {
@@ -78,19 +88,62 @@ function probeRpcMethods(exe, methods) {
       if (!msg || typeof msg.id !== 'number') continue;
       const name = methods[msg.id - 1];
       if (!name) continue;
+      out.responses++;
       const err = msg.error;
       if (err && (err.code === -32601 || /method not found/i.test(String(err.message || '')))) {
         if (out.notFound.indexOf(name) < 0) out.notFound.push(name);
       }
     }
-    if (!stdout.trim()) out.error = 'exe 无任何 RPC 响应（' +
-      String((res && res.stderr) || '').slice(0, 160) + '）';
+    // 一条可用的 RPC 响应都没有（读 stdin 后一句不回、或只吐非 JSON-RPC 文本）：
+    // 「方法没缺失」只是因为压根没探到，不能算通过。
+    if (out.responses === 0) {
+      out.error = 'exe 无任何 RPC 响应（' +
+        (stdout.trim() ? '输出非 JSON-RPC：' + stdout.trim().slice(0, 120)
+          : String((res && res.stderr) || '').slice(0, 160)) + '）';
+    }
   } catch (e) {
     out.error = String(e && e.message);
   } finally {
     try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch (e) { /* 忽略 */ }
   }
   return out;
+}
+
+/**
+ * 列出 vsix（本质是 zip）内的条目名与解压后大小。
+ *
+ * 原来靠 `tar -tf`：Windows 上的 GNU tar 会把 `E:\...` 里的盘符当成远程主机，
+ * 报 `tar: Cannot connect to E: resolve failed`，于是下面的条目校验被整体跳过，
+ * 「包里根本没 exe」也能一路 ALL_PASS。这里改读 zip 的中央目录，不再依赖外部工具。
+ */
+function listZipEntries(file) {
+  const buf = fs.readFileSync(file);
+  let eocd = -1;
+  // EOCD（End of Central Directory）签名 0x06054b50，后面可能跟最多 64KB 注释
+  const stop = Math.max(buf.length - 22 - 0xffff, 0);
+  for (let i = buf.length - 22; i >= stop; i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('不是有效的 zip（未找到 EOCD）');
+
+  const count = buf.readUInt16LE(eocd + 10);
+  let p = buf.readUInt32LE(eocd + 16);
+  const entries = [];
+  for (let i = 0; i < count; i++) {
+    if (p + 46 > buf.length || buf.readUInt32LE(p) !== 0x02014b50) {
+      throw new Error('中央目录第 ' + (i + 1) + ' 条损坏');
+    }
+    const size = buf.readUInt32LE(p + 24);
+    const nameLen = buf.readUInt16LE(p + 28);
+    const extraLen = buf.readUInt16LE(p + 30);
+    const commentLen = buf.readUInt16LE(p + 32);
+    entries.push({
+      name: buf.toString('utf8', p + 46, p + 46 + nameLen),
+      size
+    });
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return entries;
 }
 
 function main() {
@@ -115,21 +168,23 @@ function main() {
       process.exit(1);
     }
     let ver = '';
+    let verErr = '';
     try {
       ver = execFileSync(EXE, ['-v'], { encoding: 'utf8', timeout: 60000 }).trim();
     } catch (e) {
-      ck('narnat.exe -v 可执行', false, String(e.message).slice(0, 120));
+      verErr = String(e.message).slice(0, 120);
     }
-    if (ver) {
-      ck('narnat.exe -v 可执行', /^narnat \d+\.\d+\.\d+/.test(ver), ver);
-    }
+    // 打不出 -v（异常退出或干脆没输出）都算关键校验失败：
+    // 原来「无输出且不抛异常」时这条校验会被整条跳过，等于没查。
+    ck('narnat.exe -v 可执行', !verErr && /^narnat \d+\.\d+\.\d+/.test(ver),
+      verErr || ver || '未输出任何内容', true);
     // 关键：新编译的 exe 必须支持 --rpc
     let help = '';
     try {
       help = execFileSync(EXE, ['--help'], { encoding: 'utf8', timeout: 60000 });
     } catch (e) { /* --help 可能非零退出 */ }
     ck('exe 支持 --rpc', help.indexOf('--rpc') >= 0,
-      help.indexOf('--rpc') >= 0 ? '已声明' : '未找到 --rpc（exe 过旧，需重新编译）');
+      help.indexOf('--rpc') >= 0 ? '已声明' : '未找到 --rpc（exe 过旧，需重新编译）', true);
 
     // 关键：exe 的 RPC 方法集必须与源码一致。
     // 只校验「能跑 -v、含 --rpc」是不够的——实测交付过一个 09:59 的旧 exe，
@@ -143,16 +198,24 @@ function main() {
     ];
     const probe = probeRpcMethods(EXE, REQUIRED_METHODS);
     const missing = REQUIRED_METHODS.filter((m) => probe.notFound.indexOf(m) >= 0);
-    ck('exe 的 RPC 方法集与源码一致', missing.length === 0,
-      missing.length
-        ? '缺失: ' + missing.join(', ') + '（exe 过旧，必须先 python build.py 重新编译）'
-        : '已注册 ' + REQUIRED_METHODS.length + ' 个方法');
-    if (missing.length) {
-      // 校验不过就停，不能继续往下复制。
-      // 继续复制的话 bin/narnat.exe 已经被换成了坏 exe，而命令最终仍返回
-      // FAILED——下一次只跑 install-vsix 而不跑 package 时，就会把坏 exe
-      // 装到用户机上（实测踩过：校验报 FAIL 但 bin 已被覆盖）。
-      console.log('\n中止：exe 不满足方法集要求，未复制到 bin/、未打包。');
+    // 判据是「既有响应、也没有方法缺失」：
+    // probe.error 非空表示一条 RPC 响应都没拿到，此时 missing 必然为空，
+    // 但那是「没探到」而不是「方法齐全」——实测一个读完 stdin 一句不回的桩 exe
+    // 曾被判 PASS「已注册 13 个方法」（实际响应 0 条）并一路 ALL_PASS 进 dist/。
+    const rpcOk = !probe.error && missing.length === 0;
+    ck('exe 的 RPC 方法集与源码一致', rpcOk,
+      probe.error ? probe.error
+        : missing.length
+          ? '缺失: ' + missing.join(', ') + '（exe 过旧，必须先 python build.py 重新编译）'
+          : '已注册 ' + REQUIRED_METHODS.length + ' 个方法', true);
+
+    // 关键校验不过就停，不能继续往下复制。
+    // 继续复制的话 bin/narnat.exe 已经被换成了坏 exe，而命令最终仍返回
+    // FAILED——下一次只跑 install-vsix 而不跑 package 时，就会把坏 exe
+    // 装到用户机上（实测踩过：校验报 FAIL 但 bin 已被覆盖）。
+    if (criticalFailed) {
+      console.log('\n中止：' + criticalFailed +
+        ' 项关键校验未通过，未复制到 bin/、未打包 vsix（上一份产物保持原样）。');
       process.exit(1);
     }
 
@@ -207,27 +270,35 @@ function main() {
     if (fs.existsSync(out)) {
       const mb = (fs.statSync(out).size / 1048576).toFixed(1);
       ck('生成 vsix', true, mb + 'MB  ' + out);
-      // 校验内含 exe
-      let listing = '';
+      // 校验内含 exe（解析 zip 中央目录；不可解析本身就算失败，不能再静默跳过）
+      let entries = null;
       try {
-        listing = execFileSync('tar', ['-tf', out], { encoding: 'utf8', timeout: 120000 });
+        entries = listZipEntries(out);
       } catch (e) {
-        listing = '';
+        ck('可列出 vsix 内容', false, String(e.message).slice(0, 160));
       }
-      if (listing) {
+      if (entries) {
+        const names = entries.map((x) => x.name);
+        const exeEntry = entries.filter((x) => x.name === 'extension/bin/narnat.exe')[0];
         if (SKIP_EXE) {
           console.log('WARN 本次未打包二进制，vsix 内无 bin/narnat.exe（开发态可用源码后端）');
         } else {
-          ck('vsix 内含 bin/narnat.exe', listing.indexOf('extension/bin/narnat.exe') >= 0,
-            '条目数 ' + listing.split('\n').filter(Boolean).length);
+          ck('vsix 内含 bin/narnat.exe', !!exeEntry,
+            exeEntry ? exeEntry.size + ' 字节 / 共 ' + names.length + ' 个条目'
+              : '未找到（共 ' + names.length + ' 个条目）');
+          // 大小必须与 bin/ 里那份完全一致：曾出现「打进包的是旧 exe」
+          if (exeEntry) {
+            const binSize = fs.statSync(BIN_EXE).size;
+            ck('vsix 内 bin/narnat.exe 与 bin/ 大小一致', exeEntry.size === binSize,
+              exeEntry.size + ' / ' + binSize + ' 字节');
+          }
         }
-        ck('vsix 不含 test/', listing.indexOf('extension/test/') < 0);
-        ck('vsix 不含 design/', listing.indexOf('extension/design/') < 0);
+        ck('vsix 不含 test/', names.indexOf('extension/test/') < 0
+          && !names.some((n) => n.indexOf('extension/test/') === 0));
+        ck('vsix 不含 design/', !names.some((n) => n.indexOf('extension/design/') === 0));
         // 曾出过「装的还是旧界面」事故：确认界面产物确实进了包
-        ck('vsix 含 media/narnat.js', listing.indexOf('extension/media/narnat.js') >= 0);
-        ck('vsix 含 src/extension.js', listing.indexOf('extension/src/extension.js') >= 0);
-      } else {
-        console.log('WARN 无法列出 vsix 内容（缺 tar），跳过条目校验');
+        ck('vsix 含 media/narnat.js', names.indexOf('extension/media/narnat.js') >= 0);
+        ck('vsix 含 src/extension.js', names.indexOf('extension/src/extension.js') >= 0);
       }
     } else {
       ck('生成 vsix', false, '未生成 ' + out);

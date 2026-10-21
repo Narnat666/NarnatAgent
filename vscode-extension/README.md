@@ -184,8 +184,24 @@ node scripts/package-vsix.js               :: 复制 exe 到 bin/ 并打 vsix
 node scripts/package-vsix.js --no-package   :: 只校验扩展结构，不打 vsix（--skip-exe 仍然会打包）
 ```
 
-`package-vsix.js` 会校验：exe 能 `-v` 且 `--help` 含 `--rpc`、扩展文件齐全、
-`.vscodeignore` 已排除 test/design/scripts、vsix 内确实含 `extension/bin/narnat.exe`。
+`package-vsix.js` 会校验（前缀 `PASS` / `FAIL`，非关键项只计数，关键项 FAIL 直接中止）：
+
+| 校验项 | 判据 | 级别 |
+|---|---|---|
+| 已同步 design/ui-full.html → media/ | `sync-ui.js` 返回 0 | 非关键 |
+| 编译产物存在 | `--exe`（默认 `output/narnat.exe`）存在 | 非关键（不存在直接退出 1） |
+| narnat.exe -v 可执行 | `-v` 打出 `narnat <x.y.z>` | **关键** |
+| exe 支持 --rpc | `--help` 输出含 `--rpc` | **关键** |
+| exe 的 RPC 方法集与源码一致 | 真起一次 `--rpc` 逐方法探：**必须有响应**（拿到 JSON-RPC 回包）且**无方法缺失**（不看 `Method not found` 以外的错误码） | **关键** |
+| 已复制到 bin/narnat.exe | 复制成功 | 非关键 |
+| 扩展文件齐全 | `package.json` / `src/*.js` / `media/*` / `README.md` 共 9 项 | 非关键 |
+| .vscodeignore 已就绪 | 自动补齐 test/design/scripts/node_modules 等排除规则 | 非关键 |
+| 生成 vsix | `npx --yes @vscode/vsce package` 产出 `narnat-vscode.vsix` | 非关键 |
+| vsix 内含 bin/narnat.exe | 解析 zip 中央目录（不依赖外部 `tar`） | 非关键 |
+| vsix 内 bin/narnat.exe 与 bin/ 大小一致 | 两者字节数相同（防「打进包的是旧 exe」） | 非关键 |
+| vsix 不含 test/ 与 design/，含 media/narnat.js、src/extension.js | 条目名比对 | 非关键 |
+
+**关键校验**（exe 可执行、支持 `--rpc`、RPC 方法集完整）任一 FAIL：立即打印「中止」并以退出码 1 结束，**不复制到 `bin/`、不重新打包 vsix**——`bin/narnat.exe` 与已有 `narnat-vscode.vsix` 保持上一次的好产物，不会被坏 exe / 坏包覆盖。
 
 实测产物：`output/narnat.exe` 93.0MB（Nuitka onefile + LTO，编译约 2.5 小时）；
 `narnat-vscode.vsix` 92.9MB / 14 个条目，解压后 `extension/bin/narnat.exe` 存在，

@@ -470,7 +470,9 @@ body[data-real="true"] .demo-tip{display:none}
   background:var(--vscode-input-background,var(--bg-elev));
   padding:9px 12px 7px;
 }
-.cbox:focus-within{border-color:var(--accent)}
+/* 聚焦时用主题的 focus 边框色：input-border 在很多主题里几乎与背景同色，
+   只有换到 focusBorder 才看得出「焦点进来了」。 */
+.cbox:focus-within{border-color:var(--vscode-focusBorder,var(--accent))}
 .cbox textarea{
   width:100%;border:none;background:none;resize:none;outline:none;
   font:inherit;font-size:13px;line-height:1.6;color:var(--fg);
@@ -479,6 +481,10 @@ body[data-real="true"] .demo-tip{display:none}
   height:auto;min-height:21px;max-height:160px;
   overflow-y:hidden;padding:0;display:block;
 }
+/* 输入框的视觉边界由 .cbox 承担（1px 主题边框 + 聚焦换色），
+   #input 自己不再画边框、也不留聚焦 outline —— 两层描边叠在一起会显脏。
+   这里只给 1px 上下内边距：光标不贴着 .cbox 的边框线。 */
+#input{padding:1px 0;outline:none}
 .cbox textarea::placeholder{color:var(--fg-faint)}
 .crow{display:flex;align-items:center;gap:6px;margin-top:5px;min-height:20px;user-select:none}
 .chip{
@@ -504,6 +510,47 @@ body[data-real="true"] .demo-tip{display:none}
 .crow .chip.path{flex-shrink:2;min-width:3em}
 /* 按钮组不参与收缩：宁可省略 chip 文字，也不让「发送」被压成两行 */
 .crow .right{margin-left:auto;flex:none;display:flex;align-items:center;gap:6px}
+
+/* ---------- 附件（拖拽 / 粘贴 / 选择进来的文件、文件夹、图片） ----------
+   只显示「排队的路径」，不展示文件内容：发送时插件把绝对路径写进文本，
+   由 AI 自己用 Read/Grep/Glob 去读。
+   249px 面板下 chips 必须能换行：flex-wrap + 单个 chip max-width:100%，
+   长文件名在 chip 内部省略号截断，不产生横向滚动条。
+   附件个数没有上限（一次框选几十个文件是常态）：必须限高 + 内部纵向滚动，
+   否则附件区随个数长高，把输入框与状态栏一路顶出可视区，
+   用户既看不到自己在打什么，也点不到发送/停止。5.5em≈3 行 chip（13px 基准）。 */
+.attach{
+  display:none;flex-wrap:wrap;gap:4px;margin:0 0 6px;
+  max-height:5.5em;overflow-y:auto;overflow-x:hidden;
+  /* 限高后出现的是同一个全局 ::-webkit-scrollbar（下面「滚动条」那段，
+     滑块取 --vscode-scrollbarSlider-*），不在这里另立一套。 */
+}
+.attach[data-on="true"]{display:flex}
+.atch{
+  display:inline-flex;align-items:center;gap:4px;
+  min-width:0;max-width:100%;
+  font-size:10.5px;color:var(--fg-dim);line-height:1.6;
+  background:var(--bg-hover);border-radius:3px;padding:1px 4px;
+}
+.atch .k{flex:none;color:var(--fg-faint)}
+.atch .n{
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-family:var(--mono);
+}
+.atch .ph{flex:none;color:var(--fg-faint)}
+.atch img{flex:none;max-width:26px;max-height:18px;border-radius:2px;display:block}
+.atch .x{flex:none;color:var(--fg-faint);padding:0 1px;line-height:1}
+.atch .x:hover{color:var(--err)}
+.attach-btn{
+  flex:none;font-size:11px;color:var(--fg-faint);line-height:1.6;
+  border:1px solid var(--line);border-radius:4px;padding:0 6px;
+}
+.attach-btn:hover{color:var(--fg);border-color:var(--line-strong)}
+/* 拖拽悬停：只换边框色，不加动画/阴影 */
+.cbox[data-drop="true"]{border-color:var(--vscode-focusBorder,var(--accent))}
+.convo[data-drop="true"]{
+  outline:1px dashed var(--vscode-focusBorder,var(--accent));outline-offset:-6px;
+}
 .stop{
   display:none;align-items:center;gap:5px;
   font-size:11.5px;color:var(--fg-dim);

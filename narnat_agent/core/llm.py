@@ -20,7 +20,9 @@ import httpx
 from typing import List, Dict, Any, Iterator, Optional
 
 from ..config.loader import AIConfig
-from ..config.defaults import resolve_thinking_params, resolve_thinking_passback
+from ..config.defaults import (
+    DEFAULT_THINKING_PASSBACK, resolve_thinking_params, resolve_thinking_passback,
+)
 from .interrupt import register_abort
 from .message_list import SYNTHETIC_THINKING
 
@@ -479,7 +481,7 @@ class _OpenAIBackend:
         model = model or self._config.model
         use_rc = (
             self._config.thinking_enabled
-            and getattr(self._config, "thinking_passback", True)
+            and getattr(self._config, "thinking_passback", DEFAULT_THINKING_PASSBACK)
             and resolve_thinking_passback("openai", model) == "reasoning_content"
         )
         out = []
@@ -644,11 +646,11 @@ class _OpenAIBackend:
             content_buffer = []
             reasoning_buffer = []  # DeepSeek/Kimi OpenAI 协议：reasoning_content（思考回传用）
             _tc_idx = 0
-            # 思考内容流式下发条件：与结束时 thinking 回传判定同源（开关 + 协议查表）。
-            # 关闭回传时连 thinking_delta 也不下发，语义与 anthropic 侧保持一致。
-            rc_delta_on = (
+            # 思考内容捕获条件：与回传开关无关（捕获/存储 与 回传 已解耦）。
+            # /thinkback off 只影响请求侧是否携带 reasoning_content，不影响本地
+            # 捕获与流式下发——否则会话记录里就完全没有思考内容。
+            rc_capture_on = (
                 self._config.thinking_enabled
-                and getattr(self._config, "thinking_passback", True)
                 and resolve_thinking_passback("openai", request_model) == "reasoning_content"
             )
 
@@ -717,7 +719,7 @@ class _OpenAIBackend:
                     rc = (getattr(delta, 'model_extra', None) or {}).get('reasoning_content')
                 if rc:
                     reasoning_buffer.append(rc)
-                    if rc_delta_on:
+                    if rc_capture_on:
                         yield {"thinking_delta": rc}
 
                 if delta.tool_calls:
@@ -742,9 +744,9 @@ class _OpenAIBackend:
 
                 if finish_reason:
                     received_finish = True
-                    # 思考回传开关 + 查表：reasoning_content 格式时随完成标记上报思考
-                    # （与 anthropic 后端的 thinking 上报同构，上层统一存进消息的 thinking 字段）
-                    thinking_out = "".join(reasoning_buffer) if rc_delta_on else None
+                    # 思考内容始终上报（与回传开关解耦）：上层据此写入会话记录，
+                    # 回传与否由请求侧 _prepare_messages 的 use_rc 决定。
+                    thinking_out = "".join(reasoning_buffer) if rc_capture_on else None
                     if tool_calls_buffer:
                         completed_calls = []
                         for tc_id, buf in tool_calls_buffer.items():
@@ -1115,14 +1117,13 @@ class _AnthropicBackend:
                             yield {"content": text}
 
                     elif d_type == "thinking_delta":
-                        # 收集 thinking 内容，用于 thinking-only 回复兜底 + 思考模式回传API
+                        # 收集 thinking 内容，用于 thinking-only 回复兜底 + 会话记录留存；
+                        # 是否随请求回传给模型由 _convert_messages 的开关判定决定
                         thinking_text = delta.get("thinking", "")
                         if thinking_text:
                             thinking_buffer.append(thinking_text)
                             thinking_blocks[idx] = thinking_blocks.get(idx, "") + thinking_text
-                            # 回传开关关闭：思考内容不下发（含流式增量），与 message_delta 分支一致
-                            if getattr(self._config, "thinking_passback", True):
-                                yield {"thinking_delta": thinking_text}
+                            yield {"thinking_delta": thinking_text}
 
                     elif d_type == "input_json_delta":
                         pj = delta.get("partial_json", "")
@@ -1139,10 +1140,8 @@ class _AnthropicBackend:
                     _msg_delta_seen = True
                     stop_reason = data.get("delta", {}).get("stop_reason") or "end_turn"
                     thinking_combined = "".join(thinking_blocks[i] for i in sorted(thinking_blocks))
-                    # 回传开关关闭：真实思考内容不下发（agent_loop 不会存入消息历史）；
-                    # 本轮回传空块仍由 repair/历史消息兜底。
-                    passback_on = getattr(self._config, "thinking_passback", True)
-                    thinking_out = thinking_combined if passback_on else None
+                    # 思考内容始终上报（会话记录留存），本轮回传与否由 _convert_messages 决定
+                    thinking_out = thinking_combined
                     # Claude 签名：仅当恰好一个思考块且签名非空时上报（多块边界无法可靠对齐，宁缺勿错）
                     thinking_sig_out = None
                     if len(thinking_blocks) == 1:
@@ -1232,9 +1231,8 @@ class _AnthropicBackend:
                 if _start_usage:
                     yield {"usage": _start_usage}
                 thinking_combined = "".join(thinking_blocks[i] for i in sorted(thinking_blocks))
-                # 回传开关关闭：真实思考内容不下发
-                passback_on = getattr(self._config, "thinking_passback", True)
-                thinking_out = thinking_combined if passback_on else None
+                # 思考内容始终上报（会话记录留存），本轮回传与否由 _convert_messages 决定
+                thinking_out = thinking_combined
                 thinking_sig_out = None
                 if len(thinking_blocks) == 1:
                     sig = thinking_sigs.get(next(iter(thinking_blocks)), "")
@@ -1335,7 +1333,8 @@ class _AnthropicBackend:
                 # 思考回传开关（/thinkback）关闭：彻底删除 thinking 段，一刀切。
                 thinking = None
                 sig = None
-                if self._config.thinking_enabled and getattr(self._config, "thinking_passback", True):
+                if (self._config.thinking_enabled
+                        and getattr(self._config, "thinking_passback", DEFAULT_THINKING_PASSBACK)):
                     mode = resolve_thinking_passback("anthropic", model)
                     if mode in ("thinking_block", "thinking_block_signed"):
                         t = msg.get("thinking")

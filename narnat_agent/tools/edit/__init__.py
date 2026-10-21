@@ -10,7 +10,6 @@
 
 import os
 import shutil
-import tempfile
 import time
 import difflib
 
@@ -19,7 +18,7 @@ from typing import Optional
 from ..diff_utils import colorize_diff
 from ..param_utils import to_bool
 from ..terminal import _normalize_device_for_tools, _file_tool_device_hint
-from ..write import _has_nt_ads_colon
+from ..write import _create_tmp_file, _has_nt_ads_colon, _write_oserror_message
 
 DEFINITION = {
     "type": "function",
@@ -62,15 +61,15 @@ def _read_for_edit(file_path: str) -> tuple:
     """读取文件内容用于编辑，返回 (content, 写回编码)。
 
     编码策略与 Read 一致（BOM 嗅探优先 → utf-16；未命中再探测 utf-8-sig /
-    gbk），但必须严格解码：Edit 会把内容写回文件，errors="replace" 会以
+    gb18030），但必须严格解码：Edit 会把内容写回文件，errors="replace" 会以
     U+FFFD 永久替换原字节，造成静默数据损坏。探测结果无法严格解码时抛
     UnicodeDecodeError，由调用方拒绝编辑（对齐远程 Edit 行为）。
 
     Raises:
         ValueError: 二进制文件（含NUL字节；BOM 未命中时才判）
-        UnicodeDecodeError: 无法按 UTF-8/GBK/UTF-16(BOM) 严格解码
+        UnicodeDecodeError: 无法按 UTF-8/GB18030/UTF-16(BOM) 严格解码
     """
-    from ..read import _detect_text_encoding, _sniff_bom_encoding
+    from ..read import _detect_text_encoding, _sniff_bom_encoding, _write_encoding_for
     with open(file_path, "rb") as fb:
         head = fb.read(8192)
     # BOM 嗅探优先于二进制判定（与 Read/Grep 一致）：UTF-16 文本的 ASCII 字符
@@ -84,17 +83,9 @@ def _read_for_edit(file_path: str) -> tuple:
     with open(file_path, "r", encoding=encoding, newline="") as f:
         content = f.read()
     # 写回编码保持原文件形态：UTF-16 保持原字节序+BOM，UTF-8 有 BOM 保留 BOM、
-    # 无 BOM 不添加，GBK 写回 GBK
-    if encoding == "utf-16":
-        # utf-16-le/be 编解码器不加 BOM：先给内容前置 BOM 字符（U+FEFF），
-        # 写回编码时还原原 BOM 字节（LE=FF FE / BE=FE FF）
-        write_encoding = "utf-16-le" if head.startswith(b"\xff\xfe") else "utf-16-be"
-        content = "\ufeff" + content
-    elif encoding == "utf-8-sig":
-        write_encoding = "utf-8-sig" if head.startswith(b"\xef\xbb\xbf") else "utf-8"
-    else:
-        write_encoding = "gbk"
-    return content, write_encoding
+    # 无 BOM 不添加，GB18030 写回 GB18030（GBK 的超集，GBK 内容字节不变）
+    write_encoding, bom_prefix = _write_encoding_for(head, encoding)
+    return bom_prefix + content, write_encoding
 
 
 def execute(file_path: str, old_string: str = "", new_string: Optional[str] = None,
@@ -160,7 +151,7 @@ def execute(file_path: str, old_string: str = "", new_string: Optional[str] = No
     except OSError as e:
         return (f"[错误: 读取失败: {e}]", "")
     except UnicodeDecodeError:
-        return ((f"[错误: 文件非UTF-8/GBK/UTF-16(BOM)编码，为防止内容损坏已拒绝编辑: {file_path}。"
+        return ((f"[错误: 文件非UTF-8/GB18030/UTF-16(BOM)编码，为防止内容损坏已拒绝编辑: {file_path}。"
                  f"请用Shell工具处理（如转码为UTF-8后再编辑）]"), "")
     except ValueError:
         return ("[错误: 检测到二进制文件（含NUL字节），Edit仅支持文本文件。请使用Shell工具处理]", "")
@@ -229,17 +220,17 @@ def _write_and_diff(old_content: str, new_content: str, file_path: str,
     try:
         data = new_content.encode(write_encoding)
     except UnicodeEncodeError:
-        # 新内容含文件编码无法表示的字符（如 GBK 文件中写入 emoji）：
-        # 先编码后写盘，编码失败时文件未被触碰
+        # 新内容含文件编码无法表示的字符（原编码写入失败时）：先编码后写盘，
+        # 编码失败时文件未被触碰，不静默改成 UTF-8
         return (f"[错误: 新内容包含文件编码({write_encoding})无法表示的字符，写入失败: {file_path}]", "")
+    tmp_path = ""
     try:
         # 临时文件 + 原子替换：任何写入中途的异常都不破坏原文件
-        directory = os.path.dirname(os.path.abspath(file_path)) or "."
-        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".narnat_edit_", suffix=".tmp")
+        tmp_path, fd = _create_tmp_file(file_path)
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
-            # 保持原文件权限：mkstemp 在 POSIX 下创建 0600 文件，直接替换
+            # 保持原文件权限：临时文件在 POSIX 下创建为 0600，直接替换
             # 会把受限权限带给原文件（如编辑可执行脚本后丢失 +x）。
             # Windows 不做：只读属性复制到 tmp 会让 replace 与清理双双失败，
             # 在"目标只读"场景残留只读 tmp（且 replace 失败语义与原 open("w") 一致）
@@ -273,7 +264,8 @@ def _write_and_diff(old_content: str, new_content: str, file_path: str,
             except OSError:
                 pass
     except OSError as e:
-        return (f"[错误: 写入失败: {e}]", "")
+        # tmp_path 仍为空 = 卡在临时文件创建（目录不可写），文案据此区分
+        return (_write_oserror_message(file_path, e, creating_tmp=not tmp_path), "")
 
     if old_content == new_content:
         # 空编辑提醒：文件已照常写盘，但明确告知AI本次无实质修改

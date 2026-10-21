@@ -5,7 +5,7 @@ VSCode 扩展与 `narnat.exe` 之间的通信协议。**JSON-RPC 2.0 over stdio�
 > 设计参照 `openai/codex` 的 app-server：核心逻辑留在本地进程，客户端只做渲染。
 > 本项目 `narnat_agent/mcp/client.py` 已有同款分帧实现（作为客户端），可直接复用其序列化思路。
 
-**规模**：12 个请求方法（§3）+ 17 类通知（§4）。
+**规模**：12 个请求方法（§3）+ 18 类通知（§4）。
 契约审计脚本可一键核对文档 ↔ 后端实现 ↔ 前端渲染三者的覆盖度（输出 `CONTRACT_ALL_COVERED`）。
 
 ---
@@ -97,13 +97,15 @@ narnat.exe --rpc [--projects-root <路径>]
      "version":"16.7.9",
      "protocol":1,
      "model":{"current":"deepseek-flash","options":["deepseek-v4-pro","deepseek-flash"]},
-     "thinking":{"effort":"max","options":{"low":"低","medium":"中","high":"高","max":"最大"}},
+     "thinking":{"effort":"max","options":{"low":"低","medium":"中","high":"高","max":"最大"},"passback":false},
      "goal":{"enabled":false,"maxRounds":10},
      "plugins":[{"name":"terminal","label":"多终端持久 SSH","enabled":true}],
      "session":{"current":"grep-ignore-case","children":["try-regex"]},
      "workdir":"<启动后端时的当前工作目录>"
    }}
 ```
+
+`thinking.passback`（boolean）：思考内容是否随请求**回传给模型**（对应配置 `智能体.思考.回传`，由 `/thinkback` 或 `config/set` 切换，**默认 `false`**）。它只决定"发不发"——思考内容本身始终记录在会话里，`thinking/*` 事件也照常下发（见 §4.3）。客户端可用它渲染开关状态。
 
 ### 3.2 `chat/send`
 
@@ -201,14 +203,47 @@ narnat.exe --rpc [--projects-root <路径>]
 
 子会话用 `父/子` 形式。裸名且唯一重复时会返回 `-32000` 并带候选列表。
 
+**`messages` 载荷**（`session/switch`、`session/new`、`session/done` 与 `command/exec` 的 `cd` 都会返回）：
+
+```jsonc
+"messages":[
+  {"role":"user","text":"给 grep 加个参数"},
+  {"role":"assistant","text":"参数定义在...","thinking":"先确认参数在哪一层"},
+  {"role":"assistant","text":"已新增 ignore_case"}
+]
+```
+
+- `role` 只有 `user` / `assistant`（子会话标题那条 system 以 `# 子会话 [` 开头时会原样出现）；`text` 恒为正文字段，**思考不算正文**
+- `assistant` 项的 `thinking`（string）：该条回复的模型思考内容，**可选**——**没有思考内容时该键不出现**（不是空串），客户端据此决定是否渲染思考块；思考与回传开关无关，关闭回传后历史里仍有思考
+- 工具调用、空正文消息不下发
+
 ### 3.8 `session/delete`
 
-标记删除（退出时才真正删）。
+**立即删除**（删完即落盘）。CLI 的 `/rm` 才是「标记删除、退出时生效」；
+面板后端是长驻进程，没有退出时机，所以 RPC 这条路径直接删文件。
 
 ```jsonc
 → {"method":"session/delete","params":{"name":"old-1"}}
-← {"result":{"marked":true}}
+← {"result":{"deleted":true,"name":"old-1","parent":null,
+             "wasCurrent":false,"current":"grep-ignore-case"}}
 ```
+
+返回字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `deleted` | 恒为 `true`（失败走 JSON-RPC 错误对象，见下） |
+| `name` | 实际删掉的会话名（子会话时是子名） |
+| `parent` | 子会话的父会话名；根会话为 `null` |
+| `wasCurrent` | 删的是否会掏空当前所在位置（删的是当前会话、或其父）。`true` 时服务端已复位到游离态，`current` 为 `null` |
+| `current` | 删除后的当前路径：`父/子` / 名称 / `null` |
+| `ghost` | 可选。`true` 表示删的是幽灵父会话（父 json 已丢、只剩 `<父>/` 下的子会话文件） |
+| `childrenRemoved` | 可选。仅 `ghost`：随父一起清掉的子会话文件个数 |
+| `broken` | 可选。`true` 表示删掉的是列表里看不到的损坏 JSON 文件（界面应提示「清理了损坏文件」而不是「删除了会话」） |
+
+- 可删**任意**会话，不受当前状态限制；删当前会话（或当前会话的父）会先打断在跑的轮次再复位状态
+- 幽灵父会话同样可删：`<父>/` 下的子会话文件与空目录一并清掉，删完名字可复用
+- 失败返回 `-32000`，`message` 是可读原因（文件被占用 / 无权限 / 目标不存在）
 
 ### 3.9 `session/explore` / `session/done`
 
@@ -294,6 +329,7 @@ turn/begin
   verify/start → verify/result?
   stats
 turn/end
+（turn/end 之后可能来 session/saved × 2：自动保存的后台线程发出，见 §4.14）
 ```
 
 ### 4.1 `turn/begin`
@@ -320,12 +356,14 @@ turn/end
 {"method":"thinking/end","params":{"chars":616,"durationMs":3200}}
 ```
 
-> **两个前提，缺一就不会出现这三个事件**（实测结论）：
-> 1. 配置 `智能体.思考.回传` 为 `true`（默认 false）。关闭时源码在 LLM 层就不 yield 思考内容。
-> 2. 当前模型确实会产出思考块。实测 `deepseek-v4-pro` 有（28 个 delta / 91 字），
+> **出事件的条件**（实测结论）：
+> 1. 当前模型确实会产出思考块。实测 `deepseek-v4-pro` 有（28 个 delta / 91 字），
 >    `deepseek-flash` 没有——那是模型侧行为，不是协议或实现缺陷。
+> 2. **思考的「捕获」与「回传」已解耦**：`智能体.思考.回传`（即 `initialize.thinking.passback`，
+>    默认 `false`）只决定请求里要不要把思考发回模型，**不影响**这三个事件——关闭回传时思考照样
+>    下发、照样存进会话 json（见 §3.7 `messages[].thinking`）。
 >
-> 客户端不要把「没有 thinking 事件」当成异常。
+> 客户端不要把「没有 thinking 事件」当成异常，也不要把它当作「回传已开启」的依据。
 
 ### 4.4 `tool/call`
 
@@ -455,6 +493,28 @@ turn/end
 - 用户不答则后端一直等待；`chat/send` 在此期间会被 `busy` 拒绝
 - 超时不做自动处理：取消由用户显式操作（安全侧 fail-closed）
 
+### 4.14 `session/saved`
+
+自动保存落盘 / 会话状态切换的通知（方向：后端 → 客户端）。只在 `会话.自动保存` 开启且过了
+`自动保存Token量` 门槛时出现，由自动保存的后台线程发出，因此时间点在 `turn/end` **之后**，
+不在 §4 开头的轮次序列里。
+
+```jsonc
+{"method":"session/saved","params":{"name":"简短确认回复","current":null,"switched":false}}
+{"method":"session/saved","params":{"name":"简短确认回复","current":"简短确认回复","switched":true}}
+```
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `name` | string | 自动保存的会话名（后端自动命名） |
+| `current` | string \| null | 切换后的当前会话路径（子会话为 `父/子`）；未切换时为 `null` |
+| `switched` | boolean | 是否为「状态已切换」的那一次：`false` = 已写盘、进程内状态尚未切换；`true` = 状态已切到该会话 |
+
+> **同一份自动保存会发两次**：先 `switched:false`（写盘完成），后 `switched:true`（状态切换完成），
+> 实测两条几乎同时到达（录制流里时间戳相同，见 `nn-tasks/reqA-backend/probe.jsonl`）。客户端应**幂等**
+> 处理——按 `name`（必要时加 `switched`）去重，重复收到不要重复插系统提示、不要重复拉 `session/list`。
+> 状态切换被跳过时（写盘后用户已 `session/new` 或切到别的会话）只发 `switched:false` 那一条；
+> 写盘失败则两条都不发。
 
 ---
 
@@ -497,3 +557,4 @@ turn/end
 | `stats` | `e2e-real.js` | `inputTokens/outputTokens/cacheRatio/cost` |
 | `error` | `nn-tasks/verify-compress.py` | `{"message":"测试错误"}` |
 | `confirm/request` | `nn-tasks/verify-confirm.py`、宿主 `ui.js` | 通知含 prompt；点取消后 `confirm/reply{yes:false}` 且退出运行态 |
+| `session/saved` | `nn-tasks/reqA-backend/rpc_drive.py` | `{"name":"简短确认回复","current":null,"switched":false}` → `{"…","current":"简短确认回复","switched":true}`（见 `nn-tasks/reqA-backend/probe.jsonl`） |

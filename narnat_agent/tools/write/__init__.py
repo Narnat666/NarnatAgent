@@ -3,9 +3,9 @@
 设备语义: device=dev0或省略 → 本机(dev0)；device=dev1..devn → 被控设备(需先Terminal connect)。
 """
 
+import itertools
 import os
 import shutil
-import tempfile
 import time
 import difflib
 
@@ -85,6 +85,51 @@ def _has_nt_ads_colon(file_path: str) -> bool:
     return ":" in p
 
 
+# 临时文件名的候选上限：tempfile 模块的默认临时文件助手在 ACL 拒绝写入的目录里
+# 挂死——Windows 的 os.access(W_OK) 只看只读属性、不看 ACL → 认为可写 → os.open
+# 恒失败 → 换随机名重试到 TMP_MAX（2147483647 轮，实测单轮 0.08ms ≈ 17 万秒）。
+# 只按"文件已存在"重试，且限定次数。
+_TMP_NAME_MAX_ATTEMPTS = 20
+_tmp_seq = itertools.count()
+
+
+def _create_tmp_file(target_path: str) -> tuple:
+    """在目标文件所在目录独占创建临时文件，返回 (tmp_path, fd)。
+
+    与 tempfile 模块默认实现（重试到 TMP_MAX）的差别见 _TMP_NAME_MAX_ATTEMPTS 注释：
+    重试次数受控，且"目录不可写"这类 OSError 立即抛出、不换名重试。目录不可写时
+    PermissionError 直接上抛，由调用方转成可读错误。
+
+    O_EXCL 保证独占：候选名撞车（FileExistsError）才换下一个序号。
+    """
+    directory = os.path.dirname(os.path.abspath(target_path)) or "."
+    # 名字取目标名前 32 字符（唯一性由 pid+计数保证），避免长文件名把拼接后的
+    # 临时文件名顶过单层文件名长度上限
+    stem = os.path.basename(target_path)[:32]
+    for _ in range(_TMP_NAME_MAX_ATTEMPTS):
+        tmp_path = os.path.join(
+            directory, f".{stem}.narnat_tmp_{os.getpid()}_{next(_tmp_seq)}")
+        try:
+            fd = os.open(tmp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        return tmp_path, fd
+    raise OSError(
+        f"无法创建临时文件（{_TMP_NAME_MAX_ATTEMPTS} 个候选名均已被占用）: {directory}")
+
+
+def _write_oserror_message(file_path: str, e: OSError, creating_tmp: bool = False) -> str:
+    """写盘期 OSError → 可读错误文案（Write/Edit 共用）。
+
+    creating_tmp=True 表示临时文件都没能创建出来：此时 PermissionError 只可能是
+    目录不可写（ACL 拒写），裸 WinError 13 会被 AI 当成"文件被占用"反复重试。
+    其余阶段的 OSError 保持原有文案不变。
+    """
+    if creating_tmp and isinstance(e, PermissionError):
+        return f"[错误: 无法写入 {file_path}: 权限不足（目录不可写）]"
+    return f"[错误: 写入失败: {e}]"
+
+
 def execute(file_path: str, content: str,
             device: str = "") -> tuple:
     """
@@ -146,22 +191,29 @@ def execute(file_path: str, content: str,
     old_content = ""
     old_bytes = None
     old_encoding = None
+    write_encoding = "utf-8"    # 写回编码：默认 UTF-8，覆写时沿用原文件编码
+    write_bom_prefix = ""       # 需前置的 BOM 字符（UTF-16 用 LE/BE 编解码器时手工补回）
     diff = ""
     if os.path.isfile(abs_path):
         try:
             # 旧内容编码探测（与Read一致）：GBK文件按utf-8-sig读会抛异常导致diff静默丢失，
             # AI 覆写后看不到差异。此处仅用于展示diff，errors=replace 不影响写入内容
-            from ..read import _detect_text_encoding
+            from ..read import (_detect_text_encoding, _sniff_bom_encoding,
+                                _write_encoding_for)
             with open(abs_path, "rb") as fb:
                 head = fb.read(8192)
-                if not (head and b"\x00" in head):
+                # BOM 命中的 UTF-16 文本同样含 NUL 字节，但它确实是文本：必须按文本
+                # 读全文，否则既没有 diff 也拿不到原编码，写回只能退回 UTF-8
+                if _sniff_bom_encoding(head) or not (head and b"\x00" in head):
                     # 仅文本文件读全文用于字节级变更判定（二进制只取首块，避免大文件占内存）
                     fb.seek(0)
                     old_bytes = fb.read()
             if old_bytes is not None:
-                encoding = _detect_text_encoding(head)
-                old_encoding = encoding
-                old_content = old_bytes.decode(encoding, errors="replace")
+                old_encoding = _sniff_bom_encoding(head) or _detect_text_encoding(head)
+                # 写回保持原文件编码：固定按 UTF-8 写会把 UTF-16/BOM/GBK 文件静默
+                # 改写编码形态（下游按原编码读取的工具链拿到坏数据，且无任何提示）
+                write_encoding, write_bom_prefix = _write_encoding_for(head, old_encoding)
+                old_content = old_bytes.decode(old_encoding, errors="replace")
                 diff = _make_diff(old_content, content, file_path)
                 color_diff = colorize_diff(diff)
         except Exception:
@@ -178,15 +230,22 @@ def execute(file_path: str, content: str,
             pass
 
     try:
-        data = content.encode("utf-8")
-    except UnicodeEncodeError as e:
-        return (f"[错误: 写入失败: {e}]", "")
+        data = (write_bom_prefix + content).encode(write_encoding)
+    except UnicodeEncodeError:
+        # 原编码表示不了新内容（GB18030 覆盖全 Unicode，实践上只剩孤立代理项这类
+        # 连 UTF-8 也编不了的情况）：退回 UTF-8 写盘并由 _describe_form_drift
+        # 明确告知编码变更，不静默改编码；UTF-8 也编不了则直接报错、不碰原文件
+        write_encoding, write_bom_prefix = "utf-8", ""
+        try:
+            data = content.encode("utf-8")
+        except UnicodeEncodeError as e:
+            return (f"[错误: 写入失败: {e}]", "")
+    tmp_path = ""
     try:
         # 临时文件 + 原子替换：并发读端（其它进程/编辑器重载）不会读到
         # "截断到一半"的文件（open("w") 的 truncate+write 非原子，读写并发
         # 实测 11.5% 撕裂；Edit 已用本方案，Write 对齐）
-        directory = os.path.dirname(abs_path) or "."
-        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".narnat_write_", suffix=".tmp")
+        tmp_path, fd = _create_tmp_file(abs_path)
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
@@ -222,7 +281,8 @@ def execute(file_path: str, content: str,
             except OSError:
                 pass
     except OSError as e:
-        return (f"[错误: 写入失败: {e}]", "")
+        # tmp_path 仍为空 = 卡在临时文件创建（目录不可写），文案据此区分
+        return (_write_oserror_message(file_path, e, creating_tmp=not tmp_path), "")
 
     new_bytes = data
     byte_count = len(new_bytes)
@@ -240,26 +300,33 @@ def execute(file_path: str, content: str,
     if diff:
         tip = ""
         if old_bytes is not None:
-            drift = _describe_form_drift(old_bytes, old_encoding, old_content, content)
+            drift = _describe_form_drift(old_bytes, old_encoding, old_content, content,
+                                         write_encoding)
             if drift:
                 tip = f"（注意: {drift}）"
         return (f"[已写入: {file_path} ({byte_count}字节)]{tip}\n{diff}", color_diff)
     return (f"[已写入: {file_path} ({byte_count}字节)]", color_diff)
 
 
-def _describe_form_drift(old_bytes: bytes, old_encoding, old_content: str, content: str) -> str:
-    """正文有变化时，描述"正文之外"的文件形态漂移（编码/BOM/行尾符）。
+def _describe_form_drift(old_bytes: bytes, old_encoding, old_content: str, content: str,
+                         write_encoding: str = "utf-8") -> str:
+    """正文有变化时，描述"正文之外"的文件形态（编码/BOM/行尾符）。
 
-    Write 覆写固定按 UTF-8 无 BOM 写盘：原文件为 GBK 或带 BOM 时编码形态被
-    改变，行尾也可能由 CRLF 变为 LF。"正文相同"分支已有字节变化提示，正文
-    不同时此前只回 diff、对形态漂移零提示——AI/用户会误以为"只改了那几行"，
-    按原编码读取的下游工具链静默拿到坏数据。无漂移时返回空串。
+    写回默认沿用原文件编码：原编码表示不了新内容时退回 UTF-8（编码形态被改变），
+    行尾也可能由 CRLF 变为 LF。"正文相同"分支已有字节变化提示，正文不同时此前
+    只回 diff、对形态漂移零提示——AI/用户会误以为"只改了那几行"，按原编码读取的
+    下游工具链静默拿到坏数据。无形态变化时返回空串。
     """
     notes = []
-    if old_encoding == "gbk":
-        notes.append("编码 GBK→UTF-8")
-    if old_bytes.startswith(b"\xef\xbb\xbf"):
+    if old_encoding == "utf-16" and write_encoding not in ("utf-16-le", "utf-16-be"):
+        notes.append("编码 UTF-16→UTF-8（新内容含原编码无法表示的字符）")
+    elif old_encoding in ("gbk", "gb18030") and write_encoding == "utf-8":
+        notes.append("编码 GBK→UTF-8（新内容含原编码无法表示的字符）")
+    if old_bytes.startswith(b"\xef\xbb\xbf") and write_encoding != "utf-8-sig":
         notes.append("UTF-8 BOM 已移除")
+    if old_encoding == "utf-16" and write_encoding in ("utf-16-le", "utf-16-be"):
+        # 编码保持是最容易被误判为"改了"的形态（面板 diff 只显示文本），显式告知
+        notes.append(f"编码保持 {write_encoding.upper()}，BOM 保留")
     if "\r\n" in old_content and "\r\n" not in content and "\n" in content:
         notes.append("行尾符 CRLF→LF")
     elif "\r\n" in content and "\r\n" not in old_content and "\n" in old_content:

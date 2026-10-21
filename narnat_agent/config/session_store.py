@@ -2,9 +2,11 @@
 会话持久化 —— 序列化/反序列化messages，供commands/调用
 """
 
+import itertools
 import json
 import os
 import shutil
+import threading
 import time
 from typing import List, Dict, Any, Optional
 
@@ -42,6 +44,69 @@ def _format_ts(ts, fmt: str) -> str:
         return "未知时间"
 
 
+# 进程内单调计数器：给临时文件名提供「任意两次调用都不同」的保证。
+_tmp_seq = itertools.count(1)
+
+
+def _unique_tmp_path(path: str) -> str:
+    """为 path 生成一个**进程内唯一 + 线程内唯一**的临时文件路径。
+
+    只带 pid 是不够的（实测 P0）：同一进程里轮末后台自动保存线程的 _persist
+    与紧随其后的 /save 各写一次同一会话，两个线程抢同一个 `.<pid>.tmp`，
+    互相截断后把原会话文件写成了非法 JSON（2/20），会话从列表里消失。
+    这里三重标识：pid（跨进程）+ 线程标识（同进程不同线程）+ 进程内计数器
+    （同一线程的任意两次调用，且线程标识在线程退出后可能被复用）。
+    """
+    return f"{path}.{os.getpid()}.{threading.get_ident()}.{next(_tmp_seq)}.tmp"
+
+
+# Windows 保留文件名：带扩展名也一样建不出来（`CON.json` 仍是 CON），
+# 只能统一拒绝，否则用户拿到的是带绝对路径的系统级错误，看不懂也改不掉。
+_WINDOWS_RESERVED_NAMES = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{i}" for i in range(1, 10)]
+    + [f"LPT{i}" for i in range(1, 10)]
+)
+
+
+def validate_session_name(name: str) -> str:
+    """会话名合法性校验。返回 ""=通过，非空=可读原因（终端风格）。
+
+    为什么必须在入口拦、而不是靠 _safe_filename 兜底：文件名里带孤立代理
+    字符时 open()/encode 抛 UnicodeEncodeError，带 NUL 时抛 ValueError
+    （embedded null byte）——两者都不是 OSError，会穿透 save/rename 的
+    异常处理变成未捕获异常，并在磁盘上留下删不掉的 *.tmp 残骸（实测）。
+    控制字符还会让名字在终端/抽屉里吞掉后面的内容，用户看不出名字里有什么。
+    """
+    if not isinstance(name, str):
+        return "[错误: 会话名必须是文本]"
+    # 孤立代理字符：U+D800–U+DFFF 中不成对出现的（合法代理对由两个码元
+    # 组成，UTF-8 编码/文件名都没问题，不能误拦）
+    i, n = 0, len(name)
+    while i < n:
+        o = ord(name[i])
+        if 0xD800 <= o <= 0xDBFF:
+            if i + 1 < n and 0xDC00 <= ord(name[i + 1]) <= 0xDFFF:
+                i += 2
+                continue
+            return ("[错误: 会话名包含孤立的代理字符（U+D800–U+DFFF），"
+                    "文件名无法编码，请换一个名称]")
+        if 0xDC00 <= o <= 0xDFFF:
+            return ("[错误: 会话名包含孤立的代理字符（U+D800–U+DFFF），"
+                    "文件名无法编码，请换一个名称]")
+        if o < 0x20 or 0x7F <= o <= 0x9F:
+            return (f"[错误: 会话名不能包含控制字符（U+{o:04X}），"
+                    "请换一个名称]")
+        i += 1
+    # 按层级逐段查保留名：'a/CON' 与 'CON' 一样建不出文件
+    for part in name.split("/"):
+        stem = part.split(".")[0].strip().upper()
+        if stem in _WINDOWS_RESERVED_NAMES:
+            return (f"[错误: 会话名 '{part}' 是 Windows 保留名称"
+                    "（CON/PRN/AUX/NUL/COM1-9/LPT1-9），请换一个名称]")
+    return ""
+
+
 def _safe_filename(name: str) -> str:
     safe_name = name.replace("/", "_").replace("\\", "_")
     safe_name = safe_name.replace(":", "_").replace("<", "_").replace(">", "_")
@@ -67,6 +132,28 @@ def _sessions_dir(narnat_dir: str) -> str:
         # 异常把整个进程带崩
         pass
     return d
+
+
+def file_signature(path: str) -> str:
+    """会话文件指纹：(size, mtime_ns)。返回 ""=文件不存在。
+
+    全仓**唯一**的指纹实现（session_callbacks 把它作为模块级函数对外暴露）：
+    写入前的冲突检测、写完后的签名更新必须同一口径，各写一套会把自己刚写的
+    东西判成「被外部改动」，于是每轮都另存一个新文件。
+    用 (size, mtime_ns) 而不是内容 sha256：只需一次 stat（sha256 要把整份会话
+    读一遍，大会话每轮多读几百 KB），且 os.replace 后 mtime 必然变化；
+    同 size 同 mtime_ns 而内容不同的情况在 100ns 分辨率下不会出现。
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return ""
+    return f"{st.st_size}:{st.st_mtime_ns}"
+
+
+def session_signature(narnat_dir: str, name: str, parent: Optional[str] = None) -> str:
+    """按会话名取指纹（会话状态对象用它记住「上次读/写该文件时的指纹」）"""
+    return file_signature(_session_path(narnat_dir, name, parent=parent))
 
 
 def _load_json_with_shared_retry(path: str, attempts: int = 3):
@@ -163,19 +250,26 @@ def rename_session(narnat_dir: str, old_name: str, new_name: str,
         os.close(fd)
     except FileExistsError:
         return f"已有同名会话: {new_name}"
-    except OSError as e:
+    except (OSError, ValueError) as e:
+        # ValueError：目标名含无法编码的字符（UnicodeEncodeError 是其子类）
+        # 或 NUL，同样收敛成可读失败而不是冒泡成未捕获异常
         return f"写入新会话失败: {e}"
-    tmp = new_path + ".tmp"
+    tmp = _unique_tmp_path(new_path)
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, new_path)
-    except OSError as e:
-        # 占位文件要清掉，否则留一个空会话在列表里
-        try:
-            os.remove(new_path)
-        except OSError:
-            pass
+    except (OSError, ValueError) as e:
+        # 占位文件要清掉，否则留一个空会话在列表里；临时文件也要清掉，
+        # 否则会话库根上多一个谁也删不掉的 `*.tmp` 残骸（孤立代理字符/
+        # 控制字符进文件名时 open 抛 UnicodeEncodeError/ValueError，
+        # 不是 OSError，此前直接穿透成未捕获异常，tmp 就留在磁盘上了）。
+        # 清理本身也要容忍 ValueError：残骸的文件名里可能正带着那个坏字符。
+        for stale in (new_path, tmp):
+            try:
+                os.remove(stale)
+            except (OSError, ValueError):
+                pass
         return f"写入新会话失败: {e}"
     # 删旧文件走同一套重试：两个窗口同时改名时，一方可能正好撞上对方
     # 刚做的 replace，Windows 报 WinError 5（拒绝访问），裸 os.remove
@@ -214,19 +308,128 @@ def _rewrite_child_parent(child_dir: str, new_parent: str) -> None:
         if not fn.endswith(".json"):
             continue
         path = os.path.join(child_dir, fn)
+        # 在 try 之前算好，except 里才能引用（读文件阶段抛异常时 tmp 尚未赋值，
+        # 放在 try 内会在清理分支里变成 UnboundLocalError 穿透出去）
+        tmp = _unique_tmp_path(path)
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if not isinstance(data, dict) or data.get("parent") == new_parent:
                 continue
             data["parent"] = new_parent
-            tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             os.replace(tmp, path)
         except (OSError, ValueError, RecursionError):
-            # 单个子会话改不动不影响改名本身：列表里最多少一个子项
+            # 单个子会话改不动不影响改名本身：列表里最多少一个子项。
+            # 临时文件要一并清掉，否则会在会话目录里留下 .tmp 残骸
+            try:
+                os.remove(tmp)
+            except (OSError, ValueError):
+                pass
             continue
+
+
+def _claim_session_name(path: str) -> bool:
+    """用 O_CREAT|O_EXCL 原子声明「这个会话文件归我」。返回 False=已被别人占住。
+
+    「先查后写」在两个进程之间不原子：两个实例给同一段对话起了同一个名字时，
+    两边的存在性检查都会通过，后写的一方把先写的整段内容覆盖掉（P0-2，实测
+    1/3 概率整段消失）。O_EXCL 把「占名字」变成内核级原子操作，占不到的一方
+    去拿下一个候选名（X (2)…）。建出来的是空占位文件，随后被 os.replace 原子
+    替换成真正的 JSON；失败路径会清掉，不会留下 0 字节残骸。
+    """
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    except (OSError, ValueError):
+        # 建不出来（权限/名称非法）：不在这里报，交给随后的写盘给可读错误
+        return True
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    return True
+
+
+def _claim_free_name(narnat_dir: str, base: str,
+                     parent: Optional[str] = None) -> tuple:
+    """挑一个没被占住的会话名并原子占位。返回 (name, path)，无候选时 (None, None)。
+
+    每轮都拿**原始 base** 重新算候选名：占位失败说明该名字刚刚被别人建出来了
+    （候选名已被占），unique_session_name 于是给出下一个序号 (2)/(3)…；
+    用它已返回的名字再当 base 会得到 "X (2) (2)" 这种叠罗汉。
+    """
+    # 撞名兜底只有一份实现（session_callbacks.unique_session_name），这里按需
+    # 导入：session_callbacks 在模块级 import 本模块，顶层反向 import 会成环。
+    from ..core.session_callbacks import unique_session_name
+
+    for _ in range(8):
+        name = unique_session_name(narnat_dir, base, parent=parent)
+        path = _session_path(narnat_dir, name, parent=parent)
+        if _claim_session_name(path):
+            return name, path
+    return None, None
+
+
+def _write_session_json(path: str, data: Dict[str, Any],
+                        expect_sig: Optional[str] = None) -> tuple:
+    """把 data 原子写进 path。返回 (err, raced)。
+
+    raced=True 表示「落盘的最后一刻发现文件刚被别人改过」：本次 tmp 已丢弃、
+    目标文件一个字节都没动，调用方应改落一个新名字。
+    expect_sig 非 None 时把校验放到 os.replace 之前一步：这样「检查 → 替换」
+    之间只剩一次 stat 与一次 replace（微秒级），跨进程窗口从「整个 tmp 写盘
+    时长」（大会话可达几十毫秒）压到几乎不可命中——否则两个实例同轮写同一
+    会话时仍可能双双通过检查、后写者覆盖先写者。
+    """
+    # 临时文件名必须**进程内唯一 + 线程内唯一**：同名会话被多线程并发保存时
+    # （轮末后台自动保存与紧随其后的 /save 撞在同一个会话上），固定名或只带
+    # pid 的名字会让两个线程抢同一个临时文件，互相截断后把会话文件写成非法
+    # JSON（P0，实测 2/20）。各自写自己的临时文件后 os.replace 原子替换，
+    # 语义不变：最终文件必然是一方的完整内容。
+    tmp_path = _unique_tmp_path(path)
+    last_err = None
+    # os.replace 仍可能与另一进程的替换瞬间撞车（共享冲突）→ 短暂退避重试
+    for attempt in range(3):
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(_strip_surrogates(data), f, ensure_ascii=False, indent=2)
+            if expect_sig is not None and file_signature(path) != expect_sig:
+                # 写 tmp 期间被别人改过：不覆盖，交给调用方另存
+                try:
+                    os.remove(tmp_path)
+                except (OSError, ValueError):
+                    pass
+                return "", True
+            os.replace(tmp_path, path)
+            return "", False
+        except UnicodeEncodeError as e:
+            # 编码失败与并发无关，重试无意义
+            last_err = e
+            break
+        except ValueError as e:
+            # 文件名字符无法编码/含 NUL（embedded null byte）等：同样与并发
+            # 无关，重试无意义；必须落到下面的清理分支，别留 .tmp 残骸
+            last_err = e
+            break
+        except RecursionError as e:
+            # 深嵌套 messages（实测约 400 层即触发）在 _strip_surrogates/
+            # json.dump 递归时抛异常：load 端已按"损坏文件"防御，save 端
+            # 同样收敛为可读失败（不冒泡到主循环）
+            last_err = e
+            break
+        except OSError as e:
+            last_err = e
+            time.sleep(0.02 * (attempt + 1))
+    # 失败路径清掉本次的临时文件，不留残骸（成功路径已被 os.replace 消费）。
+    # 容忍 ValueError：临时文件名里可能正带着无法编码的字符
+    try:
+        os.remove(tmp_path)
+    except (OSError, ValueError):
+        pass
+    return f"保存失败: {last_err}", False
 
 
 def save_session(narnat_dir: str, name: str,
@@ -235,7 +438,24 @@ def save_session(narnat_dir: str, name: str,
                  status: str = "active",
                  summary: Optional[str] = None,
                  parent_msg_count: Optional[int] = None,
-                 last_summarized_at: Optional[int] = None) -> str:
+                 last_summarized_at: Optional[int] = None,
+                 expected_signature: Optional[str] = None,
+                 result: Optional[Dict[str, Any]] = None) -> str:
+    """保存会话。返回 ""=成功，非空=可读失败原因。
+
+    expected_signature 是「写入前冲突检测」的开关（指纹见 file_signature）：
+        None → 不检测，按名覆盖（旧语义；/done 合并回父会话等有意覆盖的路径）
+        ""   → 期望文件还不存在（首次保存 / 自动命名后新建），用 O_EXCL 原子占位
+        非空 → 期望磁盘上就是这份指纹
+    与磁盘实际不一致，说明有另一个实例改过这个文件（两个窗口切到同一会话各聊
+    各的）：这时按名覆盖会让对方那一整段内容静默消失，且双方都收到成功回执
+    （P0-1，实测 3/3 必现）。所以这里不覆盖，改用 unique_session_name 另存成
+    "X (2)" 之类的新名字，并把实际落点回报给调用方去告知用户。
+
+    result 是可选出参，成功时填入 {"name": 实际写入的名字,
+                                   "conflict": 是否发生了冲突另存,
+                                   "signature": 写入后的文件指纹}。
+    """
     path = _session_path(narnat_dir, name, parent=parent)
     existing = {}
     if os.path.isfile(path):
@@ -264,37 +484,60 @@ def save_session(narnat_dir: str, name: str,
         "parent_msg_count": parent_msg_count if parent_msg_count is not None else existing.get("parent_msg_count"),
         "last_summarized_at": last_summarized_at if last_summarized_at is not None else existing.get("last_summarized_at"),
     }
-    # 临时文件名带进程号：同名会话被多进程并发保存时，固定 ".tmp" 名会互相
-    # 抢占（Windows WinError 32/5），各进程写自己的临时文件后 os.replace 原子
-    # 替换，语义不变
-    tmp_path = f"{path}.{os.getpid()}.tmp"
-    last_err = None
-    # os.replace 仍可能与另一进程的替换瞬间撞车（共享冲突）→ 短暂退避重试
-    for attempt in range(3):
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(_strip_surrogates(data), f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, path)
-            return ""
-        except UnicodeEncodeError as e:
-            # 编码失败与并发无关，重试无意义
-            last_err = e
+    # ── 写入前冲突检测 + 落点选择 ──
+    write_name, write_path, conflict, placeholder = name, path, False, False
+    expect_sig: Optional[str] = None
+    if expected_signature is not None:
+        # expect_sig = 「这次替换前，磁盘上应当就是这个指纹」
+        if expected_signature and file_signature(path) == expected_signature:
+            expect_sig = expected_signature
+        else:
+            # 期望「还不存在」或「就是这个指纹」，实际不符：这个文件已经被别的
+            # 实例动过（另一个窗口也在这个会话里写），绝不能按名覆盖
+            conflict = file_signature(path) != ""
+            write_name, write_path = _claim_free_name(narnat_dir, name, parent)
+            if write_name is None:
+                return f"保存失败: 会话名 '{name}' 附近的名字都被占用，请换一个名称后重试"
+            placeholder = True
+            # 只在真的换了名字时才算冲突（首次保存占到原名不算）
+            conflict = conflict or write_name != name
+            data["name"] = write_name
+            # 占位文件是自己刚建的，它的指纹就是这次替换的期望值
+            expect_sig = file_signature(write_path)
+
+    err = ""
+    for _attempt in range(3):
+        err, raced = _write_session_json(write_path, data, expect_sig)
+        if err or not raced:
             break
-        except RecursionError as e:
-            # 深嵌套 messages（实测约 400 层即触发）在 _strip_surrogates/
-            # json.dump 递归时抛异常：load 端已按"损坏文件"防御，save 端
-            # 同样收敛为可读失败（不冒泡到主循环）
-            last_err = e
-            break
-        except OSError as e:
-            last_err = e
-            time.sleep(0.02 * (attempt + 1))
-    # 失败路径清掉本次的临时文件，不留残骸（成功路径已被 os.replace 消费）
-    try:
-        os.remove(tmp_path)
-    except OSError:
-        pass
-    return f"保存失败: {last_err}"
+        # 写 tmp 期间文件又被别人改过：本次一个字节都没落，改落一个新名字
+        conflict = True
+        if placeholder:
+            # 放弃上一个占位文件，否则留下 0 字节残骸占着这个名字
+            try:
+                os.remove(write_path)
+            except (OSError, ValueError):
+                pass
+        write_name, write_path = _claim_free_name(narnat_dir, name, parent)
+        if write_name is None:
+            return f"保存失败: 会话名 '{name}' 附近的名字都被占用，请换一个名称后重试"
+        placeholder = True
+        data["name"] = write_name
+        expect_sig = file_signature(write_path)
+
+    if err:
+        if placeholder:
+            # 占位文件必须清掉：留着就是一个列表里看不见、名字却被永久占住的残骸
+            try:
+                os.remove(write_path)
+            except (OSError, ValueError):
+                pass
+        return err
+    if result is not None:
+        result.clear()
+        result.update({"name": write_name, "conflict": conflict,
+                       "signature": file_signature(write_path)})
+    return ""
 
 
 def load_session(narnat_dir: str, name: str, parent: Optional[str] = None) -> tuple:
@@ -425,11 +668,23 @@ def delete_session(narnat_dir: str, name: str, parent: Optional[str] = None) -> 
     return ""
 
 
-def list_sessions_tree(narnat_dir: str) -> List[Dict[str, Any]]:
+def list_sessions_tree_checked(narnat_dir: str) -> tuple:
+    """会话树 + 「读不到」的原因。返回 (tree, err)。
+
+    err 非空 = 目录枚举失败（权限拒绝/路径异常/目录建不出来），调用方必须把它
+    说出来；err 为空且 tree 为空 = 真的没有会话。两者不能混为一谈：
+    此前 os.walk 的 onerror 是默认的 None，PermissionError 被静默吞掉，
+    session/list 于是返回空列表——用户看到的是「我的会话全没了」（实测）。
+    """
     sdir = _sessions_dir(narnat_dir)
+    errors = []
+
+    def _on_walk_error(e):
+        errors.append(e)
+
     roots = {}
     orphans = []
-    for dirpath, dirnames, filenames in os.walk(sdir):
+    for dirpath, dirnames, filenames in os.walk(sdir, onerror=_on_walk_error):
         for fname in filenames:
             if not fname.endswith(".json"):
                 continue
@@ -459,6 +714,14 @@ def list_sessions_tree(narnat_dir: str) -> List[Dict[str, Any]]:
                     "message_count": info["message_count"],
                     "children": [],
                 }
+    if errors:
+        # 只报枚举失败，不把「部分读到的」吞掉：tree 照常返回，调用方两边都要看
+        return _sort_session_tree(roots, orphans), f"无法读取会话目录：{errors[0]}"
+    return _sort_session_tree(roots, orphans), ""
+
+
+def _sort_session_tree(roots: dict, orphans: list) -> List[Dict[str, Any]]:
+    """把 roots/orphans 挂成树并按时间排序（list_sessions_tree 的收尾段）"""
     for child in orphans:
         parent_name = child["parent"]
         if parent_name in roots:
@@ -484,6 +747,15 @@ def list_sessions_tree(narnat_dir: str) -> List[Dict[str, Any]]:
         root["children"].sort(key=lambda c: c.get("timestamp", 0))
     result = sorted(roots.values(), key=lambda r: r.get("timestamp", 0), reverse=True)
     return result
+
+
+def list_sessions_tree(narnat_dir: str) -> List[Dict[str, Any]]:
+    """只要会话树（读不到时按空树返回）。
+
+    需要区分「读不到」与「没有会话」的场景请用 list_sessions_tree_checked：
+    session/list 就是靠它把「读不到」说出来，不能在这里吞掉。
+    """
+    return list_sessions_tree_checked(narnat_dir)[0]
 
 
 def format_session_tree(tree: List[Dict[str, Any]],

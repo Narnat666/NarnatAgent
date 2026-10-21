@@ -21,6 +21,58 @@ FOLDED_TOOL_MARKER = "[已折叠: 原工具结果共{n}字符，疑似触发服�
 # 且会让"参数类 400"白跑折叠重试——低于此值一律视为无可折叠项
 MIN_FOLDABLE_TOOL_CHARS = 200
 
+# 压缩摘要消息的前缀。Compressor.build_new_session_messages 按它注入摘要，
+# 载入会话时也靠它认出「当前上下文的摘要边界」：边界之前的历史属于归档
+# （展示/落盘要保留，但不是发给模型的上下文）。
+COMPACTION_SUMMARY_PREFIX = "# 上一轮对话成果"
+
+
+def split_loaded_history(msgs: List[Dict[str, Any]], system_prompt: str
+                         ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """把落盘的全量历史拆成 (当前上下文, 归档)。
+
+    落盘口径是 full_history() = 首条系统提示词 + 归档 + 当前，载入时必须拆回来：
+
+    - 只把整个文件塞回「当前」会让压缩白做：压缩过的会话一重进上下文就从
+      摘要态膨胀回全量历史，摘要还落在历史中间，下一次压缩再把整段（含旧摘要）
+      重摘要一遍，摘要层层叠加（P1，实测 9→15 条并叠加摘要）。
+    - 拆开后归档仍留在 full_history() 里（展示/落盘一字不少），但不发给模型。
+
+    首条系统提示词：优先取下标 0；老版本文件把提示词写在归档之后（压缩归档先于
+    提示词落盘），退化为「内容等于 system_prompt 的那条」；两者都没有就补一条
+    ——保证任何路径下「首条 system 提示词存在且只有一条」（P0）。
+    """
+    msgs = list(msgs or [])
+    head_idx = -1
+    if msgs and msgs[0].get("role") == "system":
+        head_idx = 0
+    else:
+        for i, m in enumerate(msgs):
+            if m.get("role") == "system" and m.get("content") == system_prompt:
+                head_idx = i
+                break
+    if head_idx < 0:
+        return [{"role": "system", "content": system_prompt}] + msgs, []
+    head = msgs[head_idx]
+    rest = msgs[:head_idx] + msgs[head_idx + 1:]
+    # 摘要边界 = 最后一条摘要系统消息（更早的摘要已被它整合替换，属归档）
+    cut = -1
+    for i, m in enumerate(rest):
+        if (m.get("role") == "system"
+                and str(m.get("content") or "").startswith(COMPACTION_SUMMARY_PREFIX)):
+            cut = i
+    current = [head] + (rest[cut:] if cut > 0 else rest)
+    archived = rest[:cut] if cut > 0 else []
+    # 同一份系统提示词出现多次（老版本把提示词连同归档重复落盘）：只留首条
+    prompt = head.get("content")
+    if isinstance(prompt, str) and prompt:
+        current = [m for i, m in enumerate(current)
+                   if i == 0 or not (m.get("role") == "system"
+                                     and m.get("content") == prompt)]
+        archived = [m for m in archived
+                    if not (m.get("role") == "system" and m.get("content") == prompt)]
+    return current, archived
+
 
 class MessageView:
     """messages 的只读视图。零拷贝，但调用方无法修改列表结构。"""
@@ -54,15 +106,65 @@ class MessageList:
     """
 
     def __init__(self, system_prompt: str):
+        self._system_prompt = system_prompt
         self._messages: List[Dict[str, Any]] = [
             {"role": "system", "content": system_prompt}
         ]
+        # 压缩掉的历史原文。压缩改的是「发给模型的上下文」（_messages），
+        # 用户看得见的历史（展示/落盘）必须是 归档 + 当前，见 full_history()。
+        self._archived: List[Dict[str, Any]] = []
+        # 已归档消息的对象 id 集合（判重口径，见 archive）
+        self._archived_ids: Set[int] = set()
 
     # ── 只读接口 ──
+
+    @property
+    def system_prompt(self) -> str:
+        """构造本列表时用的系统提示词（首条 system 的正文，缺失时也由它兜底）"""
+        return self._system_prompt
+
+    def is_system_prompt(self, index: int, msg: Dict[str, Any]) -> bool:
+        """这条是不是「系统提示词」——MessageList 用 system_prompt 构造的首条 system。
+
+        判据是「是不是首条」，**不是**"role 是不是 system"：/done 合并进父会话的
+        「# 子会话 [X] 结论」、/skill 注入的技能正文同样是 system 角色，它们是
+        历史内容，压缩时必须进归档（一刀切会让它们在展示/落盘里整段消失）。
+        用下标而非内容比较：会话载入后首条 system 是该会话自己那份提示词。
+        """
+        return index == 0 and msg.get("role") == "system"
 
     def view(self) -> MessageView:
         """返回只读视图。零拷贝，但调用方无法修改列表结构。"""
         return MessageView(self._messages)
+
+    def full_history(self) -> List[Dict[str, Any]]:
+        """完整历史 = 首条系统提示词 + 归档 + 当前其余，返回**新列表**（供展示/落盘用）。
+
+        调用方可以对这个新列表做任何操作（append/切片/序列化），但不得把它
+        当成内部状态回写——列表是新建的，元素仍与内部同源 dict。
+
+        首条系统提示词必须排在最前：它是最早的消息，而压缩时提示词留在当前
+        列表里、被它替换掉的历史进了归档。若按「归档 + 当前」拼接，落盘后的
+        顺序会变成「旧历史 → 提示词 → 摘要 → 保留尾部」——首条不是 system，
+        列表中间多出一条 system；载入这种文件会让请求丢掉提示词（P0-2）、
+        摘要消息夹在历史中游被再次摘要（P1）。顺序即时间顺序：提示词（最早）
+        → 归档 → 当前其余（摘要 + 保留尾部 + 后续对话）。
+
+        按对象 id 去重：压缩是「先 archive() 再 replace_all()」两步，这中间的
+        瞬间两个列表会同时持有同一批消息；后台自动保存线程恰好此刻取快照就会
+        把这一段写两遍。去重把这个窗口消掉（正常状态下不会有重复对象）。
+        """
+        out: List[Dict[str, Any]] = []
+        seen: Set[int] = set()
+        head = self._messages[0] if self._messages and self._messages[0].get("role") == "system" else None
+        for m in ([head] if head is not None else []) + self._archived + \
+                [m for m in self._messages if m is not head]:
+            key = id(m)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(m)
+        return out
 
     def __len__(self) -> int:
         return len(self._messages)
@@ -138,12 +240,38 @@ class MessageList:
         folded_ids.add(tc_id)
         return tc_id, best_len
 
+    def archive(self, msgs) -> int:
+        """把一批消息追加进归档（归档的唯一入口）。返回实际归档条数。
+
+        判重口径：消息对象 id（不是内容指纹）。归档列表持有这些 dict 的引用，
+        对象不会在归档期内被回收，id 自然不会被复用——所以 id 命中必然是
+        「同一批消息」，比内容指纹严格：内容相同的两条不同消息（例如两次
+        「继续」）不会被误判成重复而丢弃。
+        """
+        added = 0
+        for m in msgs or []:
+            key = id(m)
+            if key in self._archived_ids:
+                continue
+            self._archived_ids.add(key)
+            self._archived.append(m)
+            added += 1
+        return added
+
+    def clear_archive(self) -> None:
+        """清空归档（会话切换/新建时用：归档属于上一段会话，不可跨会话拼接）"""
+        self._archived = []
+        self._archived_ids.clear()
+
     def replace_all(self, new_messages: List[Dict[str, Any]]) -> None:
         """原子替换全部消息（会话切换时使用）。
 
         单次引用赋值（GIL 下原子）：并发读者要么看到旧列表、要么看到新列表，
         不会撞见 clear()+extend() 两步之间的空/半列表（后台保存线程读到空
         列表会把会话清空落盘）。
+
+        注意：本方法不动归档（压缩路径正是「先 archive 再 replace_all」）。
+        会话切换必须走 SessionManager.replace_messages()，它先 clear_archive()。
         """
         self._messages = list(new_messages)
 

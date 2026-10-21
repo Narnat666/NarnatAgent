@@ -62,6 +62,7 @@ class RpcStream:
         self._aborted = False
         self._turn_closed = False    # turn/end 已下发（本轮真正结束）
         self._cancelled = False
+        self._failure_message: Optional[str] = None   # 本轮失败原因（非空 → reason:"error"）
         self._thinking_started = False
         self._thinking_t0 = 0.0
         self._thinking_chars = 0
@@ -152,9 +153,21 @@ class RpcStream:
         try:
             values = self._ui.resolve_stats(
                 input_tokens, output_tokens, cache_ratio, cost, balance, "")
-            emit("stats", values)
+            self._ui.emit_stats(values)
         except Exception:
             pass
+
+    def mark_failed(self, message: str) -> None:
+        """标记「本轮以失败收尾」（core/agent_loop 在 finish 之前调用）。
+
+        收尾时据此发 error 通知 + `turn/end{reason:"error"}`，与界面
+        已有的 `reason === 'error'` 分支（「本轮出错」+「重试这一条」）对齐。
+        不标的话出错也会报 done，界面按成功收口、不给重试入口。
+        """
+        with self._lock:
+            if self._turn_closed or self._aborted:
+                return
+            self._failure_message = _clean(message).strip() or "本轮执行失败"
 
     def finish(self, input_tokens: int = 0, output_tokens: int = 0,
                cache_ratio: float = 0.0, cost: float = 0.0,
@@ -166,14 +179,22 @@ class RpcStream:
         with_stats=True 时当场下发，否则留给 RpcUI 在轮次边界收口——core 里
         with_stats=False 有两类调用：目标模式中间轮（本轮确实结束）与工具确认流程
         （本轮未结束，稍后另建新流），只有轮次边界能区分两者。
+
+        标过 mark_failed 的流是**失败收尾**：无条件按 error 收口（错误发生时这一轮
+        就是结束了，不存在"中间轮"），并先下发一条 error 通知。
         """
         with self._lock:
             if self._turn_closed or self._aborted:
                 return
+            failure = self._failure_message
         self._end_thinking()
         values = self._ui.resolve_stats(input_tokens, output_tokens, cache_ratio,
                                         cost, balance, thinking_effort)
-        emit("stats", values)
+        self._ui.emit_stats(values)
+        if failure:
+            emit("error", {"message": failure, "detail": None})
+            self.close_turn("error")
+            return
         if with_stats:
             self.close_turn(self._final_reason("done"))
 
@@ -349,6 +370,9 @@ class RpcUI:
         self._compress_t0 = 0.0
         self._verify_open = False
         self._verify_t0 = 0.0
+        # stats 去重：记住上次真正下发的内容（规范化 JSON），同一份内容只发一次
+        self._stats_lock = threading.Lock()
+        self._last_stats_key: Optional[str] = None
         self.last_command_output: List[str] = []
 
     def attach_stats(self, stats) -> None:
@@ -581,6 +605,25 @@ class RpcUI:
         self._turn_end_callback = callback
 
     # ── 统计 ──
+
+    def emit_stats(self, values: Dict[str, Any]) -> None:
+        """下发一条 stats 通知，**内容与上次完全相同则跳过**。
+
+        为什么去重：同一轮里 progress_stats（每次 usage 到达）与 finish（轮末）
+        读的是同一个 StatsTracker，字段一字不差，界面于是收到 2~3 条相同的
+        stats；余额补查成功、usage 增长后才需要再发一次。所以判据是「内容是否
+        与上次相同」，而不是时间窗口节流——节流会把真实变化一起吞掉，还可能让
+        最后一轮的 stats 永远发不出去（窗口未到期就再也不来了）。
+        """
+        try:
+            key = json.dumps(values, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            key = repr(values)
+        with self._stats_lock:
+            if key == self._last_stats_key:
+                return
+            self._last_stats_key = key
+        emit("stats", values)
 
     def resolve_stats(self, input_tokens: int = 0, output_tokens: int = 0,
                       cache_ratio: float = 0.0, cost: float = 0.0,

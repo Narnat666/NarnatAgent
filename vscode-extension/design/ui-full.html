@@ -477,7 +477,9 @@ body[data-real="true"] .demo-tip{display:none}
   background:var(--vscode-input-background,var(--bg-elev));
   padding:9px 12px 7px;
 }
-.cbox:focus-within{border-color:var(--accent)}
+/* 聚焦时用主题的 focus 边框色：input-border 在很多主题里几乎与背景同色，
+   只有换到 focusBorder 才看得出「焦点进来了」。 */
+.cbox:focus-within{border-color:var(--vscode-focusBorder,var(--accent))}
 .cbox textarea{
   width:100%;border:none;background:none;resize:none;outline:none;
   font:inherit;font-size:13px;line-height:1.6;color:var(--fg);
@@ -486,6 +488,10 @@ body[data-real="true"] .demo-tip{display:none}
   height:auto;min-height:21px;max-height:160px;
   overflow-y:hidden;padding:0;display:block;
 }
+/* 输入框的视觉边界由 .cbox 承担（1px 主题边框 + 聚焦换色），
+   #input 自己不再画边框、也不留聚焦 outline —— 两层描边叠在一起会显脏。
+   这里只给 1px 上下内边距：光标不贴着 .cbox 的边框线。 */
+#input{padding:1px 0;outline:none}
 .cbox textarea::placeholder{color:var(--fg-faint)}
 .crow{display:flex;align-items:center;gap:6px;margin-top:5px;min-height:20px;user-select:none}
 .chip{
@@ -511,6 +517,47 @@ body[data-real="true"] .demo-tip{display:none}
 .crow .chip.path{flex-shrink:2;min-width:3em}
 /* 按钮组不参与收缩：宁可省略 chip 文字，也不让「发送」被压成两行 */
 .crow .right{margin-left:auto;flex:none;display:flex;align-items:center;gap:6px}
+
+/* ---------- 附件（拖拽 / 粘贴 / 选择进来的文件、文件夹、图片） ----------
+   只显示「排队的路径」，不展示文件内容：发送时插件把绝对路径写进文本，
+   由 AI 自己用 Read/Grep/Glob 去读。
+   249px 面板下 chips 必须能换行：flex-wrap + 单个 chip max-width:100%，
+   长文件名在 chip 内部省略号截断，不产生横向滚动条。
+   附件个数没有上限（一次框选几十个文件是常态）：必须限高 + 内部纵向滚动，
+   否则附件区随个数长高，把输入框与状态栏一路顶出可视区，
+   用户既看不到自己在打什么，也点不到发送/停止。5.5em≈3 行 chip（13px 基准）。 */
+.attach{
+  display:none;flex-wrap:wrap;gap:4px;margin:0 0 6px;
+  max-height:5.5em;overflow-y:auto;overflow-x:hidden;
+  /* 限高后出现的是同一个全局 ::-webkit-scrollbar（下面「滚动条」那段，
+     滑块取 --vscode-scrollbarSlider-*），不在这里另立一套。 */
+}
+.attach[data-on="true"]{display:flex}
+.atch{
+  display:inline-flex;align-items:center;gap:4px;
+  min-width:0;max-width:100%;
+  font-size:10.5px;color:var(--fg-dim);line-height:1.6;
+  background:var(--bg-hover);border-radius:3px;padding:1px 4px;
+}
+.atch .k{flex:none;color:var(--fg-faint)}
+.atch .n{
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-family:var(--mono);
+}
+.atch .ph{flex:none;color:var(--fg-faint)}
+.atch img{flex:none;max-width:26px;max-height:18px;border-radius:2px;display:block}
+.atch .x{flex:none;color:var(--fg-faint);padding:0 1px;line-height:1}
+.atch .x:hover{color:var(--err)}
+.attach-btn{
+  flex:none;font-size:11px;color:var(--fg-faint);line-height:1.6;
+  border:1px solid var(--line);border-radius:4px;padding:0 6px;
+}
+.attach-btn:hover{color:var(--fg);border-color:var(--line-strong)}
+/* 拖拽悬停：只换边框色，不加动画/阴影 */
+.cbox[data-drop="true"]{border-color:var(--vscode-focusBorder,var(--accent))}
+.convo[data-drop="true"]{
+  outline:1px dashed var(--vscode-focusBorder,var(--accent));outline-offset:-6px;
+}
 .stop{
   display:none;align-items:center;gap:5px;
   font-size:11.5px;color:var(--fg-dim);
@@ -1209,6 +1256,9 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     <div class="cbox">
       <div class="palette" id="palette"></div>
 
+      <!-- 附件列表：拖拽/粘贴/「＋附件」进来的路径排在这里，发送后清空 -->
+      <div class="attach" id="attachBox" data-on="false"></div>
+
       <textarea id="input" rows="1" placeholder="输入任务，或输入 / 调出命令…"></textarea>
 
       <div class="crow">
@@ -1220,6 +1270,7 @@ rm -rf .narnat/data/sessions/old-3.json</div>
         <span class="chip on" id="chipGoal">目标 关</span>
         <span class="chip" id="chipPlugin">插件</span>
         <div class="right">
+          <button class="attach-btn" id="attachBtn" title="添加文件 / 文件夹 / 图片">＋附件</button>
           <span class="kbd">Enter 发送</span>
           <button class="stop" id="stopBtn"><span class="sq"></span>停止</button>
           <button class="send" id="sendBtn">发送</button>
@@ -2506,6 +2557,420 @@ rm -rf .narnat/data/sessions/old-3.json</div>
   // 面板宽度变化时占位符可能从一行变两行（或反过来），
   // 只在 input 事件里调是跟不上的。
   window.addEventListener('resize', function () { autoGrowInput(); });
+
+  /* ---------- 附件：文件 / 文件夹 / 图片 ----------
+     语义（用户明确要求）：拖进来的文件、文件夹**不复制、不存储**，
+     只把绝对路径发给 AI，让它自己用 Read/Grep/Glob 处理；
+     只有「没有磁盘路径的图片」（现场截图 / 剪贴板图片）才先让宿主落到
+     临时目录，再把那个临时路径发过去。
+     宿主侧消息（见 extension.js）：attach/pick、attach/check、attach/save、attach/thumb，
+     回执：attach/picked、attach/checked、attach/saved、attach/thumbResult。 */
+
+  /** 待发送的附件：[{id, path, name, kind:'image'|'folder'|'file', dataUrl, thumbAsked}] */
+  var ATCH = [];
+  /** 附件请求的自增 id：宿主回执里带着它，避免把 A 的缩略图贴到 B 上 */
+  var atchSeq = 0;
+  /** id → 回执回调 */
+  var atchWaiters = {};
+  var KIND_MARK = { image: '▣', folder: '▤', file: '▢' };
+  var KIND_TEXT = { image: '图片', folder: '文件夹', file: '文件' };
+  /** 单张图片上限（与宿主侧一致）：超过就不传，界面说清原因 */
+  var ATCH_MAX_IMG = 8 * 1024 * 1024;
+
+  function atchSend(type, params, cb){
+    var id = ++atchSeq;
+    var p = params || {};
+    p.id = id;
+    if (cb) atchWaiters[id] = cb;
+    post(type, p);
+    return id;
+  }
+
+  /** 宿主回执统一入口：按 id 找回调（找不到就丢，说明这条请求早已过了时限） */
+  function atchOnReply(p){
+    if (!p) return;
+    var cb = atchWaiters[p.id];
+    if (!cb) return;
+    delete atchWaiters[p.id];
+    cb(p);
+  }
+
+  /** 按文件名猜类型；文件夹没有扩展名，真实类型由宿主 attach/check 给 */
+  function atchGuessKind(name, path){
+    return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(String(name || path || '')) ? 'image' : 'file';
+  }
+
+  /** 重画附件 chip 列表（整块重画，避免逐个补丁对不上） */
+  function renderAttach(){
+    var box = document.getElementById('attachBox');
+    if (!box) return;
+    box.innerHTML = '';
+    ATCH.forEach(function(a){
+      var el = document.createElement('span');
+      el.className = 'atch';
+      el.setAttribute('data-path', a.path || '');
+      if (a.kind === 'image') {
+        // 缩略图由宿主 attach/thumb 读本地文件回 dataURL；
+        // 文件已被清理 / 过大 / 读失败 → 回 null，这里显示 [图片] 占位符。
+        // 留一个空 img 会变成「一条看不见内容的附件」，用户以为没加进来。
+        if (a.dataUrl) {
+          var img = document.createElement('img');
+          img.alt = '';
+          img.src = a.dataUrl;      // 只来自宿主，不拼进 innerHTML
+          el.appendChild(img);
+        } else {
+          var ph = document.createElement('span');
+          ph.className = 'ph';
+          ph.textContent = '[图片]';
+          el.appendChild(ph);
+        }
+      }
+      var k = document.createElement('span');
+      k.className = 'k';
+      k.textContent = KIND_MARK[a.kind] + ' ' + (KIND_TEXT[a.kind] || '文件');
+      el.appendChild(k);
+      // 文件名可能带 < > "，一律走 textContent
+      var n = document.createElement('span');
+      n.className = 'n';
+      n.textContent = a.name || a.path;
+      n.title = a.path || '';
+      el.appendChild(n);
+      var x = document.createElement('button');
+      x.className = 'x';
+      x.type = 'button';
+      x.title = '移除';
+      x.textContent = '×';
+      x.addEventListener('click', function(){
+        ATCH = ATCH.filter(function(it){ return it.id !== a.id; });
+        renderAttach();
+        input.focus();
+      });
+      el.appendChild(x);
+      box.appendChild(el);
+    });
+    box.setAttribute('data-on', ATCH.length ? 'true' : 'false');
+  }
+
+  /** 读一张本地图片的缩略图（文件没了就留 [图片]，不阻塞其它附件） */
+  function atchThumb(a){
+    if (!a || a.dataUrl || a.thumbAsked) return;
+    a.thumbAsked = true;
+    // 走共享缓存：同一张图在输入区、气泡、历史里只向宿主请求一次
+    atchThumbOf(a.path, function(url){
+      a.dataUrl = url;
+      renderAttach();
+    });
+  }
+
+  /**
+   * 收下一批「有磁盘路径」的附件。
+   * 先按扩展名猜类型让 chip 立刻可见，再让宿主 attach/check 核对
+   * 存在性与真实类型（文件夹只能由宿主判断）；路径不存在的当场剔除并说明，
+   * 不能静默失败——用户会以为文件已经跟着发出去了。
+   */
+  function atchAddPaths(paths){
+    var fresh = [];
+    (paths || []).forEach(function(raw){
+      var p = String(raw || '');
+      if (!p) return;
+      var dup = false;
+      ATCH.forEach(function(a){ if (a.path === p) dup = true; });
+      if (dup) return;
+      var name = p.split(/[\\/]/).pop() || p;
+      var item = {
+        id: ++atchSeq, path: p, name: name,
+        kind: atchGuessKind(name, p), dataUrl: null, thumbAsked: false
+      };
+      ATCH.push(item);
+      fresh.push(item);
+    });
+    if (!fresh.length) return;
+    renderAttach();
+    atchSend('attach/check', { paths: fresh.map(function(a){ return a.path; }) }, function(res){
+      var items = (res && res.items) || [];
+      var bad = [];
+      fresh.forEach(function(a, i){
+        var it = items[i] || null;
+        if (!it) {
+          for (var j = 0; j < items.length; j++) {
+            if (items[j].path === a.path) { it = items[j]; break; }
+          }
+        }
+        if (it && it.exists === false) {
+          a.bad = true;
+          bad.push(a.path);
+          return;
+        }
+        // 宿主说得更准（尤其文件夹）：以它为准
+        if (it && it.kind) a.kind = it.kind;
+        if (a.kind === 'image') atchThumb(a);
+      });
+      if (bad.length) {
+        ATCH = ATCH.filter(function(it){ return !it.bad; });
+        sysLine('✗', '附件路径不存在，已移除',
+          esc(bad.slice(0, 3).join('、')) + (bad.length > 3 ? ' 等 ' + bad.length + ' 个' : ''), 'err');
+        scrollBottom();
+      }
+      renderAttach();
+    });
+  }
+
+  /**
+   * 没有磁盘路径的图片（截图 / 剪贴板）：
+   * 先让宿主写进临时目录，拿到路径后当普通图片附件处理。
+   * 写失败必须说出来——否则用户以为图已经跟着发出去了。
+   */
+  function atchSaveImage(file){
+    var name = (file && file.name) || ('clipboard-' + Date.now() + '.png');
+    if (file && file.size && file.size > ATCH_MAX_IMG) {
+      sysLine('✗', '图片太大，未添加', esc(name) + ' 超过 8MB', 'err');
+      scrollBottom();
+      return;
+    }
+    var fr = new FileReader();
+    fr.onload = function(){
+      var s = String(fr.result || '');
+      var cut = s.indexOf(',');
+      var b64 = cut >= 0 ? s.slice(cut + 1) : s;
+      if (!b64) {
+        sysLine('✗', '图片读取失败', esc(name), 'err');
+        scrollBottom();
+        return;
+      }
+      atchSend('attach/save', { name: name, dataB64: b64 }, function(res){
+        if (!res || res.error || !res.path) {
+          sysLine('✗', '图片存到临时目录失败', esc((res && res.error) || '未知原因'), 'err');
+          scrollBottom();
+          return;
+        }
+        atchAddPaths([res.path]);
+      });
+    };
+    fr.onerror = function(){
+      sysLine('✗', '图片读取失败', esc(name), 'err');
+      scrollBottom();
+    };
+    fr.readAsDataURL(file);
+  }
+
+  /**
+   * 把 File 列表变成附件。
+   * VS Code（Electron）里 dataTransfer.files[i].path 就是绝对路径，直接用，
+   * 不复制任何内容；拿不到 path 时（沙箱 / 某些平台）只有图片能救——
+   * 读成 base64 交给宿主落临时文件；其它类型必须提示用「＋附件」按钮，
+   * 不能静默丢弃。
+   */
+  function atchAcceptFiles(files){
+    var arr = [];
+    for (var i = 0; i < (files ? files.length : 0); i++) arr.push(files[i]);
+    if (!arr.length) return;
+    var paths = [];
+    arr.forEach(function(f){
+      if (!f) return;
+      var p = f.path || '';
+      // 相对路径没有意义：AI 在别的工作目录里读不到它，当「没有路径」处理
+      if (p && p.charAt(0) !== '/' && !/^[A-Za-z]:[\\/]/.test(p) && p.indexOf('\\\\') !== 0) {
+        p = '';
+      }
+      if (p) {
+        paths.push(p);
+        return;
+      }
+      var isImg = /^image\//.test(f.type || '') || atchGuessKind(f.name) === 'image';
+      if (isImg) {
+        atchSaveImage(f);
+        return;
+      }
+      sysLine('✗', '拿不到这个文件的路径',
+        esc(f.name || '（未命名）') + ' · 请用输入框旁的「＋附件」按钮选择', 'warn');
+      scrollBottom();
+    });
+    if (paths.length) atchAddPaths(paths);
+  }
+
+  /**
+   * 挂一个拖拽落点。
+   * drop 必须 preventDefault：不拦的话 Electron 会拿这份文件去导航整个
+   * webview，面板直接变成一张图片或空白页（拖一张图进来就复现）。
+   */
+  function atchDropZone(el){
+    if (!el) return;
+    el.addEventListener('dragenter', function(e){
+      if (!e.dataTransfer) return;
+      e.preventDefault();
+      el.setAttribute('data-drop', 'true');
+    });
+    el.addEventListener('dragover', function(e){
+      if (!e.dataTransfer) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      el.setAttribute('data-drop', 'true');
+    });
+    el.addEventListener('dragleave', function(){
+      el.removeAttribute('data-drop');
+    });
+    el.addEventListener('drop', function(e){
+      var dt = e.dataTransfer;
+      if (!dt) return;
+      e.preventDefault();
+      e.stopPropagation();
+      el.removeAttribute('data-drop');
+      atchAcceptFiles(dt.files);
+    });
+  }
+  atchDropZone(document.querySelector('.cbox'));
+  atchDropZone(convo);
+
+  // 粘贴：截图工具/剪贴板里的图片没有 path，只能走「存临时文件」这条路；
+  // 纯文本粘贴不拦（照常进输入框）。
+  input.addEventListener('paste', function(e){
+    var cd = e && e.clipboardData;
+    if (!cd) return;
+    var files = cd.files && cd.files.length ? cd.files : null;
+    if (!files && cd.items && cd.items.length) {
+      var picked = [];
+      for (var i = 0; i < cd.items.length; i++) {
+        var it = cd.items[i];
+        if (!it || it.kind !== 'file') continue;
+        var f = it.getAsFile ? it.getAsFile() : null;
+        if (f) picked.push(f);
+      }
+      if (picked.length) files = picked;
+    }
+    if (!files || !files.length) return;
+    e.preventDefault();
+    atchAcceptFiles(files);
+  });
+
+  // 「＋附件」：webview 没有文件系统权限，必须让宿主弹 VS Code 原生选择框
+  //（showOpenDialog 才能同时支持选文件与选文件夹）。
+  var attachBtnEl = document.getElementById('attachBtn');
+  if (attachBtnEl) {
+    attachBtnEl.addEventListener('click', function(){
+      atchSend('attach/pick', {}, function(res){
+        if (!res || res.cancelled) return;
+        atchAddPaths(res.paths || []);
+      });
+    });
+  }
+
+  /**
+   * 附件路径块：后端协议不变（仍走 chat/send），把绝对路径写进文本，
+   * 由 AI 自己用工具去读——插件不复制、不存储文件内容。
+   */
+  function attachBlock(list){
+    if (!list || !list.length) return '';
+    var lines = ['[用户附带了以下本地路径，请用相应工具自行读取处理]'];
+    list.forEach(function(a){
+      lines.push('- ' + (KIND_TEXT[a.kind] || '文件') + '：' + a.path);
+    });
+    return '\n\n' + lines.join('\n');
+  }
+
+  /** 附件清单块里图片行：只认前置写入的这一种格式（行首 + 全角冒号） */
+  var ATTACH_IMG_LINE = '- 图片：';
+  /** 缩略图缓存：path → {url, t}（只存宿主成功读到的 dataURL + 载入时间）。
+      发送区与历史、重进会话都复用同一份结果，同一张图只向宿主请求一次。
+      为什么只存成功：失败结果一旦进了缓存就再也不会重试，图片被清理后界面
+      会永远停在旧图上（实测：删图后重渲染仍 img=1）。失败不缓存，代价只是
+      重新渲染时多问一次宿主（一次本地读文件），换来「文件没了就显示 [图片]」。 */
+  var THUMB = {};
+  /** 缓存有效期（毫秒）：超过后重新渲染会重新向宿主确认文件是否还在 */
+  var THUMB_TTL = 60000;
+  /** path → 正在等回执的回调队列：并发请求合并成一次 */
+  var THUMB_WAIT = {};
+
+  /** 丢掉全部缩略图缓存（窗口重新可见时用）：下次渲染重新确认文件是否还在 */
+  function atchThumbFlush(){
+    Object.keys(THUMB).forEach(function(p){ delete THUMB[p]; });
+  }
+
+  /**
+   * 做一次「允许重新请求」判定用的事件源：窗口从隐藏变成可见。
+   * 用户切走再切回来是「图片可能已被清理」的典型时机（面板一直开着、
+   * 文件在别处被删掉），这里把缓存全判过期，下次渲染即重新确认。
+   */
+  document.addEventListener('visibilitychange', function(){
+    if (!document.hidden) atchThumbFlush();
+  });
+
+  /** 取一张本地图片的缩略图（走宿主 attach/thumb，成功结果按路径短时缓存） */
+  function atchThumbOf(path, cb){
+    var hit = Object.prototype.hasOwnProperty.call(THUMB, path) ? THUMB[path] : null;
+    // 命中条件：缓存未过期。过期按未命中处理 —— 文件可能在缓存有效期内被清理，
+    // 永久命中会让 [图片] 占位符永远不出现。
+    if (hit && (Date.now() - hit.t) < THUMB_TTL) {
+      cb(hit.url);
+      return;
+    }
+    if (THUMB_WAIT[path]) {
+      THUMB_WAIT[path].push(cb);
+      return;
+    }
+    THUMB_WAIT[path] = [cb];
+    atchSend('attach/thumb', { path: path }, function(res){
+      var url = (res && typeof res.dataURL === 'string' && res.dataURL) ? res.dataURL : null;
+      if (url) THUMB[path] = { url: url, t: Date.now() };
+      else delete THUMB[path];
+      var list = THUMB_WAIT[path] || [];
+      delete THUMB_WAIT[path];
+      list.forEach(function(f){ f(url); });
+    });
+  }
+
+  /**
+   * 从消息正文里解析附件清单块中的图片路径。
+   * 只认上面这一种格式（行首「- 图片：」+ 路径），不做宽松猜测：
+   * 没有该块的老消息一个节点都不多画。
+   */
+  function attachPathsInText(text){
+    var out = [];
+    String(text == null ? '' : text).split(/\r?\n/).forEach(function(line){
+      if (line.indexOf(ATTACH_IMG_LINE) !== 0) return;
+      var p = line.slice(ATTACH_IMG_LINE.length).trim();
+      if (p) out.push(p);
+    });
+    return out;
+  }
+
+  /**
+   * 在用户气泡里画缩略图行：复用输入区那套 .attach / .atch / .ph 样式与
+   * attach/thumb 宿主消息，不另造一套。
+   * 宿主读不到（文件已被清理 / 路径不存在）→ 留 [图片] 占位符：
+   * 画一个空 img 等于给用户看「一条看不见内容的附件」。
+   */
+  function addMsgThumbs(host, paths){
+    var list = (paths || []).filter(Boolean);
+    if (!host || !list.length) return null;
+    var box = document.createElement('div');
+    box.className = 'attach';
+    box.setAttribute('data-on', 'true');
+    list.forEach(function(p){
+      var el = document.createElement('span');
+      el.className = 'atch';
+      el.setAttribute('data-path', p);
+      var ph = document.createElement('span');
+      ph.className = 'ph';
+      ph.textContent = '[图片]';
+      el.appendChild(ph);
+      var n = document.createElement('span');
+      n.className = 'n';
+      n.textContent = String(p).split(/[\\/]/).pop() || p;
+      n.title = p;
+      el.appendChild(n);
+      box.appendChild(el);
+      atchThumbOf(p, function(url){
+        if (!url) return;            // 读不到就留 [图片]
+        var img = document.createElement('img');
+        img.alt = '';
+        img.src = url;               // 只来自宿主，不拼进 innerHTML
+        if (ph.parentNode === el) el.replaceChild(img, ph);
+        else el.insertBefore(img, n);
+      });
+    });
+    host.appendChild(box);
+    return box;
+  }
 
   /* ---------- 输入历史（上下键调出） ---------- */
   var HIST = [];          // 已提交的输入，最旧在前
@@ -4426,6 +4891,13 @@ rm -rf .narnat/data/sessions/old-3.json</div>
   function sendChat(){
     var text = input.value.trim();
     if (!text) return;
+    // 附件只写进**发给后端的文本**（绝对路径清单），气泡里仍是用户原文：
+    // 插件不复制、不存储任何文件内容，由 AI 自己用 Read/Grep/Glob 去读。
+    var wireText = text + attachBlock(ATCH);
+    // 本次带出去的图片路径：气泡里要能看到图（不只是输入区那张 chip）。
+    // 必须在下面 ATCH 被清空之前取下来。
+    var sendImgs = ATCH.filter(function(a){ return a.kind === 'image'; })
+      .map(function(a){ return a.path; });
     // 点「发送」按钮发以 / 开头的内容，必须和按 Enter 一样当命令执行。
     // 不这样会怎样（实测）：/mode 被当成普通对话发给模型——后端执行了命令，
     // 但这一轮不产生 turn/end，_turn_active 永远停在 true，
@@ -4459,7 +4931,7 @@ rm -rf .narnat/data/sessions/old-3.json</div>
       // 自动重连 5 次放弃后，界面上无论发消息还是敲命令都被这里拦下，
       // 后端起不来，只能改配置或重载窗口。
       // 那一次请求本身会失败（后端还没起来），但用户再按一次 Enter 就成了。
-      post('chat', { text: text });
+      post('chat', { text: wireText });
       sysLine('·', '未连接后端，消息未发送',
         '已在尝试重连；连上后请再发一次（文字仍在输入框里）');
       scrollBottom();
@@ -4476,6 +4948,8 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     // 否则「被拒绝的一句话」会以已发送的样子留在对话里、永远没有回答（实测会误导）。
     m.setAttribute('data-pending', '1');
     m.innerHTML = '<div class="text">' + esc(text) + '</div>';
+    // 气泡里正文之后显示缩略图行（与输入区的 chip 共用同一套样式与缓存）
+    addMsgThumbs(m, sendImgs);
     attachCopy(m, text);
     convo.appendChild(m);
     curAssistant = null;
@@ -4491,7 +4965,13 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     //（同窗口另一面板的 accepted:true 是广播的），只能靠内容把这条消息找回来。
     lastSentText = text;
     lastSentMaybeAccepted = false;
-    post('chat', { text: text });
+    post('chat', { text: wireText });
+    // 路径已经随这条消息交给后端了：清空附件列表。
+    // 没发出去的分支（离线）不走这里，附件与输入框里的文字一起留着。
+    if (ATCH.length) {
+      ATCH = [];
+      renderAttach();
+    }
   }
 
   /**
@@ -5204,7 +5684,11 @@ rm -rf .narnat/data/sessions/old-3.json</div>
   /* ---------- 计划清单 ---------- */
 
   function renderTodo(p){
-    var todos = (p && p.todos) || [];
+    // `|| []` 挡不住「非空非数组」（例如 todos 变成对象/字符串）：那种值会让
+    // todos.forEach 抛 TypeError，整条计划更新连 rendered() 回执都发不出去。
+    // 类型不对就按空清单降级——少画一个清单，好过静默丢掉整条通知。
+    var raw = p && p.todos;
+    var todos = Array.isArray(raw) ? raw.filter(function(t){ return t && typeof t === 'object'; }) : [];
     var done = 0;
     todos.forEach(function(t){ if (t.status === 'completed') done++; });
 
@@ -5364,7 +5848,14 @@ rm -rf .narnat/data/sessions/old-3.json</div>
    * 又不进消息历史，切走再切回就消失——同一轮内容前后不一致。
    */
   function showNotice(p){
-    var text = (p && p.text) || '';
+    // notice 承载「超限 / 保存失败 / 没填 Key」这类关键信息，宁可降级也不能整条丢。
+    // text 只有字符串能 split；数字一律 String() 显示，对象/数组这种拼不出人话的
+    // （String() 会得到 "[object Object]"）直接忽略这条通知。
+    var raw = p && p.text;
+    var text;
+    if (typeof raw === 'string') text = raw;
+    else if (typeof raw === 'number' || typeof raw === 'boolean') text = String(raw);
+    else text = '';
     if (!text) return;
     // 文案里可能带多行（例如「⚠ 超限」+「请缩减输入」），逐行落成系统行
     var lines = text.split('\n').map(function (s) { return s.trim(); })
@@ -6152,13 +6643,20 @@ rm -rf .narnat/data/sessions/old-3.json</div>
   /* ---------- 会话 / 命令 / 配置回执 ---------- */
 
   function applySessionList(p){
-    var groups = (p && p.groups) || [];
+    // 类型校验必须在 SESS = [] 之前：这条通知原来先清空再遍历 groups，
+    // groups 一旦不是数组（后端字段类型变了），异常就发生在「已经清空、
+    // 还没 renderSessions」的中间态——内部列表空了、画面还是旧的，
+    // 用户点哪条都进不去。所以宁可不认这条通知，也不进那个状态。
+    if (!p || !Array.isArray(p.groups)) return;
+    var groups = p.groups;
     SESS = [];
     var hidden = 0;
     // groups 只是后端的传输容器（按今天/更早切段），前端不再显示分组，
     // 直接按顺序平铺成一列。
     groups.forEach(function(g){
-      (g.sessions || []).forEach(function(s){
+      if (!g || !Array.isArray(g.sessions)) return;
+      g.sessions.forEach(function(s){
+        if (!s || typeof s !== 'object') return;
         SESS.push({
           name: s.name,
           time: s.time || '',
@@ -6166,7 +6664,11 @@ rm -rf .narnat/data/sessions/old-3.json</div>
           // ghost：父会话文件已缺失，只有子会话还活着。列表里要标「无记录」，
           // 不能显示成 `01-01 08:00, 0条` 这种假数据（实测会误导）。
           ghost: !!s.ghost,
-          children: (s.children || []).map(function(c){
+          // children 同样只在真是数组时才映射：非数组的 truthy 值会让 .map 抛错，
+          // 而这个函数已经清过 SESS 了——异常等于把列表留在半成品状态。
+          children: (Array.isArray(s.children) ? s.children : []).filter(function(c){
+            return c && typeof c === 'object';
+          }).map(function(c){
             return { name: c.name, status: c.status || 'new', time: c.time || '', count: c.count || 0 };
           })
         });
@@ -6200,6 +6702,49 @@ rm -rf .narnat/data/sessions/old-3.json</div>
   }
 
   /**
+   * 后端自动保存会话的通知。
+   * 同一份保存会发两次：先 switched:false（已写盘），后 switched:true
+   * （状态已切成正式会话）。此前界面只靠 /save 的 command/result 刷新，
+   * 自动保存这条路径一条回执都没有——顶栏和输入框旁的会话名一直停在
+   * 「(未保存)」，会话列表也是旧的，用户以为没存上。
+   * 幂等：同一个 name + switched 组合只处理一次（宿主重连、面板重建会重发）。
+   */
+  var lastSavedKey = '';
+  function applySessionSaved(p){
+    if (!p) return;
+    var name = String(p.name || '');
+    var switched = !!p.switched;
+    var key = name + '|' + (switched ? '1' : '0');
+    if (key === lastSavedKey) return;
+    lastSavedKey = key;
+    if (!switched) {
+      // 已写盘、状态还没切：先把名字显示出来（用户最急着确认的就是这个）
+      if (name) {
+        var chip = document.getElementById('chipSess');
+        if (chip) chip.textContent = name;
+        sysLine('✓', '已自动保存为「' + esc(name) + '」', '点顶栏会话名可查看列表', 'ok');
+      }
+      if (REAL) post('sessionList', {});
+      rendered('session/saved', { name: name, switched: false });
+      return;
+    }
+    // 状态已切到正式会话：CUR 和顶栏一起跟过去。
+    // 不跟会怎样：后续 /save、新建对话都按旧的空名字处理（自动保存完再点
+    // 「保存当前为…」会又存一份，会话列表里出现两条内容相同的记录）。
+    var cur = (typeof p.current === 'string' && p.current) ? p.current : name;
+    if (cur) {
+      CUR = cur;
+      renderSessions();
+      var br = document.querySelector('#sessBtn .branch');
+      if (br) br.textContent = cur;
+      var chip2 = document.getElementById('chipSess');
+      if (chip2) chip2.textContent = cur;
+    }
+    if (REAL) post('sessionList', {});
+    rendered('session/saved', { name: name, switched: true, current: cur });
+  }
+
+  /**
    * 把后端给的历史消息画回对话区。
    * 进入历史会话时若不画，界面看着像「这个会话是空的」——
    * 明明后端有 24 条消息，用户却以为丢了。
@@ -6228,23 +6773,82 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     node.setAttribute('data-copy', '1');
   }
 
+  /**
+   * 历史消息里的思考块。
+   * 后端已把思考写进会话 json（assistant 项的可选字段 thinking），进入历史
+   * 会话时也要能看见。DOM 结构与流式思考块完全一致（不另造样式），
+   * 默认折叠；展开/收起由 convo 上的委托监听统一处理（它按 .row 找到最近的
+   * .think/.tools 并同步 data-open），所以这里不需要单独绑事件。
+   * @param {string} text 思考全文
+   * @returns {HTMLElement}
+   */
+  function addHistoryThink(text){
+    var wrap = document.createElement('div');
+    wrap.className = 'think';
+    wrap.setAttribute('data-open', 'false');
+    wrap.innerHTML = '<div class="row" data-open="false" tabindex="0" role="button">' +
+      '<span class="caret">▶</span><span class="name"></span></div>' +
+      '<div class="slot"><p></p></div>';
+    // 思考全文可能很长且含 < >，用 textContent 而不是拼 HTML
+    wrap.querySelector('.name').textContent = '思考 · ' + text.length + ' 字';
+    wrap.querySelector('.slot p').textContent = text;
+    convo.appendChild(wrap);
+    return wrap;
+  }
+
+  /**
+   * 是不是后端注入的内部指令（目标模式「轮数上限收尾」/「自动续跑」）。
+   *
+   * 后端只用 user 角色注入这两条固定文案（core/agent.py 交互与 headless 各一份，
+   * 文案完全相同）：
+   *   ① `[系统提示]目标模式已达到轮数上限（N轮），任务尚未完成。请向用户总结…`
+   *   ② `[自动续跑]已完成N轮，任务：<goal_task>\n请继续推进任务。\n[完成审计] …`
+   *      （尾部是 config/defaults.py 的 GOAL_AUDIT_HINT 固定文案）
+   *
+   * 判据必须**整条匹配**，不能只看开头：用户自己完全可以打一句
+   * `[系统提示] 我引用一段话…`（引用别人的话、贴日志都很常见），
+   * 只看开头的旧判据会把这种消息当内部行渲染、只显示首行 120 字，
+   * 第二行起全部丢失（实测）。
+   * ②里的 goal_task 是用户任务原文、内容任意，所以只锚定开头与尾部固定串。
+   */
+  var RE_GOAL_LIMIT_INJECT = /^\[系统提示\]目标模式已达到轮数上限（\d+轮），任务尚未完成。请向用户总结当前进度、已完成工作和未完成原因，无需继续执行新任务。$/;
+  var RE_GOAL_CONT_INJECT = /^\[自动续跑\]已完成\d+轮，任务：[\s\S]*\n请继续推进任务。\n\[完成审计\] [\s\S]*$/;
+
+  function isGoalInjection(text){
+    var s = String(text == null ? '' : text);
+    return RE_GOAL_LIMIT_INJECT.test(s) || RE_GOAL_CONT_INJECT.test(s);
+  }
+
   function renderHistory(msgs){
     if (!msgs || !msgs.length) return;
     msgs.forEach(function(m){
-      if (!m || !m.text) return;
+      if (!m) return;
+      // 后端只在有思考时才带 thinking 这个键；旧会话 json 里没有它，
+      // 走原来的路径、一个多余的节点都不加。
+      var thinkText = (m.role === 'assistant' && typeof m.thinking === 'string') ? m.thinking : '';
+      if (!m.text && !thinkText) return;
       if (m.role === 'user') {
         // 目标模式注入的内部指令（"[自动续跑]…" "[系统提示]…"）在历史里
         // 也是 user 角色（必须如此，它们要发给模型）。直接当用户气泡画出来，
         // 用户切回会话会看到「自己说过」一段根本没打过的字——实测会以为
         // 账号串了或被改了记录。这里按系统行渲染，内容仍完整保留。
-        if (/^\[(自动续跑|系统提示)\]/.test(m.text)) {
-          var first = esc(m.text.split('\n')[0].slice(0, 120));
-          addSysLine('·', first, '', '');
+        if (isGoalInjection(m.text)) {
+          // 不再截断到 120 字：注入文案本身是多行的（续跑指令后面带着整段
+          // [完成审计] 提示），截掉就再也看不到原文。系统行没有展开机制，
+          // 所以整段放进这一行，并保留换行（.sys 默认把换行折成空格，
+          // 全塞成一行读不出结构）。
+          var injLine = addSysLine('·', esc(m.text), '', '');
+          var injBody = injLine && injLine.querySelectorAll('span')[1];
+          if (injBody) injBody.style.whiteSpace = 'pre-wrap';
           return;
         }
         var u = document.createElement('div');
         u.className = 'msg';
         u.innerHTML = '<div class="text">' + esc(m.text) + '</div>';
+        // 历史正文里的附件清单块（- 图片：<路径>）也要画出缩略图：
+        // 否则切回会话 / 重载窗口后只剩一段路径文本，看不到自己发过的图。
+        // 没有该块的旧消息 → 一个节点都不加。
+        addMsgThumbs(u, attachPathsInText(m.text));
         attachCopy(u, m.text);
         convo.appendChild(u);
       } else if (m.role === 'system') {
@@ -6257,6 +6861,8 @@ rm -rf .narnat/data/sessions/old-3.json</div>
         convo.appendChild(n);
       } else {
         // 助手消息不套 .text（.text 是用户消息的容器，带左侧竖线）
+        // 思考必须画在正文**之前**，顺序与当时流式出现的顺序一致
+        if (thinkText) addHistoryThink(thinkText);
         var a = document.createElement('div');
         a.className = 'msg assistant';
         a.innerHTML = markdownInline(m.text);
@@ -6264,10 +6870,10 @@ rm -rf .narnat/data/sessions/old-3.json</div>
         convo.appendChild(a);
       }
     });
-    // 历史只能看到最终正文：当时的思考块/工具行是流式事件，没有落进消息体
+    // 历史里的思考现在也在（见上面的 thinking 字段），只剩工具行没有落盘
     if (msgs.length > 4) {
       sysLine('·', '已加载 ' + msgs.length + ' 条历史消息',
-        '思考与工具行只保留在当时的运行记录里', '');
+        '工具行只保留在当时的运行记录里', '');
     }
     // 刚进入/加载一个会话，用户期待停在最新一条
     scrollBottom(true);
@@ -6410,7 +7016,15 @@ rm -rf .narnat/data/sessions/old-3.json</div>
     } else if (p.action === 'sessionDelete') {
       // 面板里删除是立即生效的（后端没有「退出时清理」这个时机），
       // 所以文案不能说「退出时生效」——那会让用户以为文件还在。
-      sysLine('✓', '已删除会话' + (p.name ? '：' + esc(p.name) : ''), '', 'ok');
+      // broken：删掉的是列表里根本看不到的损坏文件（JSON 截断，或能读成
+      // JSON 但顶层不是对象）。说成「已删除会话：X」用户会以为自己删了
+      // 一条正常会话，实际那条记录早就不在列表里了。
+      if (p.broken) {
+        sysLine('✓', '已清理损坏的会话文件' + (p.name ? '：' + esc(p.name) : ''),
+          '它结构不合法、列表里看不到，现已删除，这个名字可以重新使用', 'ok');
+      } else {
+        sysLine('✓', '已删除会话' + (p.name ? '：' + esc(p.name) : ''), '', 'ok');
+      }
       // 删的若是当前会话，后端已切回游离态；CUR 必须跟着走，
       // 否则列表里高亮的还是那个已经不存在的会话。
       // 对话区也必须清：后端已经没有这段上下文了，屏幕上却还留着整段内容，
@@ -6984,6 +7598,28 @@ rm -rf .narnat/data/sessions/old-3.json</div>
 
   /* ---------- 事件分发 ---------- */
 
+  /**
+   * 只读状态快照，给宿主回归测试用（与 window.__narnatBranchUnlock 同一种做法：
+   * 不改渲染、只在窗口上挂一个读取入口）。有了它，测试可以断言
+   * 「CUR 真的切过去了」「附件列表里就是那两条路径」，
+   * 而不是从按钮文字反推内部状态。
+   */
+  window.__narnatState = function(){
+    return {
+      CUR: CUR,
+      curIsChild: CUR_IS_CHILD,
+      real: REAL,
+      lastSaved: lastSavedKey,
+      // 会话列表就在闭包里，没法从外面读：给测试一个只读快照，
+      // 才能断言「一条畸形 session/list 之后 SESS 没被清空」，
+      // 而不是从抽屉的 DOM 反推（渲染与数据正是可能不一致的那两半）。
+      sessions: SESS.map(function(s){ return { name: s.name, children: (s.children || []).length }; }),
+      attach: ATCH.map(function(a){
+        return { path: a.path, name: a.name, kind: a.kind, hasThumb: !!a.dataUrl };
+      })
+    };
+  };
+
   window.addEventListener('message', function(ev){
     var msg = ev && ev.data;
     if (!msg || typeof msg.type !== 'string') return;
@@ -7030,7 +7666,12 @@ rm -rf .narnat/data/sessions/old-3.json</div>
       case 'stats': applyStats(msg.params || {}); break;
       case 'error': notifyError(msg.params || {}); break;
       case 'session/list': applySessionList(msg.params || {}); break;
+      case 'session/saved': applySessionSaved(msg.params || {}); break;
       case 'session/result': applySessionResult(msg.params || {}); break;
+      case 'attach/picked': atchOnReply(msg.params || {}); break;
+      case 'attach/checked': atchOnReply(msg.params || {}); break;
+      case 'attach/saved': atchOnReply(msg.params || {}); break;
+      case 'attach/thumbResult': atchOnReply(msg.params || {}); break;
       case 'command/result': applyCommandResult(msg.params || {}); break;
       case 'config/result': applyConfigResult(msg.params || {}); break;
       case 'chat/result': applyChatResult(msg.params || {}); break;

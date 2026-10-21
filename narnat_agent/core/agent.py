@@ -67,6 +67,9 @@ class Agent:
                     result = self._ui.dispatch_command(cmd, args)
                     if int(result) == 2:
                         self._auto_save.on_exit()
+                        # 退出落盘不得依赖后台的 LLM 命名（等不到就当没存）：
+                        # 这里同步再落一次，游离态那段也能存下来
+                        self._mgr.exit_flush()
                         self._logger.info("core.agent", "用户退出")
                         # os._exit 不走 finally：MCP 服务端子进程在此显式回收
                         self._parts.mcp_manager.cleanup()
@@ -104,6 +107,8 @@ class Agent:
                         continue
 
                 # 4. 追加用户消息
+                #    （压缩路径不必在此追加：compress() 在压缩开始前就已把它写进
+                #    消息列表，否则压缩窗口内退出时这句话不在列表里、留不下来）
                 if not compress_ok:
                     self._msg_manager.repair()
                     self._msg_manager.append_user(stripped)

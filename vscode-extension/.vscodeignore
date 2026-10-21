@@ -13,3 +13,12 @@ bin/narnat_runtime/**
 output/**
 # 用户自己的配置与数据不该随扩展分发
 .narnat/**
+# 本地浏览器预览入口：插件运行时不加载它（webview 用的是 media/ 下的产物），
+# 进包只是白占体积，还会让装完的人在扩展目录里看到一堆开发用文件。
+preview.html
+# 上一次打包的产物不能被打进新的包，否则 vsix 会自己套自己越滚越大
+*.vsix
+package-lock.json
+# 跨平台残留
+**/.DS_Store
+**/Thumbs.db

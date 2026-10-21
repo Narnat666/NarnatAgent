@@ -344,10 +344,21 @@ def _find_project_root() -> str:
             return exe_dir
         return exe_dir
 
-    # 4. 开发模式：从 cwd 向上查找
+    # 4. 开发模式：从 cwd 向上查找。
+    #    但用户主目录这一层的 .narnat 不是项目配置：装过 vsix/bundled 版的人，
+    #    HOME 下已被自动生成过一份默认配置（接口密钥为空）。此后在 HOME 子树里的
+    #    项目用源码启动，向上查找会一路走到 HOME、读到这份空 Key 配置——表现为
+    #    401，且在工作区里填 Key 完全不生效（实测 --cwd %TEMP% 时返回 C:\Users\<user>）。
+    #    例外：cwd 本身就是主目录时照旧用它（直接在主目录启动是合法用法）。
     cwd = os.getcwd()
+    home = os.path.expanduser("~")
+    home_key = _norm_path(home) if home else ""
+    if home_key and _norm_path(cwd) == home_key:
+        return cwd
     candidate = cwd
     for _ in range(10):
+        if home_key and _norm_path(candidate) == home_key:
+            break   # 走到主目录这层：跳过它的 .narnat，别再往上/往主目录取配置
         if os.path.isdir(os.path.join(candidate, NARNAT_DIR)):
             return candidate
         parent = os.path.dirname(candidate)
@@ -355,6 +366,11 @@ def _find_project_root() -> str:
             break
         candidate = parent
     return cwd
+
+
+def _norm_path(p: str) -> str:
+    """路径归一化（Windows 大小写不敏感 + 去掉多余分隔符），供主目录比对用。"""
+    return os.path.normcase(os.path.normpath(p))
 
 
 def _coerce(v, target_type):
@@ -965,6 +981,7 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
                                 "启用": True,
                                 "强度": "high",
                                 "强度选项": {"high": "高", "max": "全开"},
+                                "回传": False,
                             },
                             "LLM重试次数": 3,
                         },
@@ -976,6 +993,7 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
                             "货币路径": "balance_infos.0.currency",
                         },
                         "联网搜索": {
+                            "provider": "mcp",
                             "key": "",
                             "url": "https://api.anysearch.com/mcp",
                             "auth": "x-api-key",

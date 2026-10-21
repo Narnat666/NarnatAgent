@@ -1,14 +1,19 @@
-"""WebSearch工具 —— 通用 MCP 搜索客户端
+"""WebSearch工具 —— 联网搜索（MCP 搜索服务器 / DeepSeek 官方 Search REST）
 
 依赖:
-  - 任意 MCP 搜索服务器（默认 AnySearch）
+  - 任意 MCP 搜索服务器（默认 AnySearch），或 DeepSeek 官方联网搜索 API
 
 经 MCP Streamable HTTP 协议调用：McpHttpClient 握手(initialize) → 列工具(tools/list)
 → 按配置解析工具与参数 → 调用(tools/call)。JSON/SSE 响应、会话头、超时均由
 McpHttpClient 承担，本模块不碰 HTTP 细节。
 
-各服务器的工具名/参数名不同，一律由配置指定（不猜）；参数类型（数组/标量）查工具
-inputSchema 决定。配置（narnat.json "联网搜索"，缺项即报错；旧字段名不识别）:
+provider 选择（narnat.json "联网搜索" 的 provider 字段）:
+  - 缺失 / "mcp": 下面这套 MCP 契约（默认）
+  - "deepseek":    DeepSeek 官方 Search REST，见 deepseek.py
+  - 其它值:        报错并列出可用值
+
+MCP 契约：各服务器的工具名/参数名不同，一律由配置指定（不猜）；参数类型（数组/标量）
+查工具 inputSchema 决定。配置（narnat.json "联网搜索"，缺项即报错；旧字段名不识别）:
   - key:          API key；空 = 无鉴权服务器
   - url:          MCP 端点 URL
   - auth:         认证方式：x-api-key / bearer / 自定义头名
@@ -28,6 +33,7 @@ from typing import Dict, List, Tuple
 from ...mcp.client import McpError
 from ...mcp.http_client import McpHttpClient
 from ..exec_signal import has_error
+from . import deepseek
 
 
 # ── 搜索配置（原模块级全局收敛为类成员）──
@@ -315,13 +321,32 @@ def _fingerprint(cfg: _Config) -> str:
                       sort_keys=True, ensure_ascii=False)
 
 
-def _read_config(api_keys) -> _Config:
+_PROVIDERS = ("mcp", "deepseek")
+
+
+def _provider_name(keys) -> str:
+    """provider 字段：缺失/"mcp" = 现有 MCP 行为；"deepseek" = 官方 Search REST"""
+    raw = keys.get("provider") if isinstance(keys, dict) else None
+    if raw is None:
+        return "mcp"
+    name = str(raw).strip().lower()
+    if not name:
+        return "mcp"
+    if name not in _PROVIDERS:
+        raise McpError(f"provider 值 '{raw}' 不被识别（可用: mcp / deepseek）")
+    return name
+
+
+def _read_config(api_keys):
     """按 narnat.json "联网搜索" 读配置；字段缺失/非法即报错并指出缺什么
 
     只认当前字段名（旧字段名如 websearch_url 一律不识别）：
     url/auth/tool/query_params/count_param 必填；key（空=无鉴权）与 args 可选。
+    provider="deepseek" 时改读 DeepSeek 配置（返回 deepseek.Config）。
     """
     keys = api_keys or {}
+    if _provider_name(keys) != "mcp":
+        return deepseek.read_config(keys)
     missing = [name for name in ("url", "auth", "tool",
                                  "query_params", "count_param")
                if name not in keys]
@@ -473,6 +498,19 @@ def _build_arguments(conn: _Connection, query: str, num: int) -> Dict:
 
 # ── 主入口 ──
 
+def _search_deepseek(cfg: deepseek.Config, query: str, num: int) -> str:
+    """DeepSeek 路径：请求 → 结果转同构结构 → 沿用 _render 的排序/条数/格式"""
+    try:
+        text = deepseek.search(cfg, query, num, SearchConfig.timeout)
+        results = deepseek.to_results(text)
+    except Exception as e:
+        return f"[错误: 搜索失败: {e}]"
+    if not results:
+        return "[无搜索结果]"
+    results.sort(key=lambda r: _relevance_score(r, query), reverse=True)
+    return _format_results(results[:num])
+
+
 def execute(query: str, num: int = 5, _tool_context=None) -> str:
     """
     联网搜索。
@@ -492,11 +530,19 @@ def execute(query: str, num: int = 5, _tool_context=None) -> str:
         return "[错误: num需为正整数]"
     if num <= 0:
         return "[错误: num需为正整数]"
+    requested = num
     # 上限20：结果逐条灌给LLM，超大num既拖慢响应又浪费配额，且全局截断会砍掉尾部
     num = min(num, 20)
     # 每次调用从 tool_context 读取配置（不缓存到全局，避免跨调用残留）
     try:
         cfg = _read_config(_tool_context.api_keys if _tool_context else None)
+    except Exception as e:
+        return f"[错误: 搜索失败: {e}]"
+    if isinstance(cfg, deepseek.Config):
+        # DeepSeek 的条数由 API 的 1~50 约束（count），故传未截到 20 的原始 num
+        return _search_deepseek(cfg, query, requested)
+
+    try:
         conn = _get_connection(cfg)
     except Exception as e:
         return f"[错误: 搜索失败: {e}]"
@@ -516,4 +562,9 @@ def execute(query: str, num: int = 5, _tool_context=None) -> str:
     # 失败语义丢失（UI 不显示失败、AI 可能把错误文档链接当结果）。
     if has_error(text):
         return text
+    # 服务端不守 isError 规范：回 200 且 content 里是 {"error":{...}} 错误体。
+    # 判定与 DeepSeek 路径同源（deepseek.server_error，唯一定义），同样不得当正文渲染
+    detail = deepseek.server_error(text)
+    if detail:
+        return f"[错误: 搜索失败: 服务端错误: {detail}]"
     return _render(text, query, num)

@@ -111,9 +111,50 @@ $p = [Environment]::GetEnvironmentVariable('Path','User')
 
 ### 1. 编译
 
-从源码编译为单文件二进制。
+从源码编译为单文件二进制。两条路：`bash build.sh`（一键，产物汇总到 `dist/`，推荐）与 `python build.py`（只编译 exe，产物留在 `output/`）。
 
-**一键编译（Windows / Linux 通用）**
+#### 一键构建（推荐）
+
+`bash build.sh` 一条龙：同步界面 → 编译 exe → 打包内嵌 exe 的 vsix → 汇总到 `dist/` 并自检。关键校验（exe 可执行、支持 `--rpc`、RPC 方法集与源码一致）任一不过就当场中止——不会把坏 exe 复制进 `vscode-extension/bin/`，也不会覆盖上一份可用的 vsix。
+
+```bash
+bash build.sh                              # 一条龙：同步界面 → 编译 → 打包 → 自检
+bash build.sh --exe-only                   # 只编译 exe（约 10~30 分钟）
+bash build.sh --vsix-only                  # exe 编译好了，只重打插件包（要求 output/narnat.exe 已存在）
+bash build.sh --skip-exe D:/x/narnat.exe   # 用已有的 exe 打包，不编译
+bash build.sh --exe-only --jobs 4          # 指定并行编译任务数
+bash build.sh --dry-run                    # 只打印将要执行的命令，不实际执行
+bash build.sh --help                       # 全部参数、产物与退出码
+```
+
+产物（`dist/`）：
+
+```
+dist/narnat.exe                   # 单文件可执行程序（Linux 上为 dist/narnat）
+dist/narnat-vscode-<版本>.vsix    # 内嵌上面这个 exe 的 VSCode 插件包
+```
+
+安装插件（插件内嵌后端，装好后只需配置 API Key，不必另装 Python 或 exe）：
+
+```bash
+code --install-extension dist/narnat-vscode-<版本>.vsix
+```
+
+未装 `code` 命令时，在 VSCode 里走 `扩展` → 右上 `…` → `从 VSIX 安装…` → 选中该 `.vsix` 文件，然后重载窗口。
+
+退出码（与 `bash build.sh --help` 一字不差）：
+
+```
+退出码：
+  0 成功   1 构建步骤失败   2 参数错误   3 缺少依赖（python/node/npm/vsce）
+  4 前置产物缺失（应为 output/narnat.exe）
+  某个步骤失败时会先打印失败的那条命令与它的子命令原始退出码（供排查），
+  脚本自身的退出码始终按上表返回：构建步骤一律 1，不透传子命令的码。
+```
+
+> `--exe-only` 不打包 vsix，因此不要求 Node.js / npm / vsce；只有打包步骤（默认流程、`--vsix-only`、`--skip-exe`）才需要它们。
+
+#### 只编译 exe（python build.py，Windows / Linux 通用）
 
 ```bash
 python build.py                  # 默认：解压目录固定在产物旁 narnat_runtime/<版本>/，同版本缓存复用
@@ -121,7 +162,7 @@ python build.py --runtime tmp    # 解压目录放系统临时目录：每次启
 python build.py --jobs 8 --assume-yes   # 并行任务数（默认 CPU 核数）；无人值守自动确认下载提示
 ```
 
-`build.py` 自动读取 `main.py` 的 `__version__` 作为 `--product-version`；beside 模式（默认）下会先自动给 Nuitka 打补丁（见下节）。产物 `output/narnat.exe`（Linux 为 `output/narnat`）。
+`build.py` 自动读取 `main.py` 的 `__version__` 作为 `--product-version`；beside 模式（默认）下会先自动给 Nuitka 打补丁（见下节）。产物 `output/narnat.exe`（Linux 为 `output/narnat`）——这是**单跑 `build.py`** 的位置；`bash build.sh` 会把它连同 vsix 一起汇总到 `dist/`，两条路径不冲突（`dist/narnat.exe` 由 `output/narnat.exe` 复制而来）。
 
 **前置：给 Nuitka 打补丁（beside 模式必需，build.py 会自动执行）**
 
@@ -156,7 +197,7 @@ python -m nuitka --onefile --output-dir=output --output-filename=narnat.exe \
 
 > 首次编译会提示下载 Dependency Walker（Python 扩展模块依赖分析工具，下载一次后缓存）；无人值守环境可在命令中加 `--assume-yes-for-downloads` 自动确认。
 
-产物 `output/narnat.exe`，约 39MB。
+产物 `output/narnat.exe`，约 39MB（手动编译的产物留在 `output/`；一键构建由 `build.sh` 汇总到 `dist/`）。
 
 > **运行时解压目录（重要）**：onefile 程序每次启动会解压约 157MB 运行时文件。Nuitka 默认解压到 `%TEMP%\onefile_<PID>_...`、退出即删——**运行期间该目录被清理（清 C 盘 / 清临时文件）会导致程序立刻崩溃**，被强杀时还会把整个目录残留在 C 盘。上面命令中的 `--onefile-tempdir-spec="{PROGRAM_DIR}/narnat_runtime/{VERSION}"`（配合上文 Nuitka 补丁）把解压目录固定到 **exe 旁**的 `narnat_runtime\<版本>\`：无论从哪个目录启动（双击、PATH 全局调用、子代理调度），都只在 exe 旁创建/复用一个 `narnat_runtime`，与启动目录无关；Nuitka 对该固定路径启用缓存复用：不删除、同版本后续启动免解压，且目录被整体误删后下次启动会自动重新解压。
 > - 目录始终创建在 exe 旁，C 盘/TEMP 清理不会命中它，与系统临时文件彻底隔离；
@@ -195,7 +236,7 @@ Linux 上推荐直接用一键脚本 `python build.py`（自动打补丁、自�
 
 ## 运行
 
-源码运行 `python main.py`，编译版直接执行 `output/` 下的产物（Windows 为 `narnat.exe`）。命令行参数：
+源码运行 `python main.py`，编译版直接执行产物（`python build.py` 单跑在 `output/`；`bash build.sh` 汇总到 `dist/`，两者文件名相同，Windows 为 `narnat.exe`）。命令行参数：
 
 | 参数 | 说明 |
 |------|------|
@@ -264,7 +305,7 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
       "启用": true,                             // 关闭则不传 thinking 参数
       "强度": "high",                           // 当前生效值
       "强度选项": { "high": "高", "max": "全开" }, // /thinking 可选值 → 显示名
-      "回传": true                              // 可选，默认 true；思考内容按厂商契约回传（/thinkback 切换）
+      "回传": false                             // 默认 false；开启才按厂商契约把思考内容随请求回传（/thinkback 切换）。关闭时思考仍写入会话 json，只是不发给模型
     },
     "LLM重试次数": 3                            // 网络类错误的重试次数（1-10，超出按边界钳制）
   },
@@ -278,10 +319,12 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
     "货币路径": "balance_infos.0.currency"
   },
 
-  // ── 联网搜索（WebSearch 接入的 MCP 服务器）──
-  // WebSearch 可接任意 MCP 搜索服务器；工具名/参数名各服务器不同，按目标服务器实际填写（不猜）。
-  // 除 key / args 外均为必填，缺项会报错并列出缺失字段名（旧字段名不再兼容）
+  // ── 联网搜索（WebSearch 接入：MCP 搜索服务器 / DeepSeek 官方 Search）──
+  // provider 选择形态（"mcp" / "deepseek"），两种形态的完整示例见下方「联网搜索的两种形态」。
+  // 本段为 mcp 形态：WebSearch 可接任意 MCP 搜索服务器；工具名/参数名各服务器不同，按目标服务器实际填写（不猜）。
+  // 除 provider / key / args 外均为必填，缺项会报错并列出缺失字段名（旧字段名不再兼容）
   "联网搜索": {
+    "provider": "mcp",                          // 默认 mcp（省掉该键等价）；"mcp" | "deepseek"
     "key": "",                                  // API key；留空 = 无鉴权服务器也可用
     "url": "https://api.anysearch.com/mcp",     // MCP 端点 URL
     "auth": "x-api-key",                        // 认证方式：x-api-key / bearer / 自定义头名
@@ -366,11 +409,50 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
 
 `"界面"` 采用「色板 + 角色引用」两级结构：`"颜色"` 定义具名色值，其余分组引用色名或十六进制色值，配方支持空格分隔组合（如 `"bold 蓝"`、`"italic dim 次文字"`）。分组名支持中文别名（标注/标记、差异/对比、框架）。仅支持此格式，旧版扁平格式（`"用户输入色"`、`"AI输出色"` 等键）不再兼容。
 
+#### 联网搜索的两种形态
+
+`联网搜索.provider` 决定 WebSearch 走哪条通道：`"mcp"`（默认，省略该键等价）接 MCP 搜索服务器，`"deepseek"` 接 DeepSeek 官方 Search REST。两形态共用同一套结果解析与排版（相关性排序、条数控制、`[无搜索结果]` / `[错误: 搜索失败: …]` 文案），换形态不影响 AI 侧的调用方式。
+
+**形态一 · `provider: "mcp"`（默认）**：MCP 握手 → 列工具 → 按配置解析工具名与参数名 → 调用。工具名/参数名各服务器不同，一律按目标服务器实际填写（不猜），参数类型（标量/数组）查工具的参数表决定。
+
+```jsonc
+"联网搜索": {
+  "provider": "mcp",                          // 可省略（默认即此）
+  "key": "",                                  // API key；留空 = 无鉴权服务器也可用
+  "url": "https://api.anysearch.com/mcp",     // MCP 端点 URL
+  "auth": "x-api-key",                        // 认证方式：x-api-key / bearer / 自定义头名
+  "tool": "search",                           // 搜索工具名；空 = 连接后报错列出服务器工具表
+  "query_params": ["query"],                  // 查询词填入的参数名（可多个；数组型参数自动包成 ["查询词"]）
+  "count_param": "max_results",               // 结果数量参数名；"" = 不传
+  "args": {}                                  // 可选，附加固定参数；仅工具参数表声明的键才传入
+}
+```
+
+**形态二 · `provider: "deepseek"`**：`POST https://api.deepseek.com/v1/tools/search`，`Authorization: Bearer <key>` 鉴权，`count` 取值 1~50（超出按边界钳制）。该形态下 `auth` / `tool` / `query_params` 不参与（DeepSeek 只支持 Bearer、请求体字段固定）；`need_content` / `ori_question` / `localization` 一律从 `args` 传，响应里的 `results` 被转成与 MCP 路径同构的「标题 + URL + 描述」。
+
+```jsonc
+"联网搜索": {
+  "provider": "deepseek",                     // 选 DeepSeek 官方 Search
+  "key": "sk-xxxxxxxx",                       // 必填，空则报错；可直接复用「智能体」段的接口密钥
+  "url": "https://api.deepseek.com/v1/tools/search",  // 可省略，默认即此地址
+  "count_param": "count",                     // 可省略，请求体里的数量字段名，默认 count；"" = 不传
+  "args": {                                   // 可选，以下三项都在 args 里
+    "need_content": false,                    // 是否取回正文 content，默认 false
+    "ori_question": "",                       // 原始提问，非空才下发
+    "localization": "1.2.3.4"                 // 搜索地域：必须是合法 IP 地址，不填则不下发
+  }
+}
+```
+
+> `args.localization` 要填**合法 IP 地址**（如 `"1.2.3.4"`）：实测传 `"zh"` 这类地域码会被服务端以 HTTP 400 拒绝；不写该键则请求体里不带 `localization`。
+
 #### thinking 参数自动适配
 
 thinking 参数按 `(协议, 模型前缀)` 由内置映射表自动翻译为对应厂商格式（DeepSeek / GLM / Kimi / MiMo / Qwen / GPT / Claude），无需手动写 `extra_body`。换模型只需改 `"智能体"` 分组字段，并通过 `/mode` 或 `"模型.列表"` 切换。
 
 思考回传（`思考.回传`）同样按厂商契约自动选择格式：Anthropic 协议回传 thinking 内容块（Claude 额外携带签名）、OpenAI 协议回传 `reasoning_content`、官方不要求回传的厂商（GPT / Qwen）不回传——DeepSeek / Kimi / MiMo 工具轮次不回传会 400，由映射表兜底。`/thinkback` 可随时切换并写入 narnat.json。
+
+**捕获与回传解耦**：无论 `/thinkback` 是开是关，模型产出的思考内容都照常捕获、落盘到会话 json（assistant 消息的 `thinking` 字段），RPC 形态下 `thinking/*` 事件也照常下发；开关只决定构造请求时要不要把它放回 `messages` 发给模型（默认关闭 = 不回传）。回传侧另有一层保护：只有工具调用轮的思考随请求回传，纯文本轮的思考被剥离（官方 harness 规则，省 token）。
 
 ### narnat.md
 
@@ -478,7 +560,7 @@ narnat_agent/
 | Terminal | 多终端持久 SSH（最多 5 个），支持远程命令执行、设备间文件传输 |
 | Serial | 多终端持久串口（最多 5 个），扫描/连接/交互 |
 | MCP | MCP 服务器管理：按需连接外部 MCP 服务（connect 连接 / disconnect 断开，详见「MCP 服务器」） |
-| WebSearch | 联网搜索（任意 MCP 搜索服务器；工具名/参数名在 `联网搜索` 段按服务器配置） |
+| WebSearch | 联网搜索（MCP 搜索服务器 / DeepSeek 官方 Search，由 `联网搜索.provider` 选择；MCP 形态下工具名/参数名在 `联网搜索` 段按服务器配置） |
 | TodoWrite | 任务列表管理（多步任务的计划建立与进度勾选） |
 | GoalComplete | 声明任务完成并提交结构化完成清单（要求→证据→状态），触发独立验证器复核（仅 `/goal` 目标模式开启时注入给 AI） |
 | mcp__… | MCP 服务器工具（由 `MCP` 工具 connect 时动态注册，命名 `mcp__<服务器名>__<工具名>`，详见「MCP 服务器」） |
@@ -504,7 +586,7 @@ narnat_agent/
 | `/done` | 完成分支探索，AI 总结后合并回父会话 | ChildSession |
 | `/skill <名称 \| 目录/文件.md>` | 加载技能文件（系统技能或项目技能） | 全部 |
 | `/thinking <强度>` | 切换思考强度（由 `思考.强度选项` 定义，写入 narnat.json） | 全部 |
-| `/thinkback [on\|off]` | 思考回传开关（无参数查看状态，写入 narnat.json） | 全部 |
+| `/thinkback [on\|off]` | 思考回传开关，默认关闭：思考内容**始终**记录到会话文件，开启后才随请求发给模型（无参数查看状态，写入 narnat.json） | 全部 |
 | `/mode <模型>` | 切换模型（由 `模型.列表` 定义，支持 Tab 补全，写入 narnat.json） | 全部 |
 | `/goal on [N]` | 开启目标模式（N=临时轮数上限） | 全部 |
 | `/goal off` | 关闭目标模式 | 全部 |

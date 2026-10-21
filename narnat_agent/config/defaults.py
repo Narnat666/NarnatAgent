@@ -137,7 +137,7 @@ DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_PROTOCOL = "anthropic"          # "openai" | "anthropic"
 DEFAULT_THINKING_ENABLED = True
 DEFAULT_THINKING_EFFORT = "high"      # high / max
-DEFAULT_THINKING_PASSBACK = True      # 思考回传：捕获并回传思考内容（DeepSeek思考模式契约）
+DEFAULT_THINKING_PASSBACK = False     # 思考回传：默认不回传（思考内容仍记录到会话，只是不发给模型）
 
 
 # ── Thinking 参数映射表 ──

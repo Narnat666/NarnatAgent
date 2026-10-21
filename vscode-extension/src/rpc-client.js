@@ -8,6 +8,25 @@ const SHUTDOWN_GRACE = 2000;
 const MAX_BUFFER = 8 * 1024 * 1024;
 
 /**
+ * 标记一条「确定没发出去」的错误。
+ *
+ * 调用方（extension.js）只有看到 sent === false 才允许对用户说“消息未发送”；
+ * 超时/连接中断但请求已写出时一律按「可能已执行」处理——后端可能已经把这一轮
+ * 跑完了，用户重发就是再执行一遍（实测：磁盘上出现两份同样的会话）。
+ * @param {Error} err
+ * @param {string} [method]
+ * @returns {Error}
+ */
+function notSent(err, method) {
+  err.sent = false;
+  err.writeFailed = true;
+  if (method) {
+    err.method = method;
+  }
+  return err;
+}
+
+/**
  * NDJSON 分帧器：按 \n 切行，跨 chunk 的半行留在 Buffer 里。
  * 用 Buffer 累积而不是字符串，chunk 切在多字节 UTF-8 字符中间也不会出现替换字符。
  */
@@ -110,7 +129,24 @@ class RpcClient {
     this._disposed = false;
     this._disposePromise = null;
     this._exitInfo = null;
-    /** @type {string[]} 子进程未启动前的写缓冲 */
+    /**
+     * 进程**根本没被创建**（spawn ENOENT/EACCES/ENOTDIR）。
+     *
+     * 与「进程起来后又退出」必须分开：后者写进 stdin 的字节可能已被处理，
+     * 只能按「可能已执行」上报；前者写进的是一个没有任何进程读的管道，
+     * 字节永远不会到达后端 —— 一律算「未写出」，否则界面会告诉用户
+     * 「可能已在执行」，而消息其实从未送达（用户因此不重发，消息就丢了）。
+     * @type {boolean}
+     */
+    this._spawnFailed = false;
+    /**
+     * 子进程未启动（或 stdin 暂不可写）时的写缓冲。
+     * 元素类型与 _write() 的入参 **必须一致**：都是未序列化的原始 message 对象，
+     * 不是 NDJSON 行串。序列化只在 _write() 内发生一次，flush 时把对象原样回灌
+     * _write()，绝不在这里二次 stringify（否则后端收到顶层 JSON 字符串，
+     * 回 Invalid Request，请求只能等满 timeout）。
+     * @type {object[]}
+     */
     this._queue = [];
   }
 
@@ -133,6 +169,8 @@ class RpcClient {
       // 待决请求 reject 全都挂在那个事件上（实测 exit 发出 0 次）。
       // 让 _onExit 自己去置位。
       this._exitInfo = { code: null, signal: null, error: err };
+      this._spawnFailed = true;
+      this._queue = [];
       this._emitLog('spawn 失败：' + (err && err.message ? err.message : err));
       process.nextTick(() => this._onExit(null, null, err));
       return this;
@@ -153,25 +191,46 @@ class RpcClient {
       });
     }
     child.on('error', (err) => {
-      this._emitLog('子进程错误：' + (err && err.message ? err.message : err));
-      this._failAll(err);
+      // pid 为 undefined = 进程从未被创建（ENOENT/EACCES/ENOTDIR 都走这里）。
+      // 此时 stdin 是个死管道：之前 write() 返回成功只代表「字节进了缓冲区」，
+      // 没有任何进程会读到它 —— 所以把所有待决请求复位成「未写出」。
+      const unsent = this._spawnFailed || !child.pid;
+      if (unsent) {
+        this._spawnFailed = true;
+        // 队列里是还没写出去的原始消息：进程都没起来，留着只会在下次 start()
+        // 时被 flush 成「已写出」，等于把没发出去的话报成可能已执行。
+        this._queue = [];
+      }
+      this._emitLog('子进程错误：' + (err && err.message ? err.message : err) +
+        (unsent ? '（进程未启动，本次写入一律按「未发出」处理）' : ''));
+      this._failAll(err, unsent);
       this._onExit(null, null, err);
     });
     // stdin 也要挂 error：后端被强杀后立刻写请求会抛 EPIPE，
     // 没有监听者时是 uncaught 异常，会直接把扩展宿主干掉（实测）。
     if (child.stdin) {
       child.stdin.on('error', (err) => {
+        const unsent = this._spawnFailed || !child.pid;
         this._emitLog('写入后端失败：' + (err && err.message ? err.message : err));
-        this._failAll(err);
+        this._failAll(err, unsent);
         this._onExit(null, null, err);
       });
     }
     child.on('exit', (code, signal) => this._onExit(code, signal, null));
 
+    // 队列里是原始 message 对象，直接交给 _write() 序列化（它期望对象入参）
     const queued = this._queue;
     this._queue = [];
-    for (const chunk of queued) {
-      this._write(chunk);
+    for (const message of queued) {
+      const state = this._write(message);
+      // flush 出去的请求要补记「确实写进 stdin 了」：调用方靠这个字段区分
+      // 「没发出去」与「发出去了但回执超时」（前者才能对用户说“未发送”）。
+      if (state === 'written' && message && message.id !== undefined && message.id !== null) {
+        const entry = this._pending.get(message.id);
+        if (entry) {
+          entry.written = true;
+        }
+      }
     }
     return this;
   }
@@ -184,6 +243,17 @@ class RpcClient {
   /** 子进程 pid，未启动时为 undefined */
   get pid() {
     return this._child && this._child.pid;
+  }
+
+  /**
+   * 进程是否从未启动成功（spawn ENOENT/EACCES/ENOTDIR）。
+   *
+   * 调用方靠它区分「后端崩了」（写出去的字节可能已被执行 → 只能说「可能已执行」）
+   * 与「后端根本没起来」（字节没被任何进程读过 → 必须说「没发出去」）。
+   * @returns {boolean}
+   */
+  get spawnFailed() {
+    return this._spawnFailed;
   }
 
   /**
@@ -302,39 +372,80 @@ class RpcClient {
 
   _request(method, params, timeoutMs, internal) {
     if (!internal && (this._disposed || this._exited)) {
-      return Promise.reject(new Error('RPC 未连接：' + method));
+      return Promise.reject(notSent(new Error('RPC 未连接：' + method), method));
     }
     const ms = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : this.timeout;
     const id = ++this._seq;
-    return new Promise((resolve, reject) => {
+    const entry = { method, resolve: null, reject: null, timer: null, written: false };
+    const promise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        const entry = this._pending.get(id);
-        if (!entry) {
+        if (!this._pending.has(id)) {
           return;
         }
         this._pending.delete(id);
-        reject(new Error('请求超时（' + ms + 'ms 无响应）：' + method));
+        const err = new Error('请求超时（' + ms + 'ms 无响应）：' + method);
+        err.method = method;
+        err.timeout = true;
+        err.timeoutMs = ms;
+        // 已写出但没等到回执：请求可能已被后端执行，调用方**不能**说“未发送”
+        err.sent = !!entry.written;
+        reject(err);
       }, ms);
       if (timer.unref) {
         timer.unref();
       }
-      this._pending.set(id, { method, resolve, reject, timer });
-      this._write({ jsonrpc: '2.0', id, method, params: params === undefined ? {} : params });
+      entry.resolve = resolve;
+      entry.reject = reject;
+      entry.timer = timer;
+      this._pending.set(id, entry);
+      const state = this._write({ jsonrpc: '2.0', id, method, params: params === undefined ? {} : params });
+      entry.written = state === 'written';
+      if (state === 'failed' || state === 'dropped') {
+        // 写入就失败了（EPIPE / 子进程不在）：确定没到达后端，立即报错不必等满超时
+        clearTimeout(timer);
+        this._pending.delete(id);
+        entry.written = false;
+        reject(notSent(new Error('请求未发出（写入失败）：' + method), method));
+      }
     });
+    // 写进 stdin 是**同步**发生的：promise 一返回，这条请求「有没有真的写出去」
+    // 就已经定了。宿主要在最坏情况（进程崩溃）的同步路径上判断这一点——
+    // 那时它只能拿到 promise，拿不到 reject 之后才有的 err.sent。
+    // 用 getter 而不是快照：请求可能先排队（子进程还没就绪）稍后才 flush 进stdin。
+    Object.defineProperty(promise, 'written', {
+      get: () => entry.written === true,
+      configurable: true
+    });
+    return promise;
   }
 
+  /**
+   * 唯一的序列化点：入参是原始 JSON-RPC 消息对象；_queue 里存的也是同一种对象，
+   * 所以任何时候一行 NDJSON 都只被 stringify 一次。
+   * @param {object} message
+   * @returns {'written'|'queued'|'failed'|'dropped'} 写入结果：
+   *   written=已写进 stdin；queued=暂存等子进程可用；failed=写入抛错；dropped=已退出丢弃
+   */
   _write(message) {
-    const line = JSON.stringify(message) + '\n';
+    if (this._spawnFailed) {
+      // 进程根本没起来：绝不能返回 written/queued，否则调用方会把这条算成
+      // 「已写出、可能已执行」——而它永远不会到达后端。
+      return 'failed';
+    }
     if (!this._child || !this._child.stdin || this._child.stdin.destroyed) {
       if (!this._exited && !this._disposed) {
-        this._queue.push(line);
+        this._queue.push(message);
+        return 'queued';
       }
-      return;
+      return 'dropped';
     }
+    const line = JSON.stringify(message) + '\n';
     try {
       this._child.stdin.write(line);
+      return 'written';
     } catch (err) {
       this._emitLog('写入失败：' + (err && err.message ? err.message : err));
+      return 'failed';
     }
   }
 
@@ -395,7 +506,14 @@ class RpcClient {
     this._events.emit('exit', this._exitInfo);
   }
 
-  _failAll(error) {
+  /**
+   * 把所有待决请求 reject 掉。
+   * @param {any} error 失败原因
+   * @param {boolean} [forceUnsent] 进程从未启动（spawn 失败）：写入记录一律作废。
+   *        write() 返回成功只代表字节进了管道缓冲，没有进程读过它，
+   *        必须复位成「未写出」，否则界面会说「可能已在执行」而消息其实没送到。
+   */
+  _failAll(error, forceUnsent) {
     if (!this._pending.size) {
       return;
     }
@@ -404,7 +522,16 @@ class RpcClient {
     this._pending.clear();
     for (const entry of entries) {
       clearTimeout(entry.timer);
-      entry.reject(new Error('请求失败（' + entry.method + '）：' + err.message));
+      const e = new Error('请求失败（' + entry.method + '）：' + err.message);
+      e.method = entry.method;
+      if (forceUnsent) {
+        entry.written = false;
+        e.writeFailed = true;
+      }
+      // 连接级失败：只有「本来就没写出去」才算确定未送达；写出去过的一律按
+      // 「可能已执行」上报，否则用户会重发、后端再执行一遍。
+      e.sent = !!entry.written;
+      entry.reject(e);
     }
   }
 

@@ -276,6 +276,23 @@ class MessageManager:
                 new_messages[-1] = merged
             else:
                 new_messages.append({"role": "user", "content": pending_input})
+        # 先归档、再替换（顺序不能反：replace_all 之后旧列表就不在 _messages 里了）。
+        # 归档范围 = 旧列表里「重建后消失」的消息：切点前的对话区、手动压缩
+        # 被剔除的尾部 user、尾部清洗掉的孤儿 tool。保留尾部（tail）原样留在当前
+        # 列表里，不入归档。
+        # 系统提示词那条（下标 0 的 system，MessageList 用 system_prompt 构造）
+        # 由新的 system_prompt + 摘要重建，不入归档——否则完整历史里会出现两份
+        # 系统提示词。**只排除这一条**：/done 合并进父会话的「# 子会话 [X] 结论」、
+        # /skill 注入的技能正文也都是 system 角色，但它们是历史内容，一刀切排除
+        # 会让它们在展示/落盘里整段消失（P0，实测压缩后全库 grep 不到）。
+        # 重复归档由 archive() 的 id 判重挡住。落盘/展示走 full_history()，模型
+        # 上下文仍只看当前列表——压缩只优化「发给模型的上下文」，不该动用户看得
+        # 见的历史。
+        retained_ids = {id(m) for m in tail}
+        self._messages.archive(
+            [m for i, m in enumerate(full_messages)
+             if id(m) not in retained_ids
+             and not self._messages.is_system_prompt(i, m)])
         self._messages.replace_all(new_messages)
 
         self._logger.info(

@@ -22,11 +22,16 @@ from typing import Any, Dict, List, Optional
 
 from .protocol import get_transport
 from .ui import RpcUI
-from ..core.session_callbacks import NoSession
+from ..config.defaults import DEFAULT_THINKING_PASSBACK
 
 PROTOCOL_VERSION = 1
 
 _MISSING = object()
+
+# 「换掉上下文」类操作等当前轮次收口的时长上限（秒）。
+# 不能无限等：这些请求是同步处理 stdin 一行的，等太久界面所有操作一起卡住；
+# 也不能太短：工具执行被 kill 后还要走完本轮收尾（append 中断结果、turn/end）。
+_TURN_SETTLE_TIMEOUT = 3.0
 
 _VERSION_RE = re.compile(r"""^__version__\s*=\s*["']([^"']+)["']""")
 
@@ -153,6 +158,39 @@ class RpcServer:
             emit("notice", {"text": text})
 
         _scb.set_notify_hook(_notice)
+
+        # 会话因「另一个实例也在写」而另存成新名字（X (2)）时，界面要把当前
+        # 会话指到内容实际所在的那个名字上——否则用户回到 X 只看到对方的内容，
+        # 会以为自己刚聊的那轮被吞了。core 不 import rpc，由这里注入。
+        def _on_state_resaved(name: str) -> None:
+            from .ui import emit as _emit_resaved
+
+            _emit_resaved("session/saved", {"name": name,
+                                            "current": self._current_path() or name,
+                                            "switched": True})
+
+        _scb.set_resaved_hook(_on_state_resaved)
+
+        # 自动保存完成 → 通知界面（协议 session/saved）。core 不 import rpc，
+        # 所以由这里注入回调；回调在自动保存的后台线程里执行。
+        # 不注册的话：磁盘上已有会话文件，进程内状态却仍是 NoSession，
+        # 界面一直显示「未保存」，也没人告诉用户这段内容已经存好了。
+        from .ui import emit as _emit
+
+        def _on_session_saved(name: str) -> None:
+            _emit("session/saved", {"name": name, "current": None, "switched": False})
+
+        def _on_session_switched(name: str) -> None:
+            _emit("session/saved", {"name": name,
+                                    "current": self._current_path() or name,
+                                    "switched": True})
+
+        try:
+            self._parts.auto_save_mgr.set_hooks(on_saved=_on_session_saved,
+                                                on_switched=_on_session_switched)
+        except Exception:
+            pass   # 钩子注册失败不该挡住后端启动
+
         self._methods = {
             "initialize": self._m_initialize,
             "chat/send": self._m_chat_send,
@@ -222,14 +260,46 @@ class RpcServer:
             self._finish()
 
     def _finish(self) -> None:
-        """收尾：会话落盘 + 延迟删除 + MCP 回收，最多等 1.2 秒后硬退出"""
-        # 先在当前线程把会话落盘：on_exit 里的 wait() 会等后台命名线程最多 5 秒，
-        # 而这里只给 1.2 秒——等命名先于落盘会让这次退出直接丢掉会话内容
-        #（实测：关窗口后磁盘上仍是上一轮的内容）。落盘是纯本地写、毫秒级。
+        """收尾：会话落盘 + 后台任务回收 + 延迟删除 + MCP 回收，最多等 1.2 秒后硬退出"""
+        # 先在当前线程同步落盘一次，且**不依赖 LLM 命名**：on_exit 里的 wait()
+        # 要等后台命名线程最多 5 秒，而这里只给 1.2 秒——命名没回来就 os._exit，
+        # 最后一段整段丢失、退出码还是 0（P0-3，实测 2/2）。exit_flush 走的是
+        # 「快速截断名 + unique_session_name + save_session」，纯本地写、毫秒级；
+        # 游离态与已命名会话/分支两种状态都覆盖，已经在磁盘上的那段不重复保存。
         try:
-            mgr = self._parts.session_mgr
-            if mgr.state.session_name():
-                mgr.on_auto_save()
+            self._parts.session_mgr.exit_flush()
+        except Exception as e:
+            # 退出时用户可能已经看不到界面，但日志要留痕
+            sys.stderr.write(f"[narnat] 退出前保存会话失败: {type(e).__name__}: {e}\n")
+            sys.stderr.flush()
+
+        # 队列里还有没被 agent 取走的输入（压缩窗口/长任务期间用户又发的话）：
+        # exit_flush 只能落盘消息列表里的内容，这些输入谁也存不到。必须给一行
+        # 可读提示——否则用户看到的是安静退出，那句话永久消失且毫无线索（P0）。
+        queue = getattr(self._ui, "_input_queue", None)
+        pending_n = queue.qsize() if hasattr(queue, "qsize") else 0
+        if pending_n:
+            sys.stderr.write(
+                f"[narnat] 退出时还有 {pending_n} 条输入未被处理，未能写入会话文件\n")
+            sys.stderr.flush()
+
+        # 压缩仍在进行就退出（用户刚发的那句话还没走完摘要）：同样不能静默。
+        # 这句话本身已在压缩开始前进了消息列表，exit_flush 能落盘；提示是为了让
+        # 「这一轮没跑完」有迹可循——退出码 0 + 零输出会让用户以为一切正常（P0）。
+        if getattr(self._ui, "_compressing", False):
+            sys.stderr.write("[narnat] 压缩未完成即退出，当前对话内容已落盘\n")
+            sys.stderr.flush()
+
+        # 后台任务回收必须同步做完：这里末尾是 os._exit(0)，不走任何
+        # finally/atexit，而 agent.run() 的 finally（cleanup_all）根本没机会跑。
+        # 漏在这一步会怎样（实测）：后端退出后它提交的 cmd.exe 仍在跑，
+        # ppid 指向一个已经不存在的进程——继续烧 CPU、继续改工作区。
+        # 只终止本进程自己 Popen 出来的任务（后台模块进程表里的 pid）。
+        try:
+            from ..tools.background import shutdown_cleanup as _bg_shutdown
+
+            killed = _bg_shutdown()
+            print(f"[narnat] 已强制终止 {killed} 个后台任务", file=sys.stderr)
         except Exception:
             pass
 
@@ -361,7 +431,9 @@ class RpcServer:
             "protocol": PROTOCOL_VERSION,
             "model": {"current": ai.model, "options": list(ai.model_options or [])},
             "thinking": {"effort": ai.thinking_effort,
-                         "options": dict(ai.thinking_options or {})},
+                         "options": dict(ai.thinking_options or {}),
+                         "passback": bool(getattr(ai, "thinking_passback",
+                                                  DEFAULT_THINKING_PASSBACK))},
             "goal": {"enabled": enabled, "maxRounds": int(max_rounds)},
             "plugins": self._plugins(),
             "session": self._session_brief(),
@@ -390,9 +462,9 @@ class RpcServer:
                 self._stats.fetch_balance(api_key, 1)
                 if self._stats.balance <= 0:
                     return
-                # 与 RpcStream.finish 走同一条下发通道（ui.emit），界面收到即显示
-                from .ui import emit as _emit
-                _emit("stats", self._ui.resolve_stats())
+                # 与 RpcStream.finish 走同一条下发通道（ui.emit_stats，内容相同则去重），
+                # 界面收到即显示
+                self._ui.emit_stats(self._ui.resolve_stats())
             except Exception:
                 pass   # 余额查不到不影响使用
 
@@ -448,7 +520,7 @@ class RpcServer:
         # 用户以为刚才那几十分钟的对话丢了（实测重载后对话区空白，
         # 只剩一行「已连接后端」）。历史本来就在内存里，顺手带走即可。
         try:
-            messages = _history_payload(self._mgr.get_messages())
+            messages = _history_payload(self._mgr.get_full_messages())
         except Exception:
             messages = []
         return {"current": current, "children": children,
@@ -596,7 +668,10 @@ class RpcServer:
                 return {"handled": True, "ok": False, "noop": False,
                         "lines": [str(e.message)], "stateChanged": ["session"]}
             return {"handled": True, "ok": True, "noop": False,
-                    "lines": ["已删除会话: " + res.get("name", target)],
+                    # broken：删的是列表里看不到的损坏文件，文案要如实说
+                    # 「清理」而不是「删除了某会话」，否则用户不知道发生了什么
+                    "lines": [("已清理损坏的会话文件: " if res.get("broken")
+                               else "已删除会话: ") + res.get("name", target)],
                     "wasCurrent": bool(res.get("wasCurrent")),
                     "stateChanged": ["session"]}
 
@@ -621,46 +696,85 @@ class RpcServer:
             "lines": lines,
             "stateChanged": _state_changes(command),
         }
-        # /cd 换了会话：必须把切换后的历史一起回给界面。
+        # /cd、/explore、/done 都换了当前会话：必须把切换后的历史一起回给界面。
         # 不回会怎样（实测）：顶栏 chip、抽屉高亮、后端 current 都切到了 B，
         # 对话区还显示 A 的消息——用户会在「B 的标题 + A 的内容」下继续提问，
         # 或以为历史丢了。session/switch 那条路径一直是回 messages 的，
-        # /cd 这条漏着。
-        if command == "cd" and handled and ok:
+        # 命令这条原来只有 /cd 带。
+        # /done 尤其不能漏：它把分支结论合并进父会话并 replace_messages，
+        # 前端不重画的话用户只看到一行「结论已合并」，对话区里却没有结论
+        #（P1，第 11 轮剧本实测）。
+        #
+        # 判据沿用本函数既有的两项（handled/ok 与 noop），不新造：
+        #   · ok：只有成功路径才带。失败（FAILED）也带的话，前端会把一次失败
+        #     当成「切换成功」去重画，与 R19 修好的 ok:false + 可读原因口径相悖。
+        #   · noop：执行了但无变更（如 /done 时分支没有新增量）不带。
+        # messages 用与 session/switch 完全相同的 _history_payload 口径，
+        # 前端画出来的结果与切会话一致。
+        if command in ("cd", "explore", "done") and handled and ok and not payload["noop"]:
             state = self._mgr.state
+            history = self._mgr.get_full_messages()
             payload["current"] = self._current_path()
             payload["isChild"] = bool(state.session_parent())
-            payload["messages"] = _history_payload(self._mgr.get_messages())
+            payload["messages"] = _history_payload(history)
+            # 合并进父会话的「# 子会话 [X] 结论」是 system 消息，_history_payload
+            # 对它保留了例外，所以结论就在上面这串 messages 里。
+            #
+            # 但前端的 command/result 渲染只对 command==='cd' 调 renderHistory
+            #（media/narnat.js: cdSwitched），仅带 messages 还画不出来——
+            # 实测：把带 messages 的 /done 回执喂给真实界面，#convo 里只有
+            # 命令行、.msg 节点数为 0。前端不在本轮允许改动的范围内，
+            # 所以把结论原文一并放进 lines：命令回执本来就是用户看得见的地方，
+            # 与终端形态的「结论已合并」不冲突（终端回执只有一行）。
+            if command == "done":
+                for msg in reversed(history):
+                    if (msg.get("role") == "system"
+                            and str(msg.get("content", "")).startswith("# 子会话 [")):
+                        payload["lines"] = list(lines) + str(msg["content"]).splitlines()
+                        break
+            # 游离态切走时，NoSession.enter 已把上一段兜底存成一条会话（P0：
+            # 默认 自动保存=false 时状态长期停在 NoSession，原来 /cd 会把刚聊的
+            # 整段丢掉、回执还说 ok:true）。存成了哪个名字必须让用户看得见——
+            # 终端那一行由 enter 直接打印（RPC 下被 exec_command 捕获进 lines），
+            # 这里再把同一个名字做成结构化字段，与 session/new 的 autoSaved 同口径。
+            if command == "cd":
+                auto = getattr(self._mgr, "_last_auto_saved", None)
+                if auto:
+                    payload["autoSaved"] = auto
         return payload
 
     # ── 方法：session ──
 
     def _m_session_list(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        from ..config.session_store import list_sessions_tree, session_tree_payload
+        from ..config.session_store import list_sessions_tree_checked, session_tree_payload
 
         show_all = params.get("all", False)
         if show_all is None:
             show_all = False
         if not isinstance(show_all, bool):
             raise RpcError(-32602, "session/list: params.all 必须是布尔值")
-        tree = list_sessions_tree(self._mgr.narnat_dir)
+        tree, list_err = list_sessions_tree_checked(self._mgr.narnat_dir)
         self._mgr.apply_delete_marks(tree)
         state = self._mgr.state
         payload = session_tree_payload(tree, state.session_name(),
                                        state.session_parent(), show_all=show_all)
         payload["isChild"] = bool(state.session_parent())
+        # 读不到会话目录时必须说出来：只回空 groups 等于告诉用户「你的会话全没了」。
+        # 契约：error 字段只在读失败时出现（非空字符串），此时 groups 可能为空或
+        # 不完整；空目录（真的没有会话）不带该字段。前端据此显示一行错误，
+        # 而不是把列表当空的。
+        if list_err:
+            payload["error"] = list_err
         return payload
 
     def _m_session_new(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """新建对话：回游离态 + 清空上下文（未保存的对话直接丢弃）。
 
-        若有轮次在跑，先打断再新建——用户点「新建对话」本意就是不要当前这段，
-        让他先手动点停止是多余的摩擦。
+        若有轮次在跑，先打断**并等它收口**再新建——用户点「新建对话」本意就是
+        不要当前这段，让他先手动点停止是多余的摩擦；但只打断不等待会让这一轮
+        后续的工具结果 append 进刚清空的新对话（P0，实测 9/13）。
         """
-        with self._turn_lock:
-            active = self._turn_active
-        if active:
-            self._ui.cancel_active()
+        self._settle_before_context_change("新建")
         # 先让轮末自动保存收尾：它可能在后台线程里正给这段内容命名落盘。
         # 不等它就 on_new，会各存一份（实测出现过两个同名会话）。
         auto = None
@@ -675,47 +789,68 @@ class RpcServer:
         # 界面据此告诉用户「已自动保存为 xxx」，而不是让人以为内容丢了。
         return {"current": None, "messageCount": len(self._mgr.get_messages()),
                 "autoSaved": auto or self._mgr._last_auto_saved,
-                "messages": _history_payload(self._mgr.get_messages())}
+                "messages": _history_payload(self._mgr.get_full_messages())}
+
+    def _preflight_switch_target(self, name: str):
+        """只读校验目标会话是否进得去。返回 (target, parent, error)。
+
+        必须在 cancel_active() **之前**做完：「切到不存在的会话」是个失败请求，
+        不该顺带把正在跑的这一轮打断（P1，实测：文案只说会话不存在，
+        用户那一轮却已经没了）。
+        判据用「文件是否存在」+ 沿用加载路径的原始错误文案，
+        与 on_enter() 的成功/失败口径一致（幽灵父、损坏文件都能如实报出）。
+        """
+        from ..config.session_store import load_session, session_exists
+
+        mgr = self._mgr
+        target, parent, err = mgr.resolve_session_name(name)
+        if err:
+            return None, None, err
+        if not target:
+            return None, None, f"会话不存在: {name}"
+        try:
+            exists = session_exists(mgr.narnat_dir, target, parent=parent)
+        except Exception:
+            exists = False
+        if exists:
+            return target, parent, ""
+        # 名字解析得到但磁盘上没有（幽灵父 / 损坏文件）：把加载路径的原话带回去
+        load_err = ""
+        try:
+            if parent is not None:
+                _msgs, load_err = mgr.load_child_with_boundary(target, parent)
+            else:
+                _msgs, load_err = load_session(mgr.narnat_dir, target)
+        except Exception as e:
+            load_err = f"读取会话失败: {e}"
+        return None, None, load_err or f"会话不存在: {name}"
 
     def _m_session_switch(self, params: Dict[str, Any]) -> Dict[str, Any]:
         name = self._require_str(params, "name", "session/switch")
-        # 有轮次在跑时必须先打断再切。
+        # 先校验目标存在，再决定要不要打断当前轮次：
+        # 目标不存在时这一轮不该被殃及（P1）。校验是纯读，不动任何状态。
+        _target, _parent, pre_err = self._preflight_switch_target(name)
+        if pre_err:
+            raise RpcError(-32000, pre_err)
+        # 有轮次在跑时必须先打断并等它收口再切。
         # 不打断会怎样：on_enter() 用 replace_all 就地换掉 MessageList，
         # 而正在跑的 agent_loop 持有同一个对象，继续 append_assistant /
         # append_tool_result —— 这一轮的正文和几十条工具记录全写进**新**会话，
         # 原会话只剩一句提问、永远得不到回答。不可恢复（实测 30 条工具结果串台）。
-        with self._turn_lock:
-            active = self._turn_active
-        if active:
-            self._ui.cancel_active()
-            # 等这一轮真正收尾（turn/end 回调会把 _turn_active 置 False），
-            # 否则 cancel 刚发出就换列表，仍在串台窗口里。
-            # 上限 2 秒：cancel 通常在百毫秒内生效，这段等待会挡住后续请求，
-            # 所以不能等太久；真等不到就照常切（此时 agent_loop 已被标记中断，
-            # 下一轮 append 前会检查 cancelled，污染窗口极小）。
-            deadline = time.time() + 2.0
-            while time.time() < deadline:
-                with self._turn_lock:
-                    if not self._turn_active:
-                        break
-                time.sleep(0.02)
-        # 切走之前先把游离态那一段兜底存下来。必须赶在 on_enter 之前：
-        # on_enter 用 replace_all 就地换掉 MessageList，之后拿到的已经是
-        # 目标会话的内容，原对话再也取不回来。
-        auto_saved = None
-        try:
-            if isinstance(self._mgr.state, NoSession):
-                auto_saved = self._mgr.state.carry_over()
-        except Exception:
-            auto_saved = None
+        self._settle_before_context_change("切换会话")
+        # 切走前先把游离态那一段兜底存下来：这件事由状态机自己做
+        # （NoSession.enter → carry_over，赶在 replace_messages 之前），
+        # 这里不再单独调一次——两处都调会把同一段内容存出两个文件
+        # （实测 "X.json" 与 "X (2).json" 各一份）。
         err = self._mgr.on_enter(name)
         if err:
             raise RpcError(-32000, err)
         return {"current": self._current_path(),
                 "messageCount": len(self._mgr.get_messages()),
                 "isChild": bool(self._mgr.state.session_parent()),
-                "messages": _history_payload(self._mgr.get_messages()),
-                "autoSaved": auto_saved}
+                "messages": _history_payload(self._mgr.get_full_messages()),
+                # 由 NoSession.enter 填（与 /cd 回执同一份结果）
+                "autoSaved": getattr(self._mgr, "_last_auto_saved", None)}
 
     def _rm_all_sessions(self) -> Dict[str, Any]:
         """面板形态的 /rm --all：把会话列表里所有根会话逐个删掉。
@@ -757,6 +892,38 @@ class RpcServer:
                 "lines": lines, "stateChanged": ["session"],
                 "wasCurrent": was_current, "current": self._current_path()}
 
+    def _delete_dangling_parent(self, name: str) -> Dict[str, Any]:
+        """删掉「父 json 已丢、只剩 <父>/ 子会话文件」的幽灵父会话。
+
+        父文件不在，delete_session 无从下手（回「会话不存在」），所以直接清整棵
+        子树：子会话 json 全删、空目录一并删掉，清完这个名字即可复用。
+        当前若停在这个幽灵父（或它的子会话）下，先复位状态再删：不复位的话
+        current 还指着刚被删掉的名字，下一次保存会把它写回磁盘（实测）。
+        成功给真实清理条数，失败抛带原因的 RpcError——没有回执用户只会重复点。
+        """
+        mgr = self._mgr
+        cur_parent = mgr.state.session_parent()
+        was_current = (self._current_path() == name) or (cur_parent == name)
+        if was_current:
+            self._settle_before_context_change("删除会话")
+            mgr.on_new()
+        # CLI 可能遗留同一目标待删标记，一并清掉
+        mgr.pending_deletes.discard((name, None))
+        try:
+            removed = _rm_session_tree(mgr.narnat_dir, name)
+        except OSError as e:
+            raise RpcError(-32000,
+                           f"删除会话失败：幽灵父「{name}」的文件被占用（{e}）。"
+                           f"请关闭占用它的程序后重试")
+        # 复查：rmtree 半途失败或文件被别的进程重建时不能报成功
+        if _is_dangling_parent(mgr.narnat_dir, name):
+            raise RpcError(-32000,
+                           f"删除未完成：幽灵父「{name}」下仍有子会话文件没能删掉"
+                           f"（可能被其它程序占用），请关闭后重试")
+        return {"deleted": True, "name": name, "parent": None, "ghost": True,
+                "childrenRemoved": removed, "wasCurrent": was_current,
+                "current": self._current_path()}
+
     def _m_session_delete(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """删除会话：允许删任意一个，并立刻落盘。
 
@@ -772,27 +939,20 @@ class RpcServer:
         name = self._require_str(params, "name", "session/delete")
         mgr = self._mgr
         target, parent, err = mgr.resolve_session_name(name)
+        # 幽灵父会话（父 json 已丢、<父>/ 下还有子会话文件）必须先于常规删除处理。
+        # resolve_session_name 对 ghost root 是「解析成功」（tree 里就有这一行），
+        # 于是常规流程去 delete_session 时找不到父文件、只回「会话不存在」，
+        # 子文件与目录永远清不掉、名字永远占着（实测 P1）。
+        ghost = None
+        if parent is None and target and _is_dangling_parent(mgr.narnat_dir, target):
+            ghost = target
+        elif _is_dangling_parent(mgr.narnat_dir, name):
+            # 子文件全是坏 JSON 时 tree 里推不出 ghost 行，resolve 会报「不存在」：
+            # 按入参再兜一次，否则这种残骸同样删不掉。
+            ghost = name
+        if ghost is not None:
+            return self._delete_dangling_parent(ghost)
         if err:
-            # 幽灵父会话（只剩子会话、父 json 已丢）：列表里可点、只能删。
-            # resolve_session_name 现在会给它一条带处置建议的提示（不再是
-            # 「会话不存在」），但删除这条路必须走得通——直接把整棵目录清掉。
-            if _is_ghost_parent(mgr.narnat_dir, name):
-                # 当前正停在这个幽灵父下（或它的子会话下）时要先复位：
-                # 不复位的话 current 还指着刚被删掉的名字，界面高亮一条
-                # 不存在的会话，下一次保存还会把它写回磁盘（实测）。
-                cur_parent = mgr.state.session_parent()
-                was_current = (self._current_path() == name) or (cur_parent == name)
-                if was_current:
-                    self._cancel_and_wait_turn()
-                    mgr.on_new()
-                mgr.pending_deletes.discard((name, None))
-                try:
-                    _rm_session_tree(mgr.narnat_dir, name)
-                except OSError as e:
-                    raise RpcError(-32000, f"删除会话失败: {e}")
-                return {"deleted": True, "name": name, "parent": None,
-                        "wasCurrent": was_current,
-                        "current": self._current_path()}
             # 目标是「只剩空目录」的残骸（目录里一个 json 都没有）时
             # resolve_session_name 会认不出来。这里兜底删掉这个空目录：
             # 否则用户永远清不掉它，磁盘上一直留个空壳（实测），
@@ -805,8 +965,12 @@ class RpcServer:
             # 于是 /rm 回「会话不存在」——文件永久残留，用户无从清理。
             # 这里直接按文件名删（只删会话库底下的直属 .json，不越界）。
             if _rm_broken_session_file(mgr.narnat_dir, name):
+                # broken：删掉的是列表里看不到的坏文件（JSON 截断，或能读成
+                # JSON 但顶层不是对象）。界面要据此说「清理了损坏文件」而不是
+                # 「删除了会话」——用户会疑惑自己删的是哪条看不见的会话。
                 return {"deleted": True, "name": name, "parent": None,
-                        "wasCurrent": False, "current": self._current_path()}
+                        "wasCurrent": False, "broken": True,
+                        "current": self._current_path()}
             # 还有一类：文件能解析，但文件名和里面的 name 字段不一致。
             # 它在列表里显示的是 name 字段，所以用户看得见、能进去，
             # 却怎么都删不掉（实测）。按 name 字段反查真实文件再删。
@@ -826,21 +990,12 @@ class RpcServer:
         was_current = (self._current_path() == full) or (
             parent is None and cur_parent == target)
         if was_current:
-            # 跑轮中删会话：必须先打断并等这一轮收尾。
+            # 跑轮中删会话：必须先打断并等这一轮收口。
             # 不等会怎样（实测）：on_new() 之后这一轮的正文还在往同一个
             # MessageList 里 append，落进空对话成为「没有提问的孤立回答」，
             # 下一次保存时一并写盘，上下文被污染。
-            # session/switch 早有这段等待，删除路径漏了。
-            with self._turn_lock:
-                active = self._turn_active
-            if active:
-                self._ui.cancel_active()
-                deadline = time.time() + 2.0
-                while time.time() < deadline:
-                    with self._turn_lock:
-                        if not self._turn_active:
-                            break
-                    time.sleep(0.02)
+            # 与 session/new、session/switch 走同一段收口逻辑。
+            self._settle_before_context_change("删除会话")
             mgr.on_new()
 
         err = delete_session(mgr.narnat_dir, target, parent=parent)
@@ -903,7 +1058,8 @@ class RpcServer:
         renaming_my_parent = (parent is None and cur_parent == target)
         err = rename_session(mgr.narnat_dir, target, to, parent=parent)
         if err:
-            raise RpcError(-32000, err)
+            raise RpcError(-32000, _rename_error_text(err, mgr.narnat_dir, to,
+                                                      parent=parent))
 
         # 改的正是当前所在会话：把状态指到新名字，
         # 否则下一轮自动保存会按旧名再写一个文件出来。
@@ -918,21 +1074,22 @@ class RpcServer:
         return {"renamed": True, "from": target, "to": to, "parent": parent,
                 "current": self._current_path()}
 
-    def _cancel_and_wait_turn(self) -> bool:
-        """有轮次在跑就先打断并等它收尾。返回是否确实打断过。
+    def _cancel_and_wait_turn(self, timeout: float = _TURN_SETTLE_TIMEOUT):
+        """有轮次在跑就先打断并等它收尾。返回 (是否确实打断过, 是否已收口)。
 
         凡是会**换掉 MessageList** 的操作都必须先调这个：
         正在跑的 agent_loop 持有同一个列表对象，换掉之后它的后续
         append_assistant/append_tool_result 会写进**新**会话，原会话
         永远只剩一句提问（实测不可恢复）。
 
-        原先只有 session/switch 与 session/delete 调了，explore / done / cd
-        三条同样换列表的路径都漏着——那三条实测都会串台。
+        第二返回值（是否收口）必须被检查：只打断不等待就换列表，
+        这一轮在换完之后才 append 的 tool 结果会落进新会话成为孤立的
+        `role:"tool"`（P0，复现 9/13），真实端点对之后每次请求都回 400。
         """
         with self._turn_lock:
             active = self._turn_active
         if not active:
-            return False
+            return False, True
         self._ui.cancel_active()
         # 隐式取消也要停后台任务：用户点了切会话/删除，那一轮派出去的子进程
         # 继续跑就等于「界面上停了、实际还在烧钱改文件」（实测）。
@@ -944,23 +1101,68 @@ class RpcServer:
         except Exception:
             pass
         # 等这一轮真正收尾（turn/end 回调把 _turn_active 置 False）。
-        # 上限 2 秒：cancel 通常百毫秒内生效，这段等待会挡住后续请求。
-        deadline = time.time() + 2.0
+        # 上限 timeout：cancel 通常百毫秒内生效，这段等待会挡住后续请求。
+        deadline = time.time() + timeout
         while time.time() < deadline:
             with self._turn_lock:
                 if not self._turn_active:
-                    break
+                    return True, True
             time.sleep(0.02)
+        with self._turn_lock:
+            return True, not self._turn_active
+
+    def _settle_before_context_change(self, action: str) -> bool:
+        """换掉上下文（新建/切换/删除会话）之前，先把当前轮次真正收口。
+
+        顺序必须是「打断 → 等收口 → 才动 MessageList」。
+        只打断不等待会怎样（P0，实测 9/13）：工具还在执行时点「新建对话」，
+        on_new() 先把列表清空，这一轮的工具结果随后才 append，落进新对话
+        成为孤立的 `role:"tool"`；之后每次请求都被真实端点回 400，
+        用户只看到「一发消息就报错」。
+        超时就按现状继续（不能把界面卡死），但必须告知——
+        否则用户遇到的就是「点了新建、新会话却坏了」且没有任何线索。
+
+        返回 True=已收口。
+        """
+        _interrupted, closed = self._cancel_and_wait_turn()
+        if not closed:
+            from .ui import emit
+
+            emit("notice", {"text": (
+                f"上一轮未完全收口（已等待 {_TURN_SETTLE_TIMEOUT:g} 秒），"
+                f"已强制{action}；若新会话里出现工具记录异常，请重新新建")})
+            return False
+        # 收口后仍可能残留「assistant 带 tool_calls 但缺 tool 回复」的孤立对
+        # （中断打断了工具结果回传）。走既有 repair 补齐，别另写一套：
+        # 不补的话这段内容落盘时就带着残缺序列，下次进入该会话首轮即 400。
+        # 无轮次在跑时同样调一次——repair 无事可做就是空操作，
+        # 但能兜住「上一轮早已收口、残缺序列留在列表里」的入口。
+        try:
+            self._parts.msg_manager.repair()
+        except Exception:
+            pass
         return True
 
     def _m_session_explore(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        name = self._require_str(params, "name", "session/explore")
+        # name 可以为空：不指定时由 core 用父会话内容自动命名（重名自动换序号）
+        name = self._require_str(params, "name", "session/explore", allow_empty=True)
         # explore 会 replace_messages：不先打断就串台（同 session/switch）
         self._cancel_and_wait_turn()
+        # 进入前先判「这个分支是不是已经存在」：已存在 = 继续之前的分支。
+        # core 的提示只打到 stdout，RPC 形态下 stdout 已改道到 stderr、前端
+        # 看不到那一行，所以结果里要明确带上 reentered/notice。
+        from ..config.session_store import session_exists
+        parent = self._mgr.state.session_name()
+        reentered = bool(name and parent
+                         and session_exists(self._mgr.narnat_dir, name, parent=parent))
         err = self._mgr.on_explore(name)
         if err:
             raise RpcError(-32000, err)
-        return {"current": self._current_path()}
+        payload = {"current": self._current_path()}
+        if reentered:
+            payload["reentered"] = True
+            payload["notice"] = f"已重新进入已有分支 {name}（继续之前的探索，/done 合并结论）"
+        return payload
 
     def _m_session_done(self, params: Dict[str, Any]) -> Dict[str, Any]:
         # done 会把结论合并回父会话并 replace_messages：不先打断就串台，
@@ -976,7 +1178,7 @@ class RpcServer:
         if err:
             raise RpcError(-32000, err)
         merged = 0
-        messages = self._mgr.get_messages()
+        messages = self._mgr.get_full_messages()
         for msg in reversed(messages):
             if msg.get("role") == "system" and "# 子会话 [" in str(msg.get("content", "")):
                 merged = len(str(msg.get("content", "")).encode("utf-8"))
@@ -1085,6 +1287,10 @@ def _history_payload(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     但它正是用户执行 /done 之后最想看到的东西。一并过滤掉的话，
     界面只显示「结论已合并」，对话区里却没有结论（实测），
     用户会以为合并失败或内容丢了。
+
+    assistant 项额外带上 `thinking`：该条消息有思考内容时才有这个键
+    （字符串，可能很长），没有则整键省略——界面靠键是否存在判断
+    要不要渲染「思考过程」。`text` 始终是正文 content，思考不算正文。
     """
     out = []
     for m in messages or []:
@@ -1098,7 +1304,12 @@ def _history_payload(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         if not isinstance(content, str) or not content.strip():
             continue
-        out.append({"role": role, "text": content})
+        item = {"role": role, "text": content}
+        if role == "assistant":
+            thinking = m.get("thinking")
+            if isinstance(thinking, str) and thinking.strip():
+                item["thinking"] = thinking
+        out.append(item)
     return out
 
 
@@ -1169,6 +1380,97 @@ def _humanize_internal_error(e: BaseException) -> str:
     return f"后端处理失败（{name}）。请重试，若持续失败请重启后端"
 
 
+# rename_session 是「返回错误字符串」的存储层接口，它的文案里带 errno 与绝对路径
+# （`写入新会话失败: [Errno 2] No such file or directory: 'E:\...\xxx.json'`）。
+# 原样抛给界面就是一行磁盘路径：用户既看不懂，也做不了什么。
+_ERRNO_RE = re.compile(r"\[?(?:Errno|WinError)\s*-?\d+\]?")
+_ABS_PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\[^\s\\])[^\s'\"，。）]*")
+_RENAME_PARTIAL_RE = re.compile(r"^会话已改名为「(.+?)」，但(.+)$")
+
+
+def _conflicting_session_name(narnat_dir: str, want: str,
+                              parent: Optional[str] = None) -> str:
+    """找出与 want「归一化后同名」的那条**已有**会话的真实名字；找不到返回 ""。
+
+    归一化 = session_store._safe_filename（`/`、`\\`、`:` 等统一换成 `_`），
+    所以 `c:/x` 与 `c:\\x` 会落到同一个文件上。rename 的失败文案原来直接回显
+    请求里的新名，用户拿着「已有同名会话: c:\\x」去列表里找，看到的却是 `c:/x`
+    ——既不知道撞的是谁，也没法照着改。这里回查会话库，报磁盘上那条的名字。
+    """
+    from ..config.session_store import _safe_filename, _sessions_dir, list_sessions_tree
+
+    target = _safe_filename(want).lower()
+    try:
+        tree = list_sessions_tree(narnat_dir)
+    except Exception:
+        tree = []
+    for root in tree or []:
+        if parent:
+            # 子会话只在自己的父会话命名空间里判重
+            if root.get("name") != parent:
+                continue
+            for c in root.get("children") or []:
+                if _safe_filename(str(c.get("name") or "")).lower() == target:
+                    return str(c.get("name"))
+            return ""
+        if _safe_filename(str(root.get("name") or "")).lower() == target:
+            return str(root.get("name"))
+        # 根会话改名会连子会话目录一起搬：撞上别人子会话的名字同样算冲突
+        for c in root.get("children") or []:
+            if _safe_filename(str(c.get("name") or "")).lower() == target:
+                return f"{root.get('name')}/{c.get('name')}"
+    # 列表里查不到（目录里只剩损坏文件 / 空壳目录）：退回按实际文件名找，
+    # 至少说得出撞的是哪个名字，而不是把请求里的新名复述一遍
+    try:
+        entries = os.listdir(_sessions_dir(narnat_dir))
+    except OSError:
+        return ""
+    for entry in entries:
+        stem = entry[:-5] if entry.endswith(".json") else entry
+        if stem.lower() == target:
+            return stem
+    return ""
+
+
+def _rename_error_text(err: str, narnat_dir: str, want: str,
+                       parent: Optional[str] = None) -> str:
+    """把 rename_session 的失败文案翻成能直接给用户看的一句话。
+
+    原始 errno / 绝对路径只进 stderr（日志侧），RPC 错误串只留结论与下一步。
+    措辞与 _humanize_internal_error 同一口径：说清楚「哪里失败 + 该做什么」。
+    """
+    if not err:
+        return ""
+    if err.startswith("已有同名会话"):
+        other = _conflicting_session_name(narnat_dir, want, parent)
+        if other and other != want:
+            return f"该名称与已有会话「{other}」冲突（两者归一化后同名），请换一个名称"
+        return err
+    if not (_ERRNO_RE.search(err) or _ABS_PATH_RE.search(err)):
+        return err
+    print(f"[session/rename] 存储层原始失败信息（仅供排查）: {err}", file=sys.stderr)
+    m = _RENAME_PARTIAL_RE.match(err)
+    if m:
+        # 主文件已经改名成功，只是收尾没做完：结论必须保留，
+        # 只把尾巴里的绝对路径/errno 换掉（否则用户会以为根本没改成）
+        name, tail = m.group(1), m.group(2)
+        if "旧文件" in tail:
+            return (f"会话已改名为「{name}」，但旧文件没能删除（可能正被其它程序占用）。"
+                    "请关闭占用后手动删除旧文件，或重启后端再试")
+        return (f"会话已改名为「{name}」，但它的子会话目录没能一起搬过去。"
+                "请手动把旧目录改名，或删除该会话后重新创建")
+    low = err.lower()
+    if "no such file" in low or "errno 2" in low:
+        return "写入新会话失败：找不到目标路径（会话库可能刚被移动或删除）。请重试或重启后端"
+    if ("permission" in low or "winerror 5" in low or "errno 13" in low
+            or "拒绝访问" in err or "占用" in err):
+        return ("写入新会话失败：文件被其他程序占用。请稍后重试"
+                "（或用命令面板执行「重启后端」）")
+    if "too long" in low or "errno 36" in low or "过长" in err:
+        return "写入新会话失败：会话名过长。请缩短后重试"
+    return "写入新会话失败：读写会话文件出错。请重试，若持续失败请重启后端"
+
+
 def _model_api_key(config) -> str:
     """当前模型用到的接口密钥（取不到就返回空串）。
 
@@ -1197,21 +1499,36 @@ def _take_config_warnings() -> list:
         return []
 
 
-def _is_ghost_parent(narnat_dir: str, name: str) -> bool:
-    """name 是不是「幽灵父会话」：列表里有它，但父 json 已丢、只剩子会话。"""
-    try:
-        from ..config.session_store import list_sessions_tree
+def _is_dangling_parent(narnat_dir: str, name: str) -> bool:
+    """name 是不是「父 json 已丢、但 <父>/ 下还有子会话文件」的幽灵父会话。
 
-        for root in list_sessions_tree(narnat_dir):
-            if root.get("name") == name:
-                return bool(root.get("ghost"))
-    except Exception:
+    比按 ghost 标记判断更宽：子文件是坏 JSON 时列表里根本推不出 ghost 行，
+    那种残骸同样删不掉、名字同样被永久占住，必须一并认得出来。
+    父 json 还在的会话不算（它有正常的删除路径）。
+    """
+    import os
+    from ..config.session_store import _safe_filename, _sessions_dir, session_exists
+
+    if not name or "/" in name or "\\" in name:
         return False
+    safe = _safe_filename(name)
+    if not safe or safe in (".", ".."):
+        return False
+    root = os.path.normpath(_sessions_dir(narnat_dir))
+    sub = os.path.normpath(os.path.join(root, safe))
+    # 只认会话库底下的直属目录（防 ../ 越界）
+    if os.path.dirname(sub) != root or not os.path.isdir(sub):
+        return False
+    if session_exists(narnat_dir, name):
+        return False
+    for _dirpath, _dirnames, filenames in os.walk(sub):
+        if any(f.lower().endswith(".json") for f in filenames):
+            return True
     return False
 
 
-def _rm_session_tree(narnat_dir: str, name: str) -> None:
-    """删掉一个会话在磁盘上的整棵子树（幽灵父专用）。"""
+def _rm_session_tree(narnat_dir: str, name: str) -> int:
+    """删掉一个会话在磁盘上的整棵子树（幽灵父专用）。返回删掉的子会话 json 数。"""
     import os
     import shutil
     from ..config.session_store import _safe_filename, _sessions_dir
@@ -1223,8 +1540,12 @@ def _rm_session_tree(narnat_dir: str, name: str) -> None:
         os.remove(json_path)
     # 子会话目录
     sub = os.path.normpath(os.path.join(root, _safe_filename(name)))
-    if os.path.dirname(sub) == root and os.path.isdir(sub):
-        shutil.rmtree(sub)
+    if os.path.dirname(sub) != root or not os.path.isdir(sub):
+        return 0
+    removed = sum(1 for _dp, _dn, fns in os.walk(sub)
+                  for f in fns if f.lower().endswith(".json"))
+    shutil.rmtree(sub)
+    return removed
 
 
 def _rm_mismatched_session_file(narnat_dir: str, name: str) -> bool:
@@ -1273,11 +1594,16 @@ def _rm_mismatched_session_file(narnat_dir: str, name: str) -> bool:
 
 
 def _rm_broken_session_file(narnat_dir: str, name: str) -> bool:
-    """删掉一个「存在但解析不了」的会话文件。返回 True=真删了。
+    """删掉一个「存在但不可用」的会话文件。返回 True=真删了。
 
-    这类文件（JSON 被截断、编码乱掉）会被 list_sessions_tree 跳过，
-    所以它不在界面上、名字也解析不到，用户想删却只会收到「会话不存在」——
-    文件永久占着磁盘，而且再想用同名保存会被判重复。这里按文件名直接删。
+    两类同等对待（对用户是同一件事：列表里看不到它、名字被永久占住、
+    按名字删只会收到「会话不存在」）：
+      1. 完全解析不出 JSON（被截断、编码乱掉）；
+      2. 能解析成 JSON 但结构不合法——顶层是数组 / 字符串 / null。
+         此前这条路只认第 1 类（`json.load` 成功就 return False），
+         于是手工改成 `[]` 的文件永远删不掉、名字再也用不上（实测）。
+    注意 messages 字段非数组的文件不算：它仍在会话列表里（count 记 0），
+    能正常解析出名字并按名字删除，把这类误删等于删掉一条可用会话。
     只允许删会话库底下的直属 .json，不越界。
     """
     import json
@@ -1291,15 +1617,17 @@ def _rm_broken_session_file(narnat_dir: str, name: str) -> bool:
     target = os.path.normpath(os.path.join(root, safe + ".json"))
     if os.path.dirname(target) != root or not os.path.isfile(target):
         return False
-    # 只对「真的解析不了」的文件动手：能解析的是正常会话，不该走这条路
+    # 只对「真的不可用」的文件动手：结构合法的是正常会话，不该走这条路
     try:
         with open(target, "r", encoding="utf-8") as f:
-            json.load(f)
-        return False
+            data = json.load(f)
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         pass
     except OSError:
         return False
+    else:
+        if isinstance(data, dict):
+            return False
     try:
         os.remove(target)
         return True

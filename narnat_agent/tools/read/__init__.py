@@ -111,10 +111,14 @@ def _sniff_bom_encoding(head: bytes):
 
 
 def _detect_text_encoding(head: bytes) -> str:
-    """先嗅探BOM（命中 → utf-16）；否则 utf-8 严格解码成功 → utf-8-sig，失败 → gbk。
+    """先嗅探BOM（命中 → utf-16）；否则 utf-8 严格解码成功 → utf-8-sig，失败 → gb18030。
 
     中文Windows环境GBK文件常见（旧日志/导出文件）。此前固定utf-8+replace解码
     会把GBK内容变成大片U+FFFD乱码，AI读到的是坏数据。此处用首块字节判定编码。
+
+    fallback 用 gb18030 而非 gbk：GB18030 是 GBK 的超集（同一字符的两字节编码
+    完全相同），而 gbk 编解码器解不了国标四字节序列（CJK 扩展 B 区生僻字，如
+    b"\\x95\\x32\\x82\\x36"）——用 gbk 会把它们读成 U+FFFD，回写即永久丢失原文。
 
     尾部窗口重试: 首块8KB可能恰好多字节序列边界截断，utf-8严格解码在截断处
     抛错会误判为GBK。UnicodeDecodeError.start位于末尾3字节内时切除重试。
@@ -132,7 +136,42 @@ def _detect_text_encoding(head: bytes) -> str:
                 trial = head[: e.start]  # 疑似边界截断 → 切掉错误起点后重试
                 continue
             break
-    return "gbk"
+    return "gb18030"
+
+
+def _write_encoding_for(head: bytes, encoding: str) -> tuple:
+    """原文件编码 → (写回编解码器, 需前置的 BOM 字符)。
+
+    读一遍再写回时必须保持原文件编码形态：固定按 UTF-8 写会把 UTF-16 文件静默
+    改写成 UTF-8、把带 BOM 的 UTF-8 的 BOM 丢掉，按原编码读取的下游工具链拿到
+    坏数据。utf-16-le/be 编解码器自身不写 BOM，需调用方在正文前置 U+FEFF 还原
+    原 BOM 字节（LE=FF FE / BE=FE FF）。
+    """
+    if encoding == "utf-16":
+        return ("utf-16-be" if head.startswith(b"\xfe\xff") else "utf-16-le"), "\ufeff"
+    if encoding == "utf-8-sig":
+        return ("utf-8-sig", "") if head.startswith(b"\xef\xbb\xbf") else ("utf-8", "")
+    return encoding, ""
+
+
+def _first_undecodable_offset(head: bytes, encoding: str) -> int:
+    """首块按 encoding 严格解码，返回第一个无法解码字节的偏移；-1 = 全部可解码。
+
+    连探测出的编码也解不了的字节此前被静默替换成 U+FFFD（AI 拿到的是坏数据还
+    以为读到了原文）。末尾被 8KB 窗口切开的多字节序列不算无法解码：与
+    _detect_text_encoding 的尾部边界截断重试同一判据（逐次切除尾部 1~3 字节）。
+    """
+    for cut in (0, 1, 2, 3):
+        trial = head[: len(head) - cut] if cut else head
+        if not trial:
+            return -1
+        try:
+            trial.decode(encoding)
+            return -1
+        except UnicodeDecodeError as e:
+            if e.start < len(trial) - 3:
+                return e.start
+    return -1
 
 
 # Windows 传统路径长度上限（MAX_PATH）：超过后普通 API 一律报"找不到路径"，
@@ -235,8 +274,19 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
     if encoding is None:
         if b"\x00" in head_bytes:
             return "[错误: 检测到二进制文件（含NUL字节），Read仅支持纯文本。请使用Shell工具处理]"
-        # 编码探测（GBK回退，避免中文Windows下GBK文件读成U+FFFD乱码）
+        # 编码探测（GB18030回退，避免中文Windows下GBK/GB18030文件读成U+FFFD乱码）
         encoding = _detect_text_encoding(head_bytes)
+
+    # 编码探测本身也可能解不了某些字节：此时下方 errors="replace" 会静默填 U+FFFD，
+    # AI 拿到坏数据却以为读到了原文（回写即永久丢失），必须先给出可读提示
+    decode_hint = ""
+    bad_at = _first_undecodable_offset(head_bytes, encoding)
+    if bad_at >= 0:
+        decode_hint = (
+            f"[提示: 文件编码无法完全识别——第{bad_at}字节起无法按 {encoding} 解码，"
+            f"无法解码的部分以 \ufffd 显示，内容可能不完整；"
+            f"如需原样处理请用 Shell 工具]\n"
+        )
 
     try:
         with open(file_path, "r", encoding=encoding, errors="replace") as f:
@@ -314,4 +364,4 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
                 f"  ... [截断: 已显示 {limit} 行。使用 offset={skipped + limit + 1} 参数可读取其余部分]"
             )
 
-    return _apply_global_cap("\n".join(result), _tool_context, total_lines)
+    return _apply_global_cap(decode_hint + "\n".join(result), _tool_context, total_lines)

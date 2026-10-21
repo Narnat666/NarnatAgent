@@ -91,6 +91,51 @@ class CompressionCoordinator:
             "[系统提醒] 对话历史过长已压缩，早前内容已总结为上下文成果；"
         )
 
+    def _detach_prepended(self, prepended: dict) -> None:
+        """把压缩前追加的那条输入从归档里摘掉。
+
+        全量压缩（无保留尾部）会把列表里所有非 system 消息整体归档，"压缩前
+        就先追加"的那条输入因此也会进归档；它同时又作为末条留在当前列表里
+        （模型要回答的就是它）。归档 + 当前正是落盘/展示口径，不摘掉就会在会话
+        文件里出现两遍。摘掉也符合本来语义：它是压缩后的最新一条，不是被摘要
+        替换掉的历史（压缩成功后才追加的旧实现同样不进归档）。
+        保留尾部路径下它本就在 tail 里、不在归档，此处为 no-op。
+        """
+        msgs = self._msg_manager._messages
+        archived = getattr(msgs, "_archived", None)
+        if not archived:
+            return
+        for i, m in enumerate(archived):
+            if m is prepended:
+                del archived[i]
+                ids = getattr(msgs, "_archived_ids", None)
+                if ids is not None:
+                    ids.discard(id(prepended))
+                return
+
+    def _fix_prepended_tail(self, prepended: dict) -> None:
+        """让压缩后的末条 user 完整保留原文，且不在归档里再存一份。
+
+        输入已在列表里，交给 handle_compress 的是空串，于是：
+        - 有保留尾部时它把空串并进尾条（内容尾部多出 "\\n\\n"）→ 抹掉即可；
+        - 全量压缩（无保留尾部）时它追加一条空 user，原文只在摘要里 → 还原原文。
+        两种情况都要把原文从归档里摘掉（见 _detach_prepended）。
+        """
+        view = self._msg_manager.view
+        self._detach_prepended(prepended)
+        if len(view) == 0:
+            return
+        last = view[-1]
+        if last.get("role") != "user":
+            return
+        content = last.get("content")
+        if not isinstance(content, str):
+            return
+        if not content.strip():
+            last["content"] = prepended.get("content") or ""
+        elif content.endswith("\n\n"):
+            last["content"] = content[:-2]
+
     def compress(self, pending_input: str) -> bool:
         """处理上下文压缩。
 
@@ -107,20 +152,30 @@ class CompressionCoordinator:
             self._msg_manager.append_user(pending_input)
             return True
 
+        # 压缩窗口内用户随时可能关窗口/重启后端（真实模型 7~11 秒），而退出
+        # 兜底（session_mgr.exit_flush）只落盘消息列表里的内容。原先输入挂在
+        # 调用栈上、压缩成功后才追加，退出时这句话永久丢失且零提示（P0）。
+        # 故压缩开始前就先追加：任何时刻退出它都在列表里、能被落盘。
+        # 交给 handle_compress 的是空串——输入已在尾部，空串让它只并入尾部
+        # 而不重复追加一次；拼接痕迹由 _fix_prepended_tail 收尾。
+        self._msg_manager.repair()
+        self._msg_manager.append_user(pending_input)
+        prepended = self._msg_manager.view[-1]
+
         def on_interrupt():
             self._ui.end_compressing()
             self._context.reset()
-            self._msg_manager.append_user(pending_input)
+            # 输入已在压缩开始前进列表，此处不得再追加（否则重复）
 
         def on_llm_error(msg):
             self._ui.end_compressing()
             self._logger.error("compressor", msg)
             self._context.set_retry_soon()
-            self._msg_manager.append_user(pending_input)
+            # 同上：中断/失败不改动 messages，输入原本就在列表里
 
         self._ui.begin_compressing()
         res = self._msg_manager.handle_compress(
-            pending_input,
+            "",
             self._config.system_prompt,
             self._llm,
             cancel_check=lambda: _interrupt_ctrl.is_set,
@@ -132,6 +187,9 @@ class CompressionCoordinator:
         if res.ok:
             self._ui.end_compressing()
             self._context.reset()
+            # 必须在下面两条 append_user_merged 之前：它们并进末条 user 后，
+            # 尾部的拼接痕迹就再也认不出来了
+            self._fix_prepended_tail(prepended)
             self._append_compaction_notice()
             self._append_plan_reminder()
             if self._session_mgr is not None:

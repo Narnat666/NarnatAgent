@@ -71,6 +71,35 @@ def _notice(stream, text: str) -> None:
         stream.feed(text)
 
 
+def _mark_failed(stream, message: str) -> None:
+    """把「本轮以失败收尾」标到流上，**在 stream.finish() 之前调用**。
+
+    为什么要标：出错收尾原来和正常完成走同一个 finish()，RPC 侧一律
+    `turn/end{reason:"done"}`——界面把它当成功收口，不给「本轮出错」和
+    「重试这一条」，用户只能从正文里一行 `[错误: …]` 猜这次失败了。
+    标过之后 RPC 流会发 error 通知 + `turn/end{reason:"error"}`。
+
+    终端形态的流没有这个方法（getattr 拿不到）→ 什么也不做，行为完全不变。
+    """
+    fn = getattr(stream, "mark_failed", None)
+    if fn is None:
+        return
+    try:
+        fn(message)
+    except Exception:
+        pass
+
+
+def _failure_text(content_parts, default: str = "LLM 调用失败") -> str:
+    """从错误正文里取可读原因（LLM 层的错误正文形如 `[错误: API调用失败(...): ...]`）"""
+    text = "".join(content_parts or []).strip()
+    if text.startswith("[错误:"):
+        text = text[len("[错误:"):].strip()
+    if text.endswith("]"):
+        text = text[:-1].strip()
+    return text or default
+
+
 def _push_progress_stats(stream, stats) -> None:
     """长任务中途补推 stats（有则推，无则跳过）。
 
@@ -282,6 +311,9 @@ class AgentLoop:
                         content_reject_detail = chunk.get("detail", "")
                         break
                     if parsed_finish_reason == "error":
+                        # 拒连 / 401 / 429 / 5xx 重试耗尽都汇总到这里：本轮是失败收尾，
+                        # 标成 error 才能让界面显示「本轮出错」+「重试这一条」
+                        _mark_failed(stream, _failure_text(content_parts))
                         stream.finish(
                             self._stats.input_tokens,
                             self._stats.output_tokens,
@@ -302,6 +334,9 @@ class AgentLoop:
                         "\n\n⚠ 请求超出模型上下文限制。"
                         "请尝试缩减本次输入，或 /save 保存会话后开启新对话。\n"
                     )
+                    _mark_failed(stream,
+                                 "请求超出模型上下文限制（重发仍超限或压缩不可用），"
+                                 "本次请求已放弃")
                     stream.finish(
                         self._stats.input_tokens,
                         self._stats.output_tokens,
@@ -325,6 +360,8 @@ class AgentLoop:
                     "\n\n⚠ 自动压缩失败，请求仍超出模型上下文限制。"
                     "请尝试缩减本次输入，或 /save 保存会话后开启新对话。\n"
                 )
+                _mark_failed(stream,
+                             "自动压缩失败，请求仍超出模型上下文限制")
                 stream.finish(
                     self._stats.input_tokens,
                     self._stats.output_tokens,
@@ -361,6 +398,8 @@ class AgentLoop:
                     _notice(stream,
                         f"\n[错误: API调用失败(400，内容审核拦截): {content_reject_detail}]\n"
                     )
+                    _mark_failed(stream,
+                                 f"请求被服务端内容审核拦截：{content_reject_detail}")
                     stream.finish(
                         self._stats.input_tokens,
                         self._stats.output_tokens,
@@ -413,8 +452,8 @@ class AgentLoop:
                 self._msg_manager.append_assistant(
                     "".join(content_parts) or None,
                     tool_calls=tool_calls_result,
-                    thinking=thinking_text,
-                    thinking_signature=thinking_signature,
+                    thinking=thinking_text or None,
+                    thinking_signature=thinking_signature or None,
                 )
 
                 tool_results = self._dispatcher.execute_tool_calls(tool_calls_result, stream)
@@ -503,6 +542,8 @@ class AgentLoop:
                 _notice(stream,
                     f"\n\n⚠ 服务端响应流中断，已自动重试{stream_retry_max}次仍失败，请稍后重试。\n"
                 )
+                _mark_failed(stream,
+                             f"服务端响应流中断，已自动重试{stream_retry_max}次仍失败")
                 stream.finish(
                     self._stats.input_tokens,
                     self._stats.output_tokens,
@@ -515,9 +556,14 @@ class AgentLoop:
 
             # 无tool_call → 纯文本输出完成
             if content_parts:
-                # 纯文本轮不回传思考（学官方 harness：reasoning_content 仅工具轮回传，
-                # 纯文本轮被忽略，省 token）
-                self._msg_manager.append_assistant("".join(content_parts))
+                # 思考内容同样落盘（供会话记录留存）；回传侧对纯文本轮有保护
+                # （llm._prepare_messages / _convert_messages 只回传工具轮），
+                # 所以这里带上 thinking 不会把纯文本轮的思考塞回请求。
+                self._msg_manager.append_assistant(
+                    "".join(content_parts),
+                    thinking=thinking_text or None,
+                    thinking_signature=thinking_signature or None,
+                )
             else:
                 # 空回复
                 self._dump_empty_debug(content_parts, tool_calls_result, parsed_finish_reason, call_usage)
@@ -599,12 +645,15 @@ class AgentLoop:
                     and not force_final                          # 收尾轮不验证
                     and self._config.ai.goal_verify              # 配置开关
                     and self._goal_verifier is not None):
+                # 先把本轮正文落定到屏幕上，再打复核徽标。反过来会让
+                # 「⟳ 独立复核…」插在 AI 总结中间——正文走渲染器缓冲（稍后才
+                # 批量落屏），复核徽标是直接写 stdout 的，两者不同步。
+                stream.flush_renderer()
                 if not has_declared_changes(self._tool_context.goal_checklist):
                     _ui_verify_skip()
                 else:
                     final_answer = "".join(content_parts)
                     _ui_verify_start()
-                    stream.flush_renderer()
                     # 验证动画为可选 UI 能力（轻量 UI/测试替身可缺省）→ 缺失时静默跳过
                     begin_verify = getattr(self._ui, "begin_verifying", None)
                     end_verify = getattr(self._ui, "end_verifying", None)
