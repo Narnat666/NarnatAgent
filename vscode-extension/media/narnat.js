@@ -21,7 +21,13 @@
    */
   var OFFLINE_BLOCKED = {
     sessionNew: 1, sessionSwitch: 1, sessionDelete: 1, sessionRename: 1,
-    sessionExplore: 1, sessionDone: 1, sessionList: 0, chat: 0, command: 0, cancel: 0
+    sessionExplore: 1, sessionDone: 1, sessionList: 1,
+    // configSet（模型/思考/目标/插件切换）也必须拦。它原来不在表里，
+    // 离线点下拉会真的发出请求并压进 configKeyQueue；重连后成功回执被这些
+    // 陈旧 key 配对，失败回退时模型按钮显示成 high、下拉连勾都没有（实测）。
+    // 而且下拉本身已经把界面改成新值了，离线根本不可能生效。
+    configSet: 1,
+    chat: 0, command: 0, cancel: 0
   };
 
   function post(type, params) {
@@ -51,6 +57,10 @@
   var assistantBuf = '';     // 当前助手消息正文缓冲（原始 Markdown）
   var authHintShown = false; // 本轮是否已提示过「去填 API Key」（避免重复刷）
   var lastSentText = '';     // 最后一条发出去的消息正文（回执里没有请求 id，靠它找回被拒的那条）
+  /* 运行中被拦下的发送：不能当场提示（写系统行会 closeAssistantSegment 把正在
+     流式的正文劈成两个气泡），所以记一笔，等这一轮收口时再补一行说明。
+     见 sendChat 里的守卫注释。 */
+  var blockedWhileRunning = false;
   // 离线/演示态下最后一次「发出去但没连上」的内容与时间：同一句话 1.5 秒内不重发
   var lastOfflineSend = { text: '', ts: 0 };
   // 「刚才那条可能已经被后端接受了」。回执是广播的、不带发起方 id，收到
@@ -100,6 +110,10 @@
   var cancelSettleTimerFired = false;
   /** 「已提交确认，等待后端执行…」那行的兜底定时器（见 replyConfirm） */
   var confirmWaitTimer = null;
+  /** 会话列表读取失败的系统行（状态类提示，下次成功时撤掉） */
+  var sessListErrLine = null;
+  /** 本次会话列表是否**没读到**（区别于「真的没有会话」）。renderSessions 用它决定空态文案。 */
+  var SESS_LIST_ERROR = false;
   /** 是否已经显示过正的余额（用来区分「还没查到」与「真的花光了」，见 applyStats） */
   var balanceSeen = false;
   function lockSess(name, action){
@@ -420,6 +434,15 @@
       var items = [];
       var i = start;
       var re = ordered ? /^(\s*)\d+[.)]\s+(.*)$/ : /^(\s*)[-*+]\s+(.*)$/;
+      /* 有序列表的起始编号：AI 常写「3. …4. …5. …」（接着上文编号），
+         而 <ol> 不写 start 时浏览器一律从 1 开始 —— 屏幕上就变成 1/2/3，
+         用户照着编号对照会指错条目（实测）。
+         只认第一项的编号，后面仍按连续递增（与 Markdown 常见实现一致）。 */
+      var olStart = 0;
+      if (ordered) {
+        var sm = /^(\s*)(\d+)[.)]\s+/.exec(lines[start] || '');
+        if (sm) olStart = parseInt(sm[2], 10) || 0;
+      }
       while (i < lines.length) {
         var ln = lines[i];
         if (/^\s*$/.test(ln)) {
@@ -469,7 +492,9 @@
         break;
       }
       var tag = ordered ? 'ol' : 'ul';
-      var html = '<' + tag + '>' + items.map(function (it) {
+      // 起始编号不是 1 时才写 start（写 start="1" 无害但多余）
+      var startAttr = (ordered && olStart > 1) ? ' start="' + olStart + '"' : '';
+      var html = '<' + tag + startAttr + '>' + items.map(function (it) {
         return '<li>' + it.text + it.subs.join('') + '</li>';
       }).join('') + '</' + tag + '>';
       return { html: html, next: i };
@@ -701,14 +726,21 @@
       // 要重复点若干次；轮末重渲染（renderAssistantFinal）还会把已经点过的
       // 状态一起抹掉（实测：流式中点「展开全部」，轮末又折回去）。
       var wrapOn = wrapPref ? 'true' : 'false';
-      var folded = (lines > 30 && !foldOpenPref) ? ' data-fold="true"' : '';
+      // 「是否真的折叠了」与「要不要给展开按钮」必须是同一个判据。
+      // 只判 lines > 30 会怎样（实测）：用户点过一次「展开全部」之后
+      // foldOpenPref 变 true，块不再折叠（data-fold 无、max-height 为 none、不可滚），
+      // 但按钮照样渲染 —— 本窗口内所有 >30 行的代码块底部都挂着一个
+      // 「展开全部 N 行」，点下去高度和行数一点变化都没有，是个彻底的死按钮。
+      // 三条渲染路径（流式分段 / 轮末重渲染 / 历史重建）都会命中。
+      var doFold = lines > 30 && !foldOpenPref;
+      var folded = doFold ? ' data-fold="true"' : '';
       blocks.push('<div class="code" data-wrap="' + wrapOn + '"' + folded + '>' +
         '<div class="code-hd"><span class="lang">' + esc(lang || 'text') + '</span>' +
         '<button class="code-wrap" type="button" data-on="' + wrapOn + '">换行</button>' +
         '<button class="code-copy" type="button">复制</button></div>' +
         '<pre data-lang="' + esc(lang) + '" data-lines="' + lines + '">' +
         hlCode(raw, lang) + '</pre>' +
-        (lines > 30 ? '<button class="code-more" type="button">展开全部 ' + lines + ' 行</button>' : '') +
+        (doFold ? '<button class="code-more" type="button">展开全部 ' + lines + ' 行</button>' : '') +
         '</div>');
       return '\u0000BLOCK' + (blocks.length - 1) + '\u0000';
     }
@@ -729,6 +761,13 @@
     //    不处理会怎样（实测）：整段代码降级成普通段落，里面的 `**`、`#`
     //    被当 Markdown 解析 → 标记字符被吃掉、代码无高亮，而且这是**流式
     //    过程中每一轮都会经过的状态**。
+    //    顺序要求：先长的后短的。只写三条反引号那条会怎样（实测）：
+    //    流式中的 ````markdown\n```js 会被 "```" + 语言标签 "markdown" 消化掉，
+    //    首个反引号留在正文里渲染成一个只含 ` 的 <p>，还多出一个空段落。
+    //    （AI 讲解「怎么嵌套代码块」时就会输出长围栏，这不是罕见形态。）
+    src = src.replace(/(`{4,})([a-zA-Z0-9_+-]*)[ \t]*\n([\s\S]*)$/, function (_m, _f, lang, code) {
+      return pushBlock(lang, code);
+    });
     src = src.replace(/```([a-zA-Z0-9_+-]*)[ \t]*\n([\s\S]*)$/, function (_m, lang, code) {
       return pushBlock(lang, code);
     });
@@ -938,6 +977,12 @@
     // 下一次 confirm/result 到达时 applyConfirmResult 会去改一个已脱离文档的
     // 节点——改的是空气，用户看不到「已确认/已失效」的最终结论。
     pendingConfirmLine = null;
+    // sessListErrLine 同理（第 25 轮新增的「读取会话列表失败」行）。
+    // 它不挂在 #convo 里，但引用同一批被清掉的节点；不清会留下悬空引用，
+    // 而且与上面几个字段的处理不一致 —— 这里按同一模式统一复位。
+    // SESS_LIST_ERROR 不在这里清：它描述的是「宿主上一次读列表成没成功」，
+    // 与对话区清屏无关；清掉会让空态文案在下一次 session/list 到达前说错话。
+    sessListErrLine = null;
   }
 
   /** 渲染回执：扩展侧据此判断 webview 画到了哪一步 */
@@ -1045,6 +1090,19 @@
   function openPalette(open){
     palette.setAttribute('data-open', open ? 'true' : 'false');
     if (!open) return;
+    // 命令面板与状态行「⋯」抽屉都是从 .composer 向上弹的浮层，同时开着会
+    // 上下叠在一起、互相遮挡（实测两浮层几何相交 63px）。面板是当前操作焦点，
+    // 所以打开它时把状态行抽屉收起来。setStDrawer 定义在后面（函数声明会提升）。
+    if (typeof stDrawerOpen === 'function' && stDrawerOpen()) setStDrawer(false);
+    // 同样要收起「下拉 / 右键菜单」：它们与面板候选行共用输入框上方那条空间带。
+    // 不收起会怎样（实测）：面板与下拉同屏，被遮住的候选只露上半截，
+    // 点下去**穿透到下层语义完全不同的控件**（想选命令、实际命中了改名/删除）。
+    // 与 showPop 里反向那一条成对，只修一侧等于没修。
+    if (typeof closePop === 'function') closePop();
+    var ctxM2 = document.getElementById('sessMenu');
+    if (ctxM2 && ctxM2.getAttribute('data-open') === 'true') {
+      ctxM2.setAttribute('data-open', 'false');
+    }
     fitPalette();
   }
 
@@ -1243,9 +1301,50 @@
     if (palette.getAttribute('data-open') === 'true') { openPalette(false); e.preventDefault(); return; }
   }, true);
   function setDrawer(open){
+    // 关抽屉时把焦点交还出去。不交还会怎样（实测）：焦点在 #dwClose 或行内
+    // 「是/否」上按 Esc 收起抽屉，节点被隐藏 → 焦点掉回 <body>，
+    // 键盘用户后续 Tab 只能从页面顶端重来（抽屉里一共 11 个停靠点，全丢）。
+    // 弹层那条路径早就修过同类问题（见上面 openPop 的注释），抽屉这两处漏了。
+    var focusWasInDrawer = open ? false :
+      !!(drawer && drawer.contains(document.activeElement));
     drawer.setAttribute('data-open', open ? 'true' : 'false');
-    sessBtnEl.setAttribute('data-open', open ? 'true' : 'false');
+    // 给 body 挂标记：#toBottom 会压住抽屉 footer 的按钮，CSS 用它让路
+    //（见 #toBottom 那段 body[data-drawer] 注释）。
+    document.body.setAttribute('data-drawer', open ? 'true' : 'false');
+    // 这里**不要**再写 #sessBtn 的 data-open。
+    // 历史原因：早先顶栏会话名胶囊就是抽屉的入口，所以 setDrawer 顺手同步它的
+    // 高亮与箭头。后来胶囊改成「打开子会话下拉」、抽屉入口改到输入行的历史按钮，
+    // 这行就成了**同属性双写**（showPop/closePop 也写它）：
+    //   · 打开抽屉 → 胶囊高亮 + 箭头翻转，但下拉并没开
+    //   · 再点胶囊开下拉、再点收起 → closePop 把 data-open 设 false，
+    //     而抽屉还开着 → 胶囊指示与实际相反（实测 A8-01）
+    // 胶囊的状态只由它自己的下拉决定，别的地方一律不碰。
     if (open && REAL) post('sessionList', { all: false });
+    // 打开抽屉时把状态详情浮层收起（与 setStDrawer 里反向那一条成对）。
+    // 249px 下两者都是覆盖全宽的浮层，状态抽屉在上层会把抽屉 footer 的按钮
+    // 整片吞掉；反过来先开状态抽屉再点历史按钮，同样会叠在一起。
+    // 只修一侧的话，另一侧的入口顺序仍然能撞出「按钮点不到」（实测）。
+    if (open && typeof stDrawerOpen === 'function' && stDrawerOpen()) {
+      setStDrawer(false);
+    }
+    // 关掉抽屉时清掉「手动收起」记忆：下次打开时仍希望一眼看到我在哪条分支里。
+    // 打开时不清（清了下一次 renderSessions 就会把用户刚收起的又展开）。
+    if (!open) {
+      MANUAL_COLLAPSED = {};
+    } else if (typeof renderSessions === 'function') {
+      // 打开时重算一次：清掉手动收起记忆后，「我在子会话里就展开父会话」这条
+      // 才能生效。不重算会怎样（实测）：上次手动收起过，关掉再打开，
+      // 抽屉里仍然看不到自己在哪条分支（记忆清了但列表没重画）。
+      renderSessions();
+    }
+    // 焦点交还：交给打开抽屉的那个历史按钮（用户按 Tab 走几格就能回到列表），
+    // 找不到就退回输入框 —— 两者都比掉到 <body> 好。
+    if (focusWasInDrawer) {
+      var backTo = document.getElementById('chipSess') || input;
+      if (backTo && typeof backTo.focus === 'function') {
+        try { backTo.focus(); } catch (e) { /* 忽略 */ }
+      }
+    }
   }
   /* 249px 下抽屉与对话区完全重合，屏幕上没有「外面」可点：点顶栏空白、
      点输入行、点状态栏都不收起它（实测 6 个位置全不动）。用户的下一个动作
@@ -1476,7 +1575,11 @@
    */
   function atchAddPaths(paths){
     var fresh = [];
-    (paths || []).forEach(function(raw){
+    // 必须判数组：宿主回执若把 paths 给成字符串/对象（版本不匹配、宿主异常），
+    // 直接 .forEach 会抛 TypeError，整条回执的处理中断，附件一个都加不进来，
+    // 而且异常会冒到 dispatchServerMessage 外层（实测 page-error）。
+    if (!Array.isArray(paths)) return;
+    paths.forEach(function(raw){
       var p = String(raw || '');
       if (!p) return;
       var dup = false;
@@ -1507,8 +1610,12 @@
           bad.push(a.path);
           return;
         }
-        // 宿主说得更准（尤其文件夹）：以它为准
-        if (it && it.kind) a.kind = it.kind;
+        // 宿主说得更准（尤其文件夹）：以它为准 —— 但只认这三种已知类型。
+        // 宿主回了未知 kind（版本不匹配）时保留按扩展名猜的值，
+        // 否则 chip 的图标兜底会渲染成「undefined 文件」（实测）。
+        if (it && (it.kind === 'image' || it.kind === 'folder' || it.kind === 'file')) {
+          a.kind = it.kind;
+        }
         if (a.kind === 'image') atchThumb(a);
       });
       if (bad.length) {
@@ -1857,6 +1964,14 @@
   function pushHistory(text){
     var t = String(text || '').trim();
     if (!t) return;
+    // 浏览态必须**无条件**复位，且要放在去重 return 之前。
+    // 踩过的坑（实测）：按 ↑ 翻出上一条 → Enter 重发 → 这条与 HIST 末尾相同，
+    // 去重命中直接 return，而 histIdx 还停在浏览位置 —— 于是
+    //   · 下次按 ↑ 从这个位置继续往前，**跳过刚发的那条**；
+    //   · 历史只有 1 条时，↑ 干脆一点反应都没有（idx 已在 0 且没被复位）。
+    // 复位浏览态与「要不要记这条」是两件事，不能因为后者不做就不做前者。
+    histIdx = -1;
+    histDraft = '';
     // 连续重复不重复记（连按两次发送同一条很常见）
     if (HIST.length && HIST[HIST.length - 1] === t) return;
     HIST.push(t);
@@ -1869,6 +1984,12 @@
    * 合并「全局历史 + 本次传入的会话消息」→ 新的 HIST。
    * 规则：同一文本只留一份（位置靠后的胜出）、保持最旧在前、超长从头截。
    * 一次遍历从尾往头去重，避免二次拼接把顺序弄错。
+   *
+   * 第二个参数**同时接受两种形状**：
+   *   · 后端消息对象 `{role, text}`（只取 user）
+   *   · 纯字符串数组（内存里的 HIST 就是这个形状）
+   * 只认对象会怎样（实测）：`mergeHistory(HIST_PERSIST, HIST)` 里每个元素
+   * 都没有 .role，于是整批被跳过 —— 看着合并了，其实内存里刚发的提问全丢了。
    */
   function mergeHistory(persist, msgs){
     var out = [];
@@ -1877,10 +1998,16 @@
       if (s) out.push(s);
     });
     (msgs || []).forEach(function(m){
-      if (!m || m.role !== 'user') return;
-      var t = String(m.text == null ? '' : m.text).trim();
+      if (!m) return;
+      var t;
+      if (typeof m === 'string') {
+        t = m.trim();
+      } else {
+        if (m.role !== 'user') return;
+        t = String(m.text == null ? '' : m.text).trim();
+        if (isGoalInjection(t)) return;      // 内部注入的指令不算用户提问
+      }
       if (!t) return;
-      if (isGoalInjection(t)) return;      // 内部注入的指令不算用户提问
       out.push(t);
     });
     var seen = [];
@@ -1907,7 +2034,12 @@
    */
   function seedHistory(msgs){
     if (!Array.isArray(msgs)) return;
-    HIST = mergeHistory(HIST_PERSIST, msgs);
+    // 底线必须是「磁盘全局历史 + 当前内存 HIST」，只按 HIST_PERSIST 重算会丢东西：
+    // 本次会话里刚发的提问此刻**只在内存 HIST 里**（磁盘那份要等下一次
+    // initialize 才回灌回来），所以一切换会话就按 HIST_PERSIST 重算，
+    // 用户刚问过的内容会从 ↑ 历史里消失 —— 明明磁盘还在、重连又能翻到，
+    // 但当场就是翻不出来（实测）。这跟「全局历史」的承诺直接冲突。
+    HIST = mergeHistory(mergeHistory(HIST_PERSIST, HIST), msgs);
     histIdx = -1;
     histDraft = '';
   }
@@ -2124,9 +2256,16 @@
     // 输入以 / 开头时不翻历史：那是命令补全的地盘（上面那条分支处理有候选的
     // 情形），连一个候选都没有时（比如只敲了 "/" 又删掉字符）翻历史会把
     // 「/」直接换成一条旧提问，用户以为自己的输入被吃了（实测）。
+    //
+    // 但「正在浏览历史」时必须放行（histIdx >= 0）：历史里本来就有 /ls、/save
+    // 这种命令条目，翻到它之后输入框内容以 / 开头，若还按上面那条判据拦，
+    // 用户就再也翻不到更早的输入了 —— 按多少次 ↑ 都停在同一条（实测）。
+    // 两种情况要分开：`histIdx === -1` 才是「用户正在打新内容」，
+    // `histIdx >= 0` 是「输入框里的字是我刚给他翻出来的」，不是命令补全的场景。
+    var browsingHist = histIdx >= 0;
     if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
         input.value.indexOf('\n') < 0 &&
-        input.value.trim().charAt(0) !== '/') {
+        (browsingHist || input.value.trim().charAt(0) !== '/')) {
       if (historyStep(e.key === 'ArrowUp' ? -1 : 1)) {
         e.preventDefault();
         return;
@@ -2585,12 +2724,21 @@
     tipFor = el;
     tipEl.textContent = text;
     tipEl.setAttribute('data-on', 'true');
+    // 夹取基准一律用 .shell 的实际几何，不用 window/innerWidth 或 100vw：
+    // 面板宽 = iframe 宽，但 innerWidth 在某些宿主环境里并不等于它（测试台里就
+    // 恒为 764，而面板被拖到 200）。用错基准的后果实测有两个：提示框在 ≤210px
+    // 面板里比面板还宽、右侧被裁；以及 left 夹取算到面板外面去。
+    var shellEl = document.querySelector('.shell');
+    var sr = shellEl ? shellEl.getBoundingClientRect()
+                     : { left: 0, right: window.innerWidth, width: window.innerWidth };
+    // 先在量尺寸之前把上限写死，否则量到的是旧宽度
+    tipEl.style.maxWidth = Math.min(220, Math.max(80, sr.width - 8)) + 'px';
     var r = el.getBoundingClientRect();
     var tr = tipEl.getBoundingClientRect();
-    var vw = window.innerWidth, vh = window.innerHeight;
-    // 左右：以元素中心对齐，再夹在视口内（留 4px 余量，贴边不切断圆角）
+    var vh = window.innerHeight;
+    // 左右：以元素中心对齐，再夹在**面板**内（留 4px 余量，贴边不切断圆角）
     var left = r.left + r.width / 2 - tr.width / 2;
-    left = Math.max(4, Math.min(left, vw - tr.width - 4));
+    left = Math.max(sr.left + 4, Math.min(left, sr.right - tr.width - 4));
     // 上下：优先上方；上方放不下就翻到下方；都放不下就压在上方边界内
     var top = r.top - tr.height - 6;
     if (top < 4) top = Math.min(r.bottom + 6, vh - tr.height - 4);
@@ -2645,11 +2793,34 @@
     }
   }
 
+  /**
+   * 打开「小浮层」（下拉 / 右键菜单）之前统一调用：收起命令面板，并关掉其它小浮层。
+   *
+   * 为什么必须有这一层：下拉与右键菜单的触发入口全都 stopPropagation（为了让
+   * 「点别处收起」不把它们自己也关掉），于是 document 上那个「点别处收面板」的
+   * 监听器**根本不会执行** —— 面板能与它们同时开着，谁也管不了谁。
+   * 同屏的后果不是「难看」，而是**点击穿透**：被面板遮住的候选只露上半截，
+   * 点下去命中的是下层语义完全不同的控件（想选命令、实际执行了改名/删除）。
+   *
+   * 抽成一处而不是在每个入口各写一遍：这一族问题已经出现过三次
+   *（palette↔状态抽屉、状态抽屉↔会话抽屉、palette↔下拉），每次都是「补一处漏一处」。
+   * 现在的规则是：**任何小浮层打开前都走这里**，新增入口只要调一次就不会漏。
+   */
+  function dismissOtherOverlays(){
+    if (typeof paletteVisible === 'function' && paletteVisible()) openPalette(false);
+    if (openPop) closePop();
+    var ctxM = document.getElementById('sessMenu');
+    if (ctxM && ctxM.getAttribute('data-open') === 'true') {
+      ctxM.setAttribute('data-open', 'false');
+    }
+  }
+
   function showPop(btn, popId){
     var pop = document.getElementById(popId || popMap[btn.id]);
     if (!pop) return;
     if (openPop === pop) { closePop(); return; }
     closePop();
+    dismissOtherOverlays();
     var r = btn.getBoundingClientRect();
     // 子会话下拉的宽度等于触发它的顶栏会话名按钮，但不小于 150px。
     // 这个下限是「左名字 + 右状态」两列各能读到几个字的极限，再窄读不出内容。
@@ -2680,9 +2851,23 @@
       // 用户要的是一眼全看完再点。
       // 高度给足（视口下方剩余全部），子会话少时自然全部展开，多了才滚。
       pop.style.maxHeight = Math.max(120, window.innerHeight - r.bottom - 12) + 'px';
+      // 宽度必须落在这里：childW 只算进了局部变量，而下面那句 pop.style.width
+      // 在本分支 return 之后，永远执行不到 —— 结果宽度被 #popChild 里 nowrap
+      // 的条目按内容撑开（实测未保存态脚注把下拉撑到 339px，249px 面板里溢出 146px）。
+      // 条目是 flex:0 0 auto + nowrap，不会被 width 自动挤窄，所以 width 与
+      // max-width 一起给；放不下的部分由 #popChild 的 overflow-x 横向拖。
+      // min-width 显式写 0：CSS 里已解掉 .pop 的 196px 下限，这里再兜一层，
+      // 否则任何一处加回 min-width 都会让上面两行失效。
+      pop.style.width = childW ? childW + 'px' : '';
+      pop.style.maxWidth = childW ? childW + 'px' : '';
+      pop.style.minWidth = childW ? '0' : '';
       pop.style.top = Math.round(r.bottom + 6) + 'px';
+      // 左边界的夹取判据也换成 .shell 的 right：与上面 maxHeight 用的口径一致。
+      // 用 window.innerWidth 会怎样（实测）：webview 里两者不等，窄面板下
+      // 夹出来的 left 仍在面板外，左侧一整截不可见。
+      var shellRight = shellEl ? shellEl.getBoundingClientRect().right : window.innerWidth;
       pop.style.left = Math.max(2, Math.min(r.left,
-        window.innerWidth - pop.offsetWidth - 12)) + 'px';
+        shellRight - pop.offsetWidth - 12)) + 'px';
       openPop = pop;
       return;
     }
@@ -2774,6 +2959,10 @@
     // role=button + tabindex=0 就必须能用键盘触发，否则键盘用户停在这里按 Enter 没反应
     chipSessEl.addEventListener('keydown', function (e) {
       if (e.key !== 'Enter' && e.key !== ' ') return;
+      // 按住不放的自动重复要挡掉：不挡会怎样（实测）——按住 Enter 两秒，
+      // 抽屉被反复开合十几次，松手时的终态取决于重复次数奇偶，
+      // 用户看到的是「抽屉闪一下又关上」。.think .row / .tools .row 都挡了，这里漏了。
+      if (e.repeat) return;
       e.preventDefault();
       openHistDrawer(e);
     });
@@ -2850,10 +3039,18 @@
         var h = statusBar.getBoundingClientRect().height;
         composerEl.style.paddingBottom = (composerEl.__stBasePad + h) + 'px';
       } else if (!on) {
-        composerEl.style.paddingBottom = composerEl.__stBasePad + 'px';
+        // 收起时**清掉内联值**，让 CSS 的 padding 重新接管。
+        // 写死成 __stBasePad 会怎样（实测）：那个值是在某一档宽度下量的
+        // （≤400px 是 8px，更宽是 10px），一旦写成内联就压住了所有宽度档 ——
+        // 从 380px 拉宽到 800px 后输入区下方少 2px（面测 base800=10 而实际 8）。
+        // 清空内联样式，各档的 padding 自然回到 CSS 定义的值。
+        composerEl.style.paddingBottom = '';
       }
     }
     statusBar.setAttribute('data-open', on ? 'true' : 'false');
+    // 给 body 挂一个标记：抽屉展开时 CSS 用它把「回到底部」藏起来
+    //（两者几何相交，按钮会被抽屉吞掉点击 —— 见 #toBottom 那段注释）。
+    document.body.setAttribute('data-stdrawer', on ? 'true' : 'false');
     if (stToggle) {
       stToggle.setAttribute('data-open', on ? 'true' : 'false');
       stToggle.setAttribute('aria-expanded', on ? 'true' : 'false');
@@ -2862,6 +3059,21 @@
     // 抽屉收起时顺手关掉从抽屉里打开的下拉：否则弹层失去锚点飘在原处，
     // 用户既看不出它属于谁，也点不到触发它的按钮。
     if (!on) closePop();
+    // 展开抽屉时把命令面板收起来（与 openPalette 里反向那一条对称）：
+    // 两者都是从 .composer 向上弹的浮层，同屏会互相遮挡（实测几何相交 63px）。
+    // 只做单向的话，先开面板再开抽屉仍然会叠在一起，那一侧看着像没修。
+    if (on && typeof paletteVisible === 'function' && paletteVisible()) {
+      openPalette(false);
+    }
+    // 同理：展开状态抽屉时把会话抽屉收起来。两者在 249px 下都是覆盖全宽的浮层，
+    // 状态抽屉（z 55）压在会话抽屉（z 50）上，会把它 footer 的三颗按钮
+    //（新建对话 / 保存当前为… / 新建探索分支；分支态下还有两颗出口按钮）
+    // **整片吞掉** —— 用户点上去零反应，而且看不出来被谁盖住了（实测）。
+    // 这一条与 setDrawer(true) 里反向那一条必须成对，否则只修一侧等于没修。
+    if (on && typeof setDrawer === 'function' &&
+        drawer && drawer.getAttribute('data-open') === 'true') {
+      setDrawer(false);
+    }
   }
   if (stToggle) {
     stToggle.addEventListener('click', function(e){
@@ -2873,6 +3085,21 @@
   document.addEventListener('keydown', function(e){
     if (e.key !== 'Escape' || !stDrawerOpen()) return;
     setStDrawer(false);
+  });
+  // 面板被拖宽到「不该有抽屉」的宽度时自动收起。
+  // 为什么必须补这一条：一旦拖宽到 ⋯ 不显示的档位，抽屉若还开着
+  //   · data-open="true" 会让所有 :not([data-open]) 的收起规则失效 ——
+  //     600px 下余额不让位、500px 下目标/插件的文字被省略号截断（实测）
+  //   · .composer 的 padding-bottom 补偿也留着 —— 输入区下方多 26px 空白
+  //   · 而那个档位没有 ⋯ 按钮，用户**找不到收起入口**，只能碰巧点一下别处
+  // 也就是「打开了关不掉」的死局，所以宽度回到不该有的档位就复位。
+  // 阈值是 470（不是 380）：⋯ 从 470 起就出现了（见 CSS 那段注释），
+  // 超过 470 才真的没有入口。
+  window.addEventListener('resize', function(){
+    if (!stDrawerOpen()) return;
+    var sh = document.querySelector('.shell');
+    var w = sh ? sh.getBoundingClientRect().width : window.innerWidth;
+    if (w > 470) setStDrawer(false);
   });
 
   function setChecked(pop, v){
@@ -2895,6 +3122,15 @@
    */
   var configKeyQueue = [];
   function postConfigSet(key, value){
+    // 离线时**不能入队**：post() 虽然会拦下请求并给出「未连接后端」提示，
+    // 但 key 已经先压进队列了 —— 重连后的第一个成功回执会配到这个陈旧 key 上，
+    // 之后任何一次失败回退都会拿着「模型」的 key 去写「思考」档位，
+    // 状态栏于是出现「思考 = deepseek-flash」或「模型 = high」这种错位（实测）。
+    // 所以在 push 之前就判离线，一个都不入队。
+    if (REAL && body.getAttribute('data-offline') === 'true') {
+      post('configSet', { key: key, value: value });   // 走 post 的离线提示
+      return;
+    }
     configKeyQueue.push(key);
     post('configSet', { key: key, value: value });
   }
@@ -2928,6 +3164,9 @@
     if (REAL) postConfigSet('goal', { enabled: v === 'on', maxRounds: Number(rounds) });
     var btn = document.getElementById('btnGoal');
     btn.textContent = v === 'on' ? '目标模式 开 · 0/' + rounds : '目标模式 关';
+    // 图标档（≤380px 时文字 font-size:0）里，CSS 靠 [data-on="true"] 上强调色，
+    // 这是唯一能看出「现在开着没有」的线索；不回写这个属性，点开也看不出变化。
+    btn.setAttribute('data-on', v === 'on' ? 'true' : 'false');
     closePop();
   });
 
@@ -2966,6 +3205,8 @@
     var enabled = this.querySelectorAll('.pi[data-on="true"]').length;
     document.getElementById('btnPlugin').textContent =
       (enabled === total ? '插件 ' + total : '插件 ' + enabled + '/' + total);
+    // 与目标模式同理：图标档里 accent 色是「还有插件开着」的唯一线索（见 CSS 1268-1275）
+    document.getElementById('btnPlugin').setAttribute('data-on', enabled > 0 ? 'true' : 'false');
   });
 
   /* ---------- 会话数据与渲染 ---------- */
@@ -2980,13 +3221,20 @@
   var VISIBLE_SESSIONS = 6;
   // 后端因截断没给的会话条数（只给计数，不给内容），「展开其余 N 条」要用
   var SESS_HIDDEN = 0;
-  var CUR = (DEMO && DEMO.current) || '';
+  var CUR = String((DEMO && DEMO.current) || '');
   // 用户点了「展开」后置 true：真实态发 session/list{all:true}，模拟态直接全显示
   var SHOW_ALL = false;
   /* 哪些父会话的分支在抽屉里展开着（key = 父会话名）。
      只影响列表显示，不改变当前会话，也不需要问后端——children 本来就在
      session/list 里给了。 */
   var EXPANDED = {};
+  /* 用户手动收起过的父会话（key = 父会话名）。renderSessions 里「当前在子会话
+     就自动展开父会话」的逻辑会看它：手动收起过就不展开。
+     为什么需要它：以前自动展开是无条件的，而收起操作是
+     `delete EXPANDED[父]; renderSessions()` —— 重绘立刻又置回 true，
+     于是在子会话里工作时那条分支永远收不起来（点几次都没反应，连箭头不动）。
+     关掉抽屉时清空：换了时点再看，仍希望一眼看到自己在哪。 */
+  var MANUAL_COLLAPSED = {};
 
   function sessMeta(s){
     return s.time || '';
@@ -3031,8 +3279,16 @@
        只能记得去输入框敲 /ls --all 或 /explore，而界面上没有任何提示。
        当前所在的那条若是子会话，进抽屉时自动把它父会话展开好，
        否则用户会看到「顶栏写着 alpha/beta，列表里却只有 alpha」。 */
-    // 当前在子会话里 → 自动展开它的父会话
-    if (CUR.indexOf('/') >= 0) EXPANDED[CUR.split('/')[0]] = true;
+    /* 当前在子会话里 → 自动展开它的父会话，除非用户手动收起过这一条。
+       判据就是「有没有手动收起过」，不依赖调用顺序：
+       renderSessions 的重绘来源很多（轮末自动保存、删除回执、切会话、
+       session/list 到达……），任何「只在这个时机做一次」的写法都会因为
+       这些时序组合而漏掉自动展开。
+       而「手动收起」是一个明确的用户意图，记住它就不会被重绘顶回来。 */
+    if (CUR.indexOf('/') >= 0) {
+      var _root = CUR.split('/')[0];
+      if (!MANUAL_COLLAPSED[_root]) EXPANDED[_root] = true;
+    }
 
     var all = SESS.slice();
     var shown = SHOW_ALL ? all : all.slice(0, VISIBLE_SESSIONS);
@@ -3065,7 +3321,15 @@
       html += '<div class="dw-more" data-more="0">收起</div>';
     }
     if (!all.length) {
-      html += '<div class="dw-empty">还没有已保存的对话</div>';
+      // 「读不到」和「真的没有」必须分开说 —— 这是两件完全不同的事。
+      // 只在列表为空、且**没有**读取失败时，才能说「还没有已保存的对话」。
+      // 读失败时还这么说会怎样（第 25 轮实测）：抽屉里同时挂着
+      // 「✗ 读取会话列表失败」和「还没有已保存的对话」，两句话语义相反，
+      // 而「还没有对话」是更强的断言 —— 用户会以为**会话全被删了**，
+      // 于是不再去排查读取问题，直接开始重建工作。
+      html += SESS_LIST_ERROR
+        ? '<div class="dw-empty">会话列表暂时读不到（原因见对话区提示）</div>'
+        : '<div class="dw-empty">还没有已保存的对话</div>';
     }
 
     // 重绘会整块换掉 innerHTML。若此刻正有一条「删除？」在等用户点，
@@ -3075,6 +3339,22 @@
     var askingName = '';
     var askingEl = document.querySelector('#sessList .dw-item[data-del="ask"]');
     if (askingEl) askingName = askingEl.getAttribute('data-name') || '';
+
+    /* 焦点也要一起保住。重绘换掉 innerHTML 后，原来获得焦点的那个节点
+       已经脱离文档 → activeElement 掉回 <body>，键盘用户的位置全丢
+       （Tab 只能从页面顶端重来）。恢复「状态」不恢复「焦点」只修了一半。
+       记下：焦点在哪条会话行、以及行内哪个按钮（靠 class 定位，不靠索引）。 */
+    var focusName = '';
+    var focusBtnCls = '';
+    var act0 = document.activeElement;
+    if (act0 && act0 !== document.body) {
+      var focusRow = act0.closest ? act0.closest('#sessList .dw-item') : null;
+      if (focusRow) {
+        focusName = focusRow.getAttribute('data-name') || '';
+        // 是「是/否」这种行内确认按钮，还是删除/改名那种图标按钮
+        focusBtnCls = act0.className || '';
+      }
+    }
 
     document.getElementById('sessList').innerHTML = html;
 
@@ -3087,6 +3367,24 @@
           items[ai].setAttribute('data-del', 'ask');
           break;
         }
+      }
+    }
+    // 焦点回填：同一行、同一类按钮。找不到就退到抽屉关闭按钮，
+    // 总之不要留在 <body> 上（那就等于把键盘用户丢回页面顶端）。
+    if (focusName) {
+      var rows2 = document.querySelectorAll('#sessList .dw-item');
+      var target = null;
+      for (var bi = 0; bi < rows2.length; bi++) {
+        if (rows2[bi].getAttribute('data-name') === focusName) {
+          target = focusBtnCls
+            ? rows2[bi].querySelector('.' + focusBtnCls.split(/\s+/)[0])
+            : rows2[bi];
+          break;
+        }
+      }
+      if (!target) target = document.getElementById('dwClose');
+      if (target && typeof target.focus === 'function') {
+        try { target.focus(); } catch (e) { /* 忽略 */ }
       }
     }
 
@@ -3668,7 +3966,20 @@
         return;
       }
       var pp = arg.split(/\s+/);
-      var target = document.querySelector('#popPlugin .pi[data-v="' + pp[0] + '"]');
+      // 按 display 名逐个 toLowerCase 比较，**不能拼进 CSS 选择器**：
+      // `.pi` 的 data-v 是原始大小写（Terminal / WebSearch），用户敲 `terminal`
+      // 时拼出来的 '#popPlugin .pi[data-v="terminal"]' 一个都匹配不到，
+      // 于是「无效插件名」（第 7 轮在 syncUiAfterCommand 里已经踩过同一个坑）。
+      var target = null;
+      Array.prototype.some.call(
+        document.querySelectorAll('#popPlugin .pi'),
+        function (pi) {
+          if (String(pi.getAttribute('data-v') || '').toLowerCase() === pp[0].toLowerCase()) {
+            target = pi;
+            return true;
+          }
+          return false;
+        });
       if (!target) {
         cmdResult(CMD, '✗', '无效插件名: ' + pp[0],
           '可用 terminal / serial / mcp / web_search', 'err');
@@ -3688,6 +3999,11 @@
       var en = document.querySelectorAll('#popPlugin .pi[data-on="true"]').length;
       document.getElementById('btnPlugin').textContent =
         (en === tot ? '插件 ' + tot : '插件 ' + en + '/' + tot);
+      // 顶栏按钮的高亮（data-on）必须跟着一起写：只写文字会怎样（实测）——
+      // 下拉项已经被本分支改成了 off，顶栏却仍带 data-on="true" 的强调色，
+      // 同一屏上「顶栏说开着、下拉说关了」。这是「同属性多处写、漏一处同步」
+      // 这一类缺陷的又一处（前 9 轮修过 4 处，这条在演示态可达）。
+      document.getElementById('btnPlugin').setAttribute('data-on', en > 0 ? 'true' : 'false');
       cmdResult(CMD, '✓', '插件' + (isOn ? '开' : '关') + ' ' + pp[0], '', 'ok');
       return;
     }
@@ -3727,14 +4043,24 @@
       // 用户会以为没点上而连点（实测点击后条目数与文案都不动）。
       if (more.getAttribute('data-pending') === 'true') return;
       var wantAll = more.getAttribute('data-more') === '1';
-      SHOW_ALL = wantAll;
       if (REAL) {
+        // 离线时**一个字节都不改**，连 SHOW_ALL 也不写。
+        // 只置 pending 不够：SHOW_ALL 原来写在判断离线**之前**，于是
+        // 界面明确告诉用户「未连接后端，操作未执行」，可状态已经变成"显示全部"了 ——
+        // 之后任何一次纯本地重绘（关一次抽屉、重绘会话列表）就会把全部会话摊开，
+        // 重连后也保持全展开（实测）。说了没执行，却执行了一半。
+        if (body.getAttribute('data-offline') === 'true') {
+          post('sessionList', { all: wantAll });   // 交给 post() 给离线提示
+          return;
+        }
+        SHOW_ALL = wantAll;
         // 真实态：让后端给全量列表，回来时 applySessionList 会按 SHOW_ALL 渲染
         more.setAttribute('data-pending', 'true');
         more.textContent = wantAll ? '正在加载全部会话…' : '正在收起…';
         post('sessionList', { all: wantAll });
       } else {
         // 模拟态数据本来就在本地，直接重画
+        SHOW_ALL = wantAll;
         renderSessions();
       }
       rendered('session/more', { all: wantAll });
@@ -3749,8 +4075,17 @@
     var br = e.target.closest('.br');
     if (br) {
       e.stopPropagation();
-      if (EXPANDED[full]) delete EXPANDED[full];
-      else EXPANDED[full] = true;
+      if (EXPANDED[full]) {
+        delete EXPANDED[full];
+        // 记下「这个父会话是我手动收起的」，让 renderSessions 的
+        // 「进抽屉自动展开我在的分支」不再把它顶回来。
+        // 不记会怎样（实测）：当前就在这条分支里工作时，点收起无效
+        //（每次重绘都被自动展开逻辑置回 true），连箭头都不动。
+        MANUAL_COLLAPSED[full] = true;
+      } else {
+        EXPANDED[full] = true;
+        delete MANUAL_COLLAPSED[full];
+      }
       renderSessions();
       rendered('session/branchToggle', { name: full, open: !!EXPANDED[full] });
       return;
@@ -3793,6 +4128,8 @@
 
   function openSessMenu(x, y, full){
     if (!sessMenuEl) return;
+    // 与下拉同一族：打开前先收起命令面板和其它小浮层（否则同屏会点击穿透）
+    dismissOtherOverlays();
     menuTarget = full;
     // 先显示再量尺寸：display:none 时 offsetWidth 是 0，夹不出正确位置
     sessMenuEl.setAttribute('data-open', 'true');
@@ -4046,9 +4383,15 @@
           doneBtn.setAttribute('data-ask', '0');
           doneBtn.textContent = '✓ 完成并合并结论';
           if (askLine && askLine.parentNode) {
-            var tail = askLine.querySelector('.tail');
-            if (tail) tail.textContent = '这次没有合并';
+            // 直接重建整行，不要去找 .tail：上面 sysLine 的第三个参数是空串，
+            // cmdOne 只在 tail 非空时才生成 .tail 节点，所以 querySelector('.tail')
+            // 恒为 null —— 原来那句 `if (tail) tail.textContent = ...` 永远不执行，
+            // 屏幕上就留着一句「再点一次才执行」，而按钮已回到初始文案，
+            // 用户按提示再点一次只会重新进入确认态，什么也没发生（实测）。
+            // 主文本也必须一起换掉：只改 tail 会得到「…再点一次才执行 这次没有合并」
+            // 这种自相矛盾的一行。
             askLine.className = 'sys';
+            askLine.innerHTML = '<span class="ico">·</span><span>这次没有合并</span>';
           }
         }
       }, 8000);
@@ -4170,6 +4513,31 @@
     // 之后所有消息都被 busy 拒绝、点停止也没用，只能重载窗口。
     if (text.charAt(0) === '/') {
       runInputCommand();
+      return;
+    }
+    /* 这一轮还在跑时，不发新的普通消息。
+       为什么必须拦（实测：损伤不可逆）：
+         · 下面会无条件 `curAssistant = null; assistantBuf = ''` —— 正在流式的那条
+           回答被丢弃引用，后续 stream/delta 会新建气泡，于是同一轮回答在屏幕上
+           被劈成两个，前半截成了再也接不上的孤儿；
+         · 后端这一轮没结束时会 busy 拒绝，而附件已经在末尾被清空（第 5978 行），
+           消息没发出去、附件也没了，且只有一条泛泛的提示；
+         · 更糟的是没有任何前置信号：只是「发送按钮变成了停止」，用户完全可能
+           在等回答的过程中补充一句（这是很自然的动作）。
+       同文件里 retry、新建对话都有 `data-run` 守卫，唯独这里漏了。
+       拦下时把内容留在输入框里（不清、不进历史），用户按停止或等回答完再发即可。
+       命令（/ 开头）不受影响：走 runInputCommand，后端对命令的处理与对话不同。
+
+       **这里刻意不写系统行**（这一点踩过一次）：`sysLine` → `cmdOne` 会无条件
+       `closeAssistantSegment()`（系统行必须落在「当前正文之后」，否则后面流进来的
+       文字会把它夹在句子中间，那是它存在的理由）。而运行中插入系统行恰恰要断开
+       正在流式的这一段 —— 于是「拦住了发送」却把回答劈成了两个气泡，
+       和修复前一样坏（第 15 轮独立验收实测：A 无插入=1 气泡 / B 插话=2 气泡，
+       且前半截的下一个兄弟正是那行提示）。
+       改为「记一笔，等这一轮收口时再提示」：turn/end 之后正文已定稿，那时插入
+       系统行不会拆散任何东西，用户也能得到明确反馈（不是零反馈）。 */
+    if (body.getAttribute('data-run') === 'true') {
+      blockedWhileRunning = true;
       return;
     }
     // 离线时不能先清空输入框：消息发不出去，用户打的字就凭空没了（实测
@@ -4471,11 +4839,22 @@
    * 清屏：把当前对话从「显示」里拿掉，会话上下文与磁盘内容一律不动。
    * 清完留一行说明，否则用户会以为对话被删了（内容其实还在会话里，
    * 点抽屉能回去）。
+   *
+   * 运行中清屏要**如实交代**。清屏会 resetConversationDom()，它把
+   * curAssistant / assistantBuf 一起丢掉但不碰 data-run，于是后续 stream/delta
+   * 会新建气泡、只装「清屏之后」的那半截；轮末重渲染也只覆盖这半截 ——
+   * 这一轮回答的前半截在屏幕上永久消失。
+   * 这里**不拦**清屏（清屏就是用户的明确意图，拦了反而违背操作），
+   * 但必须说清两件事：这一轮没停、完整内容还能从会话里取回来。
+   * 同族另外三个清屏入口（切会话 / 新建对话 / /rm 当前会话）都写了各自的交代，
+   * 只有 /clear 原来一个字不说 —— 用户会以为回答丢了或界面坏了（实测）。
    */
   function clearScreen(){
+    var wasRunning = body.getAttribute('data-run') === 'true';
     resetConversationDom();
     authHintShown = false;
-    cmdResult('/clear', '·', '已清屏', '');
+    cmdResult('/clear', '·',
+      wasRunning ? '已清屏 · 这一轮仍在后台继续，完整回答可在会话里重新载入' : '已清屏', '');
     scrollBottom();
   }
 
@@ -4506,26 +4885,114 @@
    * 三处不能切：
    *   · 代码围栏内（切开会把代码块劈成两个残块）
    *   · 表格行内（表格行之间只有单换行，切开就是两张残表）
-   *   · 列表内部（两段都是列表项时切开，会变成两个各自从 1 编号的 <ol>——
-   *     实测 8 项清单流式中途 ol=2/3/3，900 项清单最终 900 张 <ol>）
+   *   · 列表内部（切开会让每段各自从 1 编号 / 续行掉到列表外）
+   *
+   * **判据必须与渲染器同源**（这是踩过的最大一个坑）：切点判据和
+   * `parseListAt` / `markdownInline` 各自写一套规则，只要两边对「什么算同一个块」
+   * 的理解有一点偏差，流式期间就会出现「渲染错误的内容」，而轮末整段重渲染
+   * 又把它修好 —— 于是 bug 只在几十秒的流式窗口里可见，前 10 轮全部漏掉。
+   * 具体偏差（第 11 轮实测）：
+   *   · 列表：渲染器认为「空行后仍是同缩进列表项」和「≥2 空格缩进续行」都还属于
+   *     同一个列表，而切点判据只比「相邻两行都是列表项」→ 松散列表被切开后
+   *     屏幕上每段各从 1 编号；续行被剥离成列表外的独立段落
+   *   · 围栏：渲染器只认**行首**（允许前导空白）且长度 ≥3 的反引号串，切点判据
+   *     却是「全文任意位置见到 ``` 就取反」→ 代码正文里出现 ``` 时后续正文被当代码
    */
   function safeCut(buf, from){
     var n = buf.length;
     if (from >= n) return -1;
-    // 前缀里已开了奇数个 ``` 说明还困在代码块里，后续切点必须跳过
-    var fence = (buf.slice(0, from).split('```').length - 1) % 2;
-    var cut = -1;
-    var lineStart = from === 0 ? 0 : buf.lastIndexOf('\n', from - 1) + 1;
     var LIST_ITEM = /^\s*(?:[-*+]|\d+[.)])\s/;
+    var LIST_CONT = /^\s{2,}\S/;          // 缩进续行（渲染器把它并进上一项）
+    var BLANK = /^\s*$/;
+    // 行首围栏：与 markdownInline 同判据（允许前导空白、长度 >= 3）
+    function fenceLenAt(pos){
+      var rest = buf.slice(pos, pos + 96);
+      var m = /^[ \t]*(`{3,})/.exec(rest);
+      if (!m) return 0;
+      // 必须整行都是反引号（后面只允许空白或语言标签），行内出现的反引号不算围栏
+      var lineEnd = rest.indexOf('\n');
+      var line = lineEnd < 0 ? rest : rest.slice(0, lineEnd);
+      if (!/^[ \t]*`{3,}[^`]*$/.test(line)) return 0;
+      return m[1].length;
+    }
+    // 取 pos 起始的完整行（不含换行）；未写完返回 null
+    function lineAt(pos){
+      var e = buf.indexOf('\n', pos);
+      return e < 0 ? null : buf.slice(pos, e);
+    }
+    /**
+     * 这个切点（= nextStart 处的行边界）是否落在**同一个列表内部**。
+     *
+     * 必须「跨空行」判断，不能只看紧邻两行。踩过两次：
+     *   ① 只看 prevLine/nextLine 都是列表项 → `1. a\n\n2. b` 的空行处被判可切，
+     *      切开后每段各从 1 编号（屏幕上 1. 1. 1.）
+     *   ② 改成「prevLine 是项时看后面」→ `1. a\n` 与 `\n2. b` 之间那个边界，
+     *      它的 prevLine 是空行，判据整个不生效，照样切
+     * 正确语义取自渲染器的 parseListAt：**跳过空行后仍是列表项或缩进续行，
+     * 就还属于同一个列表**。所以这里往前找最近的非空行 B、往后找最近的非空行 A，
+     * 只要 B 是列表项且 A 仍是列表项/缩进续行，这个边界就在列表内部。
+     */
+    function listSpansHere(nextStart){
+      // 往后：跳过空行找第一个非空行
+      var p = nextStart;
+      var ahead = null;
+      while (p <= buf.length) {
+        var la = (p === buf.length) ? null : lineAt(p);
+        if (la === null) {
+          if (p === buf.length && buf.length > 0 && buf.charAt(buf.length - 1) !== '\n') return true;
+          break;                                  // 还没写完 → 保守当作在列表内
+        }
+        if (!BLANK.test(la)) { ahead = la; break; }
+        p += la.length + 1;
+      }
+      if (ahead !== null && !(LIST_ITEM.test(ahead) || LIST_CONT.test(ahead))) {
+        return false;                             // 后面就是普通正文 → 列表到此结束
+      }
+      // 往前：跳过空行找第一个非空行
+      var q = nextStart - 1;                      // 指向边界前的那个 '\n'
+      var behind = null;
+      while (q >= 0) {
+        var ls = buf.lastIndexOf('\n', q - 1) + 1;
+        var lb = buf.slice(ls, q);
+        if (!BLANK.test(lb)) { behind = lb; break; }
+        if (ls === 0) break;
+        q = ls - 1;
+      }
+      if (behind === null) return false;          // 前面没有内容 → 不在列表内
+      // 前面是列表项 **或缩进续行** → 都还在同一个列表里。
+      // 漏掉 LIST_CONT 会怎样（实测）：`- 安装依赖` / `  执行 npm install` / `- 第二项`
+      // 三行里，最后那个边界的前一行是「缩进续行」而不是列表项，判据返回 false
+      // 于是切开 —— 屏幕上一个 <ul> 变成两个。
+      return LIST_ITEM.test(behind) || LIST_CONT.test(behind);
+    }
+    // 前缀里当前是否困在代码块中：逐行扫，按长度配对
+    var fenceLen = 0;
+    var preEnd = from === 0 ? 0 : buf.lastIndexOf('\n', from - 1) + 1;
+    for (var q = 0; q < preEnd; ) {
+      var L0 = fenceLenAt(q);
+      if (L0) {
+        if (fenceLen === 0) fenceLen = L0;
+        else if (L0 >= fenceLen) fenceLen = 0;
+      }
+      var e0 = buf.indexOf('\n', q);
+      if (e0 < 0) break;
+      q = e0 + 1;
+    }
+    var cut = -1;          // 任意的可切边界（退化档：找不到块边界时用）
+    var cutBlock = -1;     // 块边界（优先用：切在这里不会把一段拆成两段）
+    var lineStart = from === 0 ? 0 : buf.lastIndexOf('\n', from - 1) + 1;
     var i = from;
     while (i < n) {
-      if (buf.charAt(i) === '`' && buf.charAt(i + 1) === '`' && buf.charAt(i + 2) === '`') {
-        fence = 1 - fence;
-        i += 3;
-        continue;
+      // 围栏只在行首认（行内反引号不是围栏）
+      if (i === lineStart) {
+        var Lf = fenceLenAt(i);
+        if (Lf) {
+          if (fenceLen === 0) fenceLen = Lf;
+          else if (Lf >= fenceLen) fenceLen = 0;
+        }
       }
       if (buf.charAt(i) === '\n') {
-        if (fence === 0) {
+        if (fenceLen === 0) {
           var prevLine = buf.slice(lineStart, i);
           var nextStart = i + 1;
           var nextEnd = buf.indexOf('\n', nextStart);
@@ -4541,12 +5008,31 @@
             //     写法 "a | b" —— 实测切完 <tr> 从 9 行变 1 行）
             //   · 引用块：连续 "> x" 行切开会变成多个 <blockquote>
             //     （实测 1 个变 6 个，每块各带一条竖线）
-            //   · 列表：切开变成多个各自从 1 编号的 <ol>
+            //   · 列表：判据与 parseListAt 同源，见上面 listSpansHere
             var breaksTable = isTableRow(prevLine) || isTableRow(nextLine);
-            var breaksList = LIST_ITEM.test(prevLine) && LIST_ITEM.test(nextLine);
+            // 列表：跨空行判断（见 listSpansHere 的注释），不再只看紧邻两行
+            var breaksList = listSpansHere(nextStart);
             var breaksQuote = /^\s*>/.test(prevLine) && /^\s*>/.test(nextLine);
             if (!breaksTable && !breaksList && !breaksQuote) {
               cut = i + 1;
+              /* 但「能切」不等于「该切」：还要看这里是不是一个**块边界**。
+                 为什么必须分两档（实测，频率 100%）：
+                   renderBlocks 的 flushPara 把「连续非空行」渲染成**一个** <p>
+                   （段内单换行变 <br>），而前缀 mdLockNode 一旦写入就永不重渲染。
+                   所以切在「普通段落的两行之间」时，前几行被永久定稿成一个独立 <p>，
+                   剩下的行又成一个 <p> —— 用户看到一段话被拆成几段、每段之间多出
+                   段间距，随输出推进不断重排，长回答里会持续几十秒。
+                   实测：3 行普通段落、任意步长（2/3/5/7/11）全部命中；真实长回答
+                   4/4 种切法都命中。
+                 块边界判据（切在这里不会拆段）：
+                   · 前一行是空行 → 后面是新段落起点
+                   · 下一行是块级标记（列表/表格/围栏/引用/标题）→ 是本块结束
+                 注意**不能**直接禁掉「段落行之间切」：长日志每行一个换行、全文没有
+                 空行，禁掉之后前缀完全推不动（第 6232 行注释记录过这个性能教训）。
+                 所以保留 cut 作为退化档，只在找不到块边界时用它。 */
+              var BLOCKISH = /^\s*(?:[-*+]|\d+[.)]|>|#{1,6}[ \t]|`{3,})/;
+              var atBlockEdge = BLANK.test(prevLine) || BLOCKISH.test(nextLine);
+              if (atBlockEdge) cutBlock = i + 1;
             }
           }
         }
@@ -4554,7 +5040,18 @@
       }
       i++;
     }
-    return cut;
+    // 优先块边界。两个候选都没有时返回 -1（不切），调用方保持整段在尾巴里重渲染。
+    //
+    // 退化档的判据是「尾巴已经很长」而不是「有任意可切边界」：
+    // 只看 cut 的话，3 行普通段落（无空行、无块标记）仍会在行间切开，
+    // 段落照样被拆（实测就是这条路）。而「不切」的代价只是这一段每次 delta
+    // 都整体重渲染 —— 第 11 轮 J6 实测 50 万字符整段重渲染仅 30ms，
+    // 所以短内容完全承受得起，没必要为它牺牲排版。
+    // 只有尾巴长到 2 万字符以上（典型是几百行日志、全文没有空行）才退化，
+    // 否则那种内容前缀完全推不动，每次 delta 重解析全部历史。
+    if (cutBlock > 0) return cutBlock;
+    if (cut > 0 && (n - from) > 20000) return cut;
+    return -1;
   }
 
   /**
@@ -5369,7 +5866,24 @@
       }
     }
     if (p.thinkingEffort) {
-      document.getElementById('btnThink').textContent = p.thinkingEffort;
+      var thinkBtn = document.getElementById('btnThink');
+      thinkBtn.textContent = p.thinkingEffort;
+      // 按钮只写「显示名」（深度/极致），下拉却是按 data-v（high/max）打勾，
+      // 两者的映射在 applyThink 重建条目时就建好了。只改文字不同步勾选会怎样：
+      // 每轮 stats 都可能把按钮改成后端推的档位，而下拉勾选只在 initialize /
+      // config 时更新 —— 于是按钮写「深度」、点开下拉却勾在「极致」（实测）。
+      // 用显示名反查条目（按钮文字 = 该条目的 .lb 文本），查不到就不动：
+      // 后端可能推出一个下拉里还没有的自定义档位，这时保持原勾选比乱勾安全。
+      var popT = document.getElementById('popThink');
+      if (popT) {
+        var want = String(p.thinkingEffort).trim();
+        var hit = null;
+        Array.prototype.forEach.call(popT.querySelectorAll('.pi'), function (pi) {
+          var lb = pi.querySelector('.lb');
+          if (lb && lb.textContent.trim() === want) hit = pi;
+        });
+        if (hit) setChecked(popT, hit.getAttribute('data-v'));
+      }
     }
     rendered('stats', {
       context: (document.querySelector('.status .st-ctx .v') || {}).textContent || ''
@@ -5394,17 +5908,20 @@
     Array.prototype.forEach.call(convo.querySelectorAll('[data-pending]'), function(el){
       el.removeAttribute('data-pending');
     });
+    // 上一轮被 busy 拒掉的那条会被就地标成「未发送」。这一轮真的开始了 = 那次
+    // 发送已被后端接受、用户也已经重发成功，徽标必须摘掉——留着就是在同一屏上
+    // 同时说「发了」和「没发」（原来全文件只有 setAttribute，没有一处 remove，
+    // 徽标一直跟到对话区被整段重画）。
+    Array.prototype.forEach.call(convo.querySelectorAll('[data-failed]'), function(el){
+      el.removeAttribute('data-failed');
+    });
     lastSentMaybeAccepted = false;
     // resumed=true：这是面板重建后宿主补发的「这一轮还在跑」，不是新的一轮。
     // 不能重置正文状态——清了 assistantBuf / curAssistant 之后，后续
     // stream/delta 会新建一条助手消息，用户看到同一轮回答被劈成两个气泡
     //（前半段是重建时恢复的历史，后半段是新的）。实测：一轮正文拆成两条。
     if (p && p.resumed) {
-      var g = p && p.goal;
-      if (g && g.enabled) {
-        document.getElementById('btnGoal').textContent =
-          '目标模式 开 · ' + (g.current || 0) + '/' + (g.max || 0);
-      }
+      applyTurnGoal(p && p.goal);
       scrollBottom();
       rendered('turn/begin', { round: (p && p.round) || 0, resumed: true });
       return;
@@ -5413,13 +5930,47 @@
     curAssistant = null;
     assistantBuf = '';
     resetStreamRender();
-    var goal = p && p.goal;
-    if (goal && goal.enabled) {
-      document.getElementById('btnGoal').textContent =
-        '目标模式 开 · ' + (goal.current || 0) + '/' + (goal.max || 0);
-    }
+    applyTurnGoal(p && p.goal);
     scrollBottom();
     rendered('turn/begin', { round: (p && p.round) || 0 });
+  }
+
+  /**
+   * turn/begin 里的目标模式状态：按钮文字 + data-on + 下拉勾选 + 轮数输入框。
+   *
+   * 抽成一处是因为原来 resumed 分支与正常分支各写了一遍刷新逻辑，
+   * 于是「改一处漏另一处」：
+   *   · resumed 分支只刷按钮、不回写 #goalRounds —— 面板重建后按钮写「1/15」，
+   *     点开下拉看到的输入框还是 12（实测）
+   *   · 两处都只处理 enabled=true，enabled=false 时按钮还留着上一轮的
+   *     「开 · 5/10」、图标仍亮着强调色 —— 多面板/旁路把目标模式关掉后，
+   *     这个面板的目标状态就永远陈旧
+   * 现在四种组合（开/关 × 新轮/重建）都走同一条路径，不会再分叉。
+   */
+  function applyTurnGoal(goal){
+    var btn = document.getElementById('btnGoal');
+    if (!btn) return;
+    // 没带 goal 字段就**不改写**：普通轮次的 turn/begin 本来就不带 goal，
+    // 这时后端没告诉目标状态，武断改成「关」会把真实开态冲掉。
+    // 「明确 enabled:false」才是回落信号（多面板/旁路关掉目标模式的情形）。
+    if (!goal) return;
+    var on = !!goal.enabled;
+    if (on) {
+      btn.textContent = '目标模式 开 · ' + (goal.current || 0) + '/' + (goal.max || 0);
+      btn.setAttribute('data-on', 'true');
+      // 只在 max 有真值时写输入框，避免把 undefined 写成字符串
+      if (goal.max) {
+        var gi = document.getElementById('goalRounds');
+        if (gi) gi.value = String(goal.max);
+      }
+      var pg = document.getElementById('popGoal');
+      if (pg) setChecked(pg, 'on');
+    } else {
+      btn.textContent = '目标模式 关';
+      btn.setAttribute('data-on', 'false');
+      var pg2 = document.getElementById('popGoal');
+      if (pg2) setChecked(pg2, 'off');
+    }
   }
 
   function turnEnd(p){
@@ -5529,6 +6080,14 @@
     //（断网重连、压缩后、切会话回来）都会把 assistantBuf 当成「正在流式的
     // 后半截」再画一遍——6 条消息画成 7 条，最后一句回答重复出现。
     assistantBuf = '';
+    // 这一轮里用户想发但被守卫拦下的内容：现在正文已定稿，插入系统行不会拆散
+    // 任何东西，可以如实告诉他「刚才那条没发出去、还在输入框里」。
+    // 不在这里补的话，用户按 Enter 后几十秒内看不到任何反应（第 15 轮验收点名
+    // 「零反馈」）。当场提示又会把正文劈成两个气泡，所以只能延到这里。
+    if (blockedWhileRunning) {
+      blockedWhileRunning = false;
+      sysLine('·', '刚才那条没有发出去（这一轮还在回答）', '内容仍在输入框');
+    }
     rendered('turn/end', { reason: reason, assistant: briefAssistant() });
     // 轮末补拉一次会话列表。
     // 不拉会怎样（实测）：会话的「N 条」和列表顺序都来自 session/list 快照，
@@ -5676,6 +6235,9 @@
     document.getElementById('btnGoal').textContent = enabled
       ? '目标模式 开 · ' + current + '/' + max
       : '目标模式 关';
+    // 同步 data-on：CSS 1268-1275 只在 [data-on="true"] 时才把图标点上强调色，
+    // 全文件原来没有一处写这个属性，那条高亮规则等于永不命中。
+    document.getElementById('btnGoal').setAttribute('data-on', enabled ? 'true' : 'false');
     var roundsInput = document.getElementById('goalRounds');
     if (roundsInput) roundsInput.value = String(max);
   }
@@ -5684,6 +6246,16 @@
     var pop = document.getElementById('popPlugin');
     Array.prototype.forEach.call(pop.querySelectorAll('.pi'), function(pi){
       pi.parentNode.removeChild(pi);
+    });
+    // 先过滤掉畸形项：缺 name 的条目会让 data-v="undefined"，点一下会往一个
+    // 不存在的插件发 configSet；更糟的是后续 esc(pl.label) 若碰到 null 会抛
+    // TypeError，把 applyInitialize 后半段（workdir / 会话 / 历史）整段打断，
+    // 界面停在「半初始化」——顶栏没会话名、历史也不出来（实测）。
+    // 一个坏数据项不该让整个握手失效，所以跳过它、继续渲染其余项。
+    if (!Array.isArray(plugins)) plugins = [];
+    plugins = plugins.filter(function(pl){
+      // name 允许字符串或数字（数字转成字符串照样能用），只丢真正没有名字的项
+      return pl && pl.name !== null && pl.name !== undefined && pl.name !== '';
     });
     var anchor = pop.querySelector('.pd');
     var enabled = 0;
@@ -5700,6 +6272,9 @@
     });
     document.getElementById('btnPlugin').textContent =
       enabled === plugins.length ? '插件 ' + plugins.length : '插件 ' + enabled + '/' + plugins.length;
+    // 「有插件开着」就算开：图标档里「插件 0/4」这行字是看不见的（font-size:0），
+    // 没有这个属性用户就分不出「全开」和「全关」。
+    document.getElementById('btnPlugin').setAttribute('data-on', enabled > 0 ? 'true' : 'false');
   }
 
   /**
@@ -5739,6 +6314,11 @@
     // 再点同一条 → 0 请求 0 提示，非得先点别的会话才能解开。
     unlockAllSess();
     pendingSwitchTo = '';
+    // configKeyQueue 也属于「等回执」的状态，同样必须清。
+    // 漏了会怎样（实测）：切配置的请求还在飞时掉线 → 队列里留着那个 key →
+    // 重连后下一条**失败**的配置回执会先把这个陈旧 key 消费掉，
+    // 于是真正失败的那一项没被回退，界面显示与后端长期不一致。
+    configKeyQueue.length = 0;
     // 先把上一轮留下的「当前状态」提示全部撤掉，再按这次的状态重新画。
     // 只在「状态变好」时删会怎样（实测）：状态一直没变（比如一直没填 Key），
     // 每次重连都会再画一行，屏幕上堆成两行、三行一模一样的提示。
@@ -5826,7 +6406,11 @@
     RPC_STATE.protocol = (p && p.protocol) || 0;
     RPC_STATE.init = p || null;
 
-    if (model.options && model.options.length) rebuildModelPop(model.options);
+    // 与下面 plugins 的口径保持一致：空数组也要重建（清空旧条目），
+    // 只有字段整个缺失才跳过。原来判 `model.options.length`，
+    // 后端把可选模型收窄成空时，下拉里还留着上一批名字，点了会发一个
+    // 后端不认的模型名（实测脏残留，和 plugins:[] 是同一类问题）。
+    if (Array.isArray(model.options)) rebuildModelPop(model.options);
     if (model.current) {
       setChecked(document.getElementById('popModel'), model.current);
       document.getElementById('btnModel').textContent = model.current;
@@ -5838,7 +6422,12 @@
       document.getElementById('btnThink').textContent = lb ? lb.textContent : think.effort;
     }
     applyGoal(goal);
-    if (plugins.length) applyPlugins(plugins);
+    // plugins 为空数组时也必须处理 —— 原来 `if (plugins.length)` 会把整段跳过，
+    // 于是「重新握手时后端把插件全删/全关」这种情况，界面还留着上一批插件名：
+    // 按钮写着旧数字，下拉里点一下还会往一个后端已经不认的插件发 configSet
+    // （实测脏数据残留）。applyPlugins([]) 本身是安全的：它清空下拉并把按钮
+    // 写成「插件 0」。只有字段整个缺失（undefined）时才跳过。
+    if (Array.isArray(p && p.plugins)) applyPlugins(plugins);
     if (p && p.workdir) {
       var chips = document.querySelectorAll('.crow .chip.mono');
       if (chips[1]) {
@@ -5851,7 +6440,7 @@
     SESS = [];
     // 后端 session.current 为 null 表示游离态（还没 /save），必须清空而不是沿用模拟名
     var prevCUR = CUR;
-    CUR = session.current || '';
+    CUR = String(session.current || '');
     CUR_IS_CHILD = !!session.isChild;
     // 后端说「现在不在任何会话里」，而界面还显示着某个会话的内容 → 必须清掉。
     // 典型场景：后端进程重启/重连后 current 归 null，chip 已经变成「(未保存)」，
@@ -6098,6 +6687,32 @@
     // 还没 renderSessions」的中间态——内部列表空了、画面还是旧的，
     // 用户点哪条都进不去。所以宁可不认这条通知，也不进那个状态。
     if (!p || !Array.isArray(p.groups)) return;
+    // 后端读不到会话目录时会带回 error（见 server.py `_m_session_list`：
+    // 「只回空 groups 等于告诉用户你的会话全没了」）。
+    // 前端原来完全不读这个字段 —— 于是磁盘读失败 / 目录被占用时，
+    // 抽屉里显示「还没有已保存的对话」，用户以为**所有会话都被删了**，
+    // 而实际只是这次读不到。必须明说。
+    // 注意：不 early-return —— groups 可能是不完整的，能显示多少先显示多少，
+    // 只是额外挂一行错误提示，让用户知道"看到的不全"。
+    //
+    // 这一行是**状态类提示**（描述"现在读不到"），不是历史事件，所以下次
+    // 读取成功时必须撤掉：留着会变成"永久报错"的假象——用户明明恢复正常了，
+    // 屏幕上还挂着 Permission denied，以为一直没好。与 dropStaleNotices 里
+    // 「连上了就撤掉离线/缺 Key 提示」同一处理原则。
+    if (p.error) {
+      SESS_LIST_ERROR = true;
+      if (sessListErrLine && sessListErrLine.parentNode) {
+        sessListErrLine.parentNode.removeChild(sessListErrLine);
+      }
+      sessListErrLine = sysLine('✗', '读取会话列表失败', String(p.error).slice(0, 200), 'err');
+      scrollBottom();
+    } else {
+      SESS_LIST_ERROR = false;
+      if (sessListErrLine) {
+        if (sessListErrLine.parentNode) sessListErrLine.parentNode.removeChild(sessListErrLine);
+        sessListErrLine = null;
+      }
+    }
     var groups = p.groups;
     SESS = [];
     var hidden = 0;
@@ -6129,7 +6744,7 @@
     SESS_HIDDEN = hidden;
     // current 为 null 表示游离态（未进入任何会话）：必须清空 CUR，
     // 否则删掉当前会话后列表里还高亮着已经不存在的那个。
-    CUR = (p && p.current) || '';
+    CUR = String((p && p.current) || '');
     CUR_IS_CHILD = !!(p && p.isChild);
     renderSessions();
     // 冷启动（跨进程/第二天）时后端 current 是 null，对话区只剩一句
@@ -6372,7 +6987,7 @@
       resetConversationDom();
       authHintShown = false;
       body.setAttribute('data-run', 'false');
-      CUR = p.current;
+      CUR = String(p.current || '');
       CUR_IS_CHILD = !!p.isChild;
       resetContextStats();
       renderSessions();
@@ -6411,7 +7026,7 @@
           resetConversationDom();
           authHintShown = false;
           body.setAttribute('data-run', 'false');
-          CUR = p.current || '';
+          CUR = String(p.current || '');
           CUR_IS_CHILD = !!p.isChild;
           resetContextStats();
           renderSessions();
@@ -6423,6 +7038,19 @@
         sysLine('✓', '已切换至对话 ' + esc(p.current || ''), '');
       }
     } else if (p.action === 'sessionDelete') {
+      // 删的若是当前会话，后端已切回游离态，对话区必须清：后端已经没有这段
+      // 上下文，屏幕上却还留着整段内容，用户再点保存会得到「没有对话内容，
+      // 无需保存」——以为自己的对话丢了。
+      //
+      // **清屏必须在写系统行之前**。原来顺序反了：先 sysLine('✓ 已删除 …')，
+      // 再 resetConversationDom() 把整块清空，刚写的那行跟着被抹掉 ——
+      // 用户删完当前会话，屏幕上一条反馈都没有，不知道删成功没有（实测）。
+      if (p.wasCurrent) {
+        resetConversationDom();
+        authHintShown = false;
+        body.setAttribute('data-run', 'false');
+        resetContextStats();
+      }
       // 面板里删除是立即生效的（后端没有「退出时清理」这个时机），
       // 所以文案不能说「退出时生效」——那会让用户以为文件还在。
       // broken：删掉的是列表里根本看不到的损坏文件。
@@ -6431,23 +7059,14 @@
       } else {
         sysLine('✓', '已删除 ' + (p.name ? esc(p.name) : '会话'), '', 'ok');
       }
-      // 删的若是当前会话，后端已切回游离态；CUR 必须跟着走，
-      // 否则列表里高亮的还是那个已经不存在的会话。
-      // 对话区也必须清：后端已经没有这段上下文了，屏幕上却还留着整段内容，
-      // 用户再点保存会得到「没有对话内容，无需保存」——以为自己的对话丢了。
-      if (p.wasCurrent) {
-        resetConversationDom();
-        authHintShown = false;
-        body.setAttribute('data-run', 'false');
-        resetContextStats();
-      }
-      CUR = p.current || '';
+      // CUR 必须跟着走，否则列表里高亮的还是那个已经不存在的会话。
+      CUR = String(p.current || '');
       CUR_IS_CHILD = false;
       renderSessions();
     } else if (p.action === 'sessionRename') {
       sysLine('✏', '已重命名为 ' + esc(p.to || ''), '', 'ok');
       // 改的是当前会话时后端已把状态指到新名，CUR 同步过去
-      CUR = p.current || '';
+      CUR = String(p.current || '');
       renderSessions();
     }
     rendered('session/result', { action: p.action || '' });
@@ -6511,6 +7130,11 @@
       if (mCur) curNow = parseInt(mCur[1], 10) || 0;
       document.getElementById('btnGoal').textContent = gon
         ? '目标模式 开 · ' + curNow + '/' + gr : '目标模式 关';
+      // data-on 必须一起写：≤380px 时按钮只剩靶心图标，图标颜色是**唯一**
+      // 能看出开关状态的线索（CSS 只在 [data-on="true"] 时点强调色）。
+      // 这条 /goal 回执路径原来漏了，于是命令把目标模式打开后，
+      // 窄面板上的图标还是不亮（实测，和第 1 轮修的是同一类问题，这是漏网的一处）。
+      document.getElementById('btnGoal').setAttribute('data-on', gon ? 'true' : 'false');
       setChecked(document.getElementById('popGoal'), gon ? 'on' : 'off');
       var grin = document.getElementById('goalRounds');
       if (grin) grin.value = String(gr);
@@ -6526,7 +7150,14 @@
       var pp2 = argLow.split(/\s+/);
       var pname = pp2[0];
       var pton = !(pp2[1] === 'off' || pp2[1] === 'false' || pp2[1] === '0');
-      var pNode = document.querySelector('#popPlugin .pi[data-v="' + pname + '"]');
+      // 按小写比较逐个找，**不要拼进选择器**：pname 来自 argLow（已小写化，
+      // 形如 "terminal"），而 .pi 的 data-v 是后端给的原始大小写（"Terminal"）。
+      // 拼选择器永远选不中 → pNode 为 null → 整段回执静默失效：
+      // 命令明明执行了，状态行还挂着旧数字（实测）。
+      var pNode = null;
+      Array.prototype.forEach.call(document.querySelectorAll('#popPlugin .pi'), function(pi){
+        if (String(pi.getAttribute('data-v') || '').toLowerCase() === pname) pNode = pi;
+      });
       if (pNode) {
         var sw = pNode.querySelector('.sw');
         if (sw) {
@@ -6538,9 +7169,17 @@
         var en = document.querySelectorAll('#popPlugin .pi[data-on="true"]').length;
         document.getElementById('btnPlugin').textContent =
           (en === tot ? '插件 ' + tot : '插件 ' + en + '/' + tot);
+        // 按钮的 data-on 必须一起算：≤380px 时按钮只剩插头图标，
+        // 图标颜色是唯一能看出「有没有插件开着」的线索（CSS 只在
+        // [data-on="true"] 时点强调色）。这条回执路径原来只改文字、漏了这个属性 ——
+        // 用 /plugin 把插件全关掉之后，窄面板上的图标还亮着（实测，
+        // 和第 1 轮修的是同一类问题，这是最后漏网的一处）。
+        document.getElementById('btnPlugin').setAttribute('data-on', en > 0 ? 'true' : 'false');
         if (init) {
           var pl = (init.plugins || []).map(function(x){
-            return x && x.name === pname ? { name: x.name, enabled: pton } : x;
+            // 同样按小写比较，否则快照里的 enabled 改不到，下次回滚又退回旧值
+            return (x && String(x.name || '').toLowerCase() === pname)
+              ? { name: x.name, enabled: pton } : x;
           });
           init.plugins = pl;
         }
@@ -6624,7 +7263,10 @@
     }
     var cmdText = '/' + (p.command || '');
     if (p.args) cmdText += ' ' + p.args;
-    var lines = p.lines || [];
+    // lines 必须兜住非数组：宿主/后端若把它给成字符串或对象（版本不匹配），
+    // 后面的 lines.map 会抛 TypeError，整条命令回执**静默消失** ——
+    // 用户点了 /save 却什么都没显示，以为没生效（实测）。
+    var lines = Array.isArray(p.lines) ? p.lines : (p.lines ? [String(p.lines)] : []);
     // 设置类命令成功后必须把状态栏同步过来。
     // 真实态下 /mode、/thinking、/goal、/plugin 是发给后端执行的（不是本地分支），
     // 回来后只画一行回执；状态栏那四个按钮仍是旧值——同屏写着「已切换模型：
@@ -6702,16 +7344,25 @@
       // 恒成立，于是把后端还活着的上下文从屏幕上抹掉：用户以为可以重新开始，
       // 接着提问时模型仍带着整段旧历史（实测清屏后再握手，父会话历史原样回来）。
       var exitLeave = (p.command === 'exit');
+      // 这一轮是否被这次切会话打断：必须在 resetConversationDom 之前取，
+      // 之后再读 data-run 就已经是 false 了。
+      // 为什么要单独交代：后端对 cd/explore/done 会 `_cancel_and_wait_turn()`
+      //（server.py:694-695），也就是**必然打断**当前这一轮。抽屉与顶栏下拉两条
+      // 入口都有事前提示 + 事后「■ 已停止上一轮」，只有 /cd 命令这条通路一个字
+      // 都不说 —— 用户看到的是「我刚问的问题，回答没了，屏幕直接换成另一个会话」，
+      // 无从判断是回答失败还是被自己切走了（实测）。
+      var cutTurnByCd = cdSwitched && body.getAttribute('data-run') === 'true';
       if (rmCurrent || cdSwitched) {
         resetConversationDom();
         authHintShown = false;
         body.setAttribute('data-run', 'false');
         if (cdSwitched) {
-          CUR = p.current || '';
+          CUR = String(p.current || '');
           CUR_IS_CHILD = !!p.isChild;
           resetContextStats();
           renderSessions();
         }
+        if (cutTurnByCd) sysLine('■', '已停止上一轮', '');
       }
       // 后端回执是纯文本，每行独立、不需要跨行对齐 → 一律用换行布局。
       // 不加 wrap 会怎样（实测）：249px 下真实 /plugin 的 5 行回执
@@ -6777,13 +7428,19 @@
     if (!ok) {
       // 失败的回执同样消费掉一个 key，否则队列会错位、下一次成功的回执
       // 会拿着上一次的 key 去写快照（实测会把模型名写进思考档位）。
-      configKeyQueue.shift();
+      var failedKey = configKeyQueue.shift();
       sysLine('✗', '配置未生效', esc((p && p.message) || ''), 'err');
       // 点下拉时界面已经本地打了勾、换了按钮文字。后端没写成功的话必须
       // 把这些显示退回上一次握手时的真值——不回退会怎样（实测）：
       // 用户以为切换了模型，之后几轮还在按旧模型跑（花的是另一个价），
       // 下次重开面板又莫名变回旧值。
-      revertConfigUi();
+      //
+      // 但**只回退失败的那一项**。原来无条件恢复四项会踩另一个坑：
+      // 用户先切模型、紧接着切思考（两条请求都在飞），模型那条失败 →
+      // 四项全被冲回快照 → 思考的界面改动也被抹掉；随后思考的成功回执
+      // 只推进快照、不改显示 → 界面上思考还是旧档位，后端已经是新的，
+      // 两者长期不一致（实测，反向顺序同样复现）。
+      revertConfigUi(failedKey);
     } else {
       // 成功后必须把「真值快照」推进到新值。不推进会怎样（实测）：
       // 依次切 a→b→c→d 都成功，再切 e 失败，界面退回的不是 d 而是**最初那版 a**，
@@ -6826,23 +7483,28 @@
     }
   }
 
-  /** 把模型/思考/目标/插件的界面显示退回最后一次 initialize 的真值 */
-  function revertConfigUi(){
+  /** 把模型/思考/目标/插件的界面显示退回最后一次 initialize 的真值
+   *  @param {string} [onlyKey] 只回退这一项（'model'/'thinking'/'goal'/'plugin'）。
+   *         不传 = 全部回退（用于「重连后整体对齐」这类场景）。
+   *         为什么要能限定：多条 configSet 同时在飞时，其中一条失败只该撤自己那一项，
+   *         把别的项的界面改动一起冲掉会让「已切换但回执未到」的那项显示与后端脱节。 */
+  function revertConfigUi(onlyKey){
     var init = RPC_STATE.init;
     if (!init) return;
+    var want = function(k){ return !onlyKey || onlyKey === k; };
     var model = init.model || {};
-    if (model.current) {
+    if (want('model') && model.current) {
       setChecked(document.getElementById('popModel'), model.current);
       document.getElementById('btnModel').textContent = model.current;
     }
     var think = init.thinking || {};
-    if (think.effort) {
+    if (want('thinking') && think.effort) {
       setChecked(document.getElementById('popThink'), think.effort);
       var lb = document.querySelector('#popThink .pi[data-v="' + think.effort + '"] .lb');
       document.getElementById('btnThink').textContent = lb ? lb.textContent : think.effort;
     }
-    if (init.goal) applyGoal(init.goal);
-    if (init.plugins && init.plugins.length) applyPlugins(init.plugins);
+    if (want('goal') && init.goal) applyGoal(init.goal);
+    if (want('plugin') && init.plugins && init.plugins.length) applyPlugins(init.plugins);
   }
 
   /* ---------- UI 自省通道（供扩展/测试驱动真实 DOM） ---------- */

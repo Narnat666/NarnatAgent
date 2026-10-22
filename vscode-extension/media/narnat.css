@@ -96,6 +96,15 @@ button:focus-visible, [tabindex]:focus-visible,
 .think .name:focus-visible, .tools .row:focus-visible, #goalRounds:focus-visible{
   box-shadow:0 0 0 1px var(--vscode-focusBorder, var(--accent));
 }
+/* #toBottom 必须单独写：它自己有 `#toBottom{box-shadow:0 4px 12px …}` 阴影，
+   而 id 特异性（1-0-0）压过上面这条 `button:focus-visible`（0-1-1），
+   同时 `button:focus{outline:none}` 又关掉了浏览器默认 outline ——
+   于是它是全页 13 个可聚焦控件里唯一一个**聚焦后零可见变化**的（实测）。
+   这里把两层阴影叠起来：外层仍是焦点环，内层保留原有投影。 */
+#toBottom:focus-visible{
+  box-shadow:0 0 0 1px var(--vscode-focusBorder, var(--accent)),
+             0 4px 12px rgba(0,0,0,.28);
+}
 /* container-type：让下面的 @container 查询以面板自身宽度为基准（iframe 宽 = 面板宽） */
 .shell{display:flex;flex-direction:column;height:100%;container-type:inline-size}
 
@@ -110,7 +119,14 @@ button:focus-visible, [tabindex]:focus-visible,
    注意 attr(data-tip) 会带上 title 的旧语义，所以下面的 JS 会把 title 摘掉。 */
 #tip{
   position:fixed;z-index:80;display:none;
-  max-width:220px;padding:3px 8px;
+  /* 宽度上限：CSS 这行只是**兜底**，真正生效的是 showTip() 里按 `.shell`
+     实际宽度写进 style.maxWidth 的值（min(220, 面板宽 - 8)）。
+     为什么不在 CSS 里做完整：这里能用的只有 100vw，而 100vw 是**视口**宽，
+     它未必等于面板宽（测试台里就恒为 764 而面板被拖到 200）——
+     只靠 100vw 时窄面板里提示框会比面板还宽、右侧被裁（实测 200px 溢出 24px）。
+     所以权威判据放在 JS（用 .shell 几何），这一行保证「至少不会超过视口」。 */
+  max-width:min(220px, calc(100vw - 8px));
+  padding:3px 8px;
   border-radius:6px;
   background:var(--vscode-editorHoverWidget-background, var(--bg-elev));
   color:var(--vscode-editorHoverWidget-foreground, var(--fg));
@@ -251,6 +267,18 @@ button:focus-visible, [tabindex]:focus-visible,
 #toBottom[data-on="true"]{display:block}
 #toBottom:hover{background:var(--bg-hover)}
 #toBottom[data-new="1"]{border-color:var(--accent);color:var(--accent)}
+/* 状态行抽屉展开时把「回到底部」藏起来。
+   两者在几何上必然相交：抽屉从 .composer 顶部向上弹（bottom:100%），
+   #toBottom 贴在对话区右下角，z-index 12 < 抽屉的 55 —— 结果是按钮
+   **看得见但点不动**（点击被抽屉吞掉，scrollTop 不动），249px 默认侧栏宽就复现。
+   不选「把 #toBottom 提到抽屉之上」是因为那会反过来挡住抽屉里的状态项；
+   展开抽屉时用户的注意力在状态详情上，这个按钮让开最干净。 */
+body[data-stdrawer="true"] #toBottom{display:none}
+/* 同理：会话抽屉开着时也藏起来。宽面板下抽屉是并排侧栏，看似不重叠，
+   但 #toBottom 贴的是对话区右下角、抽屉 footer 的左缘正好压在那一片 ——
+   实测「＋ 新建探索分支」有 74×27px 被它盖住，按钮看得见点不动。
+   用户正在看会话列表时不需要「回到底部」，让它让开最干净。 */
+body[data-drawer="true"] #toBottom{display:none}
 
 /* 演示数据提示条：只在未连上后端时出现，连上后隐藏 */
 .demo-tip{
@@ -300,6 +328,14 @@ body[data-real="true"] .demo-tip{display:none}
 .msg p,.msg li,.msg h1,.msg h2,.msg h3,.msg h4,.msg h5,.msg h6,.msg blockquote{
   overflow-wrap:anywhere;
 }
+/* 上面那条只覆盖「消息正文」里的段落。下面这三处也是**用户/AI 的真实文本**，
+   但结构上不在 .msg p 里，之前漏了，于是长串直接把对话区撑出横向滚动：
+     · 思考块正文（.think .slot p）—— 模型边想边吐 hash / 长路径，展开就撑破，
+       实测 900px 下 scrollWidth 1398 / clientWidth 890，8 档全部复现
+     · 计划清单（.todo div）—— 待办正文常带文件路径，实测溢出 598~1104px
+     · 工具确认条（.confirm .q）—— 待确认的命令原文，470px 起就溢出
+   长串在 AI 输出里是常态（hash、路径、base64、URL），不是罕见输入。 */
+.think .slot p,.todo > div,.confirm .q{overflow-wrap:anywhere;min-width:0}
 .msg h1,.msg h2,.msg h3,.msg h4,.msg h5,.msg h6{
   margin:14px 0 8px;line-height:1.4;font-weight:600;color:var(--fg);
 }
@@ -706,14 +742,20 @@ body[data-real="true"] .demo-tip{display:none}
   flex:none;width:24px;height:24px;padding:0;
   display:inline-grid;place-items:center;
   border-radius:999px;
-  background:var(--bg-hover);
-  color:var(--fg);
+  /* 同 .attach-btn：不能只靠 --bg-hover，某些主题里它会与 --fg 撞成
+     1.0x:1（符号几乎消失，实测亮色主题）。挂 VSCode 官方按钮变量兜底。 */
+  background:var(--vscode-button-secondaryBackground, var(--bg-hover));
+  color:var(--vscode-button-secondaryForeground,
+            var(--vscode-icon-foreground, var(--fg)));
   /* 会话名不进布局：JS 仍会写进 textContent（renderSessions /
      applySessionSaved 共 4 处），那些赋值留着做 title 的来源，
      但不在按钮上占地方（font-size:0 而不是删节点，避免改那些 JS）。 */
   font-size:0;line-height:0;overflow:visible;
 }
-.crow .chip.hist:hover{background:var(--line);color:var(--fg)}
+.crow .chip.hist:hover{
+  background:var(--vscode-list-hoverBackground, var(--line));
+  color:var(--vscode-button-secondaryForeground, var(--fg));
+}
 .crow .chip.hist::before{
   content:'';width:13px;height:13px;flex:none;
   background-color:currentColor;
@@ -760,12 +802,20 @@ body[data-real="true"] .demo-tip{display:none}
 .attach-btn{
   flex:none;display:grid;place-items:center;
   width:24px;height:24px;border-radius:999px;
-  /* 与历史按钮同一套配色：底色用 hover 层、符号用前景色，
-     对比度从原来 fg-dim × pill 的 1.4:1 提到 3:1 以上（实测偏淡看不清）。 */
-  background:var(--bg-hover);color:var(--fg);
+  /* 与历史按钮同一套配色：底色用 hover 层、符号用前景色。
+     但不能只靠 --bg-hover：它来自 list.hoverBackground，某些主题里会被设成
+     与 --fg 很接近的深色，实测亮色主题下符号与其底色的对比度只剩 1.03:1
+     （符号几乎消失）。所以再挂一层 VSCode 的按钮/图标官方变量做兜底，
+     它们在所有主题里都保证「前景与按钮底可辨」。 */
+  background:var(--vscode-button-secondaryBackground, var(--bg-hover));
+  color:var(--vscode-button-secondaryForeground,
+            var(--vscode-icon-foreground, var(--fg)));
   font-size:14px;line-height:1;
 }
-.attach-btn:hover{color:var(--fg);background:var(--line)}
+.attach-btn:hover{
+  color:var(--vscode-button-secondaryForeground, var(--fg));
+  background:var(--vscode-list-hoverBackground, var(--line));
+}
 /* 拖拽悬停：只换边框色，不加动画/阴影 */
 .cbox[data-drop="true"]{border-color:var(--vscode-focusBorder,var(--accent))}
 .convo[data-drop="true"]{
@@ -817,12 +867,46 @@ body[data-run="true"] .send{display:none}
   display:flex;align-items:baseline;gap:10px;
   padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px;
 }
-.palette .item[data-sel="true"]{background:var(--bg-hover)}
-/* 鼠标悬停也要有反馈：只靠键盘选中态的话，鼠标移上去毫无变化，
-   用户不确定这一行能不能点（实测 .item 没有 :hover 规则）。 */
-.palette .item:hover{background:var(--bg-hover)}
-/* 下拉/候选的键盘选中态（↑↓ 移动时）与鼠标悬停同一视觉 */
-.pop .pi[data-sel="true"],.palette .item[data-sel="true"]{background:var(--bg-hover)}
+/* 键盘选中态必须与「鼠标悬停」用**不同**的颜色。
+   原来两者都写 var(--bg-hover)，实测在四套主题下的对比度只有
+   1.10（Light+）/ 1.18（暗色）/ 1.21（高对比）—— 用户按 ↓ 十次，
+   屏幕上只有一层几乎察觉不到的亮度差，**根本看不出选中了哪一行**
+   （命令面板靠 ↑↓ 选命令，选不中等于这个功能失灵）。
+
+   取色规则：背景与前景必须**成对**取自同一套 VSCode 变量，并且要有**不依赖
+   任何变量是否存在**的兜底辨识手段。
+   踩过两次（都实测）：
+     · 第一版背景挂 quickInput、前景写死 #fff → 高对比主题里没有 quickInput，
+       背景 fallback 到 --accent（亮绿），绿底白字只有 1.37:1，比改前更糟；
+     · 第二版改成背景/前景都 fallback 到 --bg-elev / --fg → 变量全缺的
+       3.1a 与只注入产品变量的 3.3 里 --bg-elev 压根没定义，两者都落到页面
+       底色，选中态又回到 1.00:1（完全不可辨）。
+   所以最终方案：**再用 box-shadow 画一圈强调色内描边**。
+   box-shadow 的颜色 fallback 到 --accent，而 --accent 在任何档都必然有值
+   （它是产品自己的变量，主题缺了就退回默认蓝）—— 于是「选中」这件事
+   永远有一个可见标记，不依赖背景差分、不依赖 --bg-elev 是否存在。
+   背景下差分仍然保留：它只在两套 VSCode 变量都齐时才生效，那时观感最好。 */
+.palette .item[data-sel="true"]{
+  background:var(--vscode-quickInputList-focusBackground,
+               var(--vscode-list-activeSelectionBackground, var(--bg-hover)));
+  color:var(--vscode-quickInputList-focusForeground,
+            var(--vscode-list-activeSelectionForeground, var(--fg)));
+  box-shadow:inset 0 0 0 1.5px var(--vscode-focusBorder, var(--accent));
+}
+/* 鼠标悬停保持轻量反馈（只靠键盘选中态的话，鼠标移上去毫无变化，
+   用户不确定这一行能不能点）。悬停与选中的颜色刻意分开：
+   悬停=淡、选中=强，这样键盘走过时也能看出哪一行是"当前"。 */
+.palette .item:hover{
+  background:var(--vscode-list-hoverBackground, var(--bg-hover));
+}
+/* 下拉的键盘选中态同理，与命令面板用同一套变量，避免两处观感不一致 */
+.pop .pi[data-sel="true"]{
+  background:var(--vscode-quickInputList-focusBackground,
+               var(--vscode-list-activeSelectionBackground, var(--bg-hover)));
+  color:var(--vscode-quickInputList-focusForeground,
+            var(--vscode-list-activeSelectionForeground, var(--fg)));
+  box-shadow:inset 0 0 0 1.5px var(--vscode-focusBorder, var(--accent));
+}
 /* 可聚焦的标题行/按钮要有可见焦点（规则在文件顶部统一处理：用主题色
    box-shadow 而不是浏览器默认的 auto outline —— 后者在 webview 里会画成
    一圈与面板脱节的亮白/纯黑框，实测被点名为「白框太丑」）。 */
@@ -960,16 +1044,26 @@ body[data-run="true"] .send{display:none}
   flex:none;padding:10px 14px;border-top:1px solid var(--line);
   background:var(--bg);
 }
-.dw-foot > button{
+/* 底部操作区的按钮样式。
+   **必须写后代选择器，不能用 `> button`**：分支出口的两颗按钮（「完成并合并结论」
+   与「暂离分支」）套在 `#branchActs` 里，是 `.dw-foot > div > button` ——
+   用直接子代选择器时它们一条规则都命中不了（实测：`#newChatBtn` 命中 4 条、
+   `#doneBranchBtn` 命中 0 条），于是：
+     · 宽度按内容收缩（103.5px vs 其他按钮 233px），点击热区高度 22.1px（其他 29.5px）
+     · 字号 13px（其他 11.5px）、没有虚线/实心边框、没有 hover 反馈
+     · `.dw-primary` 的强调色也从未生效
+   后果最严重的是：**不可逆的「完成并合并结论」与可逆的「暂离」在视觉上完全一样**，
+   用户看不出哪个是危险操作。764px 与 249px 两档都复现。 */
+.dw-foot button{
   width:100%;font-size:11.5px;color:var(--fg-dim);
   border:1px dashed var(--line-strong);border-radius:5px;padding:4px;
 }
-.dw-foot > button:hover{color:var(--fg);border-color:var(--fg-dim)}
-/* 主操作（新建对话）：实心描边，和其它次级按钮区分开 */
-.dw-foot > button.dw-primary{
+.dw-foot button:hover{color:var(--fg);border-color:var(--fg-dim)}
+/* 主操作（新建对话 / 完成并合并）：实心描边 + 强调色，和其它次级按钮区分开 */
+.dw-foot button.dw-primary{
   border-style:solid;border-color:var(--accent);color:var(--accent);
 }
-.dw-foot > button.dw-primary:hover{background:var(--accent);color:var(--bg)}
+.dw-foot button.dw-primary:hover{background:var(--accent);color:var(--bg)}
 .dw-empty{
   padding:10px 14px;font-size:11.5px;color:var(--fg-faint);
 }
@@ -991,7 +1085,13 @@ body[data-run="true"] .send{display:none}
    2) 条目只显示名字，因此不做省略号截断——名字长到放不下时整块横向可拖：
       .pi 保持面板宽，.lb 不收缩不截断，溢出部分由 .pop 的滚动条展示。 */
 #popChild{min-width:0;overflow-x:auto;overscroll-behavior:contain}
-#popChild .pt,#popChild .pd{white-space:nowrap}
+/* 标题「子会话」很短，nowrap 即可；
+   脚注不同：未保存态那句「这段对话还没存到磁盘：输入 /save 或点抽屉里的
+   「保存当前为…」」有 30 多字，nowrap 会在 150px 宽的下拉里被硬切掉 180px
+   （实测 need=319 / have=138），用户看不到「怎么保存」这个关键信息。
+   给脚注放宽换行：多行显示，横向不产生滚动（滚动条留给更长的条目名）。 */
+#popChild .pt{white-space:nowrap}
+#popChild .pd{white-space:normal;overflow-wrap:anywhere}
 #popChild .pi .lb{
   flex:0 0 auto;overflow:visible;text-overflow:clip;white-space:nowrap;
 }
@@ -1196,6 +1296,21 @@ body[data-run="true"] .send{display:none}
   .status:not([data-open="true"]) :is(.st-model,.st-think,.st-opt)[data-empty="true"] + .sep{display:none}
 }
 
+/* ≤470px：把「⋯」入口一起放出来。
+   为什么阈值必须是 470 而不是 380（原来放在 380，是个死角）：
+   统计四项在 470 这一档**已经全被藏掉**（余额 700、费用 560、缓存 540、
+   上下文 470），而 ⋯ 要等到 380 才出现 —— 于是 470~381px 这七个常见宽度
+   （VSCode 侧边栏拖到这个区间很正常）里，用户既看不到费用/余额/上下文，
+   **也没有任何入口能把它们调出来**。数字和按钮同时消失，功能等于没了。
+   这与下面 380 段注释里写的设计原则（"藏掉等于用户既看不到也不知道有这个
+   功能，所以才引入 ⋯"）正好相反。
+   放出来之后：470~381 之间点 ⋯ 会展开成完整一行（浮层定位在 380 段才生效，
+   这里只保证入口在；浮层样式同样用 :not([data-open]) 前缀，展开后各档的
+   隐藏规则自动失效，所以 470 档展开也能看到全部 8 项）。 */
+@container (max-width:470px){
+  .st-toggle{display:inline-flex}
+}
+
 /* ---------- 380px：值 → 图标 ----------
    图标一律用 mask + currentColor 画：主题色、悬停色、开启高亮全都自动跟随，
    不像内联 SVG 那样要为每套主题各准备一份。文字用 font-size:0 隐去，
@@ -1284,12 +1399,15 @@ body[data-run="true"] .send{display:none}
 }
 
 /* ---------- 抽屉浮层（展开态）----------
-   宽度 ≤380px 时状态行已经被压成图标行，用户想看具体数值就得展开。
-   展开态**不参与**上面的图标化：白字、完整标签、可点，空间由浮层自己提供。
+   宽度 ≤470px 时统计四项已被逐级藏掉（末尾几档甚至全藏），用户想看具体数值
+   就得靠这个「⋯」把整行摊开。← 阈值从 380 提到 470 是与上面「⋯ 入口在
+   470 就出现」配套的：入口出现了，展开样式也必须跟着在，否则 470~381 之间
+   点了 ⋯ 只是把图标行原地摊平（会撑成两行、把输入框顶下去）。
+   展开态**不参与**上面的图标化与让位：白字、完整标签、可点，空间由浮层自己提供。
    用绝对定位而不是把状态行撑成多行：状态行脱离文档流后 .composer 变矮、
    .body 相应变高，输入框仍贴底；JS 里用 padding-bottom 补回这段高度，
    点开/收起时输入框不会跳（实测 306→306，位移 0）。 */
-@container (max-width:380px){
+@container (max-width:470px){
   .status[data-open="true"]{
     position:absolute;left:0;right:0;bottom:100%;margin-bottom:6px;
     flex-wrap:wrap;row-gap:8px;gap:12px;white-space:normal;

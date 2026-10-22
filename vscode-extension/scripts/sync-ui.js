@@ -21,7 +21,45 @@ if (!mStyle || !mScript || !mBody) {
 
 // 统一成 LF 再写盘：产物换行符不该随工作区检出方式变化，
 // 否则同一份源码在不同机器上生成的 narnat.js 会有全文件 diff。
+// （定义前移到自检之前，因为自检也要用它。）
 const toLf = (s) => s.replace(/\r\n/g, '\n');
+
+/* ---- 结构自检：拦住「静默生成坏产物」的那几种源 ----
+   这些都是第 23 轮实测出来的（见 nn-tasks/rt-round-23/Y2/REPORT.md）：
+   sync 只按**第一个** <style>/<script> 提取，于是源里一旦出现第二个，
+   后面那段会被**静默丢弃**，而 exit code 还是 0、自检照样全绿。
+   最糟的是双 <script>：`</script><script>` 会被原样写进 narnat.js，
+   产物**语法非法**（node --check 失败），但 "js has rpc handler" 那项检查
+   仍然通过 —— 装上去就是白屏，而构建日志看不出任何异常。
+   真源目前是单 <style>/单 <script>，所以这是"未来踩坑"防护，不是现行缺陷。
+   做法：数标签数量 + 语法自检，任一不满足就 exit 非 0，让构建失败得明显。 */
+function countTag(re, src) {
+  return (src.match(re) || []).length;
+}
+const nStyle = countTag(/<style>/g, html);
+const nScript = countTag(/<script>/g, html);
+const problems = [];
+if (nStyle !== 1) problems.push('<style> 应恰好 1 个，实际 ' + nStyle);
+if (nScript !== 1) problems.push('<script> 应恰好 1 个，实际 ' + nScript);
+
+// 产物语法必须合法（双 <script> 那种会把 </script> 写进去，这里立刻暴露）
+const vm = require('vm');
+try {
+  new vm.Script(toLf(mScript[1]), { filename: 'narnat.js' });
+} catch (e) {
+  problems.push('提取出的 JS 语法非法: ' + e.message);
+}
+// body 段不能是空的（空 body 会生成 BODY=""，装上去白屏）
+if (!toLf(mBody[1]).trim()) problems.push('body 段为空');
+if (!toLf(mStyle[1]).trim()) problems.push('style 段为空');
+
+if (problems.length) {
+  console.error('结构自检失败：');
+  problems.forEach(function (p) { console.error('  - ' + p); });
+  process.exit(2);
+}
+
+// 统一成 LF 再写盘（实现在上面，自检也要用）
 const css = toLf(mStyle[1]).trim() + '\n';
 const js = toLf(mScript[1]).trim() + '\n';
 const body = toLf(mBody[1]).trim();

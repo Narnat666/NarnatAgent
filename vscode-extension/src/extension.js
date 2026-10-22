@@ -157,6 +157,42 @@ function forwardEvent(message) {
 }
 
 /**
+ * 握手结果是否「有实质内容」。
+ *
+ * 这一个判据必须在**所有**把 initialize 交给 webview 的路径上生效：
+ *   · requestInitialize 的成功回调（第一次握手）
+ *   · onWebviewReady 的 `if (lastInit) 补发`
+ *   · onWebviewReady 里「重建后重新握手」的 then
+ * 只在第一处加校验会怎样（第 24 轮 Z1 实测 P0）：空包被拦下、报了 rpc/error，
+ * 但 1 ms 后 onWebviewReady 的补发路径又把它原样送达 webview —— 前端 REAL 置 true、
+ * 清掉离线态，界面变成"已连接但什么都没有"，比不拦更糟（用户以为连上了）。
+ * 抽成一处是为了让「新增一条补发路径」不会漏掉这个校验。
+ */
+function initHasContent(r) {
+  if (!r || typeof r !== 'object') return false;
+  // 后端正常的 initialize 必然带 version（见 rpc/server.py）；
+  // 允许精简到只有 session 的实现（测试用假后端就是这样）。
+  return !!(r.version || r.protocol || r.session);
+}
+const INIT_EMPTY_MSG = '后端的握手结果没有内容（version / protocol / session 全缺）';
+
+/**
+ * 这些 webview 消息类型在失败时**已经有自己的专用回执**。
+ *
+ * 单一真源：下面 dispatch 的 catch 里「给专用回执」的分支、以及
+ * 「要不要再补一条通用 notice」的判断，都必须引用这一份。
+ * 手工维护两份名单一定漂移 —— 第 24 轮我手写了一份，漏了 configSet 与
+ * confirmReply，于是那两类失败会「专用回执 + 通用 notice」双报
+ * （用户以为发生了两件事）。第 25 轮 W1 又验到同类风险，故抽成常量。
+ */
+const RECEIPT_TYPES = {
+  chat: 1, cancel: 1, sessionList: 1,
+  sessionNew: 1, sessionSwitch: 1, sessionDelete: 1,
+  sessionRename: 1, sessionExplore: 1, sessionDone: 1,
+  command: 1, configSet: 1, confirmReply: 1
+};
+
+/**
  * 主动结束这一轮（后端被杀 / 主动重启）：补一条「不完整」提示 + turn/end。
  *
  * 必须同时把 turnActive 清掉。原先是直接 broadcast()，而 turnActive 只在
@@ -169,12 +205,22 @@ function endTurnLocally(why) {
   if (!turnActive) {
     return;
   }
-  turnActive = false;
-  pendingConfirm = null;
-  broadcast({ type: 'notice', params: {
+  // turnActive / pendingConfirm 的清理交给 forwardEvent —— 它本来就是这两个
+  // 标记的唯一权威，这里自己再设一遍就成了双写（写漏一处就会永久停在
+  // 「运行中」或者永久挂着失效的确认条）。
+  //
+  // 【为什么必须走 forwardEvent 而不是 broadcast】第 24 轮实测：
+  // broadcast 只投给**当前活着的** webview；面板关着 / 用户切走了编辑器时
+  // 它什么都做不了，于是这两条（「这一轮被中断」+ `turn/end`）**永久丢失**。
+  // 后果是用户回来后面板一直显示「运行中」、停止按钮不还原，
+  // 而后端其实早就没在跑了 —— 再发消息还会被 busy 拒。
+  // 同一次崩溃里走 forwardEvent 的「已自动重连」提示能补发，这两条却丢了，
+  // 两相对照就暴露了这个不一致。
+  // forwardEvent 会把它们压进 pendingEvents，webview 就绪时统一补发。
+  forwardEvent({ type: 'notice', params: {
     text: '⚠ 这一轮被中断，上面的回答可能不完整\n' + why
   } });
-  broadcast({ type: 'turn/end', params: { reason: 'cancelled' } });
+  forwardEvent({ type: 'turn/end', params: { reason: 'cancelled' } });
 }
 
 /** 把 webview 就绪前攒下的事件补发出去 */
@@ -1204,17 +1250,26 @@ function requestInitialize(client, reason) {
       handshakeWaiting = false;
       handshakeAttempt = 0;
       clearHandshakeTimer();
-      lastInit = result;
-      lastError = null;
+      // 【顺序要紧】校验必须在赋给 lastInit **之前**。
+      // 第 25 轮 W1 实测 P0：原来先 `lastInit = result` 再校验，空包虽然被拦下、
+      // 也报了 rpc/error，但它已经躺在 lastInit 里了 —— 随后 refreshSessions
+      // 成功时 rememberCurrentSession 会给它补一个 session 字段，
+      // 下一次面板重建时 initHasContent(lastInit) 就通过了，
+      // 一个空包被当成有效握手送出去（界面「已连接但全空」，真因被掩盖）。
+      // 现在只有校验通过的结果才会成为快照，空包压根进不来。
       // 握手结果必须是个对象。为空/非对象时前端 applyInitialize 一行都读不到，
       // REAL 永远不置 true —— 界面就永久停在演示态（假对话、假回答），
       // 而后端其实是好的（实测 initialize 返回 null 就复现）。
       // 这种情况当「握手失败」处理：报错并让界面知道后端不能用。
-      if (!result || typeof result !== 'object') {
-        lastError = '后端返回了空的握手结果（initialize 没有内容）';
+      if (!initHasContent(result)) {
+        lastError = (result && typeof result === 'object')
+          ? INIT_EMPTY_MSG
+          : '后端返回了空的握手结果（initialize 没有内容）';
         reportError(lastError);
         return;
       }
+      lastInit = result;
+      lastError = null;
       // 记下握手时刻：退出时用它判断这次连接「撑够久了没有」，
       // 决定要不要把退避计数清零。不能在这里直接清零（见 RECONNECT_STABLE_MS）。
       connectedAt = Date.now();
@@ -1361,6 +1416,16 @@ function rememberCurrentSession(name) {
   if (!lastInit || typeof lastInit !== 'object') {
     return;
   }
+  // 【关键】空包不能被"补字段"救活。
+  // 第 25 轮 W1 实测 P0：空 initialize 被 requestInitialize 拦下（对的），
+  // 但 refreshSessions 成功后这里会给 lastInit 补一个 session 对象，
+  // 于是下一次面板重建时 onWebviewReady 的 `initHasContent(lastInit)` 就通过了 ——
+  // 一个空包被当成有效握手送给 webview，前端 REAL=true、撤掉离线横幅，
+  // 「已连接但全空」，而真正的错误原因（lastError）被彻底掩盖。
+  // 判据与 initHasContent 保持一致：本身没有实质内容的快照，一律不去修饰它。
+  if (!initHasContent(lastInit)) {
+    return;
+  }
   lastInit.session = lastInit.session || {};
   lastInit.session.current = typeof name === 'string' && name ? name : null;
 }
@@ -1381,7 +1446,21 @@ async function refreshSessions(client) {
       }
     }
   } catch (err) {
-    console.warn('[narnat] session/list 失败：', err && err.message ? err.message : err);
+    const message = err && err.message ? err.message : String(err);
+    console.warn('[narnat] session/list 失败：', message);
+    // 失败也必须回一条 session/list，否则前端永远等不到回执：
+    //   · 点「展开其余」时按钮永久停在「正在加载全部会话…」（data-pending 不释放）
+    //   · 面板刚打开时自动刷新失败 → 抽屉空白，且屏幕上没有任何说明
+    //     （用户以为会话全没了）
+    // 前端 applySessionList 已经支持 { groups, error } 形态（会画一行
+    // 「读取会话列表失败」并在下次成功时撤掉），所以这里按那个契约回即可。
+    // 只给 error 不给 groups 不行 —— 前端会因 groups 不是数组整条丢弃。
+    if (rpc === client) {
+      broadcast({ type: 'session/list', params: {
+        groups: [], current: null, isChild: false,
+        error: '读取会话列表失败：' + message
+      } });
+    }
   }
 }
 
@@ -1481,10 +1560,31 @@ function flushUncertainReceipts(reason, announced) {
  */
 function settleChatFailure(client, err) {
   const entry = err && err.chatEntry;
-  const wrote = chatMaybeSent(err) || entryWrote(entry);
+  // 「后端明确拒绝」必须与「状态未知」区分开。
+  // 后端回了一个合法的 JSON-RPC error 响应（err.code 有值），意味着这条请求
+  // **已经被后端收到并处理过**，它给出的是明确的拒绝（如 -32000 busy、-32603 内部错），
+  // 消息**没有被执行**。这时说「可能已执行、别重发」是错的 —— 实测后果：
+  //   用户在 busy 时发一条 → 气泡永久停在发送中、没有「未发送」标记、
+  //   还被告知「可能已被执行，请勿重发」→ 他既等不到回答，也不敢重发。
+  // 而「写出过但没等到回执」（超时 / 进程崩溃）才是真的状态未知。
+  // 判据：后端回了 JSON-RPC error 响应 = 它**收到并处理过**这条请求，
+  // 给出的是明确拒绝（-32000 busy / -32603 内部错 / -32601 方法不存在 /
+  // -32602 参数错）—— 这几种都意味着消息**没有被执行**，说「可能已执行」
+  // 反而让用户不敢重发。
+  // 只有「写出过但没等到任何回执」（超时 / 进程崩溃）才是真的状态未知。
+  //
+  // 边界的处理：
+  //   · `code === 0` / 空字符串：JSON-RPC 规范里 0 不是合法错误码，
+  //     出现了说明对端非标准 —— 按「未知」处理更保守（不撤回，让用户自己判断），
+  //     因为撤回的代价是「用户重发 → 后端再执行一遍 → 重复会话」。
+  //   · `code` 为负数（标准）：明确拒绝。
+  //   · `code` 为正数：非标准但确实是对端主动回的 → 也按明确拒绝。
+  const rejected = !!(err && typeof err.code === 'number' && err.code !== 0);
+  const wrote = !rejected && (chatMaybeSent(err) || entryWrote(entry));
   if (!wrote) {
-    // 确定没送出（EPIPE / spawn 失败 / 未连接）：不留在账上，由调用方回
-    // accepted:false 让界面把它撤回输入框 —— 这时说「没发出去」是真话。
+    // 确定没送出（EPIPE / spawn 失败 / 未连接），**或后端明确拒绝**：
+    // 都回 accepted:false 让界面把消息撤回输入框/标「未发送」——这时说
+    // 「没发出去」是真话，用户重发也不会造成重复执行。
     if (entry) {
       chatJournal.delete(entry);
     }
@@ -1653,6 +1753,16 @@ async function dispatch(type, method, params) {
       broadcast({ type: 'chat/result', params: { accepted: false, error: message } });
     } else if (type === 'cancel') {
       broadcast({ type: 'cancel/result', params: { cancelled: false, error: message } });
+    } else if (type === 'sessionList') {
+      // sessionList 失败也必须回执：用户点「展开其余」时按钮会停在
+      // 「正在加载全部会话…」永不恢复（data-pending 不释放）；
+      // 面板打开时的自动刷新失败则让抽屉空白且毫无说明（用户以为会话全丢）。
+      // 按前端已支持的 { groups, error } 契约回，前端会画一行
+      // 「读取会话列表失败」并在下次成功时撤掉。
+      broadcast({ type: 'session/list', params: {
+        groups: [], current: null, isChild: false,
+        error: '读取会话列表失败：' + message
+      } });
     } else if (type === 'sessionNew' || type === 'sessionSwitch' ||
                type === 'sessionDelete' || type === 'sessionRename' ||
                type === 'sessionExplore' || type === 'sessionDone') {
@@ -1703,9 +1813,21 @@ async function dispatch(type, method, params) {
       // 绝不能挂「离线」横幅。实测：后端回 -32603 内部错误时界面写着
       // 「⚡离线：后端未连接」，用户会去查网络，而真正的原因在后端日志里。
       if (rpc.isConnected && rpc.isConnected()) {
-        broadcast({ type: 'notice', params: {
-          text: '⚠ 请求失败（' + type + '）：' + message
-        } });
+        // 【不要重复报】下面这些类型在上面的分支里**已经回过专用回执**，
+        // 而前端的专用回执本身就会画一行可见的说明（session/list 走
+        // `{groups, error}` → 「读取会话列表失败」；chat 走
+        // `accepted:false` → 「未发送」+ 原因）。这里再补一条通用 notice
+        // 就会同屏出现两句话讲同一件事，而且连点 3 次「展开其余」会堆 3 行
+        // （第 24 轮 Z1 实测 P1）。
+        // 只有「没有专用回执通道」的类型才需要这条兜底通知。
+        // 判据直接复用上面的 RECEIPT_TYPES —— 手工维护两份名单必然漂移：
+        // 第 24 轮我手写了一份，漏掉 configSet 与 confirmReply，那两类失败
+        // 就「专用回执 + 通用 notice」双报了。
+        if (!RECEIPT_TYPES[type]) {
+          broadcast({ type: 'notice', params: {
+            text: '⚠ 请求失败（' + type + '）：' + message
+          } });
+        }
       } else {
         reportError(message + '（' + type + '）');
       }
@@ -1720,8 +1842,13 @@ async function dispatch(type, method, params) {
 function onWebviewReady(source) {
   webviewReady = true;
   console.log(`[narnat] webview ready (${source})`);
-  if (lastInit) {
+  // 补发路径同样要过 initHasContent：否则 requestInitialize 刚拦下的空包
+  // 会在这里被原样送达 webview（第 24 轮 Z1 实测 P0，用户界面"已连接但全空"）。
+  if (lastInit && initHasContent(lastInit)) {
     broadcast({ type: 'initialize', params: lastInit });
+  } else if (lastInit) {
+    // 快照是空包：当错误补发，别让前端以为已就绪
+    broadcast({ type: 'rpc/error', params: { message: lastError || INIT_EMPTY_MSG } });
   } else if (lastError) {
     broadcast({ type: 'rpc/error', params: { message: lastError } });
   } else if (handshakeWaiting) {
@@ -1743,7 +1870,8 @@ function onWebviewReady(source) {
       // 必须同时判 rpc === conn：上一次连接的回调可能在重启之后才回来，
       // 那时 rpc 已经指向新连接，只判 `rpc && fresh` 会把旧进程的快照
       // 写进 lastInit —— 界面于是拿到上一个后端（旧 cwd、旧会话、旧模型）。
-      if (rpc && rpc === conn && fresh) {
+      // 同样必须过 initHasContent（第三条补发路径）
+      if (rpc && rpc === conn && fresh && initHasContent(fresh)) {
         lastInit = fresh;
         broadcast({ type: 'initialize', params: fresh });
         refreshSessions(conn);
