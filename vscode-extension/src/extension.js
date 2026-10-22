@@ -25,7 +25,14 @@ const MESSAGE_METHODS = {
   sessionRename: 'session/rename',
   sessionExplore: 'session/explore',
   sessionDone: 'session/done',
-  configSet: 'config/set'
+  configSet: 'config/set',
+  /* 设置面板用的三条。不需要配置面板的人也会走到这里 —— 未注册的类型
+     会落到 dispatch 的 catch 里，所以必须一起登记，否则报「未知类型」。
+     回执类型（config/describe、narnatmd/result、configSet/result）
+     由下面各自的分支单独发，不走通用的 RECEIPT_TYPES 白名单。 */
+  configDescribe: 'config/describe',
+  narnatmdGet: 'narnatmd/get',
+  narnatmdSet: 'narnatmd/set'
 };
 
 /** 原样转发给 webview 的通知前缀（协议 §4） */
@@ -1721,7 +1728,24 @@ async function dispatch(type, method, params) {
       return;
     }
     if (type === 'configSet') {
+      // 设置面板用 configSet/result（带 ok:false 语义，界面据此显示"保存失败"），
+      // 主界面的下拉仍收 config/result —— 两条都发，各自的既有消费者不受影响。
+      // needRestart 必须一起透传：接口地址/密钥改了要重启后端才生效，
+      // 界面据此提示，否则用户改完 key 直接提问拿到 401 会以为 key 错了。
       broadcast({ type: 'config/result', params: result });
+      broadcast({ type: 'configSet/result', params: Object.assign({ ok: true }, result) });
+      return;
+    }
+    if (type === 'configDescribe') {
+      broadcast({ type: 'config/describe', params: result });
+      return;
+    }
+    if (type === 'narnatmdGet') {
+      broadcast({ type: 'narnatmd/result', params: result });
+      return;
+    }
+    if (type === 'narnatmdSet') {
+      broadcast({ type: 'narnatmd/saved', params: result });
       return;
     }
   } catch (err) {
@@ -1791,6 +1815,17 @@ async function dispatch(type, method, params) {
       broadcast({ type: 'config/result', params: {
         ok: false, error: message, message: message
       } });
+      broadcast({ type: 'configSet/result', params: {
+        ok: false, error: message, message: message
+      } });
+    } else if (type === 'configDescribe' || type === 'narnatmdGet' || type === 'narnatmdSet') {
+      // 设置面板这三条失败时也必须有回执，否则面板停在「正在读取配置…」
+      // 或「正在保存…」不动 —— 用户完全看不出是网络问题还是后端拒绝。
+      const failType = type === 'configDescribe' ? 'config/describe'
+        : (type === 'narnatmdGet' ? 'narnatmd/result' : 'narnatmd/saved');
+      const failBody = Object.assign({ error: message, message: message },
+        type === 'configDescribe' ? { items: [], groups: [] } : { ok: false });
+      broadcast({ type: failType, params: failBody });
     } else if (type === 'confirmReply') {
       // confirm/reply 失败（超时、后端已不在等这条确认）也必须回执。
       // 不回执会怎样（实测）：界面点完就写了「已提交确认，等待后端执行…」，
@@ -2100,6 +2135,17 @@ function handleMessage(msg, source) {
     // 原生的跟随主题、居中、自带确定/取消、Esc 关闭、有校验提示位，
     // 也不受面板宽度挤压（窄侧边栏里自绘 input 会被挤得很难看）。
     showPrompt(msg.params || {});
+    return;
+  }
+  if (msg.type === 'openSettings') {
+    // 面板里的齿轮按钮：打开后端配置文件。
+    // 与命令面板的 narnat.openSettings 走**同一个** openSettings()，
+    // 不另写一份「找路径 + 打开」——两处各写一遍必然在「配置文件在哪」上漂移。
+    Promise.resolve()
+      .then(() => openSettings())
+      .catch((err) => {
+        console.warn('[narnat] 打开配置失败：', err && err.message ? err.message : err);
+      });
     return;
   }
   // 附件四件事都只跟宿主交互，不走 RPC 后端：

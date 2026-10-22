@@ -57,6 +57,24 @@ STYLE_NOTICE_TEXT = ("回复内容简洁且抓住核心")
 # 提醒语由用户配置原文，程序只加统一前缀（与 TodoWrite 迟到提醒同形）
 STYLE_NOTICE_TEMPLATE = "[系统提醒] {text}"
 
+# ── 内部注入的统一前缀 ──
+# 后端为解决「模型跑偏 / 上下文丢失 / 计划没勾」而临时插进对话的 user 消息，
+# 全部用这个前缀开头。它们是**给模型看的纠偏指令**，不是用户说的话，
+# 不应该出现在界面历史里（用户会以为自己在某个时刻真的打过这句话）。
+#
+# 为什么前缀要单独定义：注入点散落在 agent_loop / compression_coordinator /
+# agent 等多处，而过滤发生在 rpc/server.py —— 两处各写一份字面量必然漂移
+#（改了一处忘了另一处，注入就会漏到界面上）。这里是唯一真源。
+INTERNAL_NOTICE_PREFIX = "[系统提醒]"
+
+# 溢出恢复压缩后追加的内部继续消息（compression_coordinator.OVERFLOW_CONTINUE_MESSAGE）。
+# 它不以 [系统提醒] 开头（历史遗留的 `[]` 前缀），所以单独登记。
+# 这里只放「开头片段」用于识别，完整文案仍由 compression_coordinator 定义。
+INTERNAL_NOTICE_MARKERS = (
+    INTERNAL_NOTICE_PREFIX,
+    "[]对话历史过长已自动压缩",
+)
+
 # ── 基础Prompt模板 ──
 BASE_PROMPT_TEMPLATE = """\
 | 你的身份 | 你是 {model} 智能体。 |

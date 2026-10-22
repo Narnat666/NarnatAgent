@@ -22,7 +22,7 @@ from ..ui.ui_design import (show_verify_start as _ui_verify_start,
                             show_verify_result as _ui_verify_result,
                             show_verify_skip as _ui_verify_skip)
 from ..config.loader import Config
-from ..config.defaults import STYLE_NOTICE_TEMPLATE
+from ..config.defaults import STYLE_NOTICE_TEMPLATE, INTERNAL_NOTICE_PREFIX
 from ..output import write as _stdout_write
 from ..tools.exec_signal import strip_tags
 from ..logger import AgentLogger
@@ -491,7 +491,7 @@ class AgentLoop:
                         and self._tool_context.tool_rounds_used >= TODO_NUDGE_TOOL_ROUNDS):
                     self._tool_context.todo_nudge_sent = True
                     self._msg_manager.append_user(
-                        "[系统提醒] 若这是多步任务且你尚未梳理步骤，可考虑用 TodoWrite 建立计划；"
+                        f"{INTERNAL_NOTICE_PREFIX} 若这是多步任务且你尚未梳理步骤，可考虑用 TodoWrite 建立计划；"
                         "单步任务或探索阶段可忽略本条。"
                     )
 
@@ -593,7 +593,7 @@ class AgentLoop:
                 names = "、".join(str(t.get("content", "")) for t in unfinished[:5])
                 tail = f"等共{len(unfinished)}项" if len(unfinished) > 5 else ""
                 self._msg_manager.append_user(
-                    f"[系统提醒] 你的计划仍有未勾选完成的项: {names}{tail}。"
+                    f"{INTERNAL_NOTICE_PREFIX} 你的计划仍有未勾选完成的项: {names}{tail}。"
                     "若这些任务实际已完成，请先调用TodoWrite勾选它们（并把仍需继续的项标记为进行中）"
                     "再输出最终总结；若确实未完成或刻意跳过，请在最终总结中向用户说明原因；"
                     "若你有需要用户澄清的困惑或依赖用户决策，可直接向用户提问，无需强行收尾。"
@@ -611,7 +611,7 @@ class AgentLoop:
             if bg_summary and not self._tool_context.bg_reminded:
                 self._tool_context.bg_reminded = True
                 self._msg_manager.append_user(
-                    f"[系统提醒] 后台仍有任务在运行: {bg_summary}。"
+                    f"{INTERNAL_NOTICE_PREFIX} 后台仍有任务在运行: {bg_summary}。"
                     "若需等待其完成，请调用 Shell(bg=\"wait\")（任一任务完成会立即返回）；"
                     "若不再需要这些任务，请调用 Shell(bg=\"cancel\", id=N) 清理后结束回复。"
                 )

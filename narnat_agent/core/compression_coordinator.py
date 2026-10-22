@@ -9,6 +9,7 @@
 from typing import Tuple
 
 from ..config.loader import Config
+from ..config.defaults import INTERNAL_NOTICE_PREFIX
 from .message_manager import MessageManager
 from .llm import LLMClient
 from .context import ContextManager
@@ -18,6 +19,8 @@ from ..logger import AgentLogger
 from ..output import write as _stdout_write
 
 # 溢出恢复压缩成功后追加的内部继续消息：告知模型历史已被压缩、任务继续。
+# 开头那个 `[]` 是历史遗留（早先的标记位），现在由 defaults.INTERNAL_NOTICE_MARKERS
+# 统一登记识别。改这里时必须同步那边，否则这条注入会漏到界面历史里。
 OVERFLOW_CONTINUE_MESSAGE = (
     "[]对话历史过长已自动压缩，早前内容已总结为上下文成果。"
     "请基于当前上下文直接继续推进任务，无需复述历史。"
@@ -75,7 +78,7 @@ class CompressionCoordinator:
         unfinished = [t for t in ctx.current_todos if t.get("status") != "completed"]
         if not unfinished:
             return
-        lines = ["[系统提醒] 上下文已压缩。当前计划（未完成）："]
+        lines = [f"{INTERNAL_NOTICE_PREFIX} 上下文已压缩。当前计划（未完成）："]
         for i, t in enumerate(unfinished, 1):
             label = "进行中" if t.get("status") == "in_progress" else "待处理"
             lines.append(f"{i}. [{label}] {t.get('content', '')}")
@@ -88,7 +91,7 @@ class CompressionCoordinator:
         仅注入AI上下文，终端不展示（内部纠偏，用户无需感知）。
         """
         self._msg_manager.append_user_merged(
-            "[系统提醒] 对话历史过长已压缩，早前内容已总结为上下文成果；"
+            f"{INTERNAL_NOTICE_PREFIX} 对话历史过长已压缩，早前内容已总结为上下文成果；"
         )
 
     def _detach_prepended(self, prepended: dict) -> None:

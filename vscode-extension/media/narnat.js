@@ -72,6 +72,16 @@
   var curThink = null;       // 当前思考块
   var pendingTodoRow = null; // 由 tool/call 预留的「更新计划」行，等 todo/update 填充
   var toolMap = {};          // tool id → { wrap, row, slot, isTodo }
+  /* ---- 一轮的「工作过程」折叠（抄 dsh 的 TurnProcessNodeView）----
+     一轮跑完后，那一整串工具调用对用户已经没用了：他关心的是最后的回答。
+     dsh 的做法是收成一条带下边框的摘要行（「已工作 · 1分23秒」/「已停止」），
+     点一下才展开看细节。这里照做。
+     三个变量记「本轮」的边界与规模；tool/result 到达时打 data-turn 标记，
+     轮末只收标记过的节点 —— 历史重放的工具行没有标记，不会被卷进来。 */
+  var turnStartNode = null;  // 本轮第一个节点之前的兄弟节点（null=从头算）
+  var turnStartTime = 0;
+  var turnToolCount = 0;
+  var turnThinkCount = 0;
   var sysMap = {};           // 系统行（verify / compress）句柄
   var offlineShown = false;
   var offlineLine = null;
@@ -943,6 +953,13 @@
     toolMap = {};
     sysMap = {};
     pendingTodoRow = null;
+    // 本轮折叠的边界也要复位：不清会怎样 —— 切到新会话后 turnStartNode
+    // 还指向上一个会话的节点（已脱离文档），轮末折叠时 insertBefore
+    // 会抛错或把内容插到错误位置。
+    turnStartNode = null;
+    turnStartTime = 0;
+    turnToolCount = 0;
+    turnThinkCount = 0;
     curAssistant = null;
     curThink = null;
     assistantBuf = '';
@@ -1320,6 +1337,19 @@
     //     而抽屉还开着 → 胶囊指示与实际相反（实测 A8-01）
     // 胶囊的状态只由它自己的下拉决定，别的地方一律不碰。
     if (open && REAL) post('sessionList', { all: false });
+    // 列表与设置是互斥的两个状态，同屏会互相盖住（都铺满内容区）。
+    // 两个方向都要关：这里管「开列表 → 关设置」，setPanelOpen 管反向。
+    if (open) {
+      var sp = document.getElementById('settingsPanel');
+      if (sp && sp.getAttribute('data-open') === 'true') {
+        if (typeof setPanelOpen === 'function') setPanelOpen(false);
+      }
+    }
+    // 顶栏按钮跟着变成「当前态」，让用户知道再点一下就是关掉
+    var histBtnEl = document.getElementById('histBtn');
+    if (histBtnEl) {
+      histBtnEl.setAttribute('data-on', open ? 'true' : 'false');
+    }
     // 打开抽屉时把状态详情浮层收起（与 setStDrawer 里反向那一条成对）。
     // 249px 下两者都是覆盖全宽的浮层，状态抽屉在上层会把抽屉 footer 的按钮
     // 整片吞掉；反过来先开状态抽屉再点历史按钮，同样会叠在一起。
@@ -1340,7 +1370,7 @@
     // 焦点交还：交给打开抽屉的那个历史按钮（用户按 Tab 走几格就能回到列表），
     // 找不到就退回输入框 —— 两者都比掉到 <body> 好。
     if (focusWasInDrawer) {
-      var backTo = document.getElementById('chipSess') || input;
+      var backTo = document.getElementById('histBtn') || input;
       if (backTo && typeof backTo.focus === 'function') {
         try { backTo.focus(); } catch (e) { /* 忽略 */ }
       }
@@ -1380,6 +1410,515 @@
   document.getElementById('dwClose').addEventListener('click', function(){
     setDrawer(false);
   });
+
+  /* ---------- 设置面板 ----------
+     两个入口：顶栏最右的 ⚙（主入口）、对话记录标题栏那个小 ⚙（顺手可达）。
+     两者都只做「打开面板」，不再像旧版那样直接去宿主里打开配置文件 ——
+     配置该在这里改，不该让用户去手编 JSON。
+
+     数据全部来自后端 config/describe + narnatmd/get，界面**不自己保存
+     任何配置副本**。这样设置面板与主界面（状态栏那排按钮）永远是同一份真值：
+     在这里改完，关掉面板，主界面的模型按钮会自动跟上（它收 config/result）。 */
+
+  /** 最近一次 config/describe 的结果；null 表示还没拉到 */
+  var setItems = null;
+  /** describe 里的分组定义（顺序即分段顺序） */
+  var setGroups = [];
+  /** 当前选中的分段 id（默认第一段 = 模型 API） */
+  var setGroup = 'api';
+  /** narnat.md 原文（与后端的差异即"有未保存修改"） */
+  var mdText = '';
+  var mdSaved = '';
+
+  function setPanelOpen(on){
+    var p = document.getElementById('settingsPanel');
+    if (!p) return;
+    p.setAttribute('data-open', on ? 'true' : 'false');
+    document.body.setAttribute('data-settings', on ? 'true' : 'false');
+    var btn = document.getElementById('btnSettings');
+    if (btn) btn.setAttribute('data-on', on ? 'true' : 'false');
+    if (on) {
+      // 打开时把列表收起（两者都是铺满内容区的状态，同屏会互相盖住）
+      if (typeof setDrawer === 'function') setDrawer(false);
+      loadDescribe();
+    } else {
+      // 关面板时必须把全屏层一起关掉。不关会怎样：用户在全屏改完按 ×
+      // 关面板，全屏层留在 data-open=true —— 下次打开设置直接是全屏，
+      // 而且看不到分段和字段区，像界面坏了。
+      if (typeof setMdFull === 'function') setMdFull(false);
+    }
+  }
+
+  /** 拉一次配置全貌并重画。每次打开都拉 —— 后端可能被别的途径改过。 */
+  function loadDescribe(){
+    var body = document.getElementById('setBody');
+    if (body) body.innerHTML = '<div class="set-msg">正在读取配置…</div>';
+    post('configDescribe', {});
+  }
+
+  function setMsg(text, kind){
+    var foot = document.getElementById('setFoot');
+    if (!foot) return;
+    var old = foot.parentNode.querySelector('.set-msg');
+    if (old) old.parentNode.removeChild(old);
+    if (!text) return;
+    var d = document.createElement('div');
+    d.className = 'set-msg';
+    if (kind) d.setAttribute('data-kind', kind);
+    d.textContent = text;
+    foot.parentNode.insertBefore(d, foot);
+  }
+
+  /** 画分段按钮 */
+  function renderTabs(){
+    var tabs = document.getElementById('setTabs');
+    if (!tabs) return;
+    tabs.innerHTML = '';
+    setGroups.forEach(function(g){
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = g.label || g.id;
+      b.setAttribute('data-on', g.id === setGroup ? 'true' : 'false');
+      b.addEventListener('click', function(){
+        setGroup = g.id;
+        renderTabs();
+        renderBody();
+      });
+      tabs.appendChild(b);
+    });
+  }
+
+  /** 按当前分组画字段 */
+  function renderBody(){
+    var body = document.getElementById('setBody');
+    if (!body) return;
+    body.innerHTML = '';
+    /* 指令分组用专门的布局：字段区不滚动、textarea 吃掉全部剩余高度。
+       其它分组是普通列表（可滚动）。用 data-mode 切换而不是加两个类，
+       因为 CSS 那边要按「这一个 row 撑满」来写，判断依据得留在 DOM 上。 */
+    body.setAttribute('data-mode', setGroup === 'prompt' ? 'md' : 'list');
+    if (!setItems) {
+      body.innerHTML = '<div class="set-msg">配置还没读到（后端未连接？）</div>';
+      return;
+    }
+    var rows = setItems.filter(function(it){ return it.group === setGroup; });
+    // 条件字段：showFor 列出的模式才显示。判据取同分组里 provider 那项的值 ——
+    // 选 deepseek 时 MCP 的「服务器地址」对它毫无意义，摆在界面上只会让人
+    // 以为必须填（实测这种"看起来必填但实际无关"的字段最容易劝退）。
+    if (setGroup === 'websearch') {
+      var prov = (setItems.filter(function(x){ return x.id === 'websearch.provider'; })[0] || {}).value || 'mcp';
+      rows = rows.filter(function(it){
+        return !it.showFor || it.showFor.indexOf(prov) >= 0;
+      });
+    }
+    if (!rows.length) {
+      body.innerHTML = '<div class="set-msg">这一组没有可配置项</div>';
+      return;
+    }
+    rows.forEach(function(it){ body.appendChild(renderRow(it)); });
+    // narnat.md 的正文要额外拉一次（describe 只给元信息）
+    if (setGroup === 'prompt') loadMarkdown();
+  }
+
+  function renderRow(it){
+    var row = document.createElement('div');
+    row.className = 'set-row';
+    row.setAttribute('data-id', it.id);
+
+    var lab = document.createElement('div');
+    lab.className = 'set-lab';
+    var name = document.createElement('span');
+    name.textContent = it.label || it.id;
+    lab.appendChild(name);
+    // 当前值贴右显示：用户一眼看到"现在是啥"，不用点开下拉
+    var cur = document.createElement('span');
+    cur.className = 'set-cur';
+    if (it.kind === 'bool') cur.textContent = it.value ? '开' : '关';
+    else if (it.kind !== 'number' && it.kind !== 'markdown') cur.textContent = String(it.value == null ? '' : it.value);
+    else if (it.kind === 'number') cur.textContent = String(it.value == null ? '' : it.value);
+    lab.appendChild(cur);
+    row.appendChild(lab);
+
+    if (it.kind === 'select') {
+      var sel = document.createElement('select');
+      sel.className = 'set-sel';
+      sel.disabled = it.writable === false;
+      (it.options || []).forEach(function(o){
+        var op = document.createElement('option');
+        op.value = o.value;
+        op.textContent = o.label || o.value;
+        if (o.value === it.value) op.selected = true;
+        sel.appendChild(op);
+      });
+      sel.addEventListener('change', function(){ submitConfig(it, sel.value); });
+      row.appendChild(sel);
+    } else if (it.kind === 'bool') {
+      var sw = document.createElement('button');
+      sw.type = 'button';
+      sw.className = 'set-sw';
+      sw.textContent = it.value ? '已开启' : '已关闭';
+      sw.setAttribute('data-on', it.value ? 'true' : 'false');
+      sw.disabled = it.writable === false;
+      sw.addEventListener('click', function(){
+        sw.setAttribute('data-busy', 'true');
+        submitConfig(it, !it.value);
+      });
+      row.appendChild(sw);
+    } else if (it.kind === 'text') {
+      var inp = document.createElement('input');
+      inp.type = 'text';
+      inp.className = 'set-inp';
+      inp.value = it.value == null ? '' : String(it.value);
+      if (it.placeholder) inp.placeholder = it.placeholder;
+      inp.disabled = it.writable === false;
+      // 失焦提交：与数值项同理，边打字边提交会把半截地址写进配置
+      inp.addEventListener('change', function(){ submitConfig(it, inp.value); });
+      row.appendChild(inp);
+      // 模型名有候选列表时给一排快捷按钮（点一下直接填），
+      // 但保留手输 —— 换厂商后模型名不在列表里，必须能自己写
+      if (it.options && it.options.length) {
+        var quick = document.createElement('div');
+        quick.className = 'set-quick';
+        it.options.forEach(function(o){
+          var qb = document.createElement('button');
+          qb.type = 'button';
+          qb.textContent = o.label || o.value;
+          qb.setAttribute('data-on', o.value === it.value ? 'true' : 'false');
+          qb.addEventListener('click', function(){
+            inp.value = o.value;
+            submitConfig(it, o.value);
+          });
+          quick.appendChild(qb);
+        });
+        row.appendChild(quick);
+      }
+    } else if (it.kind === 'secret') {
+      /* 密钥字段：永远只在界面上显示打码值。
+         真值不回传（见后端 _mask_key 的注释），所以这里给的是
+         「已设置 + 掩码」，用户要换就整串重填；留空表示不改。 */
+      var sk = document.createElement('input');
+      sk.type = 'password';
+      sk.className = 'set-inp';
+      sk.value = '';
+      sk.autocomplete = 'off';
+      sk.spellcheck = false;
+      sk.placeholder = it.placeholder || '未设置';
+      sk.disabled = it.writable === false;
+      sk.addEventListener('change', function(){
+        var v = sk.value.trim();
+        // 留空 = 不改。这条必须明说，否则用户以为清空了密钥
+        if (!v) { setMsg('', ''); return; }
+        submitConfig(it, v);
+      });
+      row.appendChild(sk);
+      // 当前掩码用 .set-cur 而不是 .set-hint：这是**实际信息**（现在是哪个 key），
+      // 不是解释性废话。样式上贴在标签右侧，与其它字段的当前值一致。
+      var st = document.createElement('div');
+      st.className = 'set-hint set-cur-mask';
+      st.textContent = it.isSet ? ('当前 ' + (it.masked || '已设置')) : '未设置';
+      row.appendChild(st);
+    } else if (it.kind === 'number') {
+      var num = document.createElement('input');
+      num.type = 'number';
+      num.className = 'set-num';
+      num.value = it.value == null ? '' : String(it.value);
+      if (it.min != null) num.min = String(it.min);
+      num.disabled = it.writable === false;
+      // 失焦提交而不是每次输入都提交：否则用户打「10」时先提交「1」
+      num.addEventListener('change', function(){
+        var v = parseInt(num.value, 10);
+        if (isNaN(v)) { setMsg('请输入数字', 'err'); return; }
+        submitConfig(it, v);
+      });
+      row.appendChild(num);
+    } else if (it.kind === 'markdown') {
+      /* 工具栏：内容规模 + 复制 + 全屏。
+         「复制」是用户明确要的 —— 原来只能手动框选，而内容有几百行时
+         框选本身就不可能（要拖动滚几十屏）。「全屏」解决侧边栏太窄看不全。 */
+      var bar = document.createElement('div');
+      bar.className = 'set-md-bar';
+      var lenEl = document.createElement('span');
+      lenEl.className = 'set-md-len';
+      lenEl.setAttribute('data-act', 'mdLen');
+      bar.appendChild(lenEl);
+
+      var copyBtn = document.createElement('button');
+      copyBtn.type = 'button';
+      copyBtn.textContent = '复制';
+      copyBtn.addEventListener('click', function(){
+        if (!mdText) return;
+        // 走宿主的 clipboard 通道：webview 里 navigator.clipboard 会被沙箱拒绝
+        post('clipboard/write', { text: mdText, id: 'md' });
+      });
+      bar.appendChild(copyBtn);
+
+      var bigBtn = document.createElement('button');
+      bigBtn.type = 'button';
+      bigBtn.textContent = '全屏';
+      // setMdFull 的函数声明在下面，回调触发时必然已赋值（事件在用户点击时才跑），
+      // 所以这里直接按名调用即可，不需要提前声明顺序。
+      bigBtn.addEventListener('click', function(){
+        if (typeof setMdFull === 'function') setMdFull(true);
+      });
+      bar.appendChild(bigBtn);
+      row.appendChild(bar);
+
+      var ta = document.createElement('textarea');
+      ta.className = 'set-md';
+      ta.id = 'setMd';
+      ta.spellcheck = false;
+      ta.value = mdText;
+      ta.placeholder = '在这里写 narnat.md 的内容（会拼进系统提示词）';
+      ta.addEventListener('input', function(){
+        mdText = ta.value;
+        updateMdFoot();
+        updateMdLen();
+        // 全屏态下把内容镜像过去（两个 textarea 共享同一份 mdText）
+        var big = document.getElementById('setMdBig');
+        if (big && big.value !== mdText) big.value = mdText;
+      });
+      row.appendChild(ta);
+    }
+
+    if (it.hint) {
+      var hint = document.createElement('div');
+      hint.className = 'set-hint';
+      hint.textContent = it.hint;
+      row.appendChild(hint);
+    }
+    return row;
+  }
+
+  /** 提交单项配置。成功后重新拉一次 describe —— 不本地改状态，
+      因为后端可能规范化了值（比如把轮数夹到合法区间）。 */
+  function submitConfig(it, value){
+    var key, payload;
+    if (it.id.indexOf('plugin:') === 0) {
+      key = 'plugin';
+      payload = { name: it.pluginName, enabled: !!value };
+    } else if (it.id === 'goalRoundLimit') {
+      key = 'goal';
+      payload = { enabled: true, maxRounds: value };
+    } else if (it.id.indexOf('api.') === 0) {
+      /* 模型 API 的四个字段走同一个 key: 'api'，每次只提交**改的那一项**。
+         不整包提交：整包会把用户没动过的字段（尤其密钥）一起覆盖 ——
+         而密钥在界面上是打码的，整包提交等于把打码串写回磁盘。 */
+      key = 'api';
+      if (it.id === 'api.baseUrl') payload = { baseUrl: value };
+      else if (it.id === 'api.apiKey') payload = { apiKey: value };
+      else if (it.id === 'api.protocol') payload = { protocol: value };
+      else if (it.id === 'api.model') payload = { model: value };
+      else if (it.id === 'api.thinking') {
+        // 思考强度有热切换路径（on_thinking），不走 api 整包
+        key = 'thinking';
+        payload = value;
+      } else payload = {};
+    } else if (it.id.indexOf('websearch.') === 0) {
+      key = 'websearch';
+      if (it.id === 'websearch.provider') payload = { provider: value };
+      else if (it.id === 'websearch.url') payload = { url: value };
+      else if (it.id === 'websearch.key') payload = { key: value };
+      else payload = {};
+    } else {
+      key = it.id;
+      payload = value;
+    }
+    setMsg('正在保存…', '');
+    post('configSet', { key: key, value: payload });
+  }
+
+  /** 拉 narnat.md 原文 */
+  function loadMarkdown(){
+    post('narnatmdGet', {});
+  }
+
+  function updateMdFoot(){
+    var foot = document.getElementById('setFoot');
+    if (!foot) return;
+    var dirty = mdText !== mdSaved;
+    var saveBtn = foot.querySelector('[data-act="saveMd"]');
+    if (saveBtn) saveBtn.disabled = !dirty;
+    var tip = foot.querySelector('[data-act="mdTip"]');
+    if (tip) tip.textContent = dirty ? '有未保存的修改' : '已保存';
+    // 全屏层的保存按钮也跟着联动（两个视图，同一份状态）
+    var bigSave = document.getElementById('mdFullSave');
+    if (bigSave) bigSave.disabled = !dirty;
+    updateMdLen();
+  }
+
+  /** 更新两处的「N 行 · M 字符」。内容规模要能让用户判断要不要全屏。 */
+  function updateMdLen(){
+    var lines = mdText ? mdText.split('\n').length : 0;
+    var txt = lines + ' 行 · ' + mdText.length + ' 字符';
+    ['mdLen', 'mdFullLen'].forEach(function(id){
+      var el = (id === 'mdLen')
+        ? document.querySelector('#setFoot [data-act="mdLen"], .set-md-len')
+        : document.getElementById(id);
+      if (el) el.textContent = txt;
+    });
+    // 字段区里那个是渲染时插入的，单独按类名找一遍
+    var small = document.querySelector('.set-md-len');
+    if (small) small.textContent = txt;
+  }
+
+  /* ---------- 全屏编辑层 ---------- */
+  function setMdFull(on){
+    var box = document.getElementById('mdFull');
+    if (!box) return;
+    box.setAttribute('data-open', on ? 'true' : 'false');
+    if (on) {
+      var big = document.getElementById('setMdBig');
+      if (big) {
+        big.value = mdText;
+        updateMdLen();
+        big.focus();
+        // 光标放到末尾：用户点「全屏」多半是要接着写，不是从头看
+        try { big.setSelectionRange(mdText.length, mdText.length); } catch (e) {}
+        big.scrollTop = big.scrollHeight;
+      }
+      var bigSave = document.getElementById('mdFullSave');
+      if (bigSave) bigSave.disabled = (mdText === mdSaved);
+    } else {
+      // 收起时把全屏层里的编辑结果写回唯一真源（mdText）
+      var big2 = document.getElementById('setMdBig');
+      if (big2 && big2.value !== mdText) {
+        mdText = big2.value;
+        var small = document.getElementById('setMd');
+        if (small) small.value = mdText;
+      }
+      updateMdFoot();
+    }
+  }
+
+  var mdFullEl = document.getElementById('mdFull');
+  if (mdFullEl) {
+    var bigTa = document.getElementById('setMdBig');
+    if (bigTa) {
+      bigTa.addEventListener('input', function(){
+        mdText = bigTa.value;
+        // 同步回小编辑区，两处永远一致（保存提交的是 mdText，不会错）
+        var small = document.getElementById('setMd');
+        if (small && small.value !== mdText) small.value = mdText;
+        updateMdFoot();
+      });
+    }
+    var bc = document.getElementById('mdFullCopy');
+    if (bc) bc.addEventListener('click', function(){
+      if (!mdText) return;
+      post('clipboard/write', { text: mdText, id: 'md' });
+    });
+    var bs = document.getElementById('mdFullSave');
+    if (bs) bs.addEventListener('click', function(){
+      
+      post('narnatmdSet', { text: mdText });
+    });
+    var bx = document.getElementById('mdFullClose');
+    if (bx) bx.addEventListener('click', function(){ setMdFull(false); });
+  }
+
+  /** 重画底部动作条。指令分组才有保存按钮。 */
+  function renderFoot(){
+    var foot = document.getElementById('setFoot');
+    if (!foot) return;
+    foot.innerHTML = '';
+    if (setGroup === 'prompt') {
+      var tip = document.createElement('span');
+      tip.setAttribute('data-act', 'mdTip');
+      tip.style.cssText = 'flex:1;font-size:10.5px;color:var(--fg-faint);align-self:center';
+      tip.textContent = '已保存';
+      foot.appendChild(tip);
+      var save = document.createElement('button');
+      save.setAttribute('data-act', 'saveMd');
+      save.className = 'set-primary';
+      save.style.flex = 'none';
+      save.style.padding = '0 14px';
+      save.textContent = '保存';
+      save.disabled = true;
+      save.addEventListener('click', function(){
+        save.disabled = true;
+        
+        post('narnatmdSet', { text: mdText });
+      });
+      foot.appendChild(save);
+    } else {
+      var b = document.createElement('button');
+      b.textContent = '重新读取';
+      b.addEventListener('click', function(){ setMsg('', ''); loadDescribe(); });
+      foot.appendChild(b);
+      var open = document.createElement('button');
+      open.textContent = '打开配置文件';
+      open.addEventListener('click', function(){ post('openSettings', {}); });
+      foot.appendChild(open);
+    }
+  }
+
+  /** 顶栏 ⚙ 开面板 */
+  var settingsEntry = document.getElementById('btnSettings');
+  if (settingsEntry) settingsEntry.addEventListener('click', function(e){
+    e.stopPropagation();
+    var p = document.getElementById('settingsPanel');
+    setPanelOpen(p.getAttribute('data-open') !== 'true');
+  });
+  var setCloseEl = document.getElementById('setClose');
+  if (setCloseEl) setCloseEl.addEventListener('click', function(){ setPanelOpen(false); });
+  window.__narnatOnConfigDescribe = function(p){
+    setItems = (p && Array.isArray(p.items)) ? p.items : [];
+    setGroups = (p && Array.isArray(p.groups) && p.groups.length)
+      ? p.groups
+      // 老后端不给 groups：按已知分组兜底，至少面板不空白
+      : [{ id: 'api', label: '模型 API' }, { id: 'websearch', label: '联网工具' }, { id: 'prompt', label: '指令' }];
+    if (!setGroups.some(function(g){ return g.id === setGroup; })) setGroup = setGroups[0].id;
+    // 有改动还没生效 → 面板顶部常驻一行提示。
+    // 不提示会怎样：用户改完 key 直接提问、拿到 401，以为新 key 是错的。
+    if (p && p.restartPending) {
+      setMsg('需重启后端才生效', 'err');
+    }
+    renderTabs();
+    renderFoot();
+    renderBody();
+  };
+
+  window.__narnatOnNarnatMd = function(p){
+    mdText = (p && typeof p.text === 'string') ? p.text : '';
+    mdSaved = mdText;
+    var ta = document.getElementById('setMd');
+    if (ta) ta.value = mdText;
+    // describe 里那条 narnat.md 的 path 可能还没到，这里补一次
+    setItems = (setItems || []).map(function(it){
+      if (it.id === 'narnatmd' && p && p.path) it.path = p.path;
+      return it;
+    });
+    renderBody();
+    renderFoot();
+    updateMdFoot();
+  };
+
+  window.__narnatOnConfigResult = function(p){
+    var ok = p && (p.ok === true || p.accepted === true);
+    if (!ok) {
+      setMsg('失败：' + ((p && (p.error || p.message)) || ''), 'err');
+      // 失败后重拉，让界面回到真实值（不能停在用户以为改成的那个值上）
+      loadDescribe();
+      return;
+    }
+    /* needRestart：接口地址/密钥/协议 改动写的是磁盘，
+       而当前进程里的 LLMClient 还在用旧值（AIConfig 是加载时构造的）。
+       必须明说，否则用户改完 key 直接提问拿到 401，会以为新 key 是错的。 */
+    var need = p && (p.needRestart === true ||
+      (p.current && p.current.needRestart === true));
+    setMsg(need ? '已保存 · 需重启后端' : '已保存', 'ok');
+    loadDescribe();
+  };
+
+  window.__narnatOnNarnatMdSaved = function(p){
+    if (p && p.ok) {
+      mdSaved = mdText;
+      updateMdFoot();
+      setMsg(p.needRestart ? '已保存 · 需重启后端' : '已保存', 'ok');
+    } else {
+      setMsg('失败：' + ((p && (p.error || p.message)) || ''), 'err');
+    }
+  };
 
   palette.addEventListener('click', function(e){
     var it = e.target.closest('.item');
@@ -1924,23 +2463,23 @@
   watchStatusValues();
 
   /**
-   * 写输入行最左侧那个「历史对话」按钮。
-   * 按钮本身不显示文字（纯图标，会话名在顶栏已经有了），名字放进 title：
-   * 鼠标停上去才出现。JS 里原有的那几处赋值统一走这里，就不会出现
-   * 「名字变了但 title 还是旧的」——title 是用户唯一能看到名字的地方，
-   * 过期等于说谎。
+   * 同步顶栏「对话记录」按钮的无障碍名称。
+   *
+   * 历史：输入行原来有个「历史对话」chip，会话名直接写在 chip 文字上。
+   * 那个 chip 已删除（入口挪到顶栏、会话名顶栏本来就有），但调用点还留着几处——
+   * 全部收敛到这里改造，而不是逐个删调用：调用点分布在 initialize /
+   * session/result / 切会话等多个分支上，逐个删很容易漏一处，
+   * 漏掉的地方就会引用一个不存在的节点（静默失效，没人会发现）。
    * @param {string} name 会话名；空串 = 未保存
    */
   function setChipSess(name) {
-    var el = document.getElementById('chipSess');
+    var el = document.getElementById('histBtn');
     if (!el) return;
     var n = String(name == null ? '' : name);
-    el.textContent = n;
-    // 提示文案要精简：原生框时代这里塞了「历史对话 · 当前：xxx（点击打开会话列表）」
-    // 三段话，框又长又丑。现在只留「历史对话」，当前会话名交给 aria-label
-    // （读屏软件仍能念出完整信息，视觉上不占地方）。
-    el.setAttribute('data-tip', '历史对话');
-    el.setAttribute('aria-label', '历史对话，当前 ' + (n || '未保存') + '，点击打开会话列表');
+    // 按钮本身是纯图标（☰），会话名在顶栏胶囊里已经有了，这里只补 aria-label，
+    // 让读屏软件说出「当前在哪段对话」，视觉上不占地方。
+    el.setAttribute('data-tip', '对话记录');
+    el.setAttribute('aria-label', '对话记录，当前 ' + (n || '未保存') + '，点击打开列表');
   }
 
   /* ---------- 输入历史（上下键调出） ----------
@@ -2430,14 +2969,19 @@
         Object.keys(toolMap).forEach(function(k){
           if (toolMap[k].wrap === toolsWrap) entry = toolMap[k];
         });
-        var restLines = entry && entry.restLines;
+        // 历史重放的工具行不在 toolMap 里（它们是只读快照，没有实时 entry）。
+        // 那类行的剩余内容挂在 .more 节点的 __rest 上（见 addHistoryTool），
+        // 两处都认，展开按钮才是通用能力 —— 否则历史里的「还有 N 行」
+        // 点了没反应（比不显示按钮更糟）。
+        var restLines = (entry && entry.restLines) || moreOut.__rest;
         if (restLines && restLines.length) {
           var frag = '';
           restLines.forEach(function(t){
             frag += '<div class="ln"><span class="tx">' + esc(t) + '</span></div>';
           });
           moreOut.insertAdjacentHTML('beforebegin', frag);
-          entry.restLines = null;
+          if (entry) entry.restLines = null;
+          moreOut.__rest = null;
         }
         moreOut.parentNode.removeChild(moreOut);
         scrollBottom();
@@ -2941,11 +3485,11 @@
     }
   });
 
-  /* 输入行的会话名 / 工作目录 chip 长得跟状态栏那两个能点的按钮完全一样，
-     点了却什么都不发生（实测 cursor:auto、无监听器）。会话名接开抽屉，
-     路径接复制——这是用户点它们时唯一说得通的期待。
-     工作目录不能改（改目录要重开会话，属另一件事），所以只给复制。 */
-  var chipSessEl = document.getElementById('chipSess');
+  /* 顶栏的「对话记录」按钮：打开面板内的全宽会话列表。
+     入口原来在输入行那个小小的「历史对话」chip 上，藏得深、又和路径 chip
+     挤在一起；挪到顶栏后它和「这是哪个对话」的会话名在同一行，语义更近。
+     工作目录 chip 仍只给复制（改目录要重开会话，属另一件事）。 */
+  var chipSessEl = document.getElementById('histBtn');
   if (chipSessEl) {
     chipSessEl.style.cursor = 'pointer';
     // 顶栏会话名改成开「子会话」下拉后，这里就是会话抽屉的入口。
@@ -2967,34 +3511,14 @@
       openHistDrawer(e);
     });
   }
-  var chipPathEl = document.querySelector('.crow .chip.path');
-  if (chipPathEl) {
-    chipPathEl.style.cursor = 'pointer';
-    chipPathEl.setAttribute('data-tip', '复制工作目录');
-    // 还原用的原文必须记在属性里，不能每次点击现取 chip 的文字。
-    // 现取会怎样（实测）：1.2 秒内连点两下，第二下读到的「原文」已经是
-    // 「已复制路径」，定时器随后把它还原成这句话 —— 胶囊永久停在「已复制路径」。
-    chipPathEl.addEventListener('click', function (e) {
-      e.stopPropagation();
-      var txt = chipPathEl.getAttribute('data-path') || chipPathEl.textContent || '';
-      // 还没收到 initialize 时（或后端一直连不上），这颗胶囊里是模板占位
-      // 「工作目录」，复制它没有任何意义，更不能把它记成"原文"——否则之后
-      // 每次还原都会把真路径写回成「工作目录」。
-      if (!txt || txt === '工作目录') return;
-      copyText(txt).then(function () {
-        if (!chipPathEl.getAttribute('data-path')) {
-          chipPathEl.setAttribute('data-path', txt);
-        }
-        chipPathEl.textContent = '已复制路径';
-        // 重新计时：连点时后一次点击要把还原时间往后推，而不是让它提前触发
-        if (chipPathEl.__restoreTimer) clearTimeout(chipPathEl.__restoreTimer);
-        chipPathEl.__restoreTimer = setTimeout(function () {
-          chipPathEl.textContent = chipPathEl.getAttribute('data-path') || '';
-          chipPathEl.__restoreTimer = null;
-        }, 1200);
-      }).catch(function () { /* 复制失败就保持原样，不弹错 */ });
-    });
-  }
+  /* 工作目录 chip 已删除。
+     它显示的是 VS Code 当前工作区目录，与「你在编辑器里打开的文件夹」完全同一件事——
+     用户已经知道自己在哪个目录，再显示一遍只是占宽度。
+     而侧边栏只有 ~300px，CSS 在 460px 以下本来就直接把它藏了（见 @container 那条），
+     真实面板里从来没显示过；反而因为删掉 #chipSess 之后下面 applyInitialize 里
+     `chips[1]` 的下标失效，它还一直停在模板占位文字「工作目录」。
+     要看当前目录用 VS Code 自己的资源管理器标题，或命令面板的「复制路径」。
+     复制功能没丢：需要复制时用编辑器里的右键 → 复制路径。 */
 
   document.addEventListener('click', function(e){
     if (openPop && !e.target.closest('.pop')) closePop();
@@ -5200,6 +5724,8 @@
       '<span class="caret">▶</span><span class="name">思考中</span></div>' +
       '<div class="slot"><p></p></div>';
     convo.appendChild(wrap);
+    wrap.setAttribute('data-turn-think', '1');
+    turnThinkCount += 1;
     curThink = { wrap: wrap, p: wrap.querySelector('.slot p'), buf: '', t0: Date.now() };
     scrollBottom();
     rendered('thinking/begin', { open: false });
@@ -5403,6 +5929,10 @@
       extra: isTodo ? wrap.querySelector('.extra') : null
     };
     toolMap[p.id] = entry;
+    // 打本轮标记：轮末按它挑出「这一轮的工具行」收进折叠组。
+    // 历史重放走 addHistoryTool，不设这个标记，所以不会被卷进来。
+    wrap.setAttribute('data-turn-tool', '1');
+    turnToolCount += 1;
     if (isTodo) {
       // 计划行先占位，todo/update 到了复用这一行，不新建第二行「更新计划」
       pendingTodoRow = entry;
@@ -5903,6 +6433,12 @@
     }
     body.setAttribute('data-run', 'true');
     resetStopBtn();
+    // 记这一轮的起点：tool/result 到达时要知道「这条属于本轮」
+    //（历史重放的工具行不带 data-turn，不该被本轮收口卷进去）
+    turnStartNode = convo.lastElementChild;
+    turnStartTime = Date.now();
+    turnToolCount = 0;
+    turnThinkCount = 0;
     // 这一轮真的开始了 = 刚才那次发送必然已被后端接受（busy 的情况不会走到
     // turn/begin）。pending 标记和「可能已接受」的保守标记都可以收工了。
     Array.prototype.forEach.call(convo.querySelectorAll('[data-pending]'), function(el){
@@ -5973,6 +6509,129 @@
     }
   }
 
+  /**
+   * 把一组节点收成一个「工作过程」折叠组，挂在它们原本的位置上。
+   *
+   * 抄 dsh 的 TurnProcessNodeView（ui-chat/chat/TurnProcessNodeView.tsx）：
+   *   一轮结束后，那一整串工具调用对用户已经没价值了 —— 他要看的是最终回答。
+   *   dsh 收成一条带下边框的行：「已工作 · 1分23秒」/「已停止」/「失败」，
+   *   点开才展开细节。这里同样处理。
+   *
+   * ## 为什么要把 DOM 搬进一个容器，而不是只加 CSS 隐藏
+   *
+   * 只隐藏的话，那些节点还在 convo 的顶层兄弟流里 —— 后面新到的内容
+   * （下一轮正文、系统行）会插在它们**中间**，视觉上「折叠区」就被撑破了。
+   * 搬进一个独立容器后，它就是一个整体：要么整块收起，要么整块展开。
+   *
+   * 实时轮次（foldTurnProcess）与历史重放（renderHistory）共用这一份 ——
+   * 单一真源。分两份的后果很实在：改了一边忘了另一边，历史里的折叠干脆
+   * 就不存在（第一版就是这样，用户切回历史会话看不到任何变化）。
+   *
+   * @param {Node[]} nodes  要收进去的节点（工具行 / 思考块），任意顺序
+   * @param {Object} o
+   *   o.reason       'done' | 'cancelled' | 'error' | 'history'
+   *   o.elapsedMs    该轮耗时；0 / 不传表示未知（历史里就没有时长）
+   * @returns {HTMLElement|null} 折叠组；没有可收的节点时返回 null
+   */
+  function buildTurnProc(nodes, o) {
+    o = o || {};
+    var reason = o.reason || 'done';
+    var moving = (nodes || []).filter(function (el) {
+      return el && el.parentNode === convo;
+    }).sort(function (a, b) {
+      return (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1;
+    });
+    if (!moving.length) return null;
+
+    // 按 class 区分，不按 data-turn-* 标记：那两个标记只有实时路径会打，
+    // 历史重放走 addHistoryTool/addHistoryThink 不打标记，靠标记数会全是 0。
+    var tools = moving.filter(function (el) { return el.classList.contains('tools'); });
+    var thinks = moving.filter(function (el) { return el.classList.contains('think'); });
+    var stopped = (reason === 'cancelled' || reason === 'aborted' || reason === 'interrupted');
+    var failed = reason === 'error';
+
+    var box = document.createElement('div');
+    box.className = 'turn-proc';
+    box.setAttribute('data-open', 'false');
+    box.setAttribute('data-reason', reason);
+
+    var row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'tp-row';
+    // 历史轮次的文案：不知道当时花了多久、也不知道当时是不是被打断，
+    // 写「本次工作」而不是「已工作 · N 秒」—— 编一个耗时会误导用户。
+    var label = stopped ? '任务被打断'
+      : failed ? '这一轮失败'
+        : (reason === 'history' ? '这一轮的工作过程' : '已工作');
+    var dur = '';
+    var elapsed = o.elapsedMs || 0;
+    if (!stopped && !failed && elapsed > 0) {
+      var sec = Math.round(elapsed / 1000);
+      dur = sec >= 60 ? (Math.floor(sec / 60) + ' 分 ' + (sec % 60) + ' 秒')
+        : (sec + ' 秒');
+    }
+    var parts = [];
+    if (tools.length) parts.push(tools.length + ' 次工具调用');
+    if (thinks.length) parts.push(thinks.length + ' 段思考');
+    row.innerHTML = '<span class="tp-caret">▶</span>' +
+      '<span class="tp-label">' + esc(label) +
+      (dur ? '<span class="tp-dur">' + esc(dur) + '</span>' : '') + '</span>' +
+      '<span class="tp-meta">' + esc(parts.join(' · ')) + '</span>';
+
+    var bodyBox = document.createElement('div');
+    bodyBox.className = 'tp-body';
+
+    // 插在第一个被搬走的节点原来的位置，顺序原样保留
+    convo.insertBefore(box, moving[0]);
+    box.appendChild(row);
+    box.appendChild(bodyBox);
+    moving.forEach(function (el) { bodyBox.appendChild(el); });
+
+    // 收起态下补一条分割线，把「这一段结束了」与下面的正文分开。
+    // 用独立元素而不是 border-bottom：展开时正文会被 bodyBox 推远，边框就没意义了。
+    var hr = document.createElement('div');
+    hr.className = 'tp-sep';
+    box.appendChild(hr);
+
+    row.setAttribute('aria-expanded', 'false');
+    row.addEventListener('click', function () {
+      var on = box.getAttribute('data-open') === 'true';
+      box.setAttribute('data-open', on ? 'false' : 'true');
+      row.setAttribute('aria-expanded', on ? 'false' : 'true');
+    });
+    return box;
+  }
+
+  /**
+   * 实时轮次收口：把这一轮还没归属的工具行与思考块折起来。
+   *
+   * 什么情况不折叠：
+   *   · 本轮没有任何工具/思考（纯聊天）→ 没东西可折，加一行摘要反而碍眼
+   *   · 节点已经属于某个折叠组 → 幂等，重复的 turn/end 不再套一层
+   */
+  function foldTurnProcess(reason) {
+    /* 只取「还没被收进任何折叠组」的节点。
+       原来直接 querySelectorAll('[data-turn-tool]') 会把**上一轮**已经收好的
+       那些也捞出来 —— 它们的 closest('.turn-proc') 非空，于是第一轮那个
+       「已经收过」的守卫立刻 return，第二轮的新工具行就永远折不上（实测）。 */
+    var tools = Array.prototype.slice.call(
+      convo.querySelectorAll('[data-turn-tool]')).filter(function (el) {
+        return !el.closest('.turn-proc');
+      });
+    var thinks = Array.prototype.slice.call(
+      convo.querySelectorAll('[data-turn-think]')).filter(function (el) {
+        return !el.closest('.turn-proc');
+      });
+    // 本轮没有任何工具/思考（纯聊天）→ 没东西可折，加一行摘要反而碍眼
+    if (!tools.length && !thinks.length) return null;
+    var box = buildTurnProc(tools.concat(thinks), {
+      reason: reason,
+      elapsedMs: turnStartTime ? Math.max(1000, Date.now() - turnStartTime) : 0
+    });
+    turnStartNode = null;
+    return box;
+  }
+
   function turnEnd(p){
     // 真正的收口到了，兜底定时器就不该再开火
     if (cancelSettleTimer) { clearTimeout(cancelSettleTimer); cancelSettleTimer = null; }
@@ -6032,6 +6691,10 @@
     if (curAssistant && assistantBuf) {
       renderAssistantFinal();
     }
+    /* 正文定稿之后再收工具行 —— 顺序要紧：
+       提前收会把「正在流式写的那条助手气泡」一起卷进折叠区（它此刻在 DOM 里
+       也是 convo 的子节点），用户在收起状态下就看不到答案了。 */
+    foldTurnProcess(reason);
     if (reason === 'cancelled') {
       // 兜底收口（后端回了 cancel 却没发 turn/end）要说明白，
       // 否则用户看到的和正常打断一模一样，就分不清「真停了」和「没等到确认」。
@@ -6428,14 +7091,11 @@
     // （实测脏数据残留）。applyPlugins([]) 本身是安全的：它清空下拉并把按钮
     // 写成「插件 0」。只有字段整个缺失（undefined）时才跳过。
     if (Array.isArray(p && p.plugins)) applyPlugins(plugins);
-    if (p && p.workdir) {
-      var chips = document.querySelectorAll('.crow .chip.mono');
-      if (chips[1]) {
-        chips[1].textContent = p.workdir;
-        // 复制路径用的原文跟着真值走：只改文字不改这份，点复制拿到的还是旧目录
-        chips[1].setAttribute('data-path', p.workdir);
-      }
-    }
+    // workdir 不再显示：它与 VS Code 当前工作区目录是同一件事，用户已经看得到。
+    // 这里原来按 `chips[1]` 下标去改工作目录 chip —— 而下标依赖 #chipSess 占着
+    // chips[0]。chipSess 已删除（入口挪到顶栏），chips[1] 变成 undefined，
+    // 于是工作目录永远停在模板占位，连「复制路径」都复制不出东西。
+    // 现在整段去掉，不再有死代码去改一个不存在的节点。
 
     SESS = [];
     // 后端 session.current 为 null 表示游离态（还没 /save），必须清空而不是沿用模拟名
@@ -6851,15 +7511,188 @@
     return RE_GOAL_LIMIT_INJECT.test(s) || RE_GOAL_CONT_INJECT.test(s);
   }
 
+  /**
+   * 画一条**历史**工具行（会话切回来 / 面板重建时重放）。
+   *
+   * 为什么单独写一份而不复用 addToolRow + finishTool：
+   *   那两个函数会调 rendered('tool/call' | 'tool/result') 给宿主发回执，
+   *   而回执的语义是「这一条**实时**事件界面画到了哪一步」。历史重放不是实时
+   *   事件，发回执会让宿主的流控账本错乱（把重放的 N 条当成刚发生的 N 条）。
+   *   另外 addToolRow 建的是「执行中」占位行，而历史里的工具**早就结束了**，
+   *   直接建一个带结论的行才是对的（否则屏幕上会挂一串永远转圈的行）。
+   *
+   * 结构与实时高度一致：同一套 .tools/.row/.slot 类名，所以样式、折叠、
+   * 复制按钮、路径保尾全都自动继承。
+   */
+  function addHistoryTool(m){
+    var wrap = document.createElement('div');
+    wrap.className = 'tools';
+    /** 超过 40 行的部分，等用户点「还有 N 行」时再填进 DOM */
+    var restOutLines = null;
+    var isTodo = m.label === '更新计划' || m.name === 'TodoWrite';
+    if (isTodo) wrap.setAttribute('data-todo', 'true');
+    var failed = m.failed === true;
+    var sumText = String(m.summary || '');
+    var isPath = /[\\/]/.test(sumText) && /\.[A-Za-z0-9]{1,6}$/.test(sumText);
+    // 与实时行同一条 RTL 修正（见 addToolRow 里的长注释）
+    if (isPath && sumText.charAt(0) === '…') sumText = '\u200E' + sumText;
+    // 历史工具默认收起：一次切会话可能有几十上百条，全展开等于把屏幕淹掉。
+    // 计划行例外（它本身就是一屏摘要，展开才有用）。
+    var open = isTodo ? 'true' : 'false';
+    var meta = failed ? '<span class="bad">失败</span>' : '完成';
+    if (m.truncated) meta += ' · 已截断';
+    var inputText = isTodo ? '' : toolInputText(m);
+    var outHtml = '';
+    // 编辑类工具：优先画 diff（红绿行），没有 diff 才退回纯文本输出。
+    // 与实时 finishTool 用同一套 .snippet/.ln add|del/.foot 结构，
+    // 所以颜色、行号、+N −M 行头全都一致。
+    var diff = m.diff;
+    if (diff && Array.isArray(diff.lines) && diff.lines.length) {
+      var dHtml = '<div class="io-lb io-out-lb">OUT</div><div class="snippet">';
+      diff.lines.forEach(function (l) {
+        var cls = l.type === 'add' ? 'ln add' : (l.type === 'del' ? 'ln del' : 'ln');
+        dHtml += '<div class="' + cls + '"><span class="no">' +
+          esc(l.no === undefined || l.no === null ? '' : l.no) + '</span>' +
+          '<span class="tx">' + esc(l.text) + '</span></div>';
+      });
+      dHtml += '<div class="foot">+' + (diff.added || 0) + ' −' + (diff.removed || 0) +
+        (diff.truncated ? ' · 只显示前 ' + diff.lines.length + ' 行改动' : '') +
+        '</div></div>';
+      outHtml = dHtml;
+    } else {
+      var outText = String(m.output || '');
+      if (outText) {
+        /* 【结构必须与实时一致】实时 finishTool 画的是
+             .io-lb(OUT 标签) + .snippet.out > .ln > .tx
+           一开始这里套了 `.io > .io-sec > .io-h + pre.snippet` —— 三层容器各自
+           有 padding/border/max-height，挤在侧边栏里结果就是：外层卡片很大、
+           真正的文字区只剩一条窄缝（实测用户点名「画布很大但中间显示文字的
+           只有一个小的长方形区域」）。现在完全照搬实时那套扁平结构，
+           只有 .snippet 一个滚动体（overflow-x:auto），行用 .ln 排列。 */
+        var outLines = outText.split('\n');
+        // 与实时相同的上限：前 40 行进 DOM，其余给一行「还有 N 行未显示」。
+        // 一次几百行会拖慢渲染，而用户真要全文可以去翻原始输出文件。
+        var headLines = outLines.slice(0, 40);
+        var restLines = outLines.length - headLines.length;
+        var oHtml = '<div class="io-lb io-out-lb">OUT</div><div class="snippet out">';
+        headLines.forEach(function (t) {
+          oHtml += '<div class="ln"><span class="tx">' + esc(t) + '</span></div>';
+        });
+        if (restLines > 0) {
+          // data-rest 供展开按钮使用（与实时 .more 同一套交互）
+          oHtml += '<div class="more" data-rest="' + restLines + '">还有 ' +
+            restLines + ' 行未显示 · 点击展开</div>';
+          restOutLines = outLines.slice(40);
+        }
+        oHtml += '</div>';
+        outHtml = oHtml;
+      }
+    }
+    // 行头也带上 +N −M：与实时一致，用户不展开也能看出改了多少
+    var diffTag = (diff && Array.isArray(diff.lines) && diff.lines.length)
+      ? '+' + (diff.added || 0) + ' −' + (diff.removed || 0)
+      : '';
+    if (diffTag) meta += ' · ' + diffTag;
+    wrap.innerHTML = '<div class="row" data-open="' + open + '" data-st="' +
+      (failed ? 'err' : 'ok') + '" tabindex="0" role="button">' +
+      '<span class="caret">▶</span>' +
+      '<span class="name">' + esc(m.label || m.name || '工具') + '</span>' +
+      '<span class="arg' + (isPath ? ' path' : '') + '">' + esc(sumText) + '</span>' +
+      '<span class="meta">' + meta + '</span></div>' +
+      '<div class="slot">' +
+      (isTodo ? '<div class="todo"></div><div class="extra"></div>' : ioInHtml(inputText) + outHtml) +
+      '</div>';
+    convo.appendChild(wrap);
+    // 剩余行挂到 .more 节点上（历史行不在 toolMap 里，见事件委托那段）
+    if (restOutLines && restOutLines.length) {
+      var moreEl = wrap.querySelector('.snippet .more');
+      if (moreEl) moreEl.__rest = restOutLines;
+    }
+    // 计划行：历史里 arguments 就是当时的完整清单，直接画出来。
+    // 与实时 todo/update 用同一套 class（done/now/mk），样式自动一致。
+    if (isTodo) {
+      var todos = (m.arguments && m.arguments.todos) || null;
+      if (Array.isArray(todos)) {
+        var done = 0;
+        todos.forEach(function (t) { if (t && t.status === 'completed') done++; });
+        var argEl = wrap.querySelector('.arg');
+        if (argEl) argEl.textContent = todos.length + ' 项 · ' + done + ' 完成';
+        var html = '';
+        todos.forEach(function (t) {
+          if (!t || typeof t !== 'object') return;
+          var cls = t.status === 'completed' ? 'done' : (t.status === 'in_progress' ? 'now' : '');
+          var mk = t.status === 'completed' ? '✓' : (t.status === 'in_progress' ? '●' : '○');
+          html += '<div' + (cls ? ' class="' + cls + '"' : '') +
+            '><span class="mk">' + mk + '</span>' + esc(t.content) + '</div>';
+        });
+        var todoEl = wrap.querySelector('.todo');
+        if (todoEl) todoEl.innerHTML = html;
+      }
+    }
+    return wrap;
+  }
+
+  /**
+   * 是不是**纯内部纠偏指令**（后端解决模型跑偏时插的 user 消息）。
+   *
+   * 这类消息对模型有用，但用户看到会以为「自己在某个时刻真的打过这句话」。
+   * 后端在 rpc/server.py 的 _history_payload 里已经过滤掉了；这里再挡一次是
+   * **兜底**：用户可能还在跑旧版后端（改后端的代码要重启进程才生效），
+   * 或者历史来自别处（导入的会话文件）。
+   *
+   * ⚠ 改这里必须同步 `narnat_agent/config/defaults.py` 的
+   *    INTERNAL_NOTICE_PREFIX / INTERNAL_NOTICE_MARKERS —— 那是唯一真源。
+   *    两份不一致的后果：后端的注入在界面上漏出来（或反过来把用户的话吃掉）。
+   *
+   * ## 判据必须锚定整条开头，不能只看「以 [ 开头」
+   * 用户的真实消息里就有大量方括号开头的**粘贴日志**，实测见过：
+   *   `[Mapping Extensions and Extra Properties (MEEP)] …`
+   *   `[ValleyTalk] VT-HTTP-START…`
+   *   `[Wind Effects] …`
+   * 只看开头会把它们全吃掉。
+   */
+  var RE_INTERNAL_ONLY = /^(?:\[系统提醒\]|\[\]对话历史过长已自动压缩)/;
+
+  function isInternalOnly(text){
+    var s = String(text == null ? '' : text);
+    // 后端注入时可能在前面带空白（append 之间夹了空行），先去掉再判
+    return RE_INTERNAL_ONLY.test(s.replace(/^\s+/, ''));
+  }
+
   function renderHistory(msgs){
     if (!msgs || !msgs.length) return;
+    /* 历史里没有 turn/begin、turn/end 事件，只有一串 user / assistant / tool。
+       轮次边界只能靠 **user 消息** 划：它之后到下一个 user 之前，就是一轮。
+       收口时把这些工具行与思考块折起来，用户切回会话看到的才是
+       「▸ 这一轮的工作过程 · 3 次工具调用」，而不是几十行平铺的工具。 */
+    var roundNodes = [];
+    function flushRound(){
+      if (!roundNodes.length) return;
+      buildTurnProc(roundNodes, { reason: 'history' });
+      roundNodes = [];
+    }
     msgs.forEach(function(m){
       if (!m) return;
+      // 工具条目：后端在 _history_payload 里按真实顺序插进来，
+      // 结构对齐实时事件（见 server.py 那段注释）。
+      if (m.role === 'tool') {
+        var toolEl = addHistoryTool(m);
+        if (toolEl) roundNodes.push(toolEl);
+        return;
+      }
+      // 纯内部纠偏指令：一个字都不显示（不是画成系统行 —— 用户没必要知道
+      // 模型被提醒过要建计划、要收后台任务，那是框架自己的事）。
+      // 注意顺序：必须在「目标模式续跑」判断**之前**，否则当系统行画出来。
+      if (m.role === 'user' && isInternalOnly(m.text)) {
+        return;
+      }
       // 后端只在有思考时才带 thinking 这个键；旧会话 json 里没有它，
       // 走原来的路径、一个多余的节点都不加。
       var thinkText = (m.role === 'assistant' && typeof m.thinking === 'string') ? m.thinking : '';
       if (!m.text && !thinkText) return;
       if (m.role === 'user') {
+        // 新的一条用户消息 = 上一轮结束了，先把上一轮收口
+        flushRound();
         // 目标模式注入的内部指令（"[自动续跑]…" "[系统提示]…"）在历史里
         // 也是 user 角色（必须如此，它们要发给模型）。直接当用户气泡画出来，
         // 用户切回会话会看到「自己说过」一段根本没打过的字——实测会以为
@@ -6894,13 +7727,15 @@
       } else {
         // 助手消息不套 .text（.text 是用户消息的容器）
         // 思考必须画在正文**之前**，顺序与当时流式出现的顺序一致
-        if (thinkText) addHistoryThink(thinkText);
+        if (thinkText) roundNodes.push(addHistoryThink(thinkText));
         var a = document.createElement('div');
         a.className = 'msg assistant';
         a.innerHTML = markdownInline(m.text);
         convo.appendChild(a);
       }
     });
+    // 最后一条 user 之后的那一轮没有「下一个 user」来触发收口，这里补上
+    flushRound();
     // 刚进入/加载一个会话，用户期待停在最新一条
     scrollBottom(true);
   }
@@ -7740,6 +8575,13 @@
       case 'clipboard/written': onClipboardWritten(msg.params || {}); break;
       case 'command/result': applyCommandResult(msg.params || {}); break;
       case 'config/result': applyConfigResult(msg.params || {}); break;
+      // 设置面板的三类专用回执。与 config/result 分开是因为它们的
+      // 语义不同：config/result 是「某一项配置写成功了」，
+      // 而下面三个是「读到了配置全貌 / 读到了 md / md 写成功了」。
+      case 'config/describe': window.__narnatOnConfigDescribe && window.__narnatOnConfigDescribe(msg.params || {}); break;
+      case 'narnatmd/result': window.__narnatOnNarnatMd && window.__narnatOnNarnatMd(msg.params || {}); break;
+      case 'narnatmd/saved': window.__narnatOnNarnatMdSaved && window.__narnatOnNarnatMdSaved(msg.params || {}); break;
+      case 'configSet/result': window.__narnatOnConfigResult && window.__narnatOnConfigResult(msg.params || {}); break;
       case 'chat/result': applyChatResult(msg.params || {}); break;
       case 'cancel/result': applyCancelResult(msg.params || {}); break;
       case 'prompt/result': onPromptResult(msg.params || {}); break;
@@ -7766,8 +8608,8 @@
       SESS_HIDDEN = 0;
       var demoBranch = document.querySelector('#sessBtn .branch');
       if (demoBranch) demoBranch.textContent = '';
-      var demoChip = document.getElementById('chipSess');
-      if (demoChip) demoChip.textContent = '';
+      // 演示态的会话名原来写在输入行 chip 上，chip 已删除；
+      // 现在会话名只在顶栏胶囊里，由 setChipSess 统一维护 aria-label。
       renderSessions();
     }
   }

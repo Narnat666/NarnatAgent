@@ -22,8 +22,9 @@ from typing import Any, Dict, List, Optional
 
 from .protocol import get_transport
 from .ui import RpcUI
-from ..config.defaults import DEFAULT_THINKING_PASSBACK
+from ..config.defaults import DEFAULT_THINKING_PASSBACK, INTERNAL_NOTICE_MARKERS
 from ..core.input_history import append_history, history_path, load_history
+from ..core.session_callbacks import _persist_config
 
 PROTOCOL_VERSION = 1
 
@@ -206,6 +207,9 @@ class RpcServer:
             "session/explore": self._m_session_explore,
             "session/done": self._m_session_done,
             "config/set": self._m_config_set,
+            "config/describe": self._m_config_describe,
+            "narnatmd/get": self._m_narnatmd_get,
+            "narnatmd/set": self._m_narnatmd_set,
             "shutdown": self._m_shutdown,
         }
 
@@ -1207,6 +1211,167 @@ class RpcServer:
 
     # ── 方法：config ──
 
+    def _m_config_describe(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """一次性返回设置面板需要的全部配置面。
+
+        ## 三个分组（对应界面上三个分段）
+
+        1. `api`      —— **模型接入配置**：接口地址 / 密钥 / 协议 / 模型名。
+                        这是用户最需要改的（换厂商就是改这三项），
+                        以前只能去手编 narnat.json。
+        2. `websearch`—— **联网搜索接入配置**：provider / 服务器地址 / 密钥。
+        3. `prompt`   —— narnat.md 用户指令（内容另走 narnatmd/get）。
+
+        ## 为什么密钥要打码
+
+        这份结果会进 webview。webview 内容可能被截图 / 录屏 / 贴进 issue，
+        整串 key 出现在界面上就等于泄露。所以只回 `apiKeyMasked`
+        （首尾各 4 位）与 `apiKeySet`（有没有填）。用户改的时候输入新值即可，
+        不需要看见旧值。
+
+        ## 为什么界面不该自己存一份配置
+
+        主界面状态栏也有模型按钮。如果设置面板自己存一份、状态栏存另一份，
+        两边必然漂移（这类双份状态在前面几轮已经踩过）。所以界面只做
+        「展示后端给的值 + 提交」，改完重拉。
+        """
+        ai = self._config.ai
+        api_snap = self._api_snapshot()
+        ws_snap = self._websearch_snapshot()
+        groups = [
+            {"id": "api", "label": "模型 API"},
+            {"id": "websearch", "label": "联网工具"},
+            {"id": "prompt", "label": "指令"},
+        ]
+        items: List[Dict[str, Any]] = []
+
+        # ────────── 1. 模型 API ──────────
+        items.append({
+            "id": "api.baseUrl", "group": "api", "label": "接口地址", "kind": "text",
+            "value": api_snap["baseUrl"], "writable": True, "placeholder": "https://api.deepseek.com/anthropic",
+        })
+        items.append({
+            "id": "api.apiKey", "group": "api", "label": "接口密钥", "kind": "secret",
+            "value": "", "masked": api_snap["apiKeyMasked"], "isSet": api_snap["apiKeySet"],
+            "writable": True,
+            "placeholder": "（已设置，留空表示不改）" if api_snap["apiKeySet"] else "sk-...",
+        })
+        items.append({
+            "id": "api.protocol", "group": "api", "label": "协议", "kind": "select",
+            "value": api_snap["protocol"], "writable": True,
+            "options": [
+                {"value": "anthropic", "label": "anthropic（Claude / DeepSeek 官方）"},
+                {"value": "openai", "label": "openai（OpenAI 兼容 / vLLM / Ollama）"},
+            ],
+        })
+        items.append({
+            "id": "api.model", "group": "api", "label": "模型名", "kind": "text",
+            "value": ai.model, "writable": True, "placeholder": "deepseek-flash",
+            "options": [{"value": m, "label": m} for m in (getattr(ai, "model_options", None) or [])],
+        })
+        items.append({
+            "id": "api.thinking", "group": "api", "label": "思考强度", "kind": "select",
+            "value": ai.thinking_effort, "writable": True,
+            "options": [{"value": k, "label": v}
+                        for k, v in (getattr(ai, "thinking_options", None) or {}).items()],
+        })
+
+        # ────────── 2. 联网工具 ──────────
+        items.append({
+            "id": "websearch.provider", "group": "websearch", "label": "搜索服务", "kind": "select",
+            "value": ws_snap["provider"], "writable": True,
+            "options": [
+                {"value": "mcp", "label": "MCP 服务器（AnySearch 等）"},
+                {"value": "deepseek", "label": "DeepSeek 官方搜索"},
+            ],
+        })
+        items.append({
+            "id": "websearch.url", "group": "websearch", "label": "服务器地址", "kind": "text",
+            "value": ws_snap["url"], "writable": True, "showFor": ["mcp"],
+            "placeholder": "https://api.anysearch.com/mcp",
+        })
+        items.append({
+            "id": "websearch.key", "group": "websearch", "label": "搜索 API Key", "kind": "secret",
+            "value": "", "masked": ws_snap["keyMasked"], "isSet": ws_snap["keySet"],
+            "writable": True,
+            "placeholder": "（已设置，留空表示不改）" if ws_snap["keySet"] else "as_sk_...",
+        })
+        # 联网搜索总开关（复用已有的 plugin 通道，不新造一套）
+        for p in self._plugins():
+            if str(p.get("name")) == "WebSearch":
+                items.append({
+                    "id": "plugin:WebSearch", "group": "websearch", "label": "启用联网搜索",
+                    "kind": "bool", "value": bool(p.get("enabled")), "pluginName": "WebSearch",
+                    "writable": True,
+                })
+
+        # ────────── 3. narnat.md ──────────
+        items.append({
+            "id": "narnatmd", "group": "prompt", "label": "narnat.md", "kind": "markdown",
+            "value": "", "path": self._narnat_md_path(), "writable": True,
+        })
+
+        return {"items": items, "groups": groups,
+                # 顶层也带一份：界面据此在整个面板顶部提示「改动尚未生效」，
+                # 而不是逐字段去猜。含义见 _api_snapshot 的 restartPending。
+                "restartPending": bool(api_snap.get("restartPending"))}
+
+    def _narnat_md_path(self) -> str:
+        """定位 narnat.md。
+
+        不走「猜路径」：直接复用加载器正在用的那个 narnat_dir，
+        否则设置面板写到的文件和后端实际读的文件可能是两个地方
+       （扩展侧也有自己的一套 rpcSettings 路径推导，两边口径必须一致）。
+        """
+        narnat_dir = getattr(self._mgr, "narnat_dir", None)
+        if not narnat_dir:
+            from ..config.loader import _find_project_root
+            from ..config.defaults import NARNAT_DIR, CONFIG_SUBDIR
+            narnat_dir = os.path.join(_find_project_root(), NARNAT_DIR)
+        from ..config.defaults import CONFIG_SUBDIR, NARNAT_MD
+        return os.path.join(narnat_dir, CONFIG_SUBDIR, NARNAT_MD)
+
+    def _m_narnatmd_get(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """读 narnat.md 原文（供设置面板回显）。"""
+        path = self._narnat_md_path()
+        text = ""
+        exists = os.path.isfile(path)
+        if exists:
+            # 与 loader._load_user_md 同一套编码宽容策略：
+            # 记事本存的 BOM 要吸收，ANSI/GBK 要能读，失败不崩。
+            try:
+                with open(path, "r", encoding="utf-8-sig") as f:
+                    text = f.read()
+            except UnicodeDecodeError:
+                try:
+                    with open(path, "r", encoding="gbk") as f:
+                        text = f.read()
+                except OSError:
+                    text = ""
+            except OSError as e:
+                raise RpcError(-32000, "读取 narnat.md 失败: %s" % e)
+        return {"path": path, "text": text, "exists": exists}
+
+    def _m_narnatmd_set(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """写 narnat.md 原文。
+
+        写盘后**不热重载**系统提示词：那需要重建消息管理器的 system 段，
+        而当前这一轮的上下文已经在跑了。如实告诉界面「下次启动生效」，
+        比假装立即生效更可靠（否则用户改完发现 AI 行为没变，会以为保存失败）。
+        """
+        text = params.get("text")
+        if not isinstance(text, str):
+            raise RpcError(-32602, "narnatmd/set: params.text 必须是字符串")
+        path = self._narnat_md_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+        except OSError as e:
+            raise RpcError(-32000, "写入 narnat.md 失败: %s" % e)
+        return {"ok": True, "path": path, "bytes": len(text.encode("utf-8")),
+                "needRestart": True}
+
     def _m_config_set(self, params: Dict[str, Any]) -> Dict[str, Any]:
         key = self._require_str(params, "key", "config/set")
         value = params.get("value", _MISSING)
@@ -1278,7 +1443,198 @@ class RpcServer:
             if "仅本次会话有效" in text:
                 raise RpcError(-32000, text.strip())
             return {"ok": True, "current": {"name": name, "enabled": enabled}}
+        if key == "api":
+            return self._set_api_config(value)
+        if key == "websearch":
+            return self._set_websearch_config(value)
         raise RpcError(-32602, f"config/set: 未知 key {key}")
+
+    def _set_api_config(self, value: Any) -> Dict[str, Any]:
+        """改模型的接入配置：接口地址 / 接口密钥 / 协议 / 模型名。
+
+        ## 为什么必须重启后端才生效
+
+        `AIConfig` 是**加载时**构造的不可变对象，LLMClient 持有它的一份引用。
+        改磁盘上的 narnat.json 只影响**下一次启动**，当前进程里的 client
+        还在用旧 key/旧 base_url。假装「立即生效」会让用户改完 key 直接提问，
+        然后拿到 401 —— 却不知道是因为改动还没生效，会去怀疑新 key 是错的。
+
+        所以这里如实返回 `needRestart: true`，界面显示「重启后端后生效」。
+        （模型名和思考强度是例外：它们有 on_mode / on_thinking 热切换路径，
+        那两条走的是 `config/set` 的 model/thinking 分支，不在这里。）
+        """
+        if not isinstance(value, dict):
+            raise RpcError(-32602, "config/set: api 的 value 必须是对象")
+        patch: Dict[str, Any] = {}
+        if "baseUrl" in value:
+            v = value.get("baseUrl")
+            if not isinstance(v, str):
+                raise RpcError(-32602, "config/set: api.baseUrl 必须是字符串")
+            patch["接口地址"] = v.strip()
+        if "apiKey" in value:
+            v = value.get("apiKey")
+            if not isinstance(v, str):
+                raise RpcError(-32602, "config/set: api.apiKey 必须是字符串")
+            patch["接口密钥"] = v.strip()
+        if "protocol" in value:
+            v = str(value.get("protocol") or "").strip().lower()
+            if v not in ("openai", "anthropic"):
+                raise RpcError(-32000, "config/set: 协议只支持 openai / anthropic")
+            patch["协议"] = v
+        if "model" in value:
+            v = value.get("model")
+            if not isinstance(v, str) or not v.strip():
+                raise RpcError(-32602, "config/set: api.model 必须是非空字符串")
+            patch["模型"] = {"当前": v.strip()}
+        if not patch:
+            raise RpcError(-32602, "config/set: api 没有任何可写字段")
+
+        def _mutate(data):
+            ai = data.setdefault("智能体", {})
+            if "模型" in patch:
+                # 模型是嵌套对象（当前/列表），只改"当前"，保住"列表"
+                ai.setdefault("模型", {})["当前"] = patch["模型"]["当前"]
+            for k, v in patch.items():
+                if k != "模型":
+                    ai[k] = v
+
+        err = _persist_config(getattr(self._mgr, "_config_dir", ""), _mutate)
+        if err:
+            raise RpcError(-32000, "保存失败：" + err)
+        # 热切模型（有 on_mode 路径，能立即生效）
+        if "模型" in patch:
+            try:
+                self._mgr.on_mode(patch["模型"]["当前"])
+            except Exception:
+                pass
+        return {"ok": True, "needRestart": True,
+                "current": self._api_snapshot()}
+
+    def _set_websearch_config(self, value: Any) -> Dict[str, Any]:
+        """改联网搜索的接入配置。
+
+        后端支持两种 provider（见 tools/web_search/_provider_name）：
+          · "mcp"      —— 任意 MCP 搜索服务器（默认 AnySearch），要 url/auth/tool 等
+          · "deepseek" —— DeepSeek 官方搜索 REST，只要 key
+        两种需要的字段不同，所以这里按 provider 分别校验 ——
+        统一按 mcp 校验会让选 deepseek 的人被要求填 url（那些字段对 deepseek 无意义）。
+        """
+        if not isinstance(value, dict):
+            raise RpcError(-32602, "config/set: websearch 的 value 必须是对象")
+        provider = str(value.get("provider") or "mcp").strip().lower()
+        if provider not in ("mcp", "deepseek"):
+            raise RpcError(-32000, "config/set: provider 只支持 mcp / deepseek")
+        patch: Dict[str, Any] = {"provider": provider}
+        for src, dst in (("url", "url"), ("key", "key"), ("auth", "auth"), ("tool", "tool")):
+            if src in value:
+                v = value.get(src)
+                if not isinstance(v, str):
+                    raise RpcError(-32602, f"config/set: websearch.{src} 必须是字符串")
+                patch[dst] = v.strip()
+
+        if provider == "deepseek":
+            if "key" in patch and not patch["key"]:
+                raise RpcError(-32000, "config/set: 选 deepseek 时必须填 API Key")
+        else:
+            # mcp 方式：url 是这个模式的核心（请求发到哪）
+            if "url" in patch and not patch["url"]:
+                raise RpcError(-32000, "config/set: 选 mcp 时必须填服务器地址")
+
+        def _mutate(data):
+            ws = data.setdefault("联网搜索", {})
+            ws.update(patch)
+
+        err = _persist_config(getattr(self._mgr, "_config_dir", ""), _mutate)
+        if err:
+            raise RpcError(-32000, "保存失败：" + err)
+        return {"ok": True, "needRestart": True, "current": self._websearch_snapshot()}
+
+    def _mask_key(self, key: Any) -> str:
+        """密钥打码：只留首尾各 4 位。
+
+        为什么不能原样返回：config/describe 的结果会进 webview，
+        而 webview 的内容可能被用户截图、录屏、贴进 issue。
+        整串 key 一旦出现在界面上就等于泄露。用户要看真值可以点「显示」，
+        那需要额外一次请求（后续可做），默认一律打码。
+        """
+        if not isinstance(key, str) or not key:
+            return ""
+        if len(key) <= 8:
+            return "*" * len(key)
+        return key[:4] + "*" * (len(key) - 8) + key[-4:]
+
+    def _api_snapshot(self) -> Dict[str, Any]:
+        """当前 API 配置（密钥打码）。
+
+        ## 为什么读磁盘而不是读内存里的 self._config.ai
+
+        接口地址 / 密钥 / 协议改完是**写磁盘**，而 `self._config.ai` 是进程
+        启动时加载的不可变快照 —— 它到进程结束都不会变。
+        如果这里返回内存值，用户刚改完再看设置面板会显示**旧值**，
+        看起来像"没保存成功"（实测：磁盘已是 test.example.com，
+        面板仍显示 deepseek.com），用户会反复重试。
+
+        所以除「模型名 / 思考强度 / 上下文」这类有热切换路径的项之外，
+        一律以磁盘为准 —— 磁盘才是用户下次启动真正会用到的东西。
+        当前进程实际在用什么，靠 `needRestart` 提示说明。
+        """
+        ai = self._config.ai
+        disk = self._read_json_config().get("智能体") or {}
+        if not isinstance(disk, dict):
+            disk = {}
+        base_url = disk.get("接口地址")
+        protocol = disk.get("协议")
+        key = disk.get("接口密钥")
+        return {
+            "baseUrl": base_url if isinstance(base_url, str) else ai.base_url,
+            "apiKeyMasked": self._mask_key(key if isinstance(key, str) else ai.api_key),
+            "apiKeySet": bool((key if isinstance(key, str) else ai.api_key)),
+            "protocol": protocol if isinstance(protocol, str) else ai.protocol,
+            "model": ai.model,
+            # 内存值与磁盘值不一致 = 改动还没生效，界面据此提示重启
+            "restartPending": (
+                (isinstance(base_url, str) and base_url != ai.base_url)
+                or (isinstance(protocol, str) and protocol != ai.protocol)
+                or (isinstance(key, str) and key != ai.api_key)
+            ),
+        }
+
+    def _read_json_config(self) -> Dict[str, Any]:
+        """读 narnat.json（读盘失败返回空 dict，不抛）。
+
+        编码用 utf-8-sig：用户很可能用记事本改过这个文件，
+        BOM 不吸收会让 json.loads 在第一字节就失败。
+        """
+        cfg_dir = getattr(self._mgr, "_config_dir", "")
+        if not cfg_dir:
+            return {}
+        p = os.path.join(cfg_dir, "narnat.json")
+        try:
+            with open(p, "r", encoding="utf-8-sig") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _websearch_snapshot(self) -> Dict[str, Any]:
+        """当前联网搜索配置（密钥打码）。
+
+        读的是 narnat.json 的「联网搜索」段 —— 那几个字段没有进 AIConfig，
+        而在 tool_context.api_keys 里按需读。所以这里直接读文件，
+        但**复用** _read_json_config / _persist_config 的同一个 config_dir，
+        避免读的和写的不是一份。
+        """
+        ws = self._read_json_config().get("联网搜索")
+        if not isinstance(ws, dict):
+            ws = {}
+        return {
+            "provider": str(ws.get("provider") or "mcp"),
+            "url": str(ws.get("url") or ""),
+            "keyMasked": self._mask_key(ws.get("key")),
+            "keySet": bool(ws.get("key")),
+            "auth": str(ws.get("auth") or ""),
+            "tool": str(ws.get("tool") or ""),
+        }
 
     # ── 方法：shutdown ──
 
@@ -1287,14 +1643,59 @@ class RpcServer:
         return {"bye": True}
 
 
+def _is_internal_notice(text: str) -> bool:
+    """这条 user 消息是不是**后端自己注入的纠偏指令**（不是用户说的话）。
+
+    为什么要判：agent_loop / compression_coordinator 会在对话里插一批
+    `[系统提醒] …` 的 user 消息（TodoWrite 提醒、计划未勾、后台任务未收、
+    上下文已压缩…）。它们对模型有用，但**不该出现在界面历史里** ——
+    用户切回会话会看到一句自己从没打过的「我说的话」，以为账号串了或被改了记录。
+
+    ## 判据为什么必须锚定整条，不能只看「以 [ 开头」
+
+    实测用户的真实消息里就有大量以方括号开头的内容：
+        `[Mapping Extensions and Extra Properties (MEEP)] Animal LemurKat…`
+        `[ValleyTalk] VT-HTTP-START…`
+        `[Wind Effects] Wind Effects are disabled for today.`
+    这些是用户**粘贴的日志/模组输出**，必须原样显示。只看开头会把它们全吃掉。
+
+    所以：
+      · `[系统提醒]` 前缀 —— 程序独占（STYLE_NOTICE_TEMPLATE 也用它），
+        只管前缀就够，因为用户配的提醒语是任意内容，必须能覆盖到。
+      · 溢出压缩那条 `[]对话历史过长…` —— 用完整开头片段锚定。
+    """
+    if not isinstance(text, str):
+        return False
+    s = text.lstrip()
+    if not s:
+        return False
+    for marker in INTERNAL_NOTICE_MARKERS:
+        if s.startswith(marker):
+            return True
+    return False
+
+
 def _history_payload(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """把会话消息裁成界面可渲染的历史记录。
 
-    只保留 user / assistant 两类且有正文的：
+    保留 user / assistant 两类正文，以及**工具调用**（role="tool" 的条目）。
+
+    ## 为什么必须带工具调用（第 27 轮修复）
+
+    原来这里把 `tool_calls` 与 role="tool" 全丢了，理由是「体积大、重放无法
+    还原当时的分组」。后果（实测）：切换会话回来，整段 AI 的工具调度信息
+    全部消失，界面上只剩几行干巴巴的正文 —— 用户看不出 AI 当时搜了什么、
+    读了哪个文件。而这些数据**磁盘上一直都在**（实测某会话 1644/1649 条
+    消息带 tool_calls），纯粹是这一层筛掉了。
+
+    现在按**真实发生顺序**输出：正文 → 该轮的每个工具 → 下一段正文。
+    工具条目的结构刻意与实时事件 `tool/call` + `tool/result` 对齐
+    （name/label/summary/arguments/output/failed），这样界面可以用同一套
+    渲染逻辑画历史，不必再写一份。
+
+    仍然过滤掉的：
       - system：提示词，给用户看毫无意义
-      - tool：工具返回体，体积大且界面上本就以折叠行呈现（重放无法还原当时的分组）
-      - 空 assistant：只有 tool_calls 没有正文的中间步
-    界面拿到这串就能把对话区画回来，不必理解内部结构。
+      - 空 assistant 且没有 tool_calls：什么都没有，画不出东西
 
     例外：`/done` 合并进父会话的「# 子会话 [X] 结论」也是 system 角色，
     但它正是用户执行 /done 之后最想看到的东西。一并过滤掉的话，
@@ -1305,7 +1706,18 @@ def _history_payload(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     （字符串，可能很长），没有则整键省略——界面靠键是否存在判断
     要不要渲染「思考过程」。`text` 始终是正文 content，思考不算正文。
     """
-    out = []
+    # 先建「tool_call_id → 输出文本」的索引：工具结果在下一条 role="tool" 消息里，
+    # 而我们要把它挂回**发起调用**的那个工具条目上，两条消息距离可能隔好几条
+    #（一条 assistant 可以同时发起多个并行工具调用）。
+    results: Dict[str, Any] = {}
+    for m in messages or []:
+        if m.get("role") != "tool":
+            continue
+        cid = m.get("tool_call_id")
+        if isinstance(cid, str) and cid:
+            results[cid] = m.get("content")
+
+    out: List[Dict[str, Any]] = []
     for m in messages or []:
         role = m.get("role")
         content = m.get("content")
@@ -1313,17 +1725,186 @@ def _history_payload(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if isinstance(content, str) and content.startswith("# 子会话 ["):
                 out.append({"role": "system", "text": content})
             continue
+        if role == "tool":
+            # 已经并入对应的工具条目（见下面 _tool_history_entry），不单独成条
+            continue
         if role not in ("user", "assistant"):
             continue
-        if not isinstance(content, str) or not content.strip():
+        # 后端注入的纠偏指令不是用户说的话，不进界面历史（见 _is_internal_notice）。
+        if role == "user" and _is_internal_notice(content):
             continue
-        item = {"role": role, "text": content}
-        if role == "assistant":
-            thinking = m.get("thinking")
-            if isinstance(thinking, str) and thinking.strip():
-                item["thinking"] = thinking
-        out.append(item)
+        calls = m.get("tool_calls")
+        has_text = isinstance(content, str) and content.strip()
+        if role == "assistant" and isinstance(calls, list) and calls:
+            # 中间步（只有 tool_calls、正文为空）不能整条丢掉 —— 丢了就等于
+            # 把这一轮的工具调度信息抹掉，这正是原来的 bug。
+            pass
+        elif not has_text:
+            continue
+        if has_text:
+            item: Dict[str, Any] = {"role": role, "text": content}
+            if role == "assistant":
+                thinking = m.get("thinking")
+                if isinstance(thinking, str) and thinking.strip():
+                    item["thinking"] = thinking
+            out.append(item)
+        if role == "assistant" and isinstance(calls, list):
+            for tc in calls:
+                entry = _tool_history_entry(tc, results)
+                if entry is not None:
+                    out.append(entry)
     return out
+
+
+# 单条工具输出在历史里的长度上限。
+# 不设上限会怎样（实测）：某会话 1644 条工具调用，其中 `Read` 一次就回几千行，
+# 整份 session/switch 回执能到几十 MB —— 界面解析卡死、面板白屏。
+# 实时流不受这个限制（那是用户正在看的那一条，必须完整），只有历史回放截断。
+_HISTORY_TOOL_OUTPUT_MAX = 4000
+
+
+def _tool_failed_from_output(output: str) -> bool:
+    """从工具输出判断这次调用是否失败。
+
+    存储里没有独立的 `failed` 字段，只能读 output 的固定标记。
+    目前只认 bash 工具写的 `[exit code: N]`：
+      · 只看这一种，不去猜其它文案 —— 猜错会把成功的行画成红色，
+        比不标失败更糟（用户会去查一个根本不存在的错误）。
+      · 编辑类工具失败时会回 `[编辑失败: …]` / `[写入失败: …]`，
+        一并识别，否则失败行会显示成「完成」。
+    """
+    if not isinstance(output, str):
+        return False
+    m = re.search(r"\[exit code:\s*(-?\d+)\]", output)
+    if m and int(m.group(1)) != 0:
+        return True
+    head = output.lstrip()[:20]
+    return head.startswith("[编辑失败") or head.startswith("[写入失败")
+
+
+def _rebuild_diff(name: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """从工具参数**重建**编辑的 diff。
+
+    ## 为什么需要重建
+
+    diff 从来不落盘 —— 它是 `on_tool_result(diff=...)` 的运行时参数，
+    只走实时流。存储里 tool 消息的 content 只有 `[已写入: 路径 (N字节)]`。
+    所以切换会话回来后，历史里的编辑行没有颜色差异，用户看不出当时改了什么
+    （实测点名的问题）。
+
+    但 `Edit` 的参数里有 old_string / new_string，`Write` 有完整 content ——
+    足够把 diff 重建出来。重建走与实时**完全相同**的 `_struct_diff`，
+    所以行号、+N −M、截断上限、颜色 class 全都一致，不会出现
+    「实时的 diff 和历史里的 diff 长得不一样」。
+
+    Write 没有「旧内容」可比（工具不去读原文件），只能按「整个文件都是新增」
+    呈现。这不是精确 diff，但行头 +N −0 能让用户一眼看出写入了多少行，
+    比完全没有强。
+    """
+    from ..core.tool_dispatcher import _struct_diff
+    import difflib
+
+    def _lines(v):
+        if not isinstance(v, str):
+            return []
+        # 统一换行：old/new 可能一个用 \r\n 一个用 \n，
+        # 不做统一会让每一行都被判成「一删一增」（整屏红绿），
+        # 而实际上只改了一个词。
+        return v.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+    if name == "Edit":
+        old_s = args.get("old_string")
+        new_s = args.get("new_string")
+        if not isinstance(old_s, str) or not isinstance(new_s, str):
+            return None
+        old_l, new_l = _lines(old_s), _lines(new_s)
+    elif name == "Write":
+        content = args.get("content")
+        if not isinstance(content, str) or not content:
+            return None
+        old_l, new_l = [], _lines(content)
+    else:
+        return None
+
+    path = args.get("file_path")
+    fname = os.path.basename(str(path)) if isinstance(path, str) and path else "file"
+    unified = list(difflib.unified_diff(
+        old_l, new_l, fromfile="a/" + fname, tofile="b/" + fname, lineterm=""
+    ))
+    if not unified:
+        return None
+    return _struct_diff("\n".join(unified))
+
+
+def _tool_history_entry(tc: Dict[str, Any], results: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """把一条存储态 tool_call 转成界面可渲染的工具条目。
+
+    结构与实时事件对齐（name/label/summary/arguments/output），
+    界面因此能复用同一套渲染与折叠逻辑。
+    """
+    if not isinstance(tc, dict):
+        return None
+    fn = tc.get("function")
+    if not isinstance(fn, dict):
+        return None
+    name = fn.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    raw_args = fn.get("arguments")
+    args: Any = {}
+    if isinstance(raw_args, dict):
+        args = raw_args
+    elif isinstance(raw_args, str) and raw_args.strip():
+        try:
+            parsed = json.loads(raw_args)
+            if isinstance(parsed, dict):
+                args = parsed
+        except (ValueError, TypeError):
+            # 参数不是合法 JSON（旧会话 / 手工改过）：保留原文，界面按文本展开
+            args = {"_raw": raw_args}
+    if not isinstance(args, dict):
+        args = {}
+
+    # label / summary 复用派发器的同一套算法 —— 不另写一份，
+    # 否则历史里的「执行命令 / dir」与实时显示的「执行命令 / dir」会对不上。
+    from ..core.tool_dispatcher import ToolDispatcher
+    try:
+        label, summary = ToolDispatcher._tool_label_summary(name, args)
+    except Exception:
+        label, summary = name, ""
+
+    cid = tc.get("id")
+    cid = cid if isinstance(cid, str) else ""
+    raw_out = results.get(cid)
+    output = raw_out if isinstance(raw_out, str) else ""
+    truncated = len(output) > _HISTORY_TOOL_OUTPUT_MAX
+    if truncated:
+        output = output[:_HISTORY_TOOL_OUTPUT_MAX] + "\n…（共 %d 字符，已截断）" % len(raw_out)
+
+    entry: Dict[str, Any] = {
+        "role": "tool",
+        "id": cid,
+        "name": name,
+        "label": label or name,
+        "summary": summary or "",
+        "arguments": args,
+        "output": output,
+    }
+    # 编辑类工具：把 diff 重建出来，界面才有红绿颜色差异。
+    # 只有在**确实写成功了**才重建 —— 失败的编辑没改到磁盘，画出一堆
+    # 红绿行会让用户以为改动已生效（比不显示更误导）。
+    # 判据用工具给的输出文案（Write/Edit 成功时固定写「已写入 / 已编辑」）。
+    if not _tool_failed_from_output(output):
+        diff = _rebuild_diff(name, args)
+        if diff is not None:
+            entry["diff"] = diff
+    if truncated:
+        entry["truncated"] = True
+    # 失败判定统一走 _tool_failed_from_output（退出码 / 编辑失败前缀），
+    # 不在这里再写一遍正则 —— 两份判据会漂移。
+    if _tool_failed_from_output(output):
+        entry["failed"] = True
+    return entry
 
 
 def _as_bool(value: Any) -> bool:

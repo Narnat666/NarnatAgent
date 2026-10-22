@@ -149,6 +149,187 @@ button:focus-visible, [tabindex]:focus-visible,
   /* 品牌名比会话名重一档，但不要纯白，免得抢走会话名的注意力 */
   color:var(--fg);
 }
+/* 顶栏的对话记录入口。做成和其它顶栏图标同样的 24×24 命中区，
+   图标本身用描述性字符而不是 emoji（emoji 在深色主题下发彩、抢眼）。 */
+.hist-btn{
+  flex:none;width:24px;height:24px;padding:0;border-radius:5px;
+  display:inline-flex;align-items:center;justify-content:center;
+  font-size:13px;line-height:1;color:var(--fg-dim);
+  background:transparent;border:1px solid transparent;
+}
+.hist-btn:hover{background:var(--bg-hover);color:var(--fg);border-color:var(--line)}
+.hist-btn:focus-visible{outline:none;border-color:var(--accent)}
+/* 列表打开时按钮本身变成「当前态」，给用户一个"再点一下关掉"的暗示 */
+.hist-btn[data-on="true"]{background:var(--bg-hover);color:var(--accent)}
+/* 顶栏最右的按钮：把剩余空间全吃掉，自己贴右。
+   .bar 是 flex 且 .sess 有 min-width:0，不加 margin-left:auto 的话
+   设置按钮会紧贴会话名，而不是停在最右。 */
+.hist-btn.bar-end{margin-left:auto}
+
+/* ---------- 设置面板（面板内单栏 + 顶部分段）----------
+   版式服从 ~300px 侧边栏：
+   · dsh 是 800px 居中模态 + 188px 左导航 + 右内容（双栏）
+   · 这里 300px 放不下双栏，改成「顶部分段按钮 + 下方单栏字段」
+   信息结构照抄 dsh：分组、每项 value/options/writable、改完立即提交。 */
+.settings{
+  display:none;flex:1;min-width:0;flex-direction:column;
+  background:var(--bg);overflow:hidden;
+}
+.settings[data-open="true"]{display:flex}
+/* 设置态：和列表态一样，对话区与输入区让位 */
+body[data-settings="true"] .convo{display:none}
+body[data-settings="true"] .composer{display:none}
+body[data-settings="true"] #toBottom{display:none}
+.set-head{
+  display:flex;align-items:center;flex:none;padding:12px 14px 8px;
+  font-size:11px;color:var(--fg-faint);letter-spacing:.04em;
+}
+.set-head button{
+  margin-left:auto;color:var(--fg-faint);font-size:14px;width:22px;height:22px;
+  display:inline-flex;align-items:center;justify-content:center;
+  border-radius:4px;background:transparent;border:1px solid transparent;
+}
+.set-head button:hover{color:var(--fg);background:var(--bg-hover);border-color:var(--line)}
+/* 分段按钮横排。条数少（3 个），宽度用 flex:1 均分，窄面板也不会挤成两行。 */
+.set-tabs{display:flex;gap:4px;flex:none;padding:0 12px 8px}
+.set-tabs button{
+  flex:1;min-width:0;height:26px;border-radius:6px;
+  font-size:12px;color:var(--fg-dim);
+  background:var(--pill);border:1px solid transparent;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.set-tabs button:hover{color:var(--fg);border-color:var(--line)}
+.set-tabs button[data-on="true"]{
+  color:var(--accent);background:var(--bg-hover);border-color:var(--accent);
+}
+/* 字段区：唯一滚动体。padding-bottom 留出滚动余量，否则最后一项贴着底边。 */
+.set-body{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:0 12px 12px}
+.set-row{padding:8px 0;border-bottom:1px solid var(--line)}
+.set-row:last-child{border-bottom:none}
+.set-lab{display:flex;align-items:baseline;gap:6px;font-size:12px;color:var(--fg);margin-bottom:5px}
+.set-lab .set-cur{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--fg-faint)}
+.set-hint{font-size:10.5px;color:var(--fg-faint);line-height:1.6;margin-top:4px}
+/* 密钥当前值的掩码行：信息性质，不是解释，所以用等宽字 */
+.set-cur-mask{font-family:var(--mono);font-size:10px;color:var(--fg-dim)}
+/* 下拉：原生 select 跟随主题，不做自绘（自绘要自己实现键盘、点击外部关闭、
+   窄屏定位，而原生的天然满足且跟随系统无障碍设置）。 */
+.set-sel{
+  width:100%;height:26px;padding:0 6px;border-radius:6px;
+  font-size:12px;color:var(--fg);background:var(--pill);
+  border:1px solid var(--line);
+}
+.set-sel:disabled{opacity:.5}
+.set-num{
+  width:76px;height:26px;padding:0 6px;border-radius:6px;font-size:12px;
+  color:var(--fg);background:var(--pill);border:1px solid var(--line);
+  font-family:var(--mono);
+}
+.set-num:disabled{opacity:.5}
+/* 文本 / 密钥输入框。与 .set-sel 同一套尺寸，保证一列字段左右对齐 */
+.set-inp{
+  width:100%;height:26px;padding:0 8px;border-radius:6px;box-sizing:border-box;
+  font-size:12px;color:var(--fg);background:var(--pill);border:1px solid var(--line);
+}
+.set-inp:focus{outline:none;border-color:var(--accent)}
+.set-inp:disabled{opacity:.5}
+/* 密钥框用等宽字体：掩码串里的 * 在非等宽字体下会挤在一起看不出长度 */
+input.set-inp[type="password"]{font-family:var(--mono);letter-spacing:.02em}
+/* 模型名的候选快捷按钮：一排小胶囊，点一下直接填 */
+.set-quick{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
+.set-quick button{
+  height:22px;padding:0 8px;border-radius:999px;font-size:11px;
+  background:var(--pill);border:1px solid var(--line);color:var(--fg-dim);
+}
+.set-quick button:hover{color:var(--fg);border-color:var(--line-strong)}
+.set-quick button[data-on="true"]{color:var(--accent);border-color:var(--accent)}
+/* 开关：一个按钮两态，文字直说「开/关」而不是只有颜色（色弱用户也能读） */
+.set-sw{
+  height:26px;padding:0 12px;border-radius:6px;font-size:12px;
+  background:var(--pill);border:1px solid var(--line);color:var(--fg-dim);
+}
+.set-sw[data-on="true"]{color:var(--accent);border-color:var(--accent);background:var(--bg-hover)}
+.set-sw[data-busy="true"]{opacity:.55}
+/* narnat.md 编辑区。
+   原来是 `min-height:180px; max-height:46vh; resize:vertical` —— 三个都错：
+   · 46vh 是**视口**高度的 46%，在侧边栏里被换算成一个很小的死值（实测 197px），
+     而 narnat.md 常常几百行，用户滚动几十屏也看不全，还会以为「拉不大」——
+     确实拉不大：resize 的手柄被 max-height 钉住，拖了也不动。
+   · resize:vertical 在 flex 容器里本来就不可靠（拖大只让外层滚动，自己不变）。
+   现在改成：让编辑区**占满设置面板剩下的全部高度**（父级 flex 列 + 自己 flex:1），
+   高度由面板决定而不是由 vh 决定。字段区不再滚动 —— 只有 textarea 自己滚。 */
+.set-body[data-mode="md"]{
+  display:flex;flex-direction:column;overflow:hidden;
+}
+.set-body[data-mode="md"] .set-row{
+  display:flex;flex-direction:column;flex:1;min-height:0;padding-bottom:0;border-bottom:none;
+}
+.set-md{
+  width:100%;box-sizing:border-box;flex:1;min-height:120px;
+  padding:8px;border-radius:6px;border:1px solid var(--line);
+  background:var(--bg-code);color:var(--fg);
+  font-family:var(--mono);font-size:11.5px;line-height:1.7;
+  white-space:pre-wrap;word-break:break-word;
+  resize:none;overflow:auto;
+}
+.set-md:focus{outline:none;border-color:var(--accent)}
+/* 编辑区工具栏：行数 / 复制 / 全部展开。放在 textarea 上方一行，
+   窄面板也放得下（三个小按钮 + 一段灰字）。 */
+.set-md-bar{display:flex;align-items:center;gap:4px;margin-bottom:5px;flex:none}
+.set-md-bar .set-md-len{
+  margin-right:auto;font-size:10.5px;color:var(--fg-faint);font-family:var(--mono);
+}
+.set-md-bar button{
+  height:22px;padding:0 8px;border-radius:5px;font-size:11px;
+  background:var(--pill);border:1px solid var(--line);color:var(--fg-dim);flex:none;
+}
+.set-md-bar button:hover{color:var(--fg);border-color:var(--line-strong)}
+.set-md-bar button[data-on="true"]{color:var(--accent);border-color:var(--accent)}
+
+/* ---------- narnat.md 全屏编辑层 ----------
+   覆盖整个面板（含顶栏），而不是用浏览器全屏 API ——
+   webview 里 requestFullscreen 会被沙箱拒绝，而且用户要的是
+   「在插件里看全」，不是「整个屏幕都被插件占满」。 */
+.md-full{
+  display:none;position:absolute;inset:0;z-index:60;
+  flex-direction:column;background:var(--bg);
+}
+.md-full[data-open="true"]{display:flex}
+.md-full-head{
+  display:flex;align-items:center;gap:6px;flex:none;
+  padding:10px 12px;border-bottom:1px solid var(--line);
+  font-size:11px;color:var(--fg-faint);letter-spacing:.04em;
+}
+.md-full-head .md-full-len{
+  margin-right:auto;font-family:var(--mono);font-size:10px;color:var(--fg-faint);
+}
+.md-full-head button{
+  flex:none;height:24px;padding:0 10px;border-radius:5px;font-size:11px;
+  background:var(--pill);border:1px solid var(--line);color:var(--fg-dim);
+}
+.md-full-head button:hover{color:var(--fg);border-color:var(--line-strong)}
+.md-full-head button.md-full-primary{color:var(--accent);border-color:var(--accent)}
+.md-full-ta{
+  flex:1;min-height:0;width:100%;box-sizing:border-box;
+  margin:0;padding:10px 12px;border:none;background:var(--bg-code);color:var(--fg);
+  font-family:var(--mono);font-size:12px;line-height:1.75;
+  white-space:pre-wrap;word-break:break-word;resize:none;overflow:auto;
+}
+.md-full-ta:focus{outline:none}
+/* 底部动作条：固定，不随字段区滚动（保存按钮永远够得着） */
+.set-foot{flex:none;padding:8px 12px 12px;border-top:1px solid var(--line);display:flex;gap:6px}
+.set-foot button{
+  flex:1;height:28px;border-radius:6px;font-size:12px;
+  background:var(--pill);border:1px solid var(--line);color:var(--fg-dim);
+}
+.set-foot button:hover{color:var(--fg);border-color:var(--line-strong)}
+.set-foot button.set-primary{
+  color:var(--accent);border-color:var(--accent);background:var(--bg-hover);
+}
+.set-foot button:disabled{opacity:.5}
+/* 保存结果提示：成功/失败都在动作条上方一行，不弹窗（面板太窄，弹窗会盖住全部） */
+.set-msg{flex:none;padding:0 12px 6px;font-size:10.5px;line-height:1.6;color:var(--fg-faint)}
+.set-msg[data-kind="ok"]{color:var(--ok)}
+.set-msg[data-kind="err"]{color:var(--err)}
 /* ---------- 顶栏会话名（胶囊按钮）----------
    精致化要点（原来是个裸文字块，鼠标移上去只闪一下底色）：
    · 做成带 1px 主题边框的胶囊，与输入框下方的 .chip 同一套语言
@@ -191,7 +372,8 @@ button:focus-visible, [tabindex]:focus-visible,
 /* ---------- 状态行（输入框下方） ---------- */
 .status{
   display:flex;align-items:center;gap:12px;
-  max-width:680px;margin:0 auto;padding:8px 2px 0;
+  /* 状态行同样占满（原来 680px 居中，比输入框还窄一截） */
+  max-width:100%;padding:8px 2px 0;
   /* 11px 而不是 10.5px：等宽字体在小字号下发虚，配上最淡那档颜色就「糊」
      （实测被视觉评估点名）。字号提半档、标签用次要色即可，不必再加深。 */
   font-family:var(--mono);font-size:11px;
@@ -246,8 +428,14 @@ button:focus-visible, [tabindex]:focus-visible,
 
 /* ---------- 主体 ---------- */
 .body{flex:1;display:flex;min-height:0;position:relative}
-.convo{flex:1;min-width:0;overflow-y:auto;padding:26px 24px 8px}
-.convo > *{max-width:680px;margin-left:auto;margin-right:auto}
+.convo{flex:1;min-width:0;overflow-y:auto;padding:26px 10px 8px}
+/* 对话内容占满面板宽度。
+   原来这里写了 max-width:680px + 左右 auto 居中 —— 那是给宽屏阅读体验设计的
+   （一行 680px 约 80 字符，长段落更好读）。但侧边栏本身只有 300~700px，
+   680px 的上限在 764px 面板里就变成左右各让出 42px 的「黑边」，
+   用户看到的是「我的面板明明这么宽，对话只用中间一截」。
+   在窄面板里让满宽是对的：宽度本来就是稀缺资源，不该再主动收窄。 */
+.convo > *{max-width:100%}
 /* 错误行上的「重试这一条」：出错后唯一的补救入口（见 turnEnd 的 error 分支） */
 .sys .retry{
   margin-left:8px;font-size:10.5px;padding:1px 8px;border-radius:4px;
@@ -639,7 +827,7 @@ body[data-real="true"] .demo-tip{display:none}
      边框本身不承载文字，按 WCAG 1.4.11「非文本对比度 3:1」也够。 */
   border:1px solid var(--fg-faint);border-radius:6px;
   padding:10px 12px;margin-bottom:22px;
-  max-width:680px;
+  max-width:100%;
 }
 .confirm .q{font-size:12.5px;color:var(--fg);margin-bottom:6px}
 .confirm .cmd{
@@ -671,9 +859,11 @@ body[data-real="true"] .demo-tip{display:none}
 /* ---------- 输入区 ---------- */
 /* position:relative 是给状态行抽屉用的：窄面板下 .status 绝对定位、bottom:100%
    向上弹出，需要一个已定位的祖先当参照。少了它就会相对视口定位，抽屉跑到屏幕外。 */
-.composer{flex:none;padding:10px 24px 10px;position:relative}
+.composer{flex:none;padding:10px 10px 10px;position:relative}
 .cbox{
-  max-width:680px;margin:0 auto;position:relative;
+  /* 与对话区同样占满：原来 max-width:680px + auto 居中，在 764px 面板里
+     左右各让出 42px，输入框比对话还窄一圈，看起来像没对齐。 */
+  max-width:100%;position:relative;
   /* 背景用 input-background（深色 #3C3C3C 对 #1E1E1E 面板底有明显层次，
      比原来的 sideBar-background 更像个输入框）；边框在 HC 主题下取
      input-border 才有强对比，普通主题靠背景差 + 聚焦变强调色。 */
@@ -717,9 +907,6 @@ body[data-real="true"] .demo-tip{display:none}
    一排灰胶囊里突然一块亮蓝，视觉上比它承载的信息重得多（实测被点名突兀）。 */
 .chip.on{color:var(--fg)}
 .chip[data-clickable="true"]{cursor:pointer}
-/* 收缩优先级：会话名先让 → 路径次之（留 3em 不至于整块消失）→ 目标状态不让 */
-.crow .chip.on{flex:none}
-.crow .chip.path{flex-shrink:2;min-width:3em}
 /* 按钮组不参与收缩：宁可省略 chip 文字，也不让「发送」被压成两行 */
 .crow .right{margin-left:auto;flex:none;display:flex;align-items:center;gap:6px}
 
@@ -928,24 +1115,37 @@ body[data-run="true"] .send{display:none}
 }
 .palette .item .s{color:var(--fg-faint);font-family:var(--mono);font-size:10.5px;flex:none}
 
-/* ---------- 抽屉 ---------- */
-/* 三段式：标题 / 可滚动的历史列表 / 常驻底部操作区。
-   原来整个抽屉一起滚，底部按钮用 sticky 浮在列表上——滚历史时按钮下方
-   能看见列表内容透出来，像一块浮在半空的板子（实测）。现在让列表自己滚，
-   底部操作区是布局里的固定一段，不再覆盖任何内容。 */
+/* ---------- 会话列表（面板内全宽列表态）---------- */
+/* 侧边栏只有 ~300px 宽，放不下「列表 + 对话」并排两栏。
+   所以列表是**同一个面板里的另一种状态**：打开时铺满整个内容区，
+   对话暂时让位；点一条会话或按 × 就回到对话。
+   三段式：标题 / 可滚动的历史列表 / 常驻底部操作区。 */
 .drawer{
-  display:none;flex:none;width:262px;flex-direction:column;
-  border-left:1px solid var(--line);overflow:hidden;padding:14px 0 0;
+  display:none;flex:1;min-width:0;flex-direction:column;
+  overflow:hidden;padding:0;
   background:var(--bg);
 }
 .drawer[data-open="true"]{display:flex}
+/* 列表态：对话区让位。只靠 .drawer 的 flex:1 不够 —— .convo 也占着 flex:1，
+   两者会各分一半宽，变成「左边对话右边列表」的窄栏并排（262px+ 挤在 300px 里
+   完全没法看）。所以打开列表时把对话区整块收起来。 */
+body[data-drawer="true"] .convo{display:none}
+/* 输入区、回到底部按钮在列表态没有意义（没有对话可输入/可滚），一并收起，
+   让列表拿到整个面板高度。 */
+body[data-drawer="true"] .composer{display:none}
+body[data-drawer="true"] #toBottom{display:none}
 .drawer #sessList{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain}
 .dw-head{
-  display:flex;align-items:center;padding:0 14px 10px;
+  display:flex;align-items:center;padding:12px 14px 10px;
   font-size:11px;color:var(--fg-faint);letter-spacing:.04em;
 }
-.dw-head button{margin-left:auto;color:var(--fg-faint);font-size:14px}
-.dw-head button:hover{color:var(--fg)}
+/* 右侧动作（关闭）。 */
+.dw-head-acts{margin-left:auto;display:flex;align-items:center;gap:2px}
+.dw-head button{color:var(--fg-faint);font-size:14px;width:22px;height:22px;
+  display:inline-flex;align-items:center;justify-content:center;
+  border-radius:4px;background:transparent;border:1px solid transparent}
+.dw-head button:hover{color:var(--fg);background:var(--bg-hover);border-color:var(--line)}
+.dw-head button:focus-visible{outline:none;border-color:var(--accent)}
 .dw-item{
   display:flex;align-items:baseline;gap:7px;
   padding:4px 14px;font-size:12px;color:var(--fg-dim);cursor:pointer;
@@ -1478,14 +1678,56 @@ body[data-run="true"] .send{display:none}
   .msg.sys-note .text{padding-left:10px}
 }
 
-/* ---------- 输入行：路径先让，历史按钮不收 ----------
-   .crow 里有两组东西：历史按钮 + 工作目录 chip、右侧图标按钮组。
-   收窄时按「信息价值」让位，而不是一起挤：
-     460px  工作目录路径直接消失 —— 它是纯参考信息，看一次就够了；
-            历史按钮要能点、按钮组要用，两者都不该先让。
-   历史按钮本身就是 24px 图标按钮，没有再可收的东西，所以这里不再分档。
-   （上一版给它加了「文字→图标」两档，文字其实是会话名，而会话名已在顶栏，
-     这里重复显示反而让人误以为它是「保存」。） */
-@container (max-width:460px){
-  .crow .chip.path{display:none}
+/* ---------- 输入行 ----------
+   .crow 现在只剩右侧按钮组（历史按钮挪到顶栏、工作目录 chip 已删除）。
+   .crow .right 自带 margin-left:auto，所以整组会自己靠右，左侧留白即可。
+   原来那条「460px 以下隐藏工作目录」的规则随 chip 一起删掉了 ——
+   留着它就是一条永远匹配不到元素的选择器。 */
+/* ---------- 一轮的「工作过程」折叠（抄 dsh TurnProcessNodeView）----------
+   收起：只有一行摘要 + 下方一条分割线，本轮的工具与思考全部藏在里面。
+   展开：摘要行不动，下面铺开原始工具行。
+   dsh 那版是 33px 高、0.5px 下边框、chevron 旋转 180°；这里同形，
+   但字号与间距服从我们自己的面板密度（侧边栏更窄，字要小一档）。 */
+.turn-proc{margin:2px 0 6px}
+.tp-row{
+  display:flex;align-items:center;gap:6px;width:100%;
+  padding:5px 2px 6px;border:none;background:none;
+  color:var(--fg-faint);font:inherit;font-size:11.5px;
+  text-align:left;cursor:pointer;
+}
+.tp-row:hover{color:var(--fg-dim)}
+.tp-caret{
+  flex:none;font-size:9px;line-height:1;
+  transition:transform .12s;transform-origin:50% 50%;
+}
+.turn-proc[data-open="true"] .tp-caret{transform:rotate(90deg)}
+.tp-label{flex:none;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 耗时用等宽 + 数字对齐，dsh 也是这么处理的：数字跳动时行宽不变 */
+.tp-dur{
+  margin-left:5px;font-family:var(--mono);font-size:10.5px;
+  font-variant-numeric:tabular-nums;color:var(--fg-faint);
+}
+.tp-meta{
+  margin-left:auto;flex:none;font-family:var(--mono);font-size:10px;color:var(--fg-faint);
+}
+/* 被打断 / 失败时摘要行用对应色的左边框条，读起来一眼能分 */
+.turn-proc[data-reason="cancelled"] .tp-row,
+.turn-proc[data-reason="aborted"] .tp-row,
+.turn-proc[data-reason="interrupted"] .tp-row{color:var(--warn)}
+.turn-proc[data-reason="error"] .tp-row{color:var(--err)}
+/* 展开内容：靠内缩一点，与摘要行区分层级 */
+.tp-body{display:none;padding-top:6px}
+.turn-proc[data-open="true"] .tp-body{display:block}
+/* 组内的工具行去掉外边距：外面已经有一层 .turn-proc 的间距，
+   再叠加会让展开后的内容离摘要行很远。 */
+.tp-body .tools{margin-top:4px}
+.tp-body .tools:first-child{margin-top:0}
+.tp-body .think{margin-bottom:8px}
+/* 组底的分割线：全组只有这一条横线（摘要行自己不带 border-bottom）。
+   收起时它是「工作过程与下面的回答之间的界线」；展开时它在折叠内容下方，
+   同样只出现一次 —— 原来摘要行带 border-bottom、组底再放一条，
+   收起态下屏幕上并排两条线，像表格分隔而不是折叠。 */
+.tp-sep{height:0;border-top:1px solid var(--line);margin:5px 0 10px}
+@media (prefers-reduced-motion:reduce){
+  .tp-caret{transition:none}
 }
