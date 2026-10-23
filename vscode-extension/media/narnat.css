@@ -106,7 +106,7 @@ button:focus-visible, [tabindex]:focus-visible,
              0 4px 12px rgba(0,0,0,.28);
 }
 /* container-type：让下面的 @container 查询以面板自身宽度为基准（iframe 宽 = 面板宽） */
-.shell{display:flex;flex-direction:column;height:100%;container-type:inline-size}
+.shell{position:relative;display:flex;flex-direction:column;height:100%;container-type:inline-size}
 
 /* ---------- 自绘提示框（替代浏览器原生 title） ----------
    原生 title 是 Electron 画的系统提示框：直角、灰底、字号/配色全由宿主决定，
@@ -152,9 +152,11 @@ button:focus-visible, [tabindex]:focus-visible,
 /* 顶栏的对话记录入口。做成和其它顶栏图标同样的 24×24 命中区，
    图标本身用描述性字符而不是 emoji（emoji 在深色主题下发彩、抢眼）。 */
 .hist-btn{
-  flex:none;width:24px;height:24px;padding:0;border-radius:5px;
+  flex:none;width:26px;height:26px;padding:0;border-radius:6px;
   display:inline-flex;align-items:center;justify-content:center;
-  font-size:13px;line-height:1;color:var(--fg-dim);
+  /* 图标大小由 font-size 决定（☰ / ⚙ 都是字形）。只放大 width/height 会出现
+     「底座变大、图标还是那么小」——实测被点名。 */
+  font-size:16px;line-height:1;color:var(--fg-dim);
   background:transparent;border:1px solid transparent;
 }
 .hist-btn:hover{background:var(--bg-hover);color:var(--fg);border-color:var(--line)}
@@ -185,9 +187,12 @@ body[data-settings="true"] #toBottom{display:none}
   font-size:11px;color:var(--fg-faint);letter-spacing:.04em;
 }
 .set-head button{
-  margin-left:auto;color:var(--fg-faint);font-size:14px;width:22px;height:22px;
+  margin-left:auto;color:var(--fg-faint);
+  /* 与顶栏图标同规格（26×26 / 16px）—— 它也是字形图标，
+     只加大底座不加大字号会显得空。 */
+  font-size:16px;width:26px;height:26px;
   display:inline-flex;align-items:center;justify-content:center;
-  border-radius:4px;background:transparent;border:1px solid transparent;
+  border-radius:6px;background:transparent;border:1px solid transparent;
 }
 .set-head button:hover{color:var(--fg);background:var(--bg-hover);border-color:var(--line)}
 /* 分段按钮横排。条数少（3 个），宽度用 flex:1 均分，窄面板也不会挤成两行。 */
@@ -279,7 +284,10 @@ input.set-inp[type="password"]{font-family:var(--mono);letter-spacing:.02em}
   margin-right:auto;font-size:10.5px;color:var(--fg-faint);font-family:var(--mono);
 }
 .set-md-bar button{
-  height:22px;padding:0 8px;border-radius:5px;font-size:11px;
+  height:26px;padding:0 12px;border-radius:6px;
+  /* 字要跟着一起大：上一版只把 height 从 22 提到 26、字号 11→11.5，
+     看起来就是「底座变大、里面的字没变」，不协调。 */
+  font-size:12.5px;
   background:var(--pill);border:1px solid var(--line);color:var(--fg-dim);flex:none;
 }
 .set-md-bar button:hover{color:var(--fg);border-color:var(--line-strong)}
@@ -1691,13 +1699,17 @@ body[data-drawer="true"] #toBottom{display:none}
 .turn-proc{margin:2px 0 6px}
 .tp-row{
   display:flex;align-items:center;gap:6px;width:100%;
-  padding:5px 2px 6px;border:none;background:none;
-  color:var(--fg-faint);font:inherit;font-size:11.5px;
+  padding:7px 2px 8px;border:none;background:none;
+  color:var(--fg-faint);font:inherit;font-size:12.5px;
   text-align:left;cursor:pointer;
+  /* 展开时标题下方多留 6px（8→14），抄 dsh 的 `[aria-expanded=true]{padding-bottom:8px}`：
+     不加的话标题和展开内容贴在一起，看起来像同一行被拆断。 */
+  transition:color .1s ease, padding-bottom .11s cubic-bezier(.4,0,.2,1);
 }
+.turn-proc[data-open="true"] .tp-row{padding-bottom:14px}
 .tp-row:hover{color:var(--fg-dim)}
 .tp-caret{
-  flex:none;font-size:9px;line-height:1;
+  flex:none;font-size:10px;line-height:1;
   transition:transform .12s;transform-origin:50% 50%;
 }
 .turn-proc[data-open="true"] .tp-caret{transform:rotate(90deg)}
@@ -1715,19 +1727,50 @@ body[data-drawer="true"] #toBottom{display:none}
 .turn-proc[data-reason="aborted"] .tp-row,
 .turn-proc[data-reason="interrupted"] .tp-row{color:var(--warn)}
 .turn-proc[data-reason="error"] .tp-row{color:var(--err)}
-/* 展开内容：靠内缩一点，与摘要行区分层级 */
-.tp-body{display:none;padding-top:6px}
-.turn-proc[data-open="true"] .tp-body{display:block}
+/* 展开内容。高度由 JS 动画驱动（见 tpCollapse/tpReveal），
+   所以这里不能再写 display:none/block 的开关 —— 那会让高度过渡失效。
+   收起态用 hidden 属性（动画结束后才加，这样收缩过程看得见）。 */
+.tp-body{padding-top:6px;overflow:hidden}
+.tp-body[hidden]{display:none}
+/* 展开后套滚动上限（抄 dsh 的 max-height: min(400px, 50vh)）。
+   不加上限会怎样：一轮 109 次工具调用，展开后直接把整个对话刷出屏幕，
+   用户想看下面那句正文得自己滚十几屏 —— 而他本来只是想确认某一步。
+   上限只在「用户主动展开」时生效；收起动画从屏幕上真实高度开始，不受它干扰。 */
+.tp-body[data-capped="true"]{
+  max-height:min(400px,50vh);
+  overflow-y:auto;overscroll-behavior-y:contain;scrollbar-gutter:stable;
+}
+/* 可滚动时上下加 24px 渐隐：不提示的话，用户看不出这块还能往下滚，
+   只会以为内容就到这儿了（dsh 的 fadeTop/fadeBottom 同一个作用）。 */
+.tp-body[data-fade-up="true"]{
+  mask-image:linear-gradient(to bottom,transparent 0,#000 24px,#000 100%);
+}
+.tp-body[data-fade-down="true"]{
+  mask-image:linear-gradient(to bottom,#000 0,#000 calc(100% - 24px),transparent 100%);
+}
+.tp-body[data-fade-up="true"][data-fade-down="true"]{
+  mask-image:linear-gradient(to bottom,transparent 0,#000 24px,
+    #000 calc(100% - 24px),transparent 100%);
+}
 /* 组内的工具行去掉外边距：外面已经有一层 .turn-proc 的间距，
    再叠加会让展开后的内容离摘要行很远。 */
-.tp-body .tools{margin-top:4px}
-.tp-body .tools:first-child{margin-top:0}
-.tp-body .think{margin-bottom:8px}
+.tp-inner .tools{margin-top:4px}
+.tp-inner .tools:first-child{margin-top:0}
+.tp-inner .think{margin-bottom:8px}
 /* 组底的分割线：全组只有这一条横线（摘要行自己不带 border-bottom）。
    收起时它是「工作过程与下面的回答之间的界线」；展开时它在折叠内容下方，
    同样只出现一次 —— 原来摘要行带 border-bottom、组底再放一条，
    收起态下屏幕上并排两条线，像表格分隔而不是折叠。 */
 .tp-sep{height:0;border-top:1px solid var(--line);margin:5px 0 10px}
+/* 组内成员之间的间距变化跟着收缩动画一起走（抄 dsh 的
+   `[data-chat-motion] .content > * { transition: margin-top 160ms ... }`）：
+   收缩时上面的成员消失、下面的成员上移，那段位移如果硬跳会很突兀。 */
+.tp-inner > :not([data-motion]){
+  transition:margin-top .16s cubic-bezier(.4,0,.2,1);
+}
 @media (prefers-reduced-motion:reduce){
   .tp-caret{transition:none}
+  .tp-row{transition:none}
+  /* 组内成员间距的变化也随收缩走（dsh 的 `[data-chat-motion] .content > *`） */
+  .tp-inner > *{transition:none}
 }

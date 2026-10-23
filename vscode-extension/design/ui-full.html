@@ -113,7 +113,7 @@ button:focus-visible, [tabindex]:focus-visible,
              0 4px 12px rgba(0,0,0,.28);
 }
 /* container-type：让下面的 @container 查询以面板自身宽度为基准（iframe 宽 = 面板宽） */
-.shell{display:flex;flex-direction:column;height:100%;container-type:inline-size}
+.shell{position:relative;display:flex;flex-direction:column;height:100%;container-type:inline-size}
 
 /* ---------- 自绘提示框（替代浏览器原生 title） ----------
    原生 title 是 Electron 画的系统提示框：直角、灰底、字号/配色全由宿主决定，
@@ -159,9 +159,11 @@ button:focus-visible, [tabindex]:focus-visible,
 /* 顶栏的对话记录入口。做成和其它顶栏图标同样的 24×24 命中区，
    图标本身用描述性字符而不是 emoji（emoji 在深色主题下发彩、抢眼）。 */
 .hist-btn{
-  flex:none;width:24px;height:24px;padding:0;border-radius:5px;
+  flex:none;width:26px;height:26px;padding:0;border-radius:6px;
   display:inline-flex;align-items:center;justify-content:center;
-  font-size:13px;line-height:1;color:var(--fg-dim);
+  /* 图标大小由 font-size 决定（☰ / ⚙ 都是字形）。只放大 width/height 会出现
+     「底座变大、图标还是那么小」——实测被点名。 */
+  font-size:16px;line-height:1;color:var(--fg-dim);
   background:transparent;border:1px solid transparent;
 }
 .hist-btn:hover{background:var(--bg-hover);color:var(--fg);border-color:var(--line)}
@@ -192,9 +194,12 @@ body[data-settings="true"] #toBottom{display:none}
   font-size:11px;color:var(--fg-faint);letter-spacing:.04em;
 }
 .set-head button{
-  margin-left:auto;color:var(--fg-faint);font-size:14px;width:22px;height:22px;
+  margin-left:auto;color:var(--fg-faint);
+  /* 与顶栏图标同规格（26×26 / 16px）—— 它也是字形图标，
+     只加大底座不加大字号会显得空。 */
+  font-size:16px;width:26px;height:26px;
   display:inline-flex;align-items:center;justify-content:center;
-  border-radius:4px;background:transparent;border:1px solid transparent;
+  border-radius:6px;background:transparent;border:1px solid transparent;
 }
 .set-head button:hover{color:var(--fg);background:var(--bg-hover);border-color:var(--line)}
 /* 分段按钮横排。条数少（3 个），宽度用 flex:1 均分，窄面板也不会挤成两行。 */
@@ -286,7 +291,10 @@ input.set-inp[type="password"]{font-family:var(--mono);letter-spacing:.02em}
   margin-right:auto;font-size:10.5px;color:var(--fg-faint);font-family:var(--mono);
 }
 .set-md-bar button{
-  height:22px;padding:0 8px;border-radius:5px;font-size:11px;
+  height:26px;padding:0 12px;border-radius:6px;
+  /* 字要跟着一起大：上一版只把 height 从 22 提到 26、字号 11→11.5，
+     看起来就是「底座变大、里面的字没变」，不协调。 */
+  font-size:12.5px;
   background:var(--pill);border:1px solid var(--line);color:var(--fg-dim);flex:none;
 }
 .set-md-bar button:hover{color:var(--fg);border-color:var(--line-strong)}
@@ -1698,13 +1706,17 @@ body[data-drawer="true"] #toBottom{display:none}
 .turn-proc{margin:2px 0 6px}
 .tp-row{
   display:flex;align-items:center;gap:6px;width:100%;
-  padding:5px 2px 6px;border:none;background:none;
-  color:var(--fg-faint);font:inherit;font-size:11.5px;
+  padding:7px 2px 8px;border:none;background:none;
+  color:var(--fg-faint);font:inherit;font-size:12.5px;
   text-align:left;cursor:pointer;
+  /* 展开时标题下方多留 6px（8→14），抄 dsh 的 `[aria-expanded=true]{padding-bottom:8px}`：
+     不加的话标题和展开内容贴在一起，看起来像同一行被拆断。 */
+  transition:color .1s ease, padding-bottom .11s cubic-bezier(.4,0,.2,1);
 }
+.turn-proc[data-open="true"] .tp-row{padding-bottom:14px}
 .tp-row:hover{color:var(--fg-dim)}
 .tp-caret{
-  flex:none;font-size:9px;line-height:1;
+  flex:none;font-size:10px;line-height:1;
   transition:transform .12s;transform-origin:50% 50%;
 }
 .turn-proc[data-open="true"] .tp-caret{transform:rotate(90deg)}
@@ -1722,21 +1734,52 @@ body[data-drawer="true"] #toBottom{display:none}
 .turn-proc[data-reason="aborted"] .tp-row,
 .turn-proc[data-reason="interrupted"] .tp-row{color:var(--warn)}
 .turn-proc[data-reason="error"] .tp-row{color:var(--err)}
-/* 展开内容：靠内缩一点，与摘要行区分层级 */
-.tp-body{display:none;padding-top:6px}
-.turn-proc[data-open="true"] .tp-body{display:block}
+/* 展开内容。高度由 JS 动画驱动（见 tpCollapse/tpReveal），
+   所以这里不能再写 display:none/block 的开关 —— 那会让高度过渡失效。
+   收起态用 hidden 属性（动画结束后才加，这样收缩过程看得见）。 */
+.tp-body{padding-top:6px;overflow:hidden}
+.tp-body[hidden]{display:none}
+/* 展开后套滚动上限（抄 dsh 的 max-height: min(400px, 50vh)）。
+   不加上限会怎样：一轮 109 次工具调用，展开后直接把整个对话刷出屏幕，
+   用户想看下面那句正文得自己滚十几屏 —— 而他本来只是想确认某一步。
+   上限只在「用户主动展开」时生效；收起动画从屏幕上真实高度开始，不受它干扰。 */
+.tp-body[data-capped="true"]{
+  max-height:min(400px,50vh);
+  overflow-y:auto;overscroll-behavior-y:contain;scrollbar-gutter:stable;
+}
+/* 可滚动时上下加 24px 渐隐：不提示的话，用户看不出这块还能往下滚，
+   只会以为内容就到这儿了（dsh 的 fadeTop/fadeBottom 同一个作用）。 */
+.tp-body[data-fade-up="true"]{
+  mask-image:linear-gradient(to bottom,transparent 0,#000 24px,#000 100%);
+}
+.tp-body[data-fade-down="true"]{
+  mask-image:linear-gradient(to bottom,#000 0,#000 calc(100% - 24px),transparent 100%);
+}
+.tp-body[data-fade-up="true"][data-fade-down="true"]{
+  mask-image:linear-gradient(to bottom,transparent 0,#000 24px,
+    #000 calc(100% - 24px),transparent 100%);
+}
 /* 组内的工具行去掉外边距：外面已经有一层 .turn-proc 的间距，
    再叠加会让展开后的内容离摘要行很远。 */
-.tp-body .tools{margin-top:4px}
-.tp-body .tools:first-child{margin-top:0}
-.tp-body .think{margin-bottom:8px}
+.tp-inner .tools{margin-top:4px}
+.tp-inner .tools:first-child{margin-top:0}
+.tp-inner .think{margin-bottom:8px}
 /* 组底的分割线：全组只有这一条横线（摘要行自己不带 border-bottom）。
    收起时它是「工作过程与下面的回答之间的界线」；展开时它在折叠内容下方，
    同样只出现一次 —— 原来摘要行带 border-bottom、组底再放一条，
    收起态下屏幕上并排两条线，像表格分隔而不是折叠。 */
 .tp-sep{height:0;border-top:1px solid var(--line);margin:5px 0 10px}
+/* 组内成员之间的间距变化跟着收缩动画一起走（抄 dsh 的
+   `[data-chat-motion] .content > * { transition: margin-top 160ms ... }`）：
+   收缩时上面的成员消失、下面的成员上移，那段位移如果硬跳会很突兀。 */
+.tp-inner > :not([data-motion]){
+  transition:margin-top .16s cubic-bezier(.4,0,.2,1);
+}
 @media (prefers-reduced-motion:reduce){
   .tp-caret{transition:none}
+  .tp-row{transition:none}
+  /* 组内成员间距的变化也随收缩走（dsh 的 `[data-chat-motion] .content > *`） */
+  .tp-inner > *{transition:none}
 }
 </style>
 </head>
@@ -1814,22 +1857,24 @@ body[data-drawer="true"] #toBottom{display:none}
       <div class="set-body" id="setBody"></div>
       <div class="set-foot" id="setFoot"></div>
     </section>
-
-    <!-- narnat.md 全屏编辑层：侧边栏只有 ~300px，几百行的指令在那里永远看不全。
-         全屏是**同一份 mdText 的第二个视图**，不是另开的编辑器 ——
-         两处输入都写同一个变量，保存时提交的永远是这一份。 -->
-    <section class="md-full" id="mdFull" aria-label="编辑 narnat.md">
-      <div class="md-full-head">
-        <span>narnat.md</span>
-        <span class="md-full-len" id="mdFullLen"></span>
-        <button id="mdFullCopy" data-tip="复制全部" aria-label="复制全部">复制</button>
-        <button id="mdFullSave" class="md-full-primary">保存</button>
-        <button id="mdFullClose" data-tip="收起" aria-label="收起全屏">×</button>
-      </div>
-      <textarea id="setMdBig" class="md-full-ta" spellcheck="false"
-        placeholder="在这里写 narnat.md 的内容（会拼进系统提示词）"></textarea>
-    </section>
   </div>
+
+  <!-- narnat.md 全屏编辑层：侧边栏只有 ~300px，几百行的提示词在那里永远看不全。
+       全屏是**同一份 mdText 的第二个视图**，不是另开的编辑器 ——
+       两处输入都写同一个变量，保存时提交的永远是这一份。
+       放在 .shell 直下（不是 .body 里）：「全屏」要盖住整个面板含顶栏，
+       而 .body 只有内容区那么高，且 .settings 带 overflow:hidden 会裁掉它。 -->
+  <section class="md-full" id="mdFull" aria-label="编辑 narnat.md">
+    <div class="md-full-head">
+      <span>narnat.md</span>
+      <span class="md-full-len" id="mdFullLen"></span>
+      <button id="mdFullCopy" data-tip="复制全部" aria-label="复制全部">复制</button>
+      <button id="mdFullSave" class="md-full-primary">保存</button>
+      <button id="mdFullClose" data-tip="收起" aria-label="收起全屏">×</button>
+    </div>
+    <textarea id="setMdBig" class="md-full-ta" spellcheck="false"
+      placeholder="在这里写 narnat.md 的内容（会拼进系统提示词）"></textarea>
+  </section>
 
   <!-- 输入区 -->
   <footer class="composer">
@@ -3402,6 +3447,11 @@ body[data-drawer="true"] #toBottom{display:none}
       b.addEventListener('click', function(){
         setGroup = g.id;
         renderTabs();
+        /* 必须重画底栏。不画会怎样（实测）：从「模型 API」切到「提示词」后，
+           底部还是 list 态那组「重新读取 / 打开配置文件」按钮，**保存按钮根本
+           不存在** —— 用户改了 narnat.md 却没有任何地方能保存，只能去全屏层
+           里存，而他又不知道全屏层有独立的保存按钮。 */
+        renderFoot();
         renderBody();
       });
       tabs.appendChild(b);
@@ -3786,7 +3836,7 @@ body[data-drawer="true"] #toBottom{display:none}
     setGroups = (p && Array.isArray(p.groups) && p.groups.length)
       ? p.groups
       // 老后端不给 groups：按已知分组兜底，至少面板不空白
-      : [{ id: 'api', label: '模型 API' }, { id: 'websearch', label: '联网工具' }, { id: 'prompt', label: '指令' }];
+      : [{ id: 'api', label: '模型 API' }, { id: 'websearch', label: '联网工具' }, { id: 'prompt', label: '提示词' }];
     if (!setGroups.some(function(g){ return g.id === setGroup; })) setGroup = setGroups[0].id;
     // 有改动还没生效 → 面板顶部常驻一行提示。
     // 不提示会怎样：用户改完 key 直接提问、拿到 401，以为新 key 是错的。
@@ -3798,19 +3848,42 @@ body[data-drawer="true"] #toBottom{display:none}
     renderBody();
   };
 
+  /* narnatmd/result 到达时的处理。
+     「有未保存修改」用 mdText !== mdSaved 判断；所以这里绝不能无条件用
+     服务器的值覆盖 mdText —— 用户在回执到达前打的字会被静默丢掉（实测：
+     点「提示词」分组触发一次 narnatmdGet，回执一到，刚敲的几行全没了，
+     而且不报错）。只有本地没有改动（mdText === mdSaved）时才接受服务器的值。 */
   window.__narnatOnNarnatMd = function(p){
-    mdText = (p && typeof p.text === 'string') ? p.text : '';
-    mdSaved = mdText;
-    var ta = document.getElementById('setMd');
-    if (ta) ta.value = mdText;
+    var incoming = (p && typeof p.text === 'string') ? p.text : '';
     // describe 里那条 narnat.md 的 path 可能还没到，这里补一次
     setItems = (setItems || []).map(function(it){
       if (it.id === 'narnatmd' && p && p.path) it.path = p.path;
       return it;
     });
-    renderBody();
-    renderFoot();
+    var clean = (mdText === mdSaved);
+    if (!clean) {
+      // 本地有未保存的改动：保留用户的输入，只把「服务器那份」记下来备查
+      mdSaved = incoming;
+      updateMdFoot();
+      return;
+    }
+    mdText = incoming;
+    mdSaved = incoming;
+    /* 就地写进两个 textarea，**不调 renderBody() 重建**。
+       重建的代价（实测）：光标跳回开头、滚动位置归零、输入法组合态被打断 ——
+       用户在几百行里刚滚到某处，一次回执就把他弹回顶部，感受就是
+       「不能上下滑动看完整内容」（其实能滚，只是每次都被重置）。
+       只有编辑区还没画出来（切成别的分组了）时才需要重建。 */
+    var small = document.getElementById('setMd');
+    if (small && setGroup === 'prompt') {
+      if (small.value !== mdText) small.value = mdText;
+      var big = document.getElementById('setMdBig');
+      if (big && big.value !== mdText) big.value = mdText;
+    } else if (setGroup === 'prompt') {
+      renderBody();
+    }
     updateMdFoot();
+    renderFoot();
   };
 
   window.__narnatOnConfigResult = function(p){
@@ -7852,6 +7925,10 @@ body[data-drawer="true"] #toBottom{display:none}
     // 打本轮标记：轮末按它挑出「这一轮的工具行」收进折叠组。
     // 历史重放走 addHistoryTool，不设这个标记，所以不会被卷进来。
     wrap.setAttribute('data-turn-tool', '1');
+    // 工具名要留着：折叠后摘要行写的是「已读取文件并搜索代码」这类
+    // **按类别合成的短语**（抄 dsh 的 processTitle），没有名字就合成不出来。
+    wrap.setAttribute('data-tool', String(p.name || ''));
+    wrap.setAttribute('data-tool-label', String(p.label || ''));
     turnToolCount += 1;
     if (isTodo) {
       // 计划行先占位，todo/update 到了复用这一行，不新建第二行「更新计划」
@@ -8429,6 +8506,97 @@ body[data-drawer="true"] #toBottom{display:none}
     }
   }
 
+  /* ---------- 折叠摘要的标题：把工具类别合成一句话 ----------
+     抄 dsh 的 process-activity.ts + step-process.ts + locale 那三条。
+     dsh 的折叠标题不是「工作过程 · 13 次工具调用」这种计数标签，而是把这一段
+     做过的**事**说成一句人话：「已读取文件并搜索代码」「执行了命令，修改了文件」。
+     计数对用户没有信息量 —— 他要的是「AI 刚才干了什么类别的事」。
+     
+     三个拼接规则也照抄：
+       两个类别      「已读取文件并搜索代码」  ← 共享的「已」前缀只留一个
+       三个以上      「已读取文件，执行了命令，修改了文件等」
+       同类别去重    按**次数**降序，次数相同按首次出现顺序 */
+  var TP_ACTIVITY = {
+    read: '已读取文件',
+    readImage: '已读取图片',
+    search: '已搜索代码',
+    edit: '修改了文件',
+    write: '已写入文件',
+    commands: '执行了命令',
+    code: '运行了代码',
+    webSearch: '已搜索网页',
+    webFetch: '已访问网页',
+    subagents: '已协调子智能体',
+    plan: '更新了计划',
+    questions: '向用户提出了问题',
+    tools: '已调用工具',
+    thinking: '已完成分析'
+  };
+
+  /** 工具名 → 活动类别。顺序与 dsh 的 activity() 一致。
+      除了 name 也认 label：历史重放与老版本事件的 payload 里 name 可能缺失，
+      只靠 name 会整段退化成「已调用工具」，用户看不出到底干了什么。 */
+  function tpActivityName(name, label) {
+    var n = String(name || '');
+    if (n === 'Read') return 'read';
+    if (n === 'Glob' || n === 'Grep') return 'search';
+    if (n === 'Edit') return 'edit';
+    if (n === 'Write') return 'write';
+    if (n === 'Shell' || n === 'Terminal') return 'commands';
+    if (n === 'WebSearch') return 'webSearch';
+    if (n === 'TodoWrite' || n === 'GoalComplete') return 'plan';
+    if (n === 'Serial') return 'tools';
+    if (n.indexOf('mcp__') === 0) return 'tools';
+    // name 缺失时的兜底：界面上的 label 是中文，逐个对回去
+    var l = String(label || '');
+    if (l === '读取') return 'read';
+    if (l === '搜索内容' || l === '搜索') return 'search';
+    if (l === '编辑') return 'edit';
+    if (l === '写入') return 'write';
+    if (l === '执行命令') return 'commands';
+    if (l === '联网搜索' || l === '搜索网页') return 'webSearch';
+    if (l === '更新计划') return 'plan';
+    return 'tools';
+  }
+
+  /**
+   * 把一组节点里的工具名合成标题。
+   * @param {HTMLElement[]} moving 组内成员
+   * @returns {string} 例如「已读取文件并搜索代码」
+   */
+  function tpTitle(moving) {
+    var counts = {};
+    var order = [];
+    var hasThink = false;
+    moving.forEach(function (el) {
+      if (el.classList.contains('think')) { hasThink = true; return; }
+      var kind = tpActivityName(el.getAttribute('data-tool'), el.getAttribute('data-tool-label'));
+      if (!counts[kind]) { counts[kind] = 0; order.push(kind); }
+      counts[kind] += 1;
+    });
+    // 按次数降序、次数相同按首次出现顺序（dsh 也是这个排序）
+    var ranked = order.slice().sort(function (a, b) {
+      if (counts[b] !== counts[a]) return counts[b] - counts[a];
+      return order.indexOf(a) - order.indexOf(b);
+    });
+    var labels = ranked.slice(0, 3).map(function (k) { return TP_ACTIVITY[k]; });
+    if (!labels.length && hasThink) return TP_ACTIVITY.thinking;
+    if (!labels.length) return TP_ACTIVITY.tools;
+    var first = labels[0];
+    if (labels.length === 1) return first;
+    if (labels.length === 2) {
+      // 共享前缀「已」只留一个：「已读取文件」+「已搜索代码」→ 已读取文件并搜索代码
+      var second = labels[1];
+      if (first.charAt(0) === '已' && second.charAt(0) === '已') second = second.slice(1);
+      return first + '并' + second;
+    }
+    // 三个以上：第一个原样，后面去掉共享的「已」前缀，末尾加「等」
+    var rest = labels.slice(1).map(function (l) {
+      return l.charAt(0) === '已' ? l.slice(1) : l;
+    });
+    return first + '，' + rest.join('，') + (ranked.length > 3 ? '等' : '');
+  }
+
   /**
    * 把一组节点收成一个「工作过程」折叠组，挂在它们原本的位置上。
    *
@@ -8451,6 +8619,10 @@ body[data-drawer="true"] #toBottom{display:none}
    * @param {Object} o
    *   o.reason       'done' | 'cancelled' | 'error' | 'history'
    *   o.elapsedMs    该轮耗时；0 / 不传表示未知（历史里就没有时长）
+   *   o.headline     这一组是否承担「整轮收口」的文案（一组只有最后那段是）
+   *   o.animate      建组时是否播「收起」动画。实时轮次收口时 true
+   *                  （屏幕上正摊着一大片工具行，必须让它收得有过程）；
+   *                  历史重放时 false（刚渲染出来的东西不该先展开再收起）
    * @returns {HTMLElement|null} 折叠组；没有可收的节点时返回 null
    */
   function buildTurnProc(nodes, o) {
@@ -8478,34 +8650,44 @@ body[data-drawer="true"] #toBottom{display:none}
     var row = document.createElement('button');
     row.type = 'button';
     row.className = 'tp-row';
-    // 历史轮次的文案：不知道当时花了多久、也不知道当时是不是被打断，
-    // 写「本次工作」而不是「已工作 · N 秒」—— 编一个耗时会误导用户。
-    var label = stopped ? '任务被打断'
-      : failed ? '这一轮失败'
-        : (reason === 'history' ? '这一轮的工作过程' : '已工作');
-    var dur = '';
+    /* 标题 = 把这一段做过的**事**说成一句人话（抄 dsh 的 processTitle）：
+       「已读取文件并搜索代码」「执行了命令，修改了文件」。
+       原来写的是「工作过程」/「已工作」这种空标签 + 「13 次工具调用」计数 ——
+       计数对用户没有信息量，他要知道的是「AI 刚才干了什么类别的事」。 */
+    var label = tpTitle(moving);
+    /* 耗时与状态并排放右侧，不挤进标题里：
+       标题要留给「干了什么」，时间/成败是附注。 */
+    var metaText = '';
     var elapsed = o.elapsedMs || 0;
-    if (!stopped && !failed && elapsed > 0) {
+    if (stopped) metaText = '任务被打断';
+    else if (failed) metaText = '这一轮失败';
+    else if (elapsed > 0) {
       var sec = Math.round(elapsed / 1000);
-      dur = sec >= 60 ? (Math.floor(sec / 60) + ' 分 ' + (sec % 60) + ' 秒')
-        : (sec + ' 秒');
+      metaText = sec >= 60 ? (Math.floor(sec / 60) + ' 分 ' + (sec % 60) + ' 秒') : (sec + ' 秒');
     }
-    var parts = [];
-    if (tools.length) parts.push(tools.length + ' 次工具调用');
-    if (thinks.length) parts.push(thinks.length + ' 段思考');
+    // 计数留在 DOM 属性上（测试与无障碍要用），但不显示出来
+    box.setAttribute('data-tool-count', String(tools.length));
+    box.setAttribute('data-think-count', String(thinks.length));
     row.innerHTML = '<span class="tp-caret">▶</span>' +
-      '<span class="tp-label">' + esc(label) +
-      (dur ? '<span class="tp-dur">' + esc(dur) + '</span>' : '') + '</span>' +
-      '<span class="tp-meta">' + esc(parts.join(' · ')) + '</span>';
+      '<span class="tp-label">' + esc(label) + '</span>' +
+      (metaText ? '<span class="tp-meta">' + esc(metaText) + '</span>' : '');
 
     var bodyBox = document.createElement('div');
     bodyBox.className = 'tp-body';
+    // 外层负责高度动画与（展开后的）滚动上限，内层承载真实内容。
+    // 双层是抄 dsh 的 ChatGroupSeat：外层 .body 有 max-height + overflow-y:auto，
+    // 内层 .content 是实际内容。合成一层的话，高度动画会和自己内部的滚动条打架 ——
+    // 收缩过程中 max-height 仍然生效，测到的 offsetHeight 就已经被夹过，
+    // 动画起点不是屏幕上真实高度，会先「跳」一下再收。
+    var innerBox = document.createElement('div');
+    innerBox.className = 'tp-inner';
 
     // 插在第一个被搬走的节点原来的位置，顺序原样保留
     convo.insertBefore(box, moving[0]);
     box.appendChild(row);
     box.appendChild(bodyBox);
-    moving.forEach(function (el) { bodyBox.appendChild(el); });
+    bodyBox.appendChild(innerBox);
+    moving.forEach(function (el) { innerBox.appendChild(el); });
 
     // 收起态下补一条分割线，把「这一段结束了」与下面的正文分开。
     // 用独立元素而不是 border-bottom：展开时正文会被 bodyBox 推远，边框就没意义了。
@@ -8514,16 +8696,205 @@ body[data-drawer="true"] #toBottom{display:none}
     box.appendChild(hr);
 
     row.setAttribute('aria-expanded', 'false');
+    /* 这些节点在折叠前一直是「展现在外面」的，所以这里要做一次真动画：
+       从当前可见高度收缩到 0 —— 用户看到的是「工具过程被收起来了」，
+       而不是「一大片内容瞬间消失」。
+       注意顺序：必须先量高度再设 hidden。反过来设的话 offsetHeight 已经是 0，
+       tpCollapse 会走「本来就没高度」的快速路径，动画根本不会发生（实测）。 */
+    if (o.animate) {
+      tpCollapse(bodyBox, function () { bodyBox.setAttribute('hidden', ''); });
+    } else {
+      // 历史重放：内容刚建出来就没展开过，直接是收起态，没有「收起过程」可演
+      bodyBox.setAttribute('hidden', '');
+    }
     row.addEventListener('click', function () {
       var on = box.getAttribute('data-open') === 'true';
       box.setAttribute('data-open', on ? 'false' : 'true');
       row.setAttribute('aria-expanded', on ? 'false' : 'true');
+      if (on) {
+        tpCollapse(bodyBox, function () { bodyBox.setAttribute('hidden', ''); });
+      } else {
+        tpReveal(bodyBox, true);
+      }
     });
     return box;
   }
 
+  /* ---------- 折叠 / 展开的过渡（抄 dsh 的 flow-motion.ts）----------
+     dsh 的时序（FADE_OUT_MS=70 / CLOSE_DELAY_MS=50 / CLOSE_MS=110）：
+       0ms      开始淡出，同时不动高度
+       50ms     透明度已到 ~28%，开始收高度
+       160ms    高度归零，此时几乎不可见
+     先淡出再收高度，是因为「一边透明一边缩」会让人眼觉得内容在抽搐；
+     等它快看不见了再收，感知上是「淡出后自然塌陷」。
+     缓动用 cubic-bezier(0.4,0,0.2,1)（Material 的 standard easing）。 */
+  var TP_FADE_MS = 70;
+  var TP_CLOSE_DELAY_MS = 50;
+  var TP_CLOSE_MS = 110;
+  var TP_SLACK_MS = 80;
+  var TP_EASE = 'cubic-bezier(0.4, 0, 0.2, 1)';
+
+  function tpReduced(){
+    return typeof matchMedia === 'function'
+      && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+
+  /** 清掉动画留下的内联样式，让 CSS 的自然尺寸/滚动上限接管 */
+  function tpClearMotion(el){
+    el.style.transition = '';
+    el.style.height = '';
+    el.style.marginTop = '';
+    el.style.opacity = '';
+    el.style.overflow = '';
+    el.removeAttribute('data-motion');
+  }
+
   /**
-   * 实时轮次收口：把这一轮还没归属的工具行与思考块折起来。
+   * 维护展开态的上下渐隐标记（抄 dsh 的 useProcessScroll）。
+   *
+   * 为什么需要：展开后组体有 400px 上限，超出的内容要靠内部滚动。但滚动条
+   * 在深色窄面板里几乎看不见，用户不会知道「这块还能往下滚」—— 他会以为
+   * 工具就这么多。边缘渐隐是最省字的一句话说「上面/下面还有」。
+   */
+  function tpBindFades(el){
+    if (el.__tpFades) return;
+    var sync = function () {
+      var up = el.scrollTop > 1;
+      var down = el.scrollTop < el.scrollHeight - el.clientHeight - 1;
+      el.setAttribute('data-fade-up', up ? 'true' : 'false');
+      el.setAttribute('data-fade-down', down ? 'true' : 'false');
+    };
+    el.addEventListener('scroll', sync, { passive: true });
+    if (typeof ResizeObserver === 'function') {
+      var ro = new ResizeObserver(sync);
+      ro.observe(el);
+      var inner = el.firstElementChild;
+      if (inner) ro.observe(inner);
+      el.__tpFades = { sync: sync, ro: ro };
+    } else {
+      el.__tpFades = { sync: sync, ro: null };
+    }
+    sync();
+  }
+
+  /**
+   * 收缩一个块到 0 高，结束后回调。
+   * @param {HTMLElement} el 要收的块（.tp-body）
+   * @param {Function} done 收完（高度归零）后调用 —— 调用方在这里设 hidden
+   */
+  function tpCollapse(el, done){
+    // 正在动画的同一块先取消，避免两次收尾互相覆盖
+    if (el.__tpCancel) el.__tpCancel();
+    var h = el.offsetHeight;
+    var mt = parseFloat(getComputedStyle(el).marginTop) || 0;
+    if (tpReduced() || (h === 0 && mt === 0)) { tpClearMotion(el); done(); return; }
+    el.setAttribute('data-motion', 'collapse');
+    el.style.transition = 'none';
+    el.style.overflow = 'hidden';
+    el.style.height = h + 'px';
+    el.style.marginTop = mt + 'px';
+    void el.offsetHeight;      // 强制 reflow，否则下面的 transition 不会生效
+    el.style.transition = 'opacity ' + TP_FADE_MS + 'ms ' + TP_EASE + ', '
+      + 'height ' + TP_CLOSE_MS + 'ms ' + TP_EASE + ' ' + TP_CLOSE_DELAY_MS + 'ms, '
+      + 'margin-top ' + TP_CLOSE_MS + 'ms ' + TP_EASE + ' ' + TP_CLOSE_DELAY_MS + 'ms';
+    el.style.opacity = '0';
+    el.style.height = '0px';
+    el.style.marginTop = '0px';
+    var finished = false;
+    var finish = function () {
+      if (finished) return;
+      finished = true;
+      el.removeEventListener('transitionend', onEnd);
+      clearTimeout(timer);
+      el.__tpCancel = null;
+      tpClearMotion(el);
+      done();
+    };
+    var onEnd = function (ev) {
+      if (ev.target === el && ev.propertyName === 'height') finish();
+    };
+    // transitionend 有不来的情况（元素被移出文档、浏览器丢帧），必须有兜底
+    var timer = setTimeout(finish, TP_CLOSE_DELAY_MS + TP_CLOSE_MS + TP_SLACK_MS);
+    el.addEventListener('transitionend', onEnd);
+    el.__tpCancel = finish;
+  }
+
+  /**
+   * 把一个 hidden 的块从 0 长到自然高度。
+   * @param {HTMLElement} el 要展开的块
+   * @param {boolean} capped 展开后是否套用滚动上限（内容超高时不再无限拉长）
+   */
+  function tpReveal(el, capped){
+    if (el.__tpCancel) { el.__tpCancel(); el.__tpCancel = null; }
+    el.removeAttribute('hidden');
+    // 先按「无上限」量出真实高度，再决定动画终点。
+    // 不这么做会怎样：hidden 刚摘掉时 max-height 已经生效，量到的高度是夹过的，
+    // 而动画终点写成夹过的值 —— 展开到一半又跳一下（实测）。
+    el.removeAttribute('data-capped');
+    var natural = el.offsetHeight;
+    var mt = parseFloat(getComputedStyle(el).marginTop) || 0;
+    if (tpReduced()) {
+      tpClearMotion(el);
+      if (capped) {
+        el.setAttribute('data-capped', 'true');
+        tpBindFades(el);
+        if (el.__tpFades) el.__tpFades.sync();
+      }
+      return;
+    }
+    el.setAttribute('data-motion', 'reveal');
+    el.style.transition = 'none';
+    el.style.overflow = 'hidden';
+    el.style.opacity = '0';
+    el.style.height = '0px';
+    el.style.marginTop = '0px';
+    void el.offsetHeight;
+    el.style.transition = 'height ' + TP_CLOSE_MS + 'ms ' + TP_EASE + ' ' + TP_CLOSE_DELAY_MS + 'ms, '
+      + 'margin-top ' + TP_CLOSE_MS + 'ms ' + TP_EASE + ' ' + TP_CLOSE_DELAY_MS + 'ms, '
+      + 'opacity ' + TP_CLOSE_MS + 'ms ' + TP_EASE + ' ' + TP_CLOSE_DELAY_MS + 'ms';
+    el.style.height = natural + 'px';
+    el.style.marginTop = mt + 'px';
+    el.style.opacity = '1';
+    var finished = false;
+    var finish = function () {
+      if (finished) return;
+      finished = true;
+      el.removeEventListener('transitionend', onEnd);
+      clearTimeout(timer);
+      el.__tpCancel = null;
+      tpClearMotion(el);
+      // 动画结束才套滚动上限：动画中用 max-height 会截断高度过渡
+      if (capped) {
+        el.setAttribute('data-capped', 'true');
+        // 边缘渐隐要等上限生效（能滚了）再绑，否则算出的 scrollHeight 是没夹过的
+        tpBindFades(el);
+        if (el.__tpFades) el.__tpFades.sync();
+      }
+    };
+    var onEnd = function (ev) {
+      if (ev.target === el && ev.propertyName === 'height') finish();
+    };
+    var timer = setTimeout(finish, TP_CLOSE_DELAY_MS + TP_CLOSE_MS + TP_SLACK_MS);
+    el.addEventListener('transitionend', onEnd);
+    el.__tpCancel = finish;
+  }
+
+  /**
+   * 实时轮次收口：把这一轮的工具行与思考块**按段**折起来。
+   *
+   * ## 为什么必须分段（第 29 轮修复）
+   *
+   * 一轮里 AI 是「做几件事 → 说一句 → 再做几件 → 再说一句」这样推进的。
+   * 原来这里把所有 `[data-turn-tool]` 一次性收进**一个**组，再把组插到
+   * 第一个工具的位置 —— 于是后面几段的工具全被搬到最前面，正文被挤到末尾。
+   * 实测一发就是：`[正文A][组: 全部4条工具][正文B][正文C]`，
+   * 而真实顺序是 `[工具][正文A][工具][正文B][工具][正文C]`。
+   * 用户看到的是「AI 先把所有工具跑完才说话」，跟当时的过程完全对不上。
+   *
+   * dsh 的做法（ui-chat/conversation-nodes/process-groups.ts）是同一条：
+   *   「遇到带正文的 assistant-step 就 flush 一次组」
+   * 这里用 DOM 相邻性表达同一个意思：**夹了别的东西（正文/用户插话/系统行）
+   * 就断开成新的一段**，每段各自成为一个折叠组。
    *
    * 什么情况不折叠：
    *   · 本轮没有任何工具/思考（纯聊天）→ 没东西可折，加一行摘要反而碍眼
@@ -8534,22 +8905,40 @@ body[data-drawer="true"] #toBottom{display:none}
        原来直接 querySelectorAll('[data-turn-tool]') 会把**上一轮**已经收好的
        那些也捞出来 —— 它们的 closest('.turn-proc') 非空，于是第一轮那个
        「已经收过」的守卫立刻 return，第二轮的新工具行就永远折不上（实测）。 */
-    var tools = Array.prototype.slice.call(
-      convo.querySelectorAll('[data-turn-tool]')).filter(function (el) {
-        return !el.closest('.turn-proc');
-      });
-    var thinks = Array.prototype.slice.call(
-      convo.querySelectorAll('[data-turn-think]')).filter(function (el) {
-        return !el.closest('.turn-proc');
-      });
+    var nodes = Array.prototype.slice.call(convo.children).filter(function (el) {
+      return (el.hasAttribute('data-turn-tool') || el.hasAttribute('data-turn-think'))
+        && !el.closest('.turn-proc');
+    });
     // 本轮没有任何工具/思考（纯聊天）→ 没东西可折，加一行摘要反而碍眼
-    if (!tools.length && !thinks.length) return null;
-    var box = buildTurnProc(tools.concat(thinks), {
-      reason: reason,
-      elapsedMs: turnStartTime ? Math.max(1000, Date.now() - turnStartTime) : 0
+    if (!nodes.length) return null;
+
+    // 按 DOM 相邻性切段：上一个处理过的节点不是自己的前一个兄弟 = 中间夹了别的东西
+    var segments = [];
+    var cur = [];
+    nodes.forEach(function (el) {
+      if (cur.length && cur[cur.length - 1].nextElementSibling !== el) {
+        segments.push(cur);
+        cur = [];
+      }
+      cur.push(el);
+    });
+    if (cur.length) segments.push(cur);
+
+    var last = null;
+    segments.forEach(function (seg, i) {
+      /* 只有最后一段承担整轮收口的文案（耗时 / 被打断 / 失败）。
+         中间段写「工作过程」—— 文案与颜色都别再重复一遍，
+         否则一屏出现三行「已工作」，读者分不清哪些是同一轮。 */
+      var tail = (i === segments.length - 1);
+      last = buildTurnProc(seg, {
+        reason: reason,
+        elapsedMs: tail && turnStartTime ? Math.max(1000, Date.now() - turnStartTime) : 0,
+        headline: tail,
+        animate: true
+      }) || last;
     });
     turnStartNode = null;
-    return box;
+    return last;
   }
 
   function turnEnd(p){
@@ -9375,6 +9764,10 @@ body[data-drawer="true"] #toBottom{display:none}
       if (br) br.textContent = cur;
       setChipSess(cur);
     }
+    /* 保存完成后要**真的回到那个会话**：用户点的是抽屉里的「保存当前为…」，
+       保存成功却还把抽屉摊在那儿，他会以为没成（实测被点名「理应自动跳转」）。
+       历史已经在屏幕上（他本来就在这段对话里），所以只收抽屉、不重画。 */
+    setDrawer(false);
     if (REAL) post('sessionList', {});
     rendered('session/saved', { name: name, switched: true, current: cur });
   }
@@ -9523,6 +9916,9 @@ body[data-drawer="true"] #toBottom{display:none}
       (isTodo ? '<div class="todo"></div><div class="extra"></div>' : ioInHtml(inputText) + outHtml) +
       '</div>';
     convo.appendChild(wrap);
+    // 同实时行：留工具名供折叠摘要合成「已读取文件」这类短语
+    wrap.setAttribute('data-tool', String(m.name || ''));
+    wrap.setAttribute('data-tool-label', String(m.label || ''));
     // 剩余行挂到 .more 节点上（历史行不在 toolMap 里，见事件委托那段）
     if (restOutLines && restOutLines.length) {
       var moreEl = wrap.querySelector('.snippet .more');
@@ -9584,12 +9980,22 @@ body[data-drawer="true"] #toBottom{display:none}
     /* 历史里没有 turn/begin、turn/end 事件，只有一串 user / assistant / tool。
        轮次边界只能靠 **user 消息** 划：它之后到下一个 user 之前，就是一轮。
        收口时把这些工具行与思考块折起来，用户切回会话看到的才是
-       「▸ 这一轮的工作过程 · 3 次工具调用」，而不是几十行平铺的工具。 */
+       「▸ 这一轮的工作过程 · 3 次工具调用」，而不是几十行平铺的工具。
+
+       ## 和实时一样要**分段**（第 29 轮修复）
+
+       一轮里 AI 是「做几件事 → 说一句 → 再做几件 → 再说一句」。
+       只在 user 边界收口的话，后面几段的工具会被搬到最前面、正文被挤到末尾，
+       跟当时的过程对不上（实测 order 从 `[工具][正文A][工具][正文B]`
+       变成 `[组: 全部工具][正文A][正文B]`）。
+       dsh 的做法是「遇到带正文的 assistant-step 就 flush 一次组」，
+       这里同理：**每段正文之前先把已累积的工具收口**。 */
     var roundNodes = [];
     function flushRound(){
-      if (!roundNodes.length) return;
-      buildTurnProc(roundNodes, { reason: 'history' });
+      if (!roundNodes.length) return null;
+      var box = buildTurnProc(roundNodes, { reason: 'history', headline: false });
       roundNodes = [];
+      return box;
     }
     msgs.forEach(function(m){
       if (!m) return;
@@ -9647,7 +10053,10 @@ body[data-drawer="true"] #toBottom{display:none}
       } else {
         // 助手消息不套 .text（.text 是用户消息的容器）
         // 思考必须画在正文**之前**，顺序与当时流式出现的顺序一致
+        // 思考进组（dsh 也是把 reasoning 归到 process 区）
         if (thinkText) roundNodes.push(addHistoryThink(thinkText));
+        // 正文出现 = 前一段工具到此为止，先收口再画正文
+        flushRound();
         var a = document.createElement('div');
         a.className = 'msg assistant';
         a.innerHTML = markdownInline(m.text);
@@ -9658,6 +10067,44 @@ body[data-drawer="true"] #toBottom{display:none}
     flushRound();
     // 刚进入/加载一个会话，用户期待停在最新一条
     scrollBottom(true);
+  }
+
+  /**
+   * 「切进某个会话」的唯一入口。
+   *
+   * 四条成功路径（切换 / 新建 / 新建分支 / 完成合并 / 保存会话）在**切换**
+   * 这件事上完全一样：清屏、画历史、顶上名字、收起列表。以前每条各写一遍，
+   * 结果 sessionSwitch 里有 setDrawer(false)，其它几条都没有 —— 用户在列表里
+   * 点「新建对话」，后端真的建好了、列表却没有收起，屏幕上还是那张列表，
+   * 看起来就是「没跳转」（实测被点名）。抽成一处，以后不会有第五条漏掉。
+   *
+   * @param {Object} p 后端回执（要 current / messages / isChild）
+   * @returns {boolean} 是否真的切了（没有 current 或没带 messages 时不动）
+   */
+  function enterSessionFrom(p) {
+    if (!p || typeof p.current !== 'string' || !p.current) return false;
+    CUR = p.current;
+    CUR_IS_CHILD = !!p.isChild;
+    if (Array.isArray(p.messages)) {
+      resetConversationDom();
+      authHintShown = false;
+      body.setAttribute('data-run', 'false');
+      resetContextStats();
+      renderHistory(p.messages);
+      // 这个会话的提问也叠进来（全局历史保留，见 seedHistory）
+      seedHistory(p.messages);
+      historyDrawn = p.messages.length;
+      historyDrawnFor = p.current;
+    } else {
+      // 后端没带历史（老版本 / 空会话）：只换名字与列表状态，不清屏 ——
+      // 清屏会得到一片空白，比留着旧内容更让人以为数据丢了。
+      resetContextStats();
+    }
+    renderSessions();
+    // 列表态是**整块替换**对话区（body[data-drawer="true"] 下 .convo 是 display:none），
+    // 所以必须收起 —— 不收的话对话区仍是 display:none，用户看到的还是那张列表。
+    setDrawer(false);
+    return true;
   }
 
   function applySessionResult(p){
@@ -9720,6 +10167,9 @@ body[data-drawer="true"] #toBottom{display:none}
       body.setAttribute('data-run', 'false');
       resetContextStats();
       renderSessions();
+      // 用户是从会话列表里点的「＋ 新建对话」：建好了就必须把列表收起来，
+      // 否则屏幕上还是那张列表、对话区仍 display:none，看起来「点完没反应」。
+      setDrawer(false);
       // p.autoSaved：上一段内容被后端自动存成的会话名。
       // 必须说出来——否则用户看到对话区清空，会以为内容丢了。
       if (p.autoSaved) {
@@ -9737,37 +10187,24 @@ body[data-drawer="true"] #toBottom{display:none}
       // 于是用户正在读的回答被掐断、屏幕上直接换成另一个会话的历史，
       // 一个字都没提（实测：run true → 切完 false，sys 行 0 条）。
       var cutTurn = body.getAttribute('data-run') === 'true';
-      // 进入历史会话：清掉上一段，再把真实历史画回来。
-      // 不清空会看到两个会话的内容混在一起；不画则看着像空会话。
-      resetConversationDom();
-      authHintShown = false;
-      body.setAttribute('data-run', 'false');
-      CUR = String(p.current || '');
-      CUR_IS_CHILD = !!p.isChild;
-      resetContextStats();
-      renderSessions();
-      renderHistory(p.messages);
-      // 这个会话的提问也叠进来（全局历史保留，见 seedHistory）
-      seedHistory(p.messages);
-      // 窄面板里抽屉是覆盖全宽的浮层：不自动收起的话，历史虽然画好了却被它
-      // 盖住 —— 用户点了会话、回执也到了，屏幕上还是那张列表，只能自己找 ×
-      // 或按 Esc 才知道进去了（实测 249/320px 都这样）。
-      // 宽面板是并排形态（262px 侧栏 + 对话区），不需要收，收了反而打断浏览。
-      if (getComputedStyle(drawer).position === 'absolute') setDrawer(false);
-      // 记下「已经画了后端多少条」：不记的话，紧随其后的 initialize（重连、
-      // 面板重建）会以为还没画过，把这段历史整段清空重画——用户看到闪一下，
-      // 正在流式的正文还可能被顶掉（实测 3/3 复现）。
-      historyDrawn = (p.messages || []).length;
-      historyDrawnFor = p.current;
+      enterSessionFrom(p);
       if (cutTurn) {
         sysLine('■', '已停止上一轮', '');
       }
       // 一句到底：切换结果 + （必要时）上一轮被保存成了什么名字。
-      // 空会话、打断细节都属于用户自己能看出来的事，不必逐条解释。
-      sysLine('↳', '已切换至对话 ' + esc(p.current),
+      // 用 ✓ + 「已进入对话」：这是**成功回执**，不是过程叙述 —— 用户从列表点
+      // 进来时必须看到一句明确的「进去了」，否则切完只是换了一屏内容，
+      // 分不清是切换成功还是列表刚好关掉（实测被点名要求显示出来）。
+      sysLine('✓', '已进入对话 ' + esc(p.current || '（未命名）'),
         p.autoSaved ? '上一轮保存为「' + esc(p.autoSaved) + '」' : '');
     } else if (p.action === 'sessionExplore' && p.current) {
-      sysLine('⑂', '已切换至对话 ' + esc(p.current), '');
+      /* 新建/进入探索分支：与切换完全同一件事，必须走同一个入口。
+         原来这里只打一行系统提示，对话区仍停在上一个会话的内容上 ——
+         用户点「新建探索分支」，后端建好了、顶栏名字变了，内容却没换，
+         只能自己去列表再点一次才真正进去（实测被点名「理应自动跳转」）。 */
+      enterSessionFrom(p);
+      sysLine('⑂', '已进入探索分支 ' + esc(p.current),
+        p.reentered ? '这是之前建过的同名分支' : '');
     } else if (p.action === 'sessionDone') {
       if (p.merged === false) {
         // 分支没有增量属于业务提示，不是错误：用中性行，不用红色
@@ -9777,20 +10214,9 @@ body[data-drawer="true"] #toBottom{display:none}
         // 不重绘会怎样（实测）：顶栏写着父会话、对话区还留着分支的全部内容，
         // 用户接着在「父会话 + 分支内容」的错位状态下提问；而刚合并出来的
         // 「# 子会话 [x] 结论」在界面上根本看不到（要重载面板才出现）。
-        if (p.messages && p.messages.length) {
-          resetConversationDom();
-          authHintShown = false;
-          body.setAttribute('data-run', 'false');
-          CUR = String(p.current || '');
-          CUR_IS_CHILD = !!p.isChild;
-          resetContextStats();
-          renderSessions();
-          renderHistory(p.messages);
-          seedHistory(p.messages);
-          historyDrawn = (p.messages || []).length;
-          historyDrawnFor = p.current;
-        }
-        sysLine('✓', '已切换至对话 ' + esc(p.current || ''), '');
+        // 走统一入口：顺带把会话列表收起（用户是从列表里点的「完成并合并」）。
+        enterSessionFrom(p);
+        sysLine('✓', '已回到父会话 ' + esc(p.current || ''), '');
       }
     } else if (p.action === 'sessionDelete') {
       // 删的若是当前会话，后端已切回游离态，对话区必须清：后端已经没有这段
@@ -9818,6 +10244,9 @@ body[data-drawer="true"] #toBottom{display:none}
       CUR = String(p.current || '');
       CUR_IS_CHILD = false;
       renderSessions();
+      // 删的是当前会话时，用户本来就在列表里操作：删完要回到对话区，
+      // 而不是让他盯着一张「已经少了一条」的列表自己找出口。
+      if (p.wasCurrent) setDrawer(false);
     } else if (p.action === 'sessionRename') {
       sysLine('✏', '已重命名为 ' + esc(p.to || ''), '', 'ok');
       // 改的是当前会话时后端已把状态指到新名，CUR 同步过去

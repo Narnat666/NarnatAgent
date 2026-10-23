@@ -1175,7 +1175,18 @@ class RpcServer:
         err = self._mgr.on_explore(name)
         if err:
             raise RpcError(-32000, err)
-        payload = {"current": self._current_path()}
+        # 必须把分支的历史一起回给界面——与 session/switch 同一套字段。
+        #
+        # 原来只回 {"current": 名字}，界面拿不到 messages 就只能画一行系统提示，
+        # 对话区还停在上一个会话的内容上。用户点「新建探索分支」成功后看到的是
+        # 「顶栏名字变了、内容没变」，只能自己去会话列表再点一次才真正进去（实测）。
+        # 换句话说：**创建成功 ≠ 跳转成功**，中间差的就是这份 messages。
+        payload = {
+            "current": self._current_path(),
+            "messageCount": len(self._mgr.get_messages()),
+            "isChild": bool(self._mgr.state.session_parent()),
+            "messages": _history_payload(self._mgr.get_full_messages()),
+        }
         if reentered:
             payload["reentered"] = True
             payload["notice"] = f"已重新进入分支 {name}"
@@ -1220,7 +1231,7 @@ class RpcServer:
                         这是用户最需要改的（换厂商就是改这三项），
                         以前只能去手编 narnat.json。
         2. `websearch`—— **联网搜索接入配置**：provider / 服务器地址 / 密钥。
-        3. `prompt`   —— narnat.md 用户指令（内容另走 narnatmd/get）。
+        3. `prompt`   —— narnat.md 用户提示词（内容另走 narnatmd/get）。
 
         ## 为什么密钥要打码
 
@@ -1241,7 +1252,7 @@ class RpcServer:
         groups = [
             {"id": "api", "label": "模型 API"},
             {"id": "websearch", "label": "联网工具"},
-            {"id": "prompt", "label": "指令"},
+            {"id": "prompt", "label": "提示词"},
         ]
         items: List[Dict[str, Any]] = []
 
