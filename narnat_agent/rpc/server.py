@@ -1288,24 +1288,78 @@ class RpcServer:
         })
 
         # ────────── 2. 联网工具 ──────────
+        # 不绑定厂商：只选「接入方式」，厂商差异全部落到下面的字段里由用户填。
+        # 两种方式各自显示自己的字段（showFor），切回去时值都还在。
         items.append({
-            "id": "websearch.provider", "group": "websearch", "label": "搜索服务", "kind": "select",
-            "value": ws_snap["provider"], "writable": True,
+            "id": "websearch.mode", "group": "websearch", "label": "接入方式", "kind": "select",
+            "value": ws_snap["mode"], "writable": True,
             "options": [
-                {"value": "mcp", "label": "MCP 服务器（AnySearch 等）"},
-                {"value": "deepseek", "label": "DeepSeek 官方搜索"},
+                {"value": "mcp", "label": "MCP 服务器（任意厂商）"},
+                {"value": "http", "label": "REST 接口（任意厂商）"},
             ],
         })
         items.append({
-            "id": "websearch.url", "group": "websearch", "label": "服务器地址", "kind": "text",
-            "value": ws_snap["url"], "writable": True, "showFor": ["mcp"],
-            "placeholder": "https://api.anysearch.com/mcp",
+            "id": "websearch.url", "group": "websearch", "label": "接口地址", "kind": "text",
+            "value": ws_snap["url"], "writable": True,
+            "placeholder": "https://...",
         })
         items.append({
-            "id": "websearch.key", "group": "websearch", "label": "搜索 API Key", "kind": "secret",
+            "id": "websearch.key", "group": "websearch", "label": "密钥", "kind": "secret",
             "value": "", "masked": ws_snap["keyMasked"], "isSet": ws_snap["keySet"],
             "writable": True,
-            "placeholder": "（已设置，留空表示不改）" if ws_snap["keySet"] else "as_sk_...",
+            "placeholder": "（已设置，留空表示不改）" if ws_snap["keySet"] else "",
+        })
+        items.append({
+            "id": "websearch.auth", "group": "websearch", "label": "认证方式", "kind": "select",
+            "value": ws_snap["auth"] or "x-api-key", "writable": True,
+            "options": [
+                {"value": "x-api-key", "label": "X-API-Key 头"},
+                {"value": "bearer", "label": "Authorization: Bearer"},
+                {"value": "none", "label": "不认证"},
+            ],
+        })
+        # ── MCP 方式专属 ──
+        items.append({
+            "id": "websearch.tool", "group": "websearch", "label": "工具名", "kind": "text",
+            "value": ws_snap["tool"], "writable": True, "showFor": ["mcp"],
+            "placeholder": "search", "advanced": True,
+        })
+        items.append({
+            "id": "websearch.query_params", "group": "websearch", "label": "查询参数字段",
+            "kind": "text", "value": ws_snap["query_params"], "writable": True,
+            "showFor": ["mcp"], "placeholder": "query", "advanced": True,
+        })
+        items.append({
+            "id": "websearch.count_param", "group": "websearch", "label": "条数字段",
+            "kind": "text", "value": ws_snap["count_param"], "writable": True,
+            "showFor": ["mcp"], "placeholder": "max_results（留空=不传）", "advanced": True,
+        })
+        # ── REST 方式专属 ──
+        for iid, label, val, ph in (
+            ("websearch.query_field", "查询字段", ws_snap["query_field"], "query"),
+            ("websearch.count_field", "条数字段", ws_snap["count_field"], "count（留空=不传）"),
+        ):
+            items.append({
+                "id": iid, "group": "websearch", "label": label, "kind": "text",
+                "value": val, "writable": True, "showFor": ["http"], "placeholder": ph,
+                "advanced": True,
+            })
+        for iid, label, val, ph in (
+            ("websearch.rail_list", "结果数组路径", ws_snap["rail_list"], "results 或 data.items（留空=响应本身是数组）"),
+            ("websearch.rail_title", "标题字段", ws_snap["rail_title"], "title"),
+            ("websearch.rail_url", "链接字段", ws_snap["rail_url"], "url"),
+            ("websearch.rail_desc", "描述字段", ws_snap["rail_desc"], "snippet（可逗号分隔多个，取第一个非空）"),
+        ):
+            items.append({
+                "id": iid, "group": "websearch", "label": label, "kind": "text",
+                "value": val, "writable": True, "showFor": ["http"], "placeholder": ph,
+                "advanced": True,
+            })
+        # 附加固定参数（两种方式共用，原样并进请求）
+        items.append({
+            "id": "websearch.args", "group": "websearch", "label": "附加参数（JSON）",
+            "kind": "text", "value": ws_snap["args"], "writable": True,
+            "placeholder": '{"need_content": false}', "advanced": True,
         })
         # 联网搜索总开关（复用已有的 plugin 通道，不新造一套）
         for p in self._plugins():
@@ -1497,6 +1551,34 @@ class RpcServer:
             if not isinstance(v, str) or not v.strip():
                 raise RpcError(-32602, "config/set: api.model 必须是非空字符串")
             patch["模型"] = {"当前": v.strip()}
+
+        # 模型先在**写盘前**尝试热切换，用它的结果决定盘上到底写什么。
+        #
+        # 原实现是先写盘、再 on_mode，而 on_mode 对「不在候选列表里的名字」是
+        # **返回一句「无效值」而不是抛异常** —— try/except 抓不到，返回值也没人看。
+        # 后果（实测）：换成 Moonshot 填 kimi-k2 → 盘上是 kimi-k2、内存还是旧的，
+        # 界面回显旧模型名，用户以为没保存成功，反复重试；重启后又突然变成
+        # kimi-k2，若这个名字无效则整个后端起不来。
+        #
+        # 现在：候选列表里有的名字用**列表里的写法**写盘（顺带归一大小写/空格）；
+        # 列表里没有的名字照样写盘（换厂商必须能自己填），但把 on_mode 的原话
+        # 作为 warning 回给界面，让用户知道「本次会话仍用旧模型」。
+        mode_note = ""
+        if "模型" in patch:
+            wanted = patch["模型"]["当前"]
+            try:
+                reply = self._mgr.on_mode(wanted)
+            except Exception as e:      # on_mode 内部异常不影响写盘
+                reply = f"热切换异常: {e}"
+            if isinstance(reply, str) and reply:
+                if reply.startswith("设置成功："):
+                    # 切成功：用候选列表里的写法落盘，避免盘上留下 DEEPSEEK-FLASH
+                    patch["模型"]["当前"] = reply.split("：", 1)[1].strip()
+                else:
+                    # 没切成功（无效值 / 写回失败）：盘上仍写用户填的名字，
+                    # 但必须把原因带回界面 —— 否则用户完全看不出发生了什么
+                    mode_note = reply
+
         if not patch:
             raise RpcError(-32602, "config/set: api 没有任何可写字段")
 
@@ -1512,48 +1594,143 @@ class RpcServer:
         err = _persist_config(getattr(self._mgr, "_config_dir", ""), _mutate)
         if err:
             raise RpcError(-32000, "保存失败：" + err)
-        # 热切模型（有 on_mode 路径，能立即生效）
-        if "模型" in patch:
-            try:
-                self._mgr.on_mode(patch["模型"]["当前"])
-            except Exception:
-                pass
-        return {"ok": True, "needRestart": True,
-                "current": self._api_snapshot()}
+        out: Dict[str, Any] = {"ok": True, "needRestart": True,
+                               "current": self._api_snapshot()}
+        if mode_note:
+            # 前端会把它显示在设置面板的提示行里（见 __narnatOnConfigResult）
+            out["warning"] = mode_note
+        return out
 
     def _set_websearch_config(self, value: Any) -> Dict[str, Any]:
         """改联网搜索的接入配置。
 
-        后端支持两种 provider（见 tools/web_search/_provider_name）：
-          · "mcp"      —— 任意 MCP 搜索服务器（默认 AnySearch），要 url/auth/tool 等
-          · "deepseek" —— DeepSeek 官方搜索 REST，只要 key
-        两种需要的字段不同，所以这里按 provider 分别校验 ——
-        统一按 mcp 校验会让选 deepseek 的人被要求填 url（那些字段对 deepseek 无意义）。
+        ## 不绑定厂商
+
+        只有两种「接入方式」（见 tools/web_search/_MODES）：
+          · "mcp"  —— 任意 MCP 搜索服务器
+          · "http" —— 任意 REST 搜索接口
+        厂商差异全部由用户填的字段表达（地址/认证/字段名/响应解析），
+        所以这里只做「字段字符串校验 + 分桶落盘」，不校验任何厂商特有语义。
+
+        ## 分桶规则（避免两套配置互相污染）
+
+        key / auth  → 顶层（两种方式共用同一把搜索钥匙与认证方式）
+        url / args  → 跟**当前生效的方式**走（两边都有这两个字段）
+        其余        → 按归属入桶：tool/query_params/count_param → mcp
+                                  query_field/count_field/rail → http
         """
         if not isinstance(value, dict):
             raise RpcError(-32602, "config/set: websearch 的 value 必须是对象")
-        provider = str(value.get("provider") or "mcp").strip().lower()
-        if provider not in ("mcp", "deepseek"):
-            raise RpcError(-32000, "config/set: provider 只支持 mcp / deepseek")
-        patch: Dict[str, Any] = {"provider": provider}
-        for src, dst in (("url", "url"), ("key", "key"), ("auth", "auth"), ("tool", "tool")):
-            if src in value:
-                v = value.get(src)
+
+        # mode 只在**显式提交**时才变更。界面每改一个字段就只提交那一个，
+        # 若无条件把缺省 mode 写成 "mcp"，用户「先选 REST 再填密钥」时，
+        # 填密钥那一下会把刚选的方式冲回 mcp（这个坑实测踩过）。
+        explicit_mode: Optional[str] = None
+        if "mode" in value or "provider" in value:
+            raw = value.get("mode", value.get("provider"))
+            explicit_mode = str(raw or "").strip().lower()
+            explicit_mode = {"deepseek": "http"}.get(explicit_mode, explicit_mode)
+            if explicit_mode not in ("mcp", "http"):
+                raise RpcError(-32000, "config/set: 接入方式只支持 mcp / http")
+
+        # 当前生效的方式：显式给的优先，否则沿用磁盘现值
+        effective = explicit_mode
+        if effective is None:
+            cur = self._legacy_ws_view(self._read_json_config().get("联网搜索"))
+            effective = cur["mode"]
+
+        # 字段归属表：字段名 → 桶名（None = 顶层，"" = 跟当前方式）
+        OWNER = {
+            "key": None, "auth": None,
+            "url": "", "args": "",
+            "tool": "mcp", "query_params": "mcp", "count_param": "mcp",
+            "query_field": "http", "count_field": "http", "rail": "http",
+        }
+        top: Dict[str, Any] = {}
+        for src in OWNER:
+            if src not in value:
+                continue
+            v = value.get(src)
+            owner = OWNER[src]
+            bucket = effective if owner == "" else owner
+            # owner 为 None = 顶层字段（key/auth）。不能走 setdefault(bucket, {})：
+            # bucket 是 None 时会在 dict 里建一个 None 键，JSON 落盘成 `"null": {...}`
+            # —— 那两个字段就丢了（实测：改认证方式后磁盘多出一个 "null" 桶）。
+            if owner is None:
+                if src == "auth" and isinstance(v, str) and v.strip().lower() == "none":
+                    top[src] = ""       # 「不认证」落盘成空串（与 _auth_headers 语义一致）
+                    continue
                 if not isinstance(v, str):
                     raise RpcError(-32602, f"config/set: websearch.{src} 必须是字符串")
-                patch[dst] = v.strip()
+                top[src] = v.strip()
+                continue
+            if src == "rail":
+                if not isinstance(v, dict):
+                    raise RpcError(-32602, "config/set: websearch.rail 必须是对象")
+                top.setdefault(bucket, {})[src] = v
+            elif src == "args":
+                if not isinstance(v, dict):
+                    raise RpcError(-32602, "config/set: websearch.args 必须是对象")
+                top.setdefault(bucket, {})[src] = v
+            elif src == "query_params":
+                # 界面用逗号分隔的单行编辑，落盘统一成数组
+                if isinstance(v, str):
+                    items = [x.strip() for x in v.split(",") if x.strip()]
+                elif isinstance(v, list):
+                    items = [str(x).strip() for x in v if str(x).strip()]
+                else:
+                    raise RpcError(-32602, "config/set: websearch.query_params 必须是字符串或数组")
+                if not items:
+                    raise RpcError(-32000, "config/set: 查询参数字段不能为空")
+                top.setdefault(bucket, {})[src] = items
+            else:
+                if not isinstance(v, str):
+                    raise RpcError(-32602, f"config/set: websearch.{src} 必须是字符串")
+                top.setdefault(bucket, {})[src] = v.strip()
 
-        if provider == "deepseek":
-            if "key" in patch and not patch["key"]:
-                raise RpcError(-32000, "config/set: 选 deepseek 时必须填 API Key")
-        else:
-            # mcp 方式：url 是这个模式的核心（请求发到哪）
-            if "url" in patch and not patch["url"]:
-                raise RpcError(-32000, "config/set: 选 mcp 时必须填服务器地址")
+        # 地址是两种方式的核心，提交了空值就拒（否则存进去下次必然报错）
+        if "url" in value and not top.get(effective, {}).get("url"):
+            raise RpcError(-32000, "config/set: 接口地址不能为空")
+
+        # 只切接入方式、不带其它字段也是合法操作（用户在界面上换一个下拉就走）
+        if not top and explicit_mode is None:
+            raise RpcError(-32602, "config/set: websearch 没有任何可写字段")
 
         def _mutate(data):
             ws = data.setdefault("联网搜索", {})
-            ws.update(patch)
+            # ① 老配置迁移：平铺字段按当前方式收进对应桶，顶层只留 key/auth/mode。
+            #    不迁的话，切到 REST 后打开 narnat.json 仍会看到 MCP 那套
+            #    （"为什么还有 anyserch.com 的配置"）。
+            view = self._legacy_ws_view(ws)
+            for k in ("url", "tool", "query_params", "count_param", "args",
+                      "query_field", "count_field", "rail", "provider", "deepseek"):
+                ws.pop(k, None)
+            for name in ("mcp", "http"):
+                merged = dict(ws.get(name)) if isinstance(ws.get(name), dict) else {}
+                merged.update(view["buckets"].get(name, {}))
+                if merged:
+                    ws[name] = merged
+            ws["mode"] = effective
+            if view["top"].get("key") is not None:
+                ws["key"] = view["top"]["key"]
+            if view["top"].get("auth") is not None:
+                ws["auth"] = view["top"]["auth"]
+            # ② 写入本次提交
+            for k, v in top.items():
+                if isinstance(v, dict) and k in ("mcp", "http"):
+                    cur = ws.get(k)
+                    merged = dict(cur) if isinstance(cur, dict) else {}
+                    for kk, vv in v.items():
+                        if kk == "rail":
+                            cur_rail = merged.get("rail")
+                            r = dict(cur_rail) if isinstance(cur_rail, dict) else {}
+                            r.update(vv)
+                            merged["rail"] = r
+                        else:
+                            merged[kk] = vv
+                    ws[k] = merged
+                else:
+                    ws[k] = v
 
         err = _persist_config(getattr(self._mgr, "_config_dir", ""), _mutate)
         if err:
@@ -1596,6 +1773,11 @@ class RpcServer:
         base_url = disk.get("接口地址")
         protocol = disk.get("协议")
         key = disk.get("接口密钥")
+        # 模型也是「内存 vs 磁盘」的一对：on_mode 没切成（名字不在候选列表）时，
+        # 内存还在旧值、盘上已是新值。不算进 restartPending 的话，用户改完模型
+        # 看到的仍是旧模型名 + 一句「已保存」，会以为没生效而反复重试。
+        disk_model = disk.get("模型")
+        disk_model = disk_model.get("当前") if isinstance(disk_model, dict) else None
         return {
             "baseUrl": base_url if isinstance(base_url, str) else ai.base_url,
             "apiKeyMasked": self._mask_key(key if isinstance(key, str) else ai.api_key),
@@ -1607,6 +1789,7 @@ class RpcServer:
                 (isinstance(base_url, str) and base_url != ai.base_url)
                 or (isinstance(protocol, str) and protocol != ai.protocol)
                 or (isinstance(key, str) and key != ai.api_key)
+                or (isinstance(disk_model, str) and disk_model != ai.model)
             ),
         }
 
@@ -1634,18 +1817,118 @@ class RpcServer:
         而在 tool_context.api_keys 里按需读。所以这里直接读文件，
         但**复用** _read_json_config / _persist_config 的同一个 config_dir，
         避免读的和写的不是一份。
+
+        ## 不绑定厂商
+
+        只上报「接入方式」(mode = mcp / http)，两种方式各自的字段从自己的子对象取。
+        老配置（provider=deepseek / 字段平铺）由 _legacy_ws_view 归一化后再上报，
+        所以界面打开就能看到用户已经填过的值，不需要用户重填。
         """
-        ws = self._read_json_config().get("联网搜索")
+        ws = self._legacy_ws_view(self._read_json_config().get("联网搜索"))
+        mode = ws["mode"]
+        sub = ws["buckets"].get(mode, {})
+        # url / count 类字段跟当前方式走；其余按各自归属取
+        def pick(name, bucket=None, default=""):
+            src = ws["buckets"].get(bucket or mode, {})
+            v = src.get(name)
+            if v is None and bucket is None:
+                v = ws["top"].get(name)      # 老配置平铺在顶层
+            return default if v is None else v
+
+        rail = sub.get("rail") if isinstance(sub.get("rail"), dict) else {}
+
+        def rail_val(key, default=""):
+            v = rail.get(key)
+            if isinstance(v, list):
+                return ",".join(str(x) for x in v)
+            return default if v is None else str(v)
+
+        args = sub.get("args")
+        return {
+            "mode": mode,
+            "url": str(pick("url") or ""),
+            "keyMasked": self._mask_key(ws["top"].get("key")),
+            "keySet": bool(ws["top"].get("key")),
+            "auth": str(ws["top"].get("auth") or ""),
+            # MCP 专属
+            "tool": str(pick("tool", "mcp") or ""),
+            "query_params": self._as_csv(pick("query_params", "mcp")),
+            "count_param": str(pick("count_param", "mcp") or ""),
+            # REST 专属
+            "query_field": str(pick("query_field", "http") or ""),
+            "count_field": str(pick("count_field", "http") or ""),
+            "rail_list": rail_val("list"),
+            "rail_title": self._as_csv(rail.get("title")),
+            "rail_url": self._as_csv(rail.get("url")),
+            "rail_desc": self._as_csv(rail.get("desc")),
+            "args": json.dumps(args, ensure_ascii=False) if isinstance(args, dict) and args else "",
+        }
+
+    @staticmethod
+    def _as_csv(value) -> str:
+        """列表/字符串统一成逗号分隔展示（界面用单行 text 编辑）"""
+        if isinstance(value, (list, tuple)):
+            return ",".join(str(x) for x in value if str(x).strip())
+        return "" if value is None else str(value)
+
+    @staticmethod
+    def _legacy_ws_view(ws: Any) -> Dict[str, Any]:
+        """把「联网搜索」段归一成 {mode, top, buckets}，兼容老配置。
+
+        老配置形态（provider=deepseek / mcp，字段平铺在顶层）:
+            {"provider": "deepseek", "key": "sk-", "url": "...", "auth": "...",
+             "tool": "...", "query_params": [...], "count_param": "..."}
+        新配置形态（按接入方式分桶）:
+            {"mode": "mcp", "key": "sk-", "auth": "...",
+             "mcp": {"url": ..., "tool": ...}, "http": {"url": ..., "rail": {...}}}
+
+        归一化只读不写：真正的迁移发生在保存时（见 _set_websearch_config）。
+        """
         if not isinstance(ws, dict):
             ws = {}
-        return {
-            "provider": str(ws.get("provider") or "mcp"),
-            "url": str(ws.get("url") or ""),
-            "keyMasked": self._mask_key(ws.get("key")),
-            "keySet": bool(ws.get("key")),
-            "auth": str(ws.get("auth") or ""),
-            "tool": str(ws.get("tool") or ""),
-        }
+        raw_mode = ws.get("mode")
+        if raw_mode is None:
+            raw_mode = ws.get("provider")
+        mode = str(raw_mode or "mcp").strip().lower()
+        # 老 provider 值映射（deepseek 是「某厂商的 REST」，归入通用 http）
+        mode = {"deepseek": "http"}.get(mode, mode)
+        if mode not in ("mcp", "http"):
+            mode = "mcp"
+
+        buckets = {}
+        for name in ("mcp", "http"):
+            b = ws.get(name)
+            buckets[name] = dict(b) if isinstance(b, dict) else {}
+        # 老配置的平铺字段按**归属**分发（不能一股脑塞进当前方式：
+        # 老配置 provider=deepseek 时 mode 归一成 http，若把 tool/query_params
+        # 一起塞进 http 桶，用户切回 mcp 就会发现 those 三个丢了）。
+        #   url / args                    → 跟当前方式走（两边都有）
+        #   tool / query_params / count_param → mcp 专属
+        #   query_field / count_field / rail  → http 专属
+        legacy_shared = ("url", "args")
+        legacy_mcp = ("tool", "query_params", "count_param")
+        legacy_http = ("query_field", "count_field", "rail")
+        for k in legacy_shared:
+            if k in ws:
+                buckets[mode].setdefault(k, ws[k])
+        for k in legacy_mcp:
+            if k in ws:
+                buckets["mcp"].setdefault(k, ws[k])
+        for k in legacy_http:
+            if k in ws:
+                buckets["http"].setdefault(k, ws[k])
+        # deepseek 子对象（上一版实现）并进 http 桶
+        ds = ws.get("deepseek")
+        if isinstance(ds, dict):
+            for k, v in ds.items():
+                buckets["http"].setdefault(k, v)
+        top = {"key": ws.get("key")}
+        # auth 老配置在顶层；新配置也在顶层（两种方式共用）
+        auth = ws.get("auth")
+        if auth is None:
+            auth = buckets["mcp"].get("auth")
+        top["auth"] = auth
+        return {"mode": mode, "top": top, "buckets": buckets}
 
     # ── 方法：shutdown ──
 

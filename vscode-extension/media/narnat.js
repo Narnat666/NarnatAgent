@@ -72,10 +72,12 @@
   var curThink = null;       // 当前思考块
   var pendingTodoRow = null; // 由 tool/call 预留的「更新计划」行，等 todo/update 填充
   var toolMap = {};          // tool id → { wrap, row, slot, isTodo }
-  /* ---- 一轮的「工作过程」折叠（抄 dsh 的 TurnProcessNodeView）----
+  /* ---- 一轮的「工作过程」折叠（自研；dsh 里没有对应实现）----
      一轮跑完后，那一整串工具调用对用户已经没用了：他关心的是最后的回答。
-     dsh 的做法是收成一条带下边框的摘要行（「已工作 · 1分23秒」/「已停止」），
-     点一下才展开看细节。这里照做。
+     我们的做法是收成一条带下边框的摘要行（「已读取文件并搜索代码 · 1 分 23 秒」
+     /「已停止 · 执行了命令」），点一下才展开看细节。单行摘要的形态借鉴 dsh 的
+     工具行（`packages/client/ui-tool/**` 的 ToolRow + `ui-primitives/src/DisclosureRow.*`），
+     折叠组本身是我们自己加的。
      三个变量记「本轮」的边界与规模；tool/result 到达时打 data-turn 标记，
      轮末只收标记过的节点 —— 历史重放的工具行没有标记，不会被卷进来。 */
   var turnStartNode = null;  // 本轮第一个节点之前的兄弟节点（null=从头算）
@@ -175,6 +177,12 @@
     });
   }
 
+  /* 剪贴板写入的等待上限。宿主通道与本地通道**共用这一个值**（唯一真源）：
+     不同值只会在降级时把等待叠起来，用户以为卡死。
+     本地通道原来没有超时 —— 无用户手势时 navigator.clipboard.writeText
+     既不 resolve 也不 reject（Chromium 实测），按钮永远停在「复制」，
+     点了既不说成功也不说失败，正是下面注释点名要避免的「点了没反应的摆设」。 */
+  var CLIP_TIMEOUT_MS = 1500;
   /**
    * 走宿主的剪贴板写入。真正的 VSCode 面板里只有这条路可靠：
    * webview 是沙箱 iframe，navigator.clipboard 在部分宿主/权限策略下会以
@@ -191,7 +199,7 @@
       var timer = setTimeout(function () {
         delete clipWaiters[id];
         reject(new Error('host clipboard timeout'));
-      }, 1500);
+      }, CLIP_TIMEOUT_MS);
       clipWaiters[id] = function (ok) {
         clearTimeout(timer);
         ok ? resolve() : reject(new Error('host clipboard failed'));
@@ -209,25 +217,49 @@
   }
 
   /**
+   * 给一个剪贴板写入 Promise 套上超时兜底（CLIP_TIMEOUT_MS）。
+   * 超时按失败处理：按钮显示「复制失败」，用户知道该改用鼠标框选，
+   * 不会对着一个永远写着「复制」的按钮等。
+   */
+  function clipDeadline(p) {
+    return new Promise(function (resolve, reject) {
+      var timer = setTimeout(function () {
+        reject(new Error('clipboard timeout'));
+      }, CLIP_TIMEOUT_MS);
+      p.then(function () { clearTimeout(timer); resolve(); },
+        function (err) { clearTimeout(timer); reject(err); });
+    });
+  }
+
+  /**
    * 在 webview 内部自己写剪贴板（无宿主时用：预览页、回放测试）。
    * navigator.clipboard 要求安全上下文，没有就退到 execCommand。
+   * 两条分支都要过 clipDeadline：原生 writeText 在无用户手势时会**挂住**，
+   * 既不 resolve 也不 reject（R30c 实测等 2.5s 仍无结论）。
    */
   function copyTextLocal(s) {
+    var p;
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      return navigator.clipboard.writeText(s);
+      try {
+        p = navigator.clipboard.writeText(s);
+      } catch (err) {
+        p = Promise.reject(err);
+      }
+    } else {
+      p = new Promise(function (resolve, reject) {
+        var ta = document.createElement('textarea');
+        ta.value = s;
+        ta.style.position = 'fixed';
+        ta.style.top = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = false;
+        try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+        document.body.removeChild(ta);
+        ok ? resolve() : reject(new Error('execCommand copy failed'));
+      });
     }
-    return new Promise(function (resolve, reject) {
-      var ta = document.createElement('textarea');
-      ta.value = s;
-      ta.style.position = 'fixed';
-      ta.style.top = '-9999px';
-      document.body.appendChild(ta);
-      ta.select();
-      var ok = false;
-      try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
-      document.body.removeChild(ta);
-      ok ? resolve() : reject(new Error('execCommand copy failed'));
-    });
+    return clipDeadline(p);
   }
 
   /**
@@ -261,23 +293,32 @@
     var sel = '';
     try { sel = String(window.getSelection() || ''); } catch (err) { return; }
     if (!sel) { lastCopiedSel = ''; return; }
-    /* 选区落在输入框**内部**时才不接管：那是用户在编辑自己打的字，
-       复制该由浏览器/输入框自己处理。
+    /* 焦点在输入控件里时一律不接管。两条判据都要，缺一个就漏：
+       ① 控件自己内部有选区（selectionStart !== selectionEnd）→ 那份选区归它自己。
+          原来只靠 ② 判断，而 ② 对 textarea 天然失效 —— textarea 的内容不在
+          DOM 树里，getRangeAt().commonAncestorContainer 拿不到 textarea 内部的
+          节点，判断永远为假。实测后果：提示词框里按 Ctrl+A 全选，整篇提示词被
+          静默写进系统剪贴板，把用户刚在别处复制好的内容冲掉；紧接着 Ctrl+V
+          粘出来的是原文，用户看到的就是「Ctrl+V 粘贴的不是我要的」。
+       ② 文档选区落在输入框内部 → 同样归它自己。
        注意判据必须是「选区在不在输入框里」，不能只看 activeElement ——
        面板启动时会把焦点放到 #input，而用户完全可能没在里面打字、
        只是在对话区框选一段回答；只判 activeElement 会把这种正常复制挡掉
        （实测：activeElement 恒为 input，clipCount 永远是 0）。 */
-    try {
-      var ae = document.activeElement;
-      if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) {
+    var ae = document.activeElement;
+    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) {
+      var s0 = null, e0 = null;
+      try { s0 = ae.selectionStart; e0 = ae.selectionEnd; } catch (err) { s0 = null; }
+      if (s0 !== null && e0 !== null && s0 !== e0) return;
+      try {
         var s = window.getSelection();
         if (s && s.rangeCount) {
           var node = s.getRangeAt(0).commonAncestorContainer;
           var host = node && (node.nodeType === 1 ? node : node.parentNode);
           if (host && (host === ae || (ae.contains && ae.contains(host)))) return;
         }
-      }
-    } catch (err) { /* 取不到就按「不在输入框」处理，宁可多写一次剪贴板 */ }
+      } catch (err) { /* 取不到就按「不在输入框」处理，宁可多写一次剪贴板 */ }
+    }
     if (sel === lastCopiedSel) return;
     lastCopiedSel = sel;
     if (vscodeApi) vscodeApi.postMessage({ type: 'clipboard/write', params: { text: sel } });
@@ -288,14 +329,31 @@
     if (e.shiftKey || e.key === 'a' || e.key === 'A') setTimeout(pushSelectionToHost, 0);
   });
   /* Ctrl+C 兜底：某些环境下用户习惯按快捷键，走同一条宿主通道。
-     有选区时拦下默认行为，避免它又走那条静默失败的原生通路。 */
+     有选区时拦下默认行为，避免它又走那条静默失败的原生通路。
+
+     但**输入框内部的复制绝不能接管**：那里的选区属于控件自己，
+     window.getSelection() 未必反映它，而且宿主写入是异步的 ——
+     用户按完 Ctrl+C 立刻 Ctrl+V、或者切到别的程序粘贴，拿到的是旧内容，
+     表现就是「Ctrl+C 复制不出来」（实测反馈：提示词编辑区完全不能用）。
+     输入框、textarea 里的复制剪切一律交还给浏览器原生行为。 */
+  function inTextControl(t){
+    if (!t) return false;
+    var tag = t.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
+    return !!(t.isContentEditable);
+  }
   document.addEventListener('copy', function(e){
+    if (inTextControl(e.target)) return;
     var sel = '';
     try { sel = String(window.getSelection() || ''); } catch (err) { sel = ''; }
     if (!sel) return;
     if (vscodeApi) vscodeApi.postMessage({ type: 'clipboard/write', params: { text: sel } });
     lastCopiedSel = sel;
     e.preventDefault();
+  });
+  // 剪切同理：被接管后原生剪切不执行，textarea 里的字删不掉也复制不走
+  document.addEventListener('cut', function(e){
+    if (inTextControl(e.target)) return;
   });
 
   /* ---------- Markdown 表格 ---------- */
@@ -442,6 +500,7 @@
      */
     function parseListAt(start, baseIndent, ordered) {
       var items = [];
+      var hasTaskItem = false;
       var i = start;
       var re = ordered ? /^(\s*)\d+[.)]\s+(.*)$/ : /^(\s*)[-*+]\s+(.*)$/;
       /* 有序列表的起始编号：AI 常写「3. …4. …5. …」（接着上文编号），
@@ -469,7 +528,20 @@
         var m = re.exec(ln);
         var indent = m ? m[1].replace(/\t/g, '  ').length : -1;
         if (m && indent === baseIndent) {
-          items.push({ text: m[2], subs: [] });
+          var item = { text: m[2], subs: [], task: -1 };
+          /* 任务列表：`- [ ] 待办` / `- [x] 已完成`（大小写不敏感）。
+             不识别的话方括号会被当正文原样留成「[ ] 待办」，勾选项看起来
+             像个打坏的链接。识别后渲染成真实的 disabled checkbox，
+             与 dsh 的 render.tsx 一致（`ul` 带 contains-task-list）。 */
+          if (!ordered) {
+            var tm = /^\[([ xX])\]\s+([\s\S]*)$/.exec(item.text);
+            if (tm) {
+              item.task = (tm[1] === ' ') ? 0 : 1;
+              item.text = tm[2];
+              hasTaskItem = true;
+            }
+          }
+          items.push(item);
           i++;
           continue;
         }
@@ -504,8 +576,14 @@
       var tag = ordered ? 'ol' : 'ul';
       // 起始编号不是 1 时才写 start（写 start="1" 无害但多余）
       var startAttr = (ordered && olStart > 1) ? ' start="' + olStart + '"' : '';
-      var html = '<' + tag + startAttr + '>' + items.map(function (it) {
-        return '<li>' + it.text + it.subs.join('') + '</li>';
+      // contains-task-list 是 dsh（GFM）的标记口径：整张列表只要有一项是任务项
+      var clsAttr = hasTaskItem ? ' class="contains-task-list"' : '';
+      var html = '<' + tag + startAttr + clsAttr + '>' + items.map(function (it) {
+        // checkbox 插在首段之前，disabled（纯渲染，勾选状态由正文决定）
+        var box = it.task >= 0
+          ? '<input type="checkbox" disabled' + (it.task ? ' checked' : '') + '>'
+          : '';
+        return '<li>' + box + it.text + it.subs.join('') + '</li>';
       }).join('') + '</' + tag + '>';
       return { html: html, next: i };
     }
@@ -531,6 +609,21 @@
         flushPara();
         var lv = hm[1].length;
         out.push('<h' + lv + '>' + hm[2] + '</h' + lv + '>');
+        i++;
+        continue;
+      }
+
+      /* 分隔线：独占一行、只有同一种符号（`---` / `***` / `___`）且长度 ≥3。
+         判据要严，否则会把别的东西吃掉（实测过三类误判）：
+           · `| --- |` 表格分隔行 —— 含 `|`，不是纯符号行；而且表格在
+             extractTables 阶段就整块换成 \u0000TABLE 占位了，走不到这里
+           · `- item` 列表项 —— 符号后面有空格和正文，且列表在前面拦下了
+           · `    ---`（≥4 空格缩进）—— 缩进 4 空格在 Markdown 里是缩进代码/
+             列表续行，不是分隔线。所以前导空格限定 0~3
+         代码块内容也走不到这里：围栏代码块在 markdownInline 里已换成占位符。 */
+      if (/^ {0,3}([-*_])\1{2,}[ \t]*$/.test(line)) {
+        flushPara();
+        out.push('<hr>');
         i++;
         continue;
       }
@@ -721,8 +814,14 @@
     return out;
   }
 
-  /** 行内 Markdown：围栏代码块 → <pre>、`x` → <code>、**x** → <strong>、[t](u) → <a>、管道表格 → <table>。先整体转义再替换。 */
-  function markdownInline(text) {
+  /**
+   * 行内 Markdown：围栏代码块 → <pre>、`x` → <code>、**x** → <strong>、[t](u) → <a>、管道表格 → <table>。先整体转义再替换。
+   * @param {string} text 源文
+   * @param {boolean} [streaming] 流式中间态：为 true 时**不**跑语法高亮、
+   *   也不做代码块折叠（<pre> 直接 esc(raw)）。定稿（renderAssistantFinal /
+   *   历史重建）传 false。理由见 pushBlock 里的注释。
+   */
+  function markdownInline(text, streaming) {
     var src = String(text || '');
     var blocks = [];
     function pushBlock(lang, code) {
@@ -742,6 +841,14 @@
       // 但按钮照样渲染 —— 本窗口内所有 >30 行的代码块底部都挂着一个
       // 「展开全部 N 行」，点下去高度和行数一点变化都没有，是个彻底的死按钮。
       // 三条渲染路径（流式分段 / 轮末重渲染 / 历史重建）都会命中。
+      //
+      // 流式态还多一条：不高亮。每个 delta 都要把尾巴整段重渲染，
+      // 长代码块上跑一遍正则高亮是流式时最大的 CPU 开销（定稿只跑一次）。
+      // dsh 的做法相同 —— 流式期间 `lang = context.streaming ? undefined : lang`，
+      // 降级成纯文本代码块，定稿才带语言高亮。
+      // 但**折叠照旧**（判据里不带 streaming）：流式期间若把 200 行代码全摊开，
+      // 屏幕会被一路顶走、正文看不见，定稿又突然折回去 —— 前后跳动比限高更难读。
+      // 限高由 CSS 的 max-height 负责，与是否高亮无关。
       var doFold = lines > 30 && !foldOpenPref;
       var folded = doFold ? ' data-fold="true"' : '';
       blocks.push('<div class="code" data-wrap="' + wrapOn + '"' + folded + '>' +
@@ -749,7 +856,7 @@
         '<button class="code-wrap" type="button" data-on="' + wrapOn + '">换行</button>' +
         '<button class="code-copy" type="button">复制</button></div>' +
         '<pre data-lang="' + esc(lang) + '" data-lines="' + lines + '">' +
-        hlCode(raw, lang) + '</pre>' +
+        (streaming ? esc(raw) : hlCode(raw, lang)) + '</pre>' +
         (doFold ? '<button class="code-more" type="button">展开全部 ' + lines + ' 行</button>' : '') +
         '</div>');
       return '\u0000BLOCK' + (blocks.length - 1) + '\u0000';
@@ -852,6 +959,70 @@
     syncToBottomBtn();
   }
   convo.addEventListener('scroll', updateFollow);
+
+  /**
+   * 滚轮穿透：内层滚动盒到边界之后，由我们把剩下的 delta 交给 #convo。
+   *
+   * 为什么要接管（不是遮症状，是实测出来的第二段修复）：浏览器只在
+   * overscroll-behavior:auto 下把边界后的剩余 delta 往父容器传，而且**鼠标停在
+   * 一个已经到边界的滚动盒上时，它会隔一次吞一次**。实测在折叠代码块上连拨
+   * 18 次滚轮（每次 deltaY=120，页面确实收到 18 条 wheel 事件，deltaY 合计
+   * 2160），#convo.scrollTop 是 1585→1585→1705→1705→1825→1825…，一半的
+   * 滚轮完全没动 —— 手感就是「滚一下没反应，再滚一下才动」。
+   * CSS 那条 contain 修掉的是「永远卡住」，这条修的是「一次滚轮一次翻页」。
+   *
+   * 只接管下面**全部**成立的情况，任意一条不成立就直接 return，交回浏览器：
+   *   1) 默认行为没被别的处理器 preventDefault
+   *   2) 纵向主导（|deltaY| > |deltaX|）—— 避开 .tw 那种横向滚动
+   *   3) deltaMode === 0（像素单位；行/页模式的原生滚动更准，不接）
+   *   4) 从 event.target 往上找到第一个「overflow-y:auto|scroll 且真的溢出」的祖先
+   *      （必须仍在 #convo 之内，不含 #convo 自己）；连它都没有就说明滚轮本来
+   *      就落在普通正文上，浏览器自己会滚 #convo，不需要接管
+   *   5) 这个祖先已在本次滚动方向的边界，**并且**它到 #convo 之间的每一层可滚
+   *      祖先也都已在边界 —— 中间层（.tp-body[data-capped]）还有内容没露出来时
+   *      必须让它先滚，否则「展开组里剩下的工具」会被我们一跳跳过
+   *   7) 第一个可滚祖先不是横向容器 .tw
+   * 另外 ctrl+滚轮一律不接：那是缩放，触摸板捏合也会被浏览器合成成 ctrl+wheel，
+   * 接管了就成了「捏合放大变成翻页」。
+   * 走到 6) 才 preventDefault，并把 deltaY 直接加到 #convo.scrollTop ——
+   * 不做平滑插值、不改 scroll-behavior、不拦 touch：手感与原生一格一致，
+   * 只是保证「一次滚轮一定翻一次」。
+   */
+  function wheelAllAtEdge(target, up) {
+    var el = target;
+    var found = false;
+    while (el && el !== convo) {
+      var cs = getComputedStyle(el);
+      var oy = cs.overflowY;
+      if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight - el.clientHeight > 1) {
+        // 7) 横向容器不参与纵向接管
+        if (!found && el.classList && el.classList.contains('tw')) return false;
+        found = true;
+        // 这一层还能往本方向滚 → 交回浏览器，一个字都不动
+        var canScroll = up
+          ? el.scrollTop > 0
+          : el.scrollTop + el.clientHeight < el.scrollHeight - 1;
+        if (canScroll) return false;
+      }
+      el = el.parentElement;
+    }
+    return found;
+  }
+  convo.addEventListener('wheel', function (e) {
+    if (e.defaultPrevented) return;                        // 1)
+    if (e.ctrlKey) return;                                 // 缩放不接管
+    if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;  // 2)
+    if (e.deltaMode !== 0) return;                         // 3)
+    var up = e.deltaY < 0;
+    if (!wheelAllAtEdge(e.target, up)) return;             // 4) 5) 7)
+    // #convo 自己已经在边界时没什么可翻的，别把事件吞掉（交给更外层）
+    var edge = up
+      ? convo.scrollTop <= 0
+      : convo.scrollTop + convo.clientHeight >= convo.scrollHeight - 1;
+    if (edge) return;
+    e.preventDefault();                                    // 6)
+    convo.scrollTop += e.deltaY;
+  }, { passive: false });
 
   /**
    * 同步「回到底部」按钮：用户上翻时才出现。
@@ -1024,6 +1195,51 @@
    */
   function briefAssistant() {
     return assistantText().slice(0, 2000);
+  }
+
+  /**
+   * 在**指定轮次范围**内最后一条助手正文末尾挂「已停止」小标签
+   * （形态抄 dsh 的 `.stopped`）。
+   *
+   * dsh 的判据是「这个 assistant step 的 status === 'interrupted'」，标签挂在
+   * 该 step 的正文块末尾。我们没有 step 概念，用「本轮最后一条 .msg.assistant」
+   * 等价表达：被打断时用户看到的就是那句话，标签挂在它后面最贴合语义。
+   *
+   * ## 范围必须由调用方显式传入
+   *
+   * 一开始写的是「convo 里最后一条 .msg.assistant」，实测纯工具轮被打断时
+   * 会挂到**上一轮**的正文末尾 —— 上一轮那句话明明答完了，末尾却出现「已停止」。
+   * 改成读 `turnStartNode` 划界后又踩了第二个坑：调用点在 foldTurnProcess
+   * **之后**，而那一函数结尾会把 `turnStartNode` 置 null，于是「null = 从头算」
+   * 的兜底分支又把范围放大到整个对话，同一个 bug 原样再现
+   * （实测：轮 1 正文变成「上一轮的回答，已经答完了。已停止」）。
+   *
+   * 所以范围改成入参：调用方在 foldTurnProcess **之前**取好再传进来，
+   * 不依赖任何会被别人清掉的全局状态。
+   *
+   * @param {Node|null} startNode 本轮起点之前的兄弟节点；null = 从对话开头算
+   * @returns {boolean} 是否真的挂上了（本轮没有助手正文时返回 false，调用方
+   *   据此退回整行系统提示 —— 纯工具轮被打断时正文里没地方挂）
+   */
+  function markLastAssistantStopped(startNode) {
+    var started = (startNode === null || startNode === undefined);
+    var last = null;
+    Array.prototype.forEach.call(convo.children, function (el) {
+      if (!started) {
+        if (el === startNode) started = true;
+        return;
+      }
+      if (el.classList && el.classList.contains('msg')
+        && el.classList.contains('assistant')) last = el;
+    });
+    if (!last) return false;
+    // 幂等：重复收口（事件重放、兜底定时器与真 turn/end 撞上）不重复挂
+    if (last.querySelector('.msg-stopped')) return true;
+    var tag = document.createElement('span');
+    tag.className = 'msg-stopped';
+    tag.textContent = '已停止';
+    last.appendChild(tag);
+    return true;
   }
 
   /**
@@ -1507,23 +1723,53 @@
       return;
     }
     var rows = setItems.filter(function(it){ return it.group === setGroup; });
-    // 条件字段：showFor 列出的模式才显示。判据取同分组里 provider 那项的值 ——
-    // 选 deepseek 时 MCP 的「服务器地址」对它毫无意义，摆在界面上只会让人
-    // 以为必须填（实测这种"看起来必填但实际无关"的字段最容易劝退）。
+    // 条件字段：showFor 列出的接入方式才显示。判据取同分组里 mode 那项的值 ——
+    // MCP 的工具名/查询参数字段在 REST 方式下毫无意义，摆在界面上只会让人
+    // 以为必须填（这种"看起来必填但实际无关"的字段最容易劝退）。
     if (setGroup === 'websearch') {
-      var prov = (setItems.filter(function(x){ return x.id === 'websearch.provider'; })[0] || {}).value || 'mcp';
+      var modeEl = setItems.filter(function(x){ return x.id === 'websearch.mode'; })[0] || {};
+      var mode = modeEl.value || 'mcp';
       rows = rows.filter(function(it){
-        return !it.showFor || it.showFor.indexOf(prov) >= 0;
+        return !it.showFor || it.showFor.indexOf(mode) >= 0;
       });
     }
     if (!rows.length) {
       body.innerHTML = '<div class="set-msg">这一组没有可配置项</div>';
       return;
     }
-    rows.forEach(function(it){ body.appendChild(renderRow(it)); });
+    /* 高级字段折叠（本轮新增）：一个接入方式真正必填的只有「地址 + 密钥」，
+       其余（工具名、字段名、响应解析）是配一次性就忘的东西。
+       全铺开会把面板撑得很长，用户每次进来都要滚过一堆不常改的行；
+       全藏起来又违背「自由配置」。折中：常用的直接显示，其余收进「高级」。
+       —— 判据写在数据里（it.advanced），不在这里硬编码字段名，
+          以后后端加字段只需在 describe 时标 advanced。 */
+    var basic = rows.filter(function(it){ return !it.advanced; });
+    var adv = rows.filter(function(it){ return it.advanced; });
+    basic.forEach(function(it){ body.appendChild(renderRow(it)); });
+    if (adv.length) {
+      var open = (advOpen[setGroup] === true);
+      var toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'set-adv-toggle';
+      toggle.setAttribute('data-on', open ? 'true' : 'false');
+      toggle.textContent = (open ? '▾ 收起高级设置' : '▸ 高级设置（' + adv.length + ' 项）');
+      body.appendChild(toggle);
+      var box = document.createElement('div');
+      box.className = 'set-adv';
+      box.setAttribute('data-open', open ? 'true' : 'false');
+      adv.forEach(function(it){ box.appendChild(renderRow(it)); });
+      body.appendChild(box);
+      toggle.addEventListener('click', function(){
+        advOpen[setGroup] = !(advOpen[setGroup] === true);
+        renderBody();
+      });
+    }
     // narnat.md 的正文要额外拉一次（describe 只给元信息）
     if (setGroup === 'prompt') loadMarkdown();
   }
+
+  /** 各分组「高级设置」是否展开（跨 renderBody 记住，切分组回来不重置） */
+  var advOpen = {};
 
   function renderRow(it){
     var row = document.createElement('div');
@@ -1720,16 +1966,63 @@
       } else payload = {};
     } else if (it.id.indexOf('websearch.') === 0) {
       key = 'websearch';
-      if (it.id === 'websearch.provider') payload = { provider: value };
-      else if (it.id === 'websearch.url') payload = { url: value };
-      else if (it.id === 'websearch.key') payload = { key: value };
-      else payload = {};
+      var f = it.id.slice('websearch.'.length);
+      if (f === 'mode') payload = { mode: value };
+      else if (f === 'args') {
+        // 附加参数是 JSON 文本：解析失败就报错，不能把半截 JSON 存进配置
+        var txt = String(value == null ? '' : value).trim();
+        if (!txt) payload = { args: {} };
+        else {
+          try { payload = { args: JSON.parse(txt) }; }
+          catch (e) { setMsg('附加参数必须是合法 JSON：' + e.message, 'err'); return; }
+        }
+      }
+      else if (f === 'query_params') payload = { query_params: value };
+      else if (f === 'rail_list' || f === 'rail_title' || f === 'rail_url' || f === 'rail_desc') {
+        // 四个 rail 字段合并成一个 rail 对象提交（后端只认 rail 整体）
+        const RAIL = { rail_list: 'list', rail_title: 'title', rail_url: 'url', rail_desc: 'desc' };
+        var rail = {};
+        rail[RAIL[f]] = (f === 'rail_desc')
+          ? String(value || '').split(',').map(function(x){ return x.trim(); }).filter(Boolean)
+          : value;
+        payload = { rail: rail };
+      }
+      else payload = (function(){ var o = {}; o[f] = value; return o; })();
     } else {
       key = it.id;
       payload = value;
     }
-    setMsg('正在保存…', '');
+    /* 防重入：同一字段已有请求在飞时忽略重复提交。
+       触发场景（实测）：用户改完输入框失焦 → 提交；紧接着 loadDescribe 回来
+       重建表单 → 若该元素还带着未清的 dirty 值，Chrome 会再触发一次 change
+       → 第二条完全相同的请求。两条请求写同一份配置，除了多一次磁盘写
+       没有任何收益，却会让用户看到两遍「正在保存…」。
+
+       超时用**时间戳比较**而不是 setTimeout 清理：
+       定时器在后台标签页会被节流、在虚拟时钟下行为也不可靠，一旦回调没跑，
+       这一个字段就永久提交不了（用户改什么都不生效且无提示）—— 那比多提交
+       一次严重得多。时间戳没有这个问题：到点自然失效，不依赖任何回调。 */
+    var now = Date.now();
+    if (configInflight[it.id] && now - configInflight[it.id] < CONFIG_INFLIGHT_MS) return;
+    configInflight[it.id] = now;
+    configLabelQueue.push({ id: it.id, label: it.label || it.id });
+    setMsg('正在保存「' + (it.label || it.id) + '」…', '');
     post('configSet', { key: key, value: payload });
+  }
+
+  /** 防重入窗口：4s 覆盖正常往返（后端写盘 + 重读 describe） */
+  var CONFIG_INFLIGHT_MS = 4000;
+  /** 正在保存的字段（it.id → 提交时间戳） */
+  var configInflight = {};
+  /** 与 configSet 请求一一对应的 {id,label}，用于回执里定位是哪一项。 */
+  var configLabelQueue = [];
+
+  /** 回执到达：解锁该字段并返回它的 label（队列空了返回空串） */
+  function settleConfigLabel(){
+    var head = configLabelQueue.shift();
+    if (!head) return '';
+    delete configInflight[head.id];
+    return head.label;
   }
 
   /** 拉 narnat.md 原文 */
@@ -1740,16 +2033,22 @@
   function updateMdFoot(){
     var foot = document.getElementById('setFoot');
     if (!foot) return;
-    var dirty = mdText !== mdSaved;
+    // 提交中（点了保存、回执还没到）时按钮保持禁用，避免连点重复写盘
+    var dirty = (mdText !== mdSaved) && !mdSaving;
     var saveBtn = foot.querySelector('[data-act="saveMd"]');
     if (saveBtn) saveBtn.disabled = !dirty;
     var tip = foot.querySelector('[data-act="mdTip"]');
-    if (tip) tip.textContent = dirty ? '有未保存的修改' : '已保存';
+    if (tip) {
+      tip.textContent = mdSaving ? '正在保存…' : (mdText !== mdSaved ? '有未保存的修改' : '已保存');
+    }
     // 全屏层的保存按钮也跟着联动（两个视图，同一份状态）
     var bigSave = document.getElementById('mdFullSave');
     if (bigSave) bigSave.disabled = !dirty;
     updateMdLen();
   }
+
+  /** 是否有一条 narnatmdSet 在飞（点了保存、回执未到） */
+  var mdSaving = false;
 
   /** 更新两处的「N 行 · M 字符」。内容规模要能让用户判断要不要全屏。 */
   function updateMdLen(){
@@ -1814,7 +2113,9 @@
     });
     var bs = document.getElementById('mdFullSave');
     if (bs) bs.addEventListener('click', function(){
-      
+      if (bs.disabled || mdSaving) return;
+      mdSaving = true;
+      updateMdFoot();
       post('narnatmdSet', { text: mdText });
     });
     var bx = document.getElementById('mdFullClose');
@@ -1838,10 +2139,17 @@
       save.style.flex = 'none';
       save.style.padding = '0 14px';
       save.textContent = '保存';
+      /* 初始 disabled=true 只是「建出来的那一刻」，**必须**在函数末尾按真实
+         状态同步一次。只写 true 会怎样（实测）：renderFoot 在每次切分组、
+         每次 describe 回执、每次 narnatmd 回执都会重建底栏 —— 于是用户粘贴完
+         内容、随手点一下别的分组再回来，/或者后端回一条 describe/，
+         按钮就被打回灰色「已保存」，而内容其实一个字都没存。
+         用户原话：「粘贴进去，还是灰色的，根本就不能用」。 */
       save.disabled = true;
       save.addEventListener('click', function(){
-        save.disabled = true;
-        
+        if (save.disabled || mdSaving) return;
+        mdSaving = true;
+        updateMdFoot();
         post('narnatmdSet', { text: mdText });
       });
       foot.appendChild(save);
@@ -1855,6 +2163,10 @@
       open.addEventListener('click', function(){ post('openSettings', {}); });
       foot.appendChild(open);
     }
+    /* 底栏刚重建，两个按钮的 disabled 都是「刚建出来」的默认值。
+       必须按当前真实状态同步一次 —— 这就是「粘贴完内容、切个分组回来，
+       按钮变灰显示『已保存』」那个 bug 的根治点（见上面 save.disabled 的注释）。 */
+    updateMdFoot();
   }
 
   /** 顶栏 ⚙ 开面板 */
@@ -1923,28 +2235,43 @@
 
   window.__narnatOnConfigResult = function(p){
     var ok = p && (p.ok === true || p.accepted === true);
+    // 先取 label 再判 ok：失败路径也要把 inflight 解锁，否则那一项永久提交不了
+    var label = settleConfigLabel();
+    var tag = label ? '「' + label + '」' : '';
     if (!ok) {
-      setMsg('失败：' + ((p && (p.error || p.message)) || ''), 'err');
+      setMsg('保存失败' + tag + '：' + ((p && (p.error || p.message)) || ''), 'err');
       // 失败后重拉，让界面回到真实值（不能停在用户以为改成的那个值上）
       loadDescribe();
       return;
     }
-    /* needRestart：接口地址/密钥/协议 改动写的是磁盘，
+    /* needRestart：接口地址/密钥/协议/模型 改动写的是磁盘，
        而当前进程里的 LLMClient 还在用旧值（AIConfig 是加载时构造的）。
-       必须明说，否则用户改完 key 直接提问拿到 401，会以为新 key 是错的。 */
+       必须明说，否则用户改完 key 直接提问拿到 401，会以为新 key 是错的。
+
+       warning：模型名不在候选列表时后端拒绝热切换，盘上写了新值但本次会话
+       仍用旧模型。不带这句的话，用户改完模型看不到界面变化、又没有原因，
+       只会反复重试。 */
     var need = p && (p.needRestart === true ||
       (p.current && p.current.needRestart === true));
-    setMsg(need ? '已保存 · 需重启后端' : '已保存', 'ok');
+    var warn = p && typeof p.warning === 'string' ? p.warning : '';
+    /* tag 是字段名：设置面板一字段一保存（改下拉、填地址各发一条），
+       不写清是哪一项时，用户改两处会看到两遍「正在保存…/已保存」，
+       看起来像同一件事重复做了两遍（实测就是这样被当成 bug 报上来的）。 */
+    var text = '已保存' + tag + (need ? ' · 需重启后端' : '');
+    setMsg(warn ? (text + '（' + warn + '）') : text, warn ? 'err' : 'ok');
     loadDescribe();
   };
 
   window.__narnatOnNarnatMdSaved = function(p){
+    // 无论成功失败都要解锁：不解锁的话按钮永久「正在保存…」，用户改完存不了
+    mdSaving = false;
     if (p && p.ok) {
       mdSaved = mdText;
       updateMdFoot();
       setMsg(p.needRestart ? '已保存 · 需重启后端' : '已保存', 'ok');
     } else {
-      setMsg('失败：' + ((p && (p.error || p.message)) || ''), 'err');
+      updateMdFoot();
+      setMsg('保存失败：' + ((p && (p.error || p.message)) || ''), 'err');
     }
   };
 
@@ -2988,28 +3315,18 @@
     // 代码块交互。放在 .row 之前判断：这些按钮不在 .row 里，
     // 但都靠事件委托，顺序错了会被 .row 分支吃掉。
     if (e.target.closest) {
-      // 工具输出「还有 N 行未显示 · 点击展开」。
-      // 剩下的行等到点开时才填进 DOM——一次几百行会拖慢渲染。
+      // 工具卡片里「… 其余 N 行」的展开入口。
+      // 被折起来的中间行以 HTML 字符串挂在 `.more` 节点自己的 __html 上
+      // （见 bindMoreHtml）：实时与历史两条路径都挂节点自身，不用先去 toolMap
+      // 里找 entry —— 历史重放的工具行本来就不在 toolMap 里。
       var moreOut = e.target.closest('.snippet .more');
       if (moreOut) {
         var toolsWrap = moreOut.closest('.tools');
-        var entry = null;
-        Object.keys(toolMap).forEach(function(k){
-          if (toolMap[k].wrap === toolsWrap) entry = toolMap[k];
-        });
-        // 历史重放的工具行不在 toolMap 里（它们是只读快照，没有实时 entry）。
-        // 那类行的剩余内容挂在 .more 节点的 __rest 上（见 addHistoryTool），
-        // 两处都认，展开按钮才是通用能力 —— 否则历史里的「还有 N 行」
-        // 点了没反应（比不显示按钮更糟）。
-        var restLines = (entry && entry.restLines) || moreOut.__rest;
-        if (restLines && restLines.length) {
-          var frag = '';
-          restLines.forEach(function(t){
-            frag += '<div class="ln"><span class="tx">' + esc(t) + '</span></div>';
-          });
-          moreOut.insertAdjacentHTML('beforebegin', frag);
-          if (entry) entry.restLines = null;
-          moreOut.__rest = null;
+        if (moreOut.__html) {
+          // 插到 .more **之前**。卡片是「头部行 → 省略入口 → 尾部行」的保留头尾
+          // 结构，追加到末尾会让恢复出来的中间行排到尾部之后，顺序全乱。
+          moreOut.insertAdjacentHTML('beforebegin', moreOut.__html);
+          moreOut.__html = null;
         }
         moreOut.parentNode.removeChild(moreOut);
         scrollBottom();
@@ -3062,13 +3379,16 @@
         }
         return;
       }
-      // 工具卡片里的命令「复制」：只复制那段命令本身。
+      // 工具卡片里的「复制」：复制**它所在那一段**的正文（IN 取 `.io-tx`，
+      // OUT 取 `.snippet` 的逐行正文，diff 行带 `+ `/`- ` 前缀）。
+      // 两段共用这一套状态机 —— 只为 OUT 另写一份的话，「复制 → 已复制 →
+      // 1s 复原 / 复制失败」的行为迟早和 IN 段不一致。
       var ioCopy = e.target.closest('.io-copy');
       if (ioCopy) {
         var ioBox = ioCopy.closest('.io-sec');
-        var ioTx = ioBox ? ioBox.querySelector('.io-tx') : null;
-        if (ioTx) {
-          copyText(ioTx.textContent).then(function(){
+        var ioText = ioSecText(ioBox);
+        if (ioText) {
+          copyText(ioText).then(function(){
             ioCopy.setAttribute('data-done', 'true');
             ioCopy.textContent = '已复制';
             setTimeout(function(){
@@ -5660,17 +5980,21 @@
     if (cut > mdLockLen) {
       // 前缀只增量追加、永不重渲染。整段重渲染前缀会怎样：每来一个 delta
       // 都要把已定稿的那几万字重新解析一遍，比不做分段还慢（实测 0.6x）。
-      mdLockNode.insertAdjacentHTML('beforeend', markdownInline(assistantBuf.slice(mdLockLen, cut)));
+      // streaming=true：流式期间代码块不高亮也不折叠，省掉每个 delta 一遍
+      // 正则高亮；定稿由 renderAssistantFinal 整段重渲染一次，结果一致。
+      mdLockNode.insertAdjacentHTML('beforeend',
+        markdownInline(assistantBuf.slice(mdLockLen, cut), true));
       mdLockLen = cut;
     }
-    mdTailNode.innerHTML = markdownInline(assistantBuf.slice(mdLockLen));
+    mdTailNode.innerHTML = markdownInline(assistantBuf.slice(mdLockLen), true);
   }
 
   /** 整段重渲染一次（轮次结束时用，保证最终结果与「一次性渲染」完全一致）。 */
   function renderAssistantFinal(){
     var host = ensureAssistant();
     resetStreamRender();
-    host.innerHTML = markdownInline(assistantBuf);
+    // streaming=false：定稿，代码块在这里才真正高亮一次
+    host.innerHTML = markdownInline(assistantBuf, false);
   }
 
   /**
@@ -5682,7 +6006,15 @@
    * 用户看到的是一条读不通的长文，而不是「说一句 → 做一步 → 再说一句」。
    */
   function closeAssistantSegment(){
-    if (curAssistant && assistantBuf) renderAssistantFinal();
+    if (curAssistant && assistantBuf) {
+      renderAssistantFinal();
+      /* 这一段的正文已经定稿，而后面还有内容（工具行 / 思考 / 系统行）——
+         说明它不是本轮的最终回答，只是「中间说明」。打上标记，轮末收口时
+         把它折进工作过程组（dsh 的折叠也是把中间消息一起收起来，只留最终回复
+         在组外）。最终回答那一段永远不会走到这里（turn/end 里直接
+         renderAssistantFinal 再置 null），所以它天然不带这个标记。 */
+      curAssistant.setAttribute('data-turn-text', '1');
+    }
     curAssistant = null;
     assistantBuf = '';
     resetStreamRender();
@@ -5848,7 +6180,9 @@
       if (entry.row.getAttribute('data-st') !== 'running') return;
       var awaiting = entry.row.getAttribute('data-await-confirm') === '1';
       if (awaiting && !forGood) return;
-      entry.row.setAttribute('data-st', 'err');
+      // 被打断 / 未执行 都不是执行失败：走 warn 一档（琥珀），红留给真跑挂的。
+      // 用户点停止后看到红字会以为「它报错了」，而它只是被掐掉了。
+      entry.row.setAttribute('data-st', 'warn');
       // 打上「已由收口逻辑定性」的标记：被打断的工具，它的 tool/result 往往
       // 还会晚几百毫秒才到（实测 242~294ms 后到达）。那个迟到结果会把
       // 「已中断」直接覆盖成「完成 · 1915ms」——用户点过停止，却看到最后一步
@@ -5861,7 +6195,7 @@
         // 也不能说「完成」。它要回答的是「这条命令到底跑了没有」——没跑。
         var why = awaiting ? '未执行（确认没生效）'
           : (reason === 'error' ? '未完成' : '已中断');
-        meta.innerHTML = '<span class="bad">' + why + '</span>';
+        meta.innerHTML = '<span class="warn">' + why + '</span>';
       }
       if (awaiting) entry.row.removeAttribute('data-await-confirm');
       // 留一个痕迹：这一行是「等确认」被收口的，不是执行中被掐断。
@@ -5901,14 +6235,261 @@
     return out;
   }
 
-  /** IN 段（命令 / 路径 / 参数正文），带一个复制按钮 —— 命令值得复制。 */
-  function ioInHtml(text){
-    if (!text) return '';
-    return '<div class="io"><div class="io-sec">' +
-      '<span class="io-lb">IN</span>' +
-      '<span class="io-tx">' + esc(text) + '</span>' +
-      '<button class="io-copy" type="button">复制</button>' +
-      '</div></div>';
+  /* ---------- 收起态摘要 / 展开卡片：实时与历史共用的唯一出口 ----------
+     以前 addToolRow / addHistoryTool 各拼一份 HTML 字符串、各判一次「像不像
+     路径」、各写一套 40 行截断，同一个工具在实时与历史两条路径上就会长出
+     不同的样子。下面这些是唯一实现，两处都只调它们，不再各写一份。 */
+
+  /** 摘要上限（字符）。与 IN 段的 IN_MAX（2000）分工：摘要是扫读用的，IN 是核对用的 */
+  var ARG_MAX = 200;
+  /* 输出段最多铺多少行。**12 行不是「少给点」，是入口可见性的硬约束**：
+     `.io-sec` 限高 220px ≈ 11 行，而 head/tail 截断把「… 其余 N 行」入口
+     排在第 head+1 行 = 第 7 行 —— 只有 head ≤ 6 时它才落在 220px 视野内。
+     取 40 时入口在第 21 行，必须滚动才看得见（B1 披露 8 的裁决）。
+     注意 position:sticky 解决不了这件事：sticky 只约束**已在可视区内**的
+     元素，初始就排在视野下方的元素不会被拉上来。 */
+  var OUT_MAX_LINES = 12;
+  /** diff 最多铺多少行。与输出同口径（head 6 + 入口 + tail 6），
+      入口同样落在第 7 行、220px 内可见。 */
+  var DIFF_MAX_LINES = 12;
+  /** RTL 语言字符：这样的路径不能套 direction:rtl，否则整段顺序翻转（见 .arg.path） */
+  var RE_RTL = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/;
+  /** 各类工具摘要该取哪个参数字段（按顺序取第一个非空字符串），对齐 dsh 的 SUMMARY_KEYS */
+  var ARG_KEYS = {
+    bash: ['description', 'command'],
+    read: ['path', 'file_path', 'url'],
+    search: ['query', 'pattern', 'url'],
+    write: ['path', 'file_path'],
+    edit: ['path', 'file_path']
+  };
+
+  /** 工具名 → 摘要取值类别；不属于这五类返回空串（那就用后端给的 summary） */
+  function argKind(name){
+    var n = String(name || '').toLowerCase();
+    if (n === 'shell' || n === 'terminal' || n === 'bash') return 'bash';
+    if (n === 'read' || n === 'web_fetch' || n === 'webfetch') return 'read';
+    if (n === 'grep' || n === 'glob') return 'search';
+    if (n === 'write') return 'write';
+    if (n === 'edit') return 'edit';
+    return '';
+  }
+
+  /**
+   * 绝对路径切掉工作目录前缀（dsh 的 relativizeToCwd）。
+   *
+   * 只做这一件事，不缩成「末两段」——那样两个不同目录里的同名文件长得完全
+   * 一样，反而更难分辨。切掉后多数路径直接短到不需要省略号。
+   * 分隔符两种写法都认：后端给 `D:\x\y`，模型有时写 `D:/x/y`。
+   */
+  function relativizeToCwd(text){
+    var t = String(text);
+    var wd = String((RPC_STATE.init && RPC_STATE.init.workdir) || '');
+    if (!t || !wd) return t;
+    var norm = function (s) { return s.replace(/\\/g, '/').replace(/\/+$/, ''); };
+    var nw = norm(wd);
+    var nt = norm(t);
+    if (!nw || nt.length <= nw.length) return t;
+    if (nt.slice(0, nw.length + 1) !== nw + '/') return t;
+    // 规范化只把 `\` 换成 `/`，两侧长度一致，所以下标可以直接切原文
+    return t.slice(nw.length + 1);
+  }
+
+  /**
+   * 收起态摘要正文：按类别取字段 → 取首行 → 切 cwd 前缀 → 超长补 `…`。
+   *
+   * 后端给的 summary 口径不受控（可能是整条命令、可能是参数 JSON、可能空），
+   * 所以已知类别按 dsh 的取值优先级自己从参数里挑。
+   *
+   * @param {string} name 工具名（Shell/Read/Grep… 决定取哪个字段）
+   * @param {string} label 中文名（不参与取值，保留给调用方与调试）
+   * @param {Object} args 工具参数
+   * @param {string} fallback 后端给的 summary（不认识这类工具时用它）
+   * @returns {string}
+   */
+  function argSummary(name, label, args, fallback){
+    var kind = argKind(name);
+    var out = '';
+    if (kind && args && typeof args === 'object') {
+      var keys = ARG_KEYS[kind];
+      for (var i = 0; i < keys.length; i++) {
+        var v = args[keys[i]];
+        if (typeof v === 'string' && v.trim()) { out = v; break; }
+      }
+    }
+    if (!out) out = String(fallback == null ? '' : fallback);
+    // 首行：Shell 的 command 常是多行脚本，摘要只该占一行（IN 段里有全文）
+    out = out.split('\n')[0];
+    out = relativizeToCwd(out);
+    if (out.length > ARG_MAX) out = out.slice(0, ARG_MAX) + '…';
+    return out;
+  }
+
+  /** 摘要文本 → { text, isPath }。isPath 决定要不要套 direction:rtl 保尾部。 */
+  function argParts(text){
+    var t = String(text == null ? '' : text);
+    // 含 RTL 语言字符的路径不套 .path：direction:rtl 下整段顺序会翻过来
+    var isPath = /[\\/]/.test(t) && /\.[A-Za-z0-9]{1,6}$/.test(t) && !RE_RTL.test(t);
+    // RTL 盒里 `…`（U+2026）是「中性」字符，会被甩到行尾并把顺序翻过来：
+    // `…\sandbox\rect_area.py` 显示成 `ndbox\rect_area.py\…`（实测）。
+    // 前缀一个 U+200E（左到右标记）把它钉成 LTR 段落，顺序就正常了。
+    if (isPath && t.charAt(0) === '…') t = '\u200E' + t;
+    return { text: t, isPath: isPath };
+  }
+
+  /**
+   * 收起态摘要的 `<span class="arg">`。实时行与历史行都从这里出。
+   *
+   * 失败行不再换成错误首行（那样会把「调的是什么工具、带了什么参数」挤掉），
+   * 所以这里统一是参数摘要；错误文本留在 OUT 段，失败由名字变红表达。
+   *
+   * @param {string} sumText 摘要正文
+   */
+  function argSpan(sumText){
+    var p = argParts(sumText);
+    var cls = 'arg' + (p.isPath ? ' path' : '');
+    return '<span class="' + cls + '">' + esc(p.text) + '</span>';
+  }
+
+  /**
+   * 长内容「保留头尾」的算术（dsh head-tail-cap.ts）：
+   *   hidden = total - maxLines；head = ceil(maxLines/2)；tail = maxLines - head
+   *
+   * 只留头部为什么不够（实测）：失败原因（编译错误、`FAILED test_x::y`）几乎总
+   * 在末尾，只铺前 40 行等于把它折进「还有 N 行」里藏起来，用户以为输出就这些。
+   */
+  function headTail(total, maxLines){
+    var hidden = total - maxLines;
+    if (hidden <= 0) return { capped: false, head: total, tail: 0, hidden: 0 };
+    var head = Math.ceil(maxLines / 2);
+    return { capped: true, head: head, tail: maxLines - head, hidden: hidden };
+  }
+
+  /**
+   * diff 页脚文案：只写屏幕上数得到的真话。
+   *
+   * 原来写「+A −R · 只显示前 N 行改动」，N 取的是**后端**截断后的行数，
+   * 而界面又按 DIFF_MAX_LINES 折了一次：60 行的 diff 后端回传 20 行、
+   * 界面只铺 12 行 +「其余 8 行」入口，页脚却承诺「前 20 行」——
+   * 屏幕上数得到 12 行，两句话互相打架（F2 的 R18b）。
+   *
+   * 现在拆成两句、语义不重叠：
+   *   「+A −R · 其余 K 行可展开」 K = 界面折叠起来的行数（点一下就看得见）
+   *   「（后端只回传前 N 条）」   N = 后端截断后回传的总行数（点不开的那些）
+   * N 后面写「条」不写「行」：同一行里已经有 K 和「K 行」，
+   * 再让另一个数字紧跟「行」，用户分不清 20 和 48 各指什么。
+   */
+  function diffFoot(d) {
+    var total = (d && d.lines) ? d.lines.length : 0;
+    var hiddenUi = total > DIFF_MAX_LINES ? total - DIFF_MAX_LINES : 0;
+    var s = '+' + ((d && d.added) || 0) + ' −' + ((d && d.removed) || 0);
+    if (hiddenUi > 0) s += ' · 其余 ' + hiddenUi + ' 行可展开';
+    if (d && d.truncated) s += '（后端只回传前 ' + total + ' 条）';
+    return s;
+  }
+
+  /** OUT 段的一行。diff 行带行号槽，输出行只有正文（两种行结构的唯一实现） */
+  function outRowHtml(kind, l){
+    if (kind === 'diff') {
+      var cls = l.type === 'add' ? 'ln add' : (l.type === 'del' ? 'ln del' : 'ln');
+      return '<div class="' + cls + '"><span class="no">' +
+        esc(l.no === undefined || l.no === null ? '' : l.no) + '</span>' +
+        '<span class="tx">' + esc(l.text) + '</span></div>';
+    }
+    return '<div class="ln"><span class="tx">' + esc(l) + '</span></div>';
+  }
+
+  /**
+   * 取某一段（`.io-sec`）**屏幕上显示的正文** —— 段内复制按钮的唯一数据源。
+   *
+   * 为什么不各段各写一套：IN 段是单块 `.io-tx`、OUT 段是逐行 `.ln`，
+   * 两份实现迟早分叉（B 阶段把 toolCardHtml 合成一张卡就是这个理由）。
+   * 统一按「这一段里有什么」取：
+   *   · IN 段  → `.io-tx` 全文（原样，含换行）
+   *   · OUT 段 → `.snippet` 里所有行的 `.tx` 按 \n 拼接；行号槽 `.no` 不进结果，
+   *              diff 行的 `+ `/`- ` 前缀在屏幕上是 `.tx::before` 的 content
+   *              （不是文本节点，textContent 取不到），这里按行的 class 补回去。
+   * `.more` / `.foot` 都不是 `.ln`，不会混进结果（它们是指示，不是正文）。
+   */
+  function ioSecText(sec) {
+    if (!sec) return '';
+    var tx = sec.querySelector('.io-tx');
+    if (tx) return tx.textContent || '';
+    var rows = sec.querySelectorAll('.snippet .ln');
+    var out = [];
+    for (var k = 0; k < rows.length; k++) {
+      var cell = rows[k].querySelector('.tx');
+      var s = cell ? String(cell.textContent || '') : '';
+      if (rows[k].classList.contains('add')) s = '+ ' + s;
+      else if (rows[k].classList.contains('del')) s = '- ' + s;
+      out.push(s);
+    }
+    return out.join('\n');
+  }
+
+  /**
+   * 工具行展开卡片的完整 HTML：IN 与 OUT **合成一张 `.io`**。
+   *
+   * 实时（finishTool）与历史（addHistoryTool）只调这一个函数 —— 两处各拼一份
+   * 字符串时，同一工具在两条路径上的间距、标签、限高、截断口径迟早会分叉。
+   *
+   * @param {string} inText IN 段正文（命令 / 路径 / 参数）
+   * @param {?Object} out OUT 段：{ kind:'out'|'diff', lines:Array, foot:string(HTML) }
+   * @returns {{html:string, more:string}} `more` 是被折起来的中间行 HTML，
+   *   要在节点插进 DOM 之后挂到 `.more` 上（见 bindMoreHtml / convo 的 click 委托）。
+   */
+  function toolCardHtml(inText, out){
+    var inHtml = '';
+    if (inText) {
+      inHtml = '<div class="io-sec">' +
+        '<span class="io-lb">IN</span>' +
+        '<span class="io-tx">' + esc(inText) + '</span>' +
+        '<button class="io-copy" type="button">复制</button>' +
+        '</div>';
+    }
+    var outHtml = '';
+    var moreHtml = '';
+    if (out && out.lines && out.lines.length) {
+      var maxLines = out.kind === 'diff' ? DIFF_MAX_LINES : OUT_MAX_LINES;
+      var cap = headTail(out.lines.length, maxLines);
+      var body = '';
+      var i;
+      if (!cap.capped) {
+        for (i = 0; i < out.lines.length; i++) body += outRowHtml(out.kind, out.lines[i]);
+      } else {
+        for (i = 0; i < cap.head; i++) body += outRowHtml(out.kind, out.lines[i]);
+        body += '<div class="more" data-rest="' + cap.hidden + '">… 其余 ' +
+          cap.hidden + ' 行</div>';
+        for (i = out.lines.length - cap.tail; i < out.lines.length; i++) {
+          body += outRowHtml(out.kind, out.lines[i]);
+        }
+        // 中间那段先不塞进 DOM（一次几百行会拖慢渲染），点开时插到 .more 之前
+        for (i = cap.head; i < out.lines.length - cap.tail; i++) {
+          moreHtml += outRowHtml(out.kind, out.lines[i]);
+        }
+      }
+      outHtml = '<div class="io-sec">' +
+        '<span class="io-lb">OUT</span>' +
+        '<div class="snippet' + (out.kind === 'diff' ? '' : ' out') + '">' + body +
+        (out.foot ? '<div class="foot">' + out.foot + '</div>' : '') +
+        '</div>' +
+        /* OUT 段也要能复制：用户想贴给同事的是**渲染出来的输出/diff 文本**，
+           不是 IN 段里那条命令或 old_string/new_string。按钮本身与 IN 段同一个
+           类、同一套状态机（点击处理见 convo 的 click 委托，按所在段取正文）。 */
+        '<button class="io-copy" type="button">复制</button></div>';
+    }
+    if (!inHtml && !outHtml) return { html: '', more: '' };
+    return {
+      html: '<div class="io">' + inHtml +
+        (inHtml && outHtml ? '<div class="io-div"></div>' : '') + outHtml + '</div>',
+      more: moreHtml
+    };
+  }
+
+  /** 卡片渲染完把「其余 N 行」的 HTML 挂到 `.more` 节点上（点击时插到它前面） */
+  function bindMoreHtml(root, moreHtml){
+    if (!moreHtml || !root || !root.querySelector) return;
+    var el = root.querySelector('.snippet .more');
+    if (el) el.__html = moreHtml;
   }
 
   function addToolRow(p){
@@ -5920,14 +6501,9 @@
       return;
     }
     var isTodo = p.label === '更新计划' || p.name === 'TodoWrite';
-    // 摘要像路径（含分隔符且以扩展名结尾）时打上 .path：窄面板里要保尾部
-    // （文件名才是区分点，头部目录对所有文件都一样）。
-    var sumText = String(p.summary || '');
-    var isPath = /[\\/]/.test(sumText) && /\.[A-Za-z0-9]{1,6}$/.test(sumText);
-    // RTL 盒里 `…`（U+2026）是「中性」字符，会被甩到行尾并把顺序翻过来：
-    // `…\sandbox\rect_area.py` 显示成 `ndbox\rect_area.py\…`（实测）。
-    // 前缀一个 U+200E（左到右标记）把它钉成 LTR 段落，顺序就正常了。
-    if (isPath && sumText.charAt(0) === '…') sumText = '\u200E' + sumText;
+    // 摘要按类别从参数里取（Shell 取 command、Read 取 path、Grep 取 pattern…），
+    // 见 argSummary —— 实时与历史共用那一个函数，两条路径才不会分叉。
+    var sumText = argSummary(p.name, p.label, p.arguments, p.summary);
     // 工具行之前先把当前正文段收口：正文 → 工具 → 正文 才是真实顺序
     closeAssistantSegment();
     // 思考也要收口：思考 → 工具 → 思考 里，后端整轮只发一次 thinking/end，
@@ -5941,10 +6517,10 @@
     wrap.innerHTML = '<div class="row" data-open="' + (isTodo ? 'true' : 'false') + '" data-st="running" tabindex="0" role="button">' +
       '<span class="caret">▶</span>' +
       '<span class="name">' + esc(p.label || p.name || '工具') + '</span>' +
-      '<span class="arg' + (isPath ? ' path' : '') + '">' + esc(sumText) + '</span>' +
+      argSpan(sumText) +
       '<span class="meta dot-anim">执行中</span></div>' +
       '<div class="slot">' +
-      (isTodo ? '<div class="todo"></div><div class="extra"></div>' : ioInHtml(inputText)) +
+      (isTodo ? '<div class="todo"></div><div class="extra"></div>' : toolCardHtml(inputText, null).html) +
       '</div>';
     convo.appendChild(wrap);
     var entry = {
@@ -5953,6 +6529,7 @@
       slot: wrap.querySelector('.slot'),
       isTodo: isTodo,
       input: inputText,
+      sum: sumText,
       todo: isTodo ? wrap.querySelector('.todo') : null,
       extra: isTodo ? wrap.querySelector('.extra') : null
     };
@@ -6015,8 +6592,9 @@
       // 取消是明确结论，把临时的定性标记一起清掉。
       entry.row.removeAttribute('data-settled');
       var mCancel = entry.row.querySelector('.meta');
-      if (mCancel) { mCancel.className = 'meta'; mCancel.innerHTML = '<span class="bad">已取消</span>'; }
-      entry.row.setAttribute('data-st', 'err');
+      if (mCancel) { mCancel.className = 'meta'; mCancel.innerHTML = '<span class="warn">已取消</span>'; }
+      // 用户自己点的取消不是执行失败：走 warn 一档（琥珀），红只留给真跑挂的
+      entry.row.setAttribute('data-st', 'warn');
       rendered('tool/result', { id: p.id, cancelled: true });
       return;
     }
@@ -6060,7 +6638,7 @@
       ? '+' + (p.diff.added || 0) + ' −' + (p.diff.removed || 0)
       : '';
     var parts = [];
-    if (!ok) parts.push('<span class="bad">失败</span>');
+    // 失败不再往右侧写「失败」二字：名字已经变红，同屏再说一遍是重复
     // 退出码 0 但输出里有失败信号：命令可能带管道（退出码取末端），
     // 别让人以为干净通过。用 warn 色而不是红，因为确实不知道结果。
     if (uncertain) parts.push('<span class="warn">退出码0·输出含失败</span>');
@@ -6071,63 +6649,48 @@
     var settled = entry.row.getAttribute('data-settled') === '1';
     if (settled) {
       entry.row.removeAttribute('data-settled');
-      parts.push('<span class="bad">中断后返回</span>');
+      // 「中断后返回」不是执行失败：走 warn 一档（琥珀），红只留给真跑挂的
+      parts.push('<span class="warn">中断后返回</span>');
       if (meta) meta.innerHTML = parts.join(' · ');
-      // 不改 data-st：保持 err，行名继续是红的
+      // 不改 data-st：保持收口逻辑定下的 warn（见 settleRunningTools）
     } else {
       if (meta) meta.innerHTML = parts.join(' · ');
       entry.row.setAttribute('data-st', ok ? 'ok' : 'err');
     }
+    /* 失败时**不**把错误内容顶到行头。
+       这里原来抄 dsh 的失败行做法（摘要整条换成错误首行），实际用下来不对：
+       `▶ 执行命令  [exit code: 1]` 把错误塞在工具名旁边，用户反而看不出
+       这行调的是什么工具、带了什么参数；而错误本来就在 OUT 段里完整可见。
+       失败只靠「名字变红」（.row[data-st="err"] .name）+ 右侧状态位表达。 */
 
-    // 展开卡片 = IN（完整输入，见 addToolRow）+ 结果（diff 或输出）。
-    // 输入段在 addToolRow 里就画好了，这里重建整块时带上它，顺序不会乱。
-    var html = entry.isTodo ? '' : ioInHtml(entry.input);
+    // 展开卡片 = IN（完整输入，见 addToolRow）+ OUT（diff 或输出），合成一张卡。
+    // 生成函数与历史路径共用（toolCardHtml），两条路径的 DOM 才逐字符一致。
+    var outSec = null;
     if (p.diff && p.diff.lines && p.diff.lines.length) {
-      html += '<div class="io-lb io-out-lb">OUT</div>';
-      html += '<div class="snippet">';
-      p.diff.lines.forEach(function(l){
-        var cls = l.type === 'add' ? 'ln add' : (l.type === 'del' ? 'ln del' : 'ln');
-        html += '<div class="' + cls + '"><span class="no">' +
-          esc(l.no === undefined || l.no === null ? '' : l.no) + '</span>' +
-          '<span class="tx">' + esc(l.text) + '</span></div>';
-      });
-      html += '<div class="foot">+' + (p.diff.added || 0) + ' −' + (p.diff.removed || 0) +
-        (p.diff.truncated ? ' · 只显示前 ' + p.diff.lines.length + ' 行改动' : '') + '</div>';
-      html += '</div>';
+      outSec = {
+        kind: 'diff',
+        lines: p.diff.lines,
+        foot: diffFoot(p.diff)
+      };
     } else if (p.output) {
-      html += '<div class="io-lb io-out-lb">OUT</div>';
-      html += '<div class="snippet out">';
-      // 只铺前 40 行，但必须说清还有多少行。
-      // 原来直接 slice(0, 40) 且 foot 只写「完成」——用户以为输出就这 40 行，
-      // 而失败原因往往在最后几行（编译错误、找不着文件），等于把关键信息藏了。
-      var outLines = String(p.output).split('\n');
-      var head = outLines.slice(0, 40);
-      var rest = outLines.length - head.length;
-      head.forEach(function(t){
-        html += '<div class="ln"><span class="tx">' + esc(t) + '</span></div>';
-      });
-      if (rest > 0) {
-        // 剩下的行不塞进 DOM（一次几百行会拖慢渲染），点开时再填
-        html += '<div class="more" data-rest="' + rest + '">还有 ' + rest +
-          ' 行未显示 · 点击展开</div>';
-        entry.restLines = outLines.slice(40);
-      }
       // 脚注要说实话：这一行可能是被打断之后才回来的结果（行头写着
-      // 「中断后返回」、data-st 仍是 err）。脚注照打「完成」就是同屏矛盾——
-      // 用户在折叠区看到「完成」，行头却是红的（实测）。
+      // 「中断后返回」、data-st 是 warn）。脚注照打「完成」就是同屏矛盾——
+      // 用户在折叠区看到「完成」，行头却是琥珀/红的（实测）。
       // 判据与行头一致：settled 或 !ok 都不能说完成。
       var footText = (!ok || settled) ? (settled ? '未完成（被中断）' : '执行失败')
         : (uncertain ? '退出码 0，但输出里有失败' : '完成');
-      html += '<div class="foot">' + footText + '</div></div>';
+      outSec = { kind: 'out', lines: String(p.output).split('\n'), foot: footText };
     }
+    var card = entry.isTodo ? { html: '', more: '' } : toolCardHtml(entry.input, outSec);
     if (entry.isTodo) {
       // 带计划的行：slot 里的 .todo 归 todo/update 独占，这里绝不覆盖 slot，
       // 否则清单会被清空（无论 tool/result 与 todo/update 谁先到）。
-      if (entry.extra && html) {
-        entry.extra.innerHTML = html;
+      if (entry.extra && card.html) {
+        entry.extra.innerHTML = card.html;
       }
     } else {
-      entry.slot.innerHTML = html;
+      entry.slot.innerHTML = card.html;
+      bindMoreHtml(entry.slot, card.more);
     }
     scrollBottom();
     rendered('tool/result', { tool: p.id, ok: ok });
@@ -6542,14 +7105,17 @@
   }
 
   /* ---------- 折叠摘要的标题：把工具类别合成一句话 ----------
-     抄 dsh 的 process-activity.ts + step-process.ts + locale 那三条。
+     折叠组与这套合成逻辑都是**我们自研**的（dsh 的对话流是逐节点平铺，
+     没有「对话折叠」这层）；这里只借用了 dsh 的类别词表
+     （`packages/client/ui-tool/src/client/tool/models/tool-call-model.ts`
+     的 VARIANT_TITLES 那 7 类）。
      dsh 的折叠标题不是「工作过程 · 13 次工具调用」这种计数标签，而是把这一段
      做过的**事**说成一句人话：「已读取文件并搜索代码」「执行了命令，修改了文件」。
      计数对用户没有信息量 —— 他要的是「AI 刚才干了什么类别的事」。
      
-     三个拼接规则也照抄：
+     三个拼接规则：
        两个类别      「已读取文件并搜索代码」  ← 共享的「已」前缀只留一个
-       三个以上      「已读取文件，执行了命令，修改了文件等」
+       三个以上      「已读取文件，执行了命令，修改了文件 等」
        同类别去重    按**次数**降序，次数相同按首次出现顺序 */
   var TP_ACTIVITY = {
     read: '已读取文件',
@@ -6568,9 +7134,14 @@
     thinking: '已完成分析'
   };
 
-  /** 工具名 → 活动类别。顺序与 dsh 的 activity() 一致。
+  /** 工具名 → 活动类别。
+      类别词表参照 dsh 的 `tool-call-model.ts`（VARIANT_TITLES 那 7 类），
+      但折叠组本身是我们自研的，dsh 里没有对应实现。
       除了 name 也认 label：历史重放与老版本事件的 payload 里 name 可能缺失，
-      只靠 name 会整段退化成「已调用工具」，用户看不出到底干了什么。 */
+      只靠 name 会整段退化成「已调用工具」，用户看不出到底干了什么。
+      不认识的名字返回 **null**（不是 `'tools'`）：`'tools'` 是「已调用工具」，
+      一条 `weird_mcp_tool` 和一条 `Serial` 混用同一个词，用户永远看不出
+      它到底调了什么。调用方（tpTitle）拿到 null 时改用原始工具名。 */
   function tpActivityName(name, label) {
     var n = String(name || '');
     if (n === 'Read') return 'read';
@@ -6591,54 +7162,233 @@
     if (l === '执行命令') return 'commands';
     if (l === '联网搜索' || l === '搜索网页') return 'webSearch';
     if (l === '更新计划') return 'plan';
-    return 'tools';
+    // 未知：交给 tpTitle 用原始工具名，绝不冒充「已调用工具」
+    return null;
+  }
+
+  /** 组内是否存在真正执行失败的工具行。
+      原来标题完全不看状态，1 条失败 + 3 条成功时标题只写「执行了命令」，
+      失败信息只在整轮 reason==='error' 时出现在右侧 meta 里。 */
+  function tpHasError(moving) {
+    for (var i = 0; i < moving.length; i++) {
+      var el = moving[i];
+      if (el.querySelector && el.querySelector('.row[data-st="err"]')) return true;
+    }
+    return false;
   }
 
   /**
-   * 把一组节点里的工具名合成标题。
+   * 组内成员计数：计数式标题的数据源（对齐 dsh 折叠行的「N 次工具调用」形态）。
+   * @param {HTMLElement[]} moving 组内成员
+   * @returns {{tools:number, texts:number, thinks:number}}
+   *   tools = 工具行数；texts = 中间正文条数（**不含**组外的最终回复）；
+   *   thinks = 思考块数（只用于没有工具也没有正文时的兜底文案）
+   */
+  function tpCounts(moving) {
+    var out = { tools: 0, texts: 0, thinks: 0 };
+    moving.forEach(function (el) {
+      if (el.classList.contains('tools')) out.tools += 1;
+      else if (el.classList.contains('think')) out.thinks += 1;
+      else if (el.classList.contains('msg') && el.classList.contains('assistant')) out.texts += 1;
+    });
+    return out;
+  }
+
+  /**
+   * 折叠行主标题：计数式，让人一眼看出「里面有东西」。
+   *
+   * 用户报障原文：「dsh 默认是折叠状态，折叠的是工具和中间消息，最终回复没有
+   * 折叠」——dsh 那一行就是计数式（`ui-trajectory/src/client/TrajectoryTable.tsx`
+   * 的 `summarizeTurn()` 拼 `{steps} steps · {toolCalls} tool calls`）。
+   * 类别短语退到副标题（.tp-sub）：标题回答「有多少东西」，副标题回答「干了什么」。
+   *
+   * @param {HTMLElement[]} moving 组内成员
+   * @param {string} status 状态前缀（'' = 不标）。由调用方决定用词：
+   *   · 用户主动打断 → '已停止'
+   *   · 其它没有最终回复的情况（max_tokens / 工具报错后中止）→ '未完成'
+   *   · 组内有失败工具 → '失败'
+   *   用入参而不是内部布尔，是因为「为什么没结论」只有调用方知道；
+   *   猜错会把 max_tokens 说成「已停止」，那也是撒谎。
+   * @returns {string} 例如「2 次工具调用 · 1 条消息」/「未完成 · 3 次工具调用」
+   */
+  function tpCountLabel(moving, status) {
+    var c = tpCounts(moving);
+    var parts = [];
+    if (c.tools > 0) parts.push(c.tools + ' 次工具调用');
+    if (c.texts > 0) parts.push(c.texts + ' 条消息');
+    // 只有思考块（本轮一次工具都没调）：也得说清里面有东西，不能空着
+    if (!parts.length) parts.push(c.thinks > 0 ? '思考过程' : '工作过程');
+    var body = parts.join(' · ');
+    return status ? (status + ' · ' + body) : body;
+  }
+
+  /**
+   * 把一组节点里的工具名合成类别短语（不带状态前缀）。
    * @param {HTMLElement[]} moving 组内成员
    * @returns {string} 例如「已读取文件并搜索代码」
    */
-  function tpTitle(moving) {
+  function tpPhrase(moving) {
     var counts = {};
     var order = [];
+    var labelOf = {};
     var hasThink = false;
     moving.forEach(function (el) {
       if (el.classList.contains('think')) { hasThink = true; return; }
-      var kind = tpActivityName(el.getAttribute('data-tool'), el.getAttribute('data-tool-label'));
+      // 成员里现在还有「中间正文」（任务 E 把它也折进组）：它不是工具，
+      // 不参与类别合成，否则副标题会多出一个莫名其妙的「未知工具」。
+      if (!el.classList.contains('tools')) return;
+      var raw = String(el.getAttribute('data-tool') || '');
+      var kind = tpActivityName(raw, el.getAttribute('data-tool-label'));
+      if (!kind) {
+        // 未知工具：用原始工具名参与排序与拼接。前缀 \u0000 是内部标记，
+        // 保证不同未知工具各占一个桶，也不会与真实类别键撞车。
+        var shown = raw || String(el.getAttribute('data-tool-label') || '') || '未知工具';
+        kind = '\u0000' + shown;
+        if (!labelOf[kind]) labelOf[kind] = shown;
+      } else if (!labelOf[kind]) {
+        labelOf[kind] = TP_ACTIVITY[kind];
+      }
       if (!counts[kind]) { counts[kind] = 0; order.push(kind); }
       counts[kind] += 1;
     });
-    // 按次数降序、次数相同按首次出现顺序（dsh 也是这个排序）
+    // 按次数降序、次数相同按首次出现顺序（与 dsh 的排序一致）
     var ranked = order.slice().sort(function (a, b) {
       if (counts[b] !== counts[a]) return counts[b] - counts[a];
       return order.indexOf(a) - order.indexOf(b);
     });
-    var labels = ranked.slice(0, 3).map(function (k) { return TP_ACTIVITY[k]; });
-    if (!labels.length && hasThink) return TP_ACTIVITY.thinking;
-    if (!labels.length) return TP_ACTIVITY.tools;
-    var first = labels[0];
-    if (labels.length === 1) return first;
-    if (labels.length === 2) {
-      // 共享前缀「已」只留一个：「已读取文件」+「已搜索代码」→ 已读取文件并搜索代码
-      var second = labels[1];
-      if (first.charAt(0) === '已' && second.charAt(0) === '已') second = second.slice(1);
-      return first + '并' + second;
+    var labels = ranked.slice(0, 3).map(function (k) { return labelOf[k]; });
+    var body;
+    if (!labels.length && hasThink) body = TP_ACTIVITY.thinking;
+    else if (!labels.length) body = TP_ACTIVITY.tools;
+    else {
+      var first = labels[0];
+      if (labels.length === 1) body = first;
+      else if (labels.length === 2) {
+        // 共享前缀「已」只留一个：「已读取文件」+「已搜索代码」→ 已读取文件并搜索代码
+        var second = labels[1];
+        if (first.charAt(0) === '已' && second.charAt(0) === '已') second = second.slice(1);
+        body = first + '并' + second;
+      } else {
+        // 三个以上：第一个原样，后面去掉共享的「已」前缀，末尾加「 等」
+        var rest = labels.slice(1).map(function (l) {
+          return l.charAt(0) === '已' ? l.slice(1) : l;
+        });
+        body = first + '，' + rest.join('，') + (ranked.length > 3 ? ' 等' : '');
+      }
     }
-    // 三个以上：第一个原样，后面去掉共享的「已」前缀，末尾加「等」
-    var rest = labels.slice(1).map(function (l) {
-      return l.charAt(0) === '已' ? l.slice(1) : l;
-    });
-    return first + '，' + rest.join('，') + (ranked.length > 3 ? '等' : '');
+    // 状态词不进这里：主标题（tpCountLabel）已经带了「失败 · 」/「已停止 · 」，
+    // 副标题只负责「干了什么类别的事」。
+    return body;
+  }
+
+  /**
+   * 类别短语 + 状态前缀（任务 B2 的既有形态，保留给副标题与既有断言用）。
+   * @param {HTMLElement[]} moving 组内成员
+   * @param {boolean} stopped 整轮是否被打断（cancelled / aborted / interrupted）
+   * @returns {string} 例如「已读取文件并搜索代码」；组内有失败行时前置「失败 · 」
+   */
+  function tpTitle(moving, stopped) {
+    var body = tpPhrase(moving);
+    // 整轮被打断优先于组内失败：被打断时那些失败多半是中断的后果，
+    // 先说「停了」才说得通。
+    if (stopped) return '已停止 · ' + body;
+    if (tpHasError(moving)) return '失败 · ' + body;
+    return body;
+  }
+
+  /** 一组节点里最后一条带正文的 assistant（没有就返回 null） */
+  function lastAssistant(list) {
+    for (var i = (list || []).length - 1; i >= 0; i--) {
+      var el = list[i];
+      if (el && el.classList
+        && el.classList.contains('msg') && el.classList.contains('assistant')) return el;
+    }
+    return null;
+  }
+
+  /**
+   * 从候选节点里摘出「最终回复」，返回要折进组的成员（不改入参）。
+   *
+   * ## 判据：该轮**最后一条过程节点**必须是正文，它才算最终回复
+   *
+   * 这个判据经过两次反复，结论如下（两次都是实测踩出来的）：
+   *
+   * 1. 最初：「最后一个成员是正文才算」。
+   * 2. 任务 E 改成：「最后一条正文，无论其后有无工具都算」，理由是
+   *    「以工具收尾的轮次正文被折进组，收起态一个字看不到，用户以为这轮没回答」。
+   *    **这个改法引入了一个更糟的问题**：正文被摘出组、而组插在第一个成员的位置，
+   *    于是 `[思考][正文][工具1][工具2]` 变成 `[组(思考+工具)][正文]` ——
+   *    AI 开口说的第一句话跑到了所有工具**后面**，看起来像最终总结，
+   *    用户以为任务已经完成了（用户实测报障，附 dsh 对照截图：dsh 保持原顺序）。
+   * 3. 现在：回到「最后一条过程节点是正文才算」。两种情形**都保持原顺序**，
+   *    因为这里只做「摘出」，从不移动节点，组只是原地包住连续范围：
+   *      · 最后是正文 → 摘出它 → `[组(思考+工具…)]` + `[正文]`，正文在最后，顺序对
+   *      · 最后是工具 → 全收   → `[组(思考+正文+工具…)]`，正文在组内原位，顺序也对
+   *    E 的顾虑（收起态看不到正文）由折叠行的「N 条消息」计数补偿 ——
+   *    用户看得出组里有正文，点开就在原来的位置。
+   *
+   * 「没有最终回复」这件事在折叠行上另有交代（见 foldTurnProcess 的 noTail），
+   * 不会让用户误以为这一轮给出了结论。
+   *
+   * @param {HTMLElement[]} nodes 候选成员
+   * @param {?HTMLElement} tail 该轮的最终回复。**必须由调用方按该轮全部节点算出**，
+   *   不能用 `nodes` 自己找：实时路径的最终正文不打 data-turn-text（见
+   *   closeAssistantSegment），只看 nodes 会把「中间正文」误当成最终回复摘出去，
+   *   组里就一条正文都不剩了。不传则退化为在 nodes 里找（历史重放的 nodes
+   *   就是该轮全部节点，两者等价）。
+   * @param {boolean} keepAll 整轮按原顺序全收（不摘最终回复）
+   * @returns {HTMLElement[]} 要折进组的成员
+   *
+   * 一轮只有 1 条正文、没有任何工具/思考时不建组（去掉正文后成员为空）——
+   * 这条边界是 E 阶段固化的裁决，保持不动。
+   */
+  function tpMembers(nodes, tail, keepAll) {
+    var members = (nodes || []).slice();
+    // keepAll：整轮按原顺序全收。必须在这里短路，不能靠「tail 传 null」表达：
+    // 下面 `tail || lastAssistant()` 会把 null 当成「没指定」而回退到最后一条正文，
+    // 等于没生效（实测踩过）。
+    if (keepAll) return members;
+    // 传了 tail 就只用它 —— 调用方按「该轮全部节点」算出来的才是权威
+    var keep = (tail !== undefined) ? tail : lastAssistant(members);
+    if (!keep) return members;
+    var at = members.indexOf(keep);
+    if (at >= 0) members.splice(at, 1);
+    return members;
+  }
+
+  /**
+   * 这一轮的「最终回复」：只有当该轮**最后一个过程节点**是正文时才有。
+   *
+   * 以工具/思考收尾 = 这一轮没有给出结论（被打断、max_tokens、工具报错后中止…）。
+   * 这时不能把中间那句「我来做个工具自检」当成结论留在组外 ——
+   * 那会让用户以为任务已经完成了（实测报障）。
+   *
+   * 实测数据（全库 160 轮真实对话）：只有 12 轮完全没有最终回复；
+   * 44 轮以工具结尾，但其中 32 轮是「说完话又去调工具」的正常完成 ——
+   * 所以判据必须是「最后一个过程节点」，不是「有没有工具」。
+   *
+   * @param {HTMLElement[]} proc 该轮的过程节点（工具/思考/正文），DOM 顺序
+   * @returns {?HTMLElement} 最终回复；最后一个不是正文就返回 null
+   */
+  function finalReplyOf(proc) {
+    var list = proc || [];
+    if (!list.length) return null;
+    var last = list[list.length - 1];
+    var isText = last.classList && last.classList.contains('msg')
+      && last.classList.contains('assistant');
+    return isText ? last : null;
   }
 
   /**
    * 把一组节点收成一个「工作过程」折叠组，挂在它们原本的位置上。
    *
-   * 抄 dsh 的 TurnProcessNodeView（ui-chat/chat/TurnProcessNodeView.tsx）：
+   * **自研**：dsh 的对话流是「每个节点各占一行」的平铺（`ChatView.tsx` 直接
+   * map 出一串 ChatNodeSeat），没有折叠组这一层，所以这里没有可抄的源码，
+   * 只有「单行摘要 + chevron」的形态参照了它的工具行
+   * （`ui-tool/**` 的 ToolRow + `ui-primitives/src/DisclosureRow.*`）。
    *   一轮结束后，那一整串工具调用对用户已经没价值了 —— 他要看的是最终回答。
-   *   dsh 收成一条带下边框的行：「已工作 · 1分23秒」/「已停止」/「失败」，
-   *   点开才展开细节。这里同样处理。
+   *   这里收成一条带下边框的行：「已读取文件并搜索代码 · 32 秒」/「已停止 · …」，
+   *   点开才展开细节。
    *
    * ## 为什么要把 DOM 搬进一个容器，而不是只加 CSS 隐藏
    *
@@ -6658,6 +7408,12 @@
    *   o.animate      建组时是否播「收起」动画。实时轮次收口时 true
    *                  （屏幕上正摊着一大片工具行，必须让它收得有过程）；
    *                  历史重放时 false（刚渲染出来的东西不该先展开再收起）
+   *   o.open         建组后是否**展开**。默认 false（收起），实时轮次收口必须
+   *                  保持收起，否则一轮结束时那一大片工具行不会收起来。
+   *                  **任务 E 起历史重放也不再传 true**：用户对照 dsh 后确认
+   *                  「dsh 默认是折叠状态」，历史里一屏摊开 675 条工具行既不是
+   *                  用户要的，也不是 dsh 的行为。入口保留（未来若要「记住上次
+   *                  展开状态」还要用），只是没有调用方再传 true。
    * @returns {HTMLElement|null} 折叠组；没有可收的节点时返回 null
    */
   function buildTurnProc(nodes, o) {
@@ -6670,48 +7426,69 @@
     });
     if (!moving.length) return null;
 
-    // 按 class 区分，不按 data-turn-* 标记：那两个标记只有实时路径会打，
+    // 成员按 class 区分，不按 data-turn-* 标记：那两个标记只有实时路径会打，
     // 历史重放走 addHistoryTool/addHistoryThink 不打标记，靠标记数会全是 0。
-    var tools = moving.filter(function (el) { return el.classList.contains('tools'); });
-    var thinks = moving.filter(function (el) { return el.classList.contains('think'); });
     var stopped = (reason === 'cancelled' || reason === 'aborted' || reason === 'interrupted');
     var failed = reason === 'error';
 
     var box = document.createElement('div');
     box.className = 'turn-proc';
-    box.setAttribute('data-open', 'false');
+    // 默认收起：实时轮次收口靠这个把摊开的工具行收起来。历史重放也不传
+    // o.open（任务 E：与 dsh 一致的默认收起），见 JSDoc。
+    var open = o.open === true;
+    box.setAttribute('data-open', open ? 'true' : 'false');
     box.setAttribute('data-reason', reason);
+
+    /* 折叠行的状态词由调用方给（见 tpCountLabel 的 status 参数）：
+         · o.status           显式指定（历史重放传「未完成」，因为它不知道确切原因）
+         · reason=cancelled   用户主动打断 → 「已停止」
+         · reason=error       这一轮失败 → 「失败」
+         · 其它且组内有失败工具 → 「失败」
+       都不满足就不标前缀（正常完成）。 */
+    var status = '';
+    if (typeof o.status === 'string' && o.status) status = o.status;
+    else if (stopped) status = '已停止';
+    else if (failed) status = '失败';
+    else if (tpHasError(moving)) status = '失败';
 
     var row = document.createElement('button');
     row.type = 'button';
     row.className = 'tp-row';
-    /* 标题 = 把这一段做过的**事**说成一句人话（抄 dsh 的 processTitle）：
-       「已读取文件并搜索代码」「执行了命令，修改了文件」。
-       原来写的是「工作过程」/「已工作」这种空标签 + 「13 次工具调用」计数 ——
-       计数对用户没有信息量，他要知道的是「AI 刚才干了什么类别的事」。 */
-    var label = tpTitle(moving);
-    /* 耗时与状态并排放右侧，不挤进标题里：
-       标题要留给「干了什么」，时间/成败是附注。 */
+    /* 主标题 = 计数式（对齐 dsh 折叠行「N 次工具调用」的形态）：
+       「2 次工具调用 · 1 条消息」。类别短语降级为副标题（.tp-sub）：
+       标题回答「有多少东西」，副标题回答「干了什么类别的事」。 */
+    var label = tpCountLabel(moving, status);
+    var sub = tpTitle(moving, stopped);
+    // 状态前缀已经进了主标题，副标题只留类别短语本身
+    sub = sub.replace(/^(?:已停止|失败|未完成) · /, '');
+    /* 耗时放右侧：标题留给「干了什么」，时间是附注。
+       有状态词时右侧留空 —— 同一件事不要说两遍。 */
     var metaText = '';
     var elapsed = o.elapsedMs || 0;
-    if (stopped) metaText = '任务被打断';
-    else if (failed) metaText = '这一轮失败';
-    else if (elapsed > 0) {
+    if (!status && elapsed > 0) {
       var sec = Math.round(elapsed / 1000);
       metaText = sec >= 60 ? (Math.floor(sec / 60) + ' 分 ' + (sec % 60) + ' 秒') : (sec + ' 秒');
     }
-    // 计数留在 DOM 属性上（测试与无障碍要用），但不显示出来
-    box.setAttribute('data-tool-count', String(tools.length));
-    box.setAttribute('data-think-count', String(thinks.length));
+    // 计数同时留在 DOM 属性上（测试与无障碍要用）
+    var counts = tpCounts(moving);
+    box.setAttribute('data-tool-count', String(counts.tools));
+    box.setAttribute('data-think-count', String(counts.thinks));
+    box.setAttribute('data-text-count', String(counts.texts));
     row.innerHTML = '<span class="tp-caret">▶</span>' +
       '<span class="tp-label">' + esc(label) + '</span>' +
+      /* 副标题只在「主标题是计数式」时才有意义：它补的是「这些工具干了什么类别
+         的事」。组里一个工具都没有（纯思考轮）时主标题已经是「思考过程」，
+         副标题再写「已完成分析」等于同一句话说两遍，窄面板里白占一行宽度。 */
+      (sub && sub !== label && (counts.tools > 0 || counts.texts > 0)
+        ? '<span class="tp-sub">' + esc(sub) + '</span>' : '') +
       (metaText ? '<span class="tp-meta">' + esc(metaText) + '</span>' : '');
 
     var bodyBox = document.createElement('div');
     bodyBox.className = 'tp-body';
     // 外层负责高度动画与（展开后的）滚动上限，内层承载真实内容。
-    // 双层是抄 dsh 的 ChatGroupSeat：外层 .body 有 max-height + overflow-y:auto，
-    // 内层 .content 是实际内容。合成一层的话，高度动画会和自己内部的滚动条打架 ——
+    // 双层（外层管高度动画与滚动上限、内层承载真实内容）是我们自研的：
+    // dsh 没有组级展开动画，它的展开是瞬时 `{open && children}`。
+    // 为什么必须两层：合成一层的话，高度动画会和自己内部的滚动条打架 ——
     // 收缩过程中 max-height 仍然生效，测到的 offsetHeight 就已经被夹过，
     // 动画起点不是屏幕上真实高度，会先「跳」一下再收。
     var innerBox = document.createElement('div');
@@ -6730,16 +7507,19 @@
     hr.className = 'tp-sep';
     box.appendChild(hr);
 
-    row.setAttribute('aria-expanded', 'false');
+    row.setAttribute('aria-expanded', open ? 'true' : 'false');
     /* 这些节点在折叠前一直是「展现在外面」的，所以这里要做一次真动画：
        从当前可见高度收缩到 0 —— 用户看到的是「工具过程被收起来了」，
        而不是「一大片内容瞬间消失」。
        注意顺序：必须先量高度再设 hidden。反过来设的话 offsetHeight 已经是 0，
        tpCollapse 会走「本来就没高度」的快速路径，动画根本不会发生（实测）。 */
-    if (o.animate) {
+    if (open) {
+      // 展开态什么都不做：内容本来就在外层，没有「收起过程」可演。
+      // 不加 hidden 就是这个组的可见态（.tp-body[hidden]{display:none} 是唯一开关）。
+    } else if (o.animate) {
       tpCollapse(bodyBox, function () { bodyBox.setAttribute('hidden', ''); });
     } else {
-      // 历史重放：内容刚建出来就没展开过，直接是收起态，没有「收起过程」可演
+      // 历史重放（收起态）：内容刚建出来就没展开过，直接是收起态，没有「收起过程」可演
       bodyBox.setAttribute('hidden', '');
     }
     row.addEventListener('click', function () {
@@ -6755,17 +7535,25 @@
     return box;
   }
 
-  /* ---------- 折叠 / 展开的过渡（抄 dsh 的 flow-motion.ts）----------
-     dsh 的时序（FADE_OUT_MS=70 / CLOSE_DELAY_MS=50 / CLOSE_MS=110）：
+  /* ---------- 折叠 / 展开的过渡（我们自研；无 dsh 出处）----------
+     dsh 的单块展开是瞬时的（`{open && children}`），全仓没有折叠动效常量
+     可抄，这套时序是我们自己定的。
+     收起时序（FADE_OUT_MS=70 / CLOSE_DELAY_MS=50 / CLOSE_MS=110）：
        0ms      开始淡出，同时不动高度
        50ms     透明度已到 ~28%，开始收高度
        160ms    高度归零，此时几乎不可见
      先淡出再收高度，是因为「一边透明一边缩」会让人眼觉得内容在抽搐；
      等它快看不见了再收，感知上是「淡出后自然塌陷」。
+     展开**不**沿用这个 50ms 起手延迟：收起时它在等「先淡出」，展开时没有
+     淡出可等，那 50ms 就纯粹是迟滞（观感是「点了没反应，过一会儿才长出来」）。
+     所以展开统一 delay 0：height / margin-top / opacity 一起走 110ms。
      缓动用 cubic-bezier(0.4,0,0.2,1)（Material 的 standard easing）。 */
   var TP_FADE_MS = 70;
   var TP_CLOSE_DELAY_MS = 50;
   var TP_CLOSE_MS = 110;
+  /* 展开时长。与 TP_CLOSE_MS 同值但单独一个常量：两边兜底定时器不同
+     （收起 50+110+80=240ms、展开 0+110+80=190ms），共用一个常量迟早算错一边。 */
+  var TP_OPEN_MS = 110;
   var TP_SLACK_MS = 80;
   var TP_EASE = 'cubic-bezier(0.4, 0, 0.2, 1)';
 
@@ -6785,7 +7573,8 @@
   }
 
   /**
-   * 维护展开态的上下渐隐标记（抄 dsh 的 useProcessScroll）。
+   * 维护展开态的上下渐隐标记（自研；dsh 没有组级滚动容器，它只在终端卡里
+   * 用 max-height 自己滚，没有边缘渐隐这一套）。
    *
    * 为什么需要：展开后组体有 400px 上限，超出的内容要靠内部滚动。但滚动条
    * 在深色窄面板里几乎看不见，用户不会知道「这块还能往下滚」—— 他会以为
@@ -6884,9 +7673,10 @@
     el.style.height = '0px';
     el.style.marginTop = '0px';
     void el.offsetHeight;
-    el.style.transition = 'height ' + TP_CLOSE_MS + 'ms ' + TP_EASE + ' ' + TP_CLOSE_DELAY_MS + 'ms, '
-      + 'margin-top ' + TP_CLOSE_MS + 'ms ' + TP_EASE + ' ' + TP_CLOSE_DELAY_MS + 'ms, '
-      + 'opacity ' + TP_CLOSE_MS + 'ms ' + TP_EASE + ' ' + TP_CLOSE_DELAY_MS + 'ms';
+    // 展开不做起手延迟：height / margin-top / opacity 三者同时开始、同时结束
+    el.style.transition = 'height ' + TP_OPEN_MS + 'ms ' + TP_EASE + ', '
+      + 'margin-top ' + TP_OPEN_MS + 'ms ' + TP_EASE + ', '
+      + 'opacity ' + TP_OPEN_MS + 'ms ' + TP_EASE;
     el.style.height = natural + 'px';
     el.style.marginTop = mt + 'px';
     el.style.opacity = '1';
@@ -6909,71 +7699,86 @@
     var onEnd = function (ev) {
       if (ev.target === el && ev.propertyName === 'height') finish();
     };
-    var timer = setTimeout(finish, TP_CLOSE_DELAY_MS + TP_CLOSE_MS + TP_SLACK_MS);
+    // 展开没有起手延迟，兜底只算 110+80=190ms（收起那边是 50+110+80=240ms）
+    var timer = setTimeout(finish, TP_OPEN_MS + TP_SLACK_MS);
     el.addEventListener('transitionend', onEnd);
     el.__tpCancel = finish;
   }
 
   /**
-   * 实时轮次收口：把这一轮的工具行与思考块**按段**折起来。
+   * 实时轮次收口：把这一轮的**全部过程**折成一个组，最终回复裸在组外。
    *
-   * ## 为什么必须分段（第 29 轮修复）
+   * 形态在任务 E 按 dsh 对齐（用户报障原文：「dsh 默认是折叠状态，折叠的是
+   * 工具和中间消息，最终回复没有折叠」）：
    *
-   * 一轮里 AI 是「做几件事 → 说一句 → 再做几件 → 再说一句」这样推进的。
-   * 原来这里把所有 `[data-turn-tool]` 一次性收进**一个**组，再把组插到
-   * 第一个工具的位置 —— 于是后面几段的工具全被搬到最前面，正文被挤到末尾。
-   * 实测一发就是：`[正文A][组: 全部4条工具][正文B][正文C]`，
-   * 而真实顺序是 `[工具][正文A][工具][正文B][工具][正文C]`。
-   * 用户看到的是「AI 先把所有工具跑完才说话」，跟当时的过程完全对不上。
+   *   · 组内成员 = 工具行（.tools）+ 思考块（.think）+ **中间正文**
+   *     （本轮除最终回复外的 assistant 正文）。
+   *     原来中间正文平铺在组外，于是一轮里出现「正文 → 组 → 正文 → 组 →
+   *     最终正文」这种碎块，跟 dsh「一组折叠 = 一轮的全部过程」对不上。
+   *   · 一轮只产生 **1 个**折叠组，插在该轮第一个过程节点原来的位置。
+   *   · 最终回复 = 该轮**最后一个过程节点是正文**时的那条正文（见 finalReplyOf）。
+   *     以工具/思考收尾 → 没有最终回复 → 全部进组并标状态。
+   *     判据不是「最后一条正文」：那样会把 AI 开口的第一句话摘到组外末尾，
+   *     看起来像总结（用户实测报障，dsh 对照保持原顺序）。
    *
-   * dsh 的做法（ui-chat/conversation-nodes/process-groups.ts）是同一条：
-   *   「遇到带正文的 assistant-step 就 flush 一次组」
-   * 这里用 DOM 相邻性表达同一个意思：**夹了别的东西（正文/用户插话/系统行）
-   * 就断开成新的一段**，每段各自成为一个折叠组。
+   * 流式期间不提前收口：中间正文定稿后仍在原位（只打 data-turn-text 标记），
+   * 直到 turn/end 才搬进组。用户正看着的内容不会突然被折起来。
    *
    * 什么情况不折叠：
-   *   · 本轮没有任何工具/思考（纯聊天）→ 没东西可折，加一行摘要反而碍眼
-   *   · 节点已经属于某个折叠组 → 幂等，重复的 turn/end 不再套一层
+   *   · 本轮没有任何过程节点（纯聊天，只有最终回复）→ 没东西可折
+   *   · 去掉最终回复后没有成员（一轮只有 1 条正文）→ 不建空组，
+   *     工具行仍然裸行显示（dsh 的同位情况见报告「边界裁决」）
    */
   function foldTurnProcess(reason) {
-    /* 只取「还没被收进任何折叠组」的节点。
-       原来直接 querySelectorAll('[data-turn-tool]') 会把**上一轮**已经收好的
-       那些也捞出来 —— 它们的 closest('.turn-proc') 非空，于是第一轮那个
-       「已经收过」的守卫立刻 return，第二轮的新工具行就永远折不上（实测）。 */
-    var nodes = Array.prototype.slice.call(convo.children).filter(function (el) {
-      return (el.hasAttribute('data-turn-tool') || el.hasAttribute('data-turn-think'))
-        && !el.closest('.turn-proc');
-    });
-    // 本轮没有任何工具/思考（纯聊天）→ 没东西可折，加一行摘要反而碍眼
-    if (!nodes.length) return null;
-
-    // 按 DOM 相邻性切段：上一个处理过的节点不是自己的前一个兄弟 = 中间夹了别的东西
-    var segments = [];
-    var cur = [];
-    nodes.forEach(function (el) {
-      if (cur.length && cur[cur.length - 1].nextElementSibling !== el) {
-        segments.push(cur);
-        cur = [];
+    /* 只收「本轮起点之后」的节点：turn/begin 记下的 turnStartNode 是本轮
+       第一个节点之前的兄弟。用 DOM 位置划界而不是只靠 data-turn-* 标记，
+       是为了不把上一轮遗留的标记卷进来（一轮只有 1 条正文时不会建组，
+       那条正文的 data-turn-text 会一直留着）。 */
+    var scope = [];
+    /* 本轮全部节点（含不带标记的）：最终回复要靠它判定。实时路径的最终正文
+       不打 data-turn-text（只有「后面还有内容」的中间正文才打），只看 scope
+       会把中间正文误当成最终回复摘出去。 */
+    var round = [];
+    var started = turnStartNode === null;
+    Array.prototype.forEach.call(convo.children, function (el) {
+      if (!started) {
+        if (el === turnStartNode) started = true;
+        return;
       }
-      cur.push(el);
+      round.push(el);
+      if (el.hasAttribute('data-turn-tool') || el.hasAttribute('data-turn-think')
+        || el.hasAttribute('data-turn-text')) scope.push(el);
     });
-    if (cur.length) segments.push(cur);
+    var box = null;
+    if (scope.length) {
+      /* 最终回复 = 该轮**最后一个过程节点是正文**时的那条正文
+         （见 finalReplyOf / tpMembers）。以工具或思考收尾 = 这一轮没给出结论：
+         全部进组、顺序不动，由折叠行标注状态。
 
-    var last = null;
-    segments.forEach(function (seg, i) {
-      /* 只有最后一段承担整轮收口的文案（耗时 / 被打断 / 失败）。
-         中间段写「工作过程」—— 文案与颜色都别再重复一遍，
-         否则一屏出现三行「已工作」，读者分不清哪些是同一轮。 */
-      var tail = (i === segments.length - 1);
-      last = buildTurnProc(seg, {
-        reason: reason,
-        elapsedMs: tail && turnStartTime ? Math.max(1000, Date.now() - turnStartTime) : 0,
-        headline: tail,
-        animate: true
-      }) || last;
-    });
+         之前的写法是「最后一条正文无论其后有无工具都算最终回复」，于是
+         `[思考][正文][工具1][工具2]` 被摘成 `[组(思考+工具)][正文]`，
+         AI 开口第一句话跑到所有工具后面，看起来像总结（用户实测报障）。 */
+      var interrupted = (reason === 'cancelled' || reason === 'aborted'
+        || reason === 'interrupted');
+      var tail = finalReplyOf(scope);
+      var members = tpMembers(scope, tail);
+      if (members.length) {
+        box = buildTurnProc(members, {
+          reason: reason,
+          elapsedMs: turnStartTime ? Math.max(1000, Date.now() - turnStartTime) : 0,
+          headline: true,
+          animate: true,
+          /* 状态前缀只在「用户主动打断」时加。
+             「没有最终回复」**不标**：实测全库 160 轮里以工具收尾的有 44 轮，
+             其中 37 轮是「说完话又去调工具」的正常结束——它们没有收尾正文，
+             但任务本身是完整的，标上状态词等于冤枉它。用户原话：
+             「后续正确的完整的工具调度也会在头上显示未完成，属于画蛇添足」。 */
+          status: (tail || !interrupted) ? '' : '已停止'
+        });
+      }
+    }
     turnStartNode = null;
-    return last;
+    return box;
   }
 
   function turnEnd(p){
@@ -7038,12 +7843,32 @@
     /* 正文定稿之后再收工具行 —— 顺序要紧：
        提前收会把「正在流式写的那条助手气泡」一起卷进折叠区（它此刻在 DOM 里
        也是 convo 的子节点），用户在收起状态下就看不到答案了。 */
-    foldTurnProcess(reason);
+    /* 先收口折叠组，再决定「已停止」挂哪里 —— 顺序不能反：
+       被打断时正文是**进组**的（保持原顺序，见 foldTurnProcess 里的注释），
+       若先挂标签再折叠，标签会跟着正文被折进组里看不见，折叠行又说了一遍
+       「已停止」，屏幕上等于什么都没说清。
+       现在的分工：
+         · 有折叠组（这一轮有过程可折）→ 折叠行带「已停止 ·」前缀，正文标签不挂
+         · 没有折叠组（只有一句话就停了）→ 在正文末尾挂 dsh 那个内联小标签
+       两种情况用户都看得到「停了」，且都只说一遍。 */
+    var interrupted = (reason === 'cancelled' || reason === 'aborted'
+      || reason === 'interrupted');
+    /* 本轮起点的快照：foldTurnProcess 结尾会把 turnStartNode 置 null，
+       而下面可能还要用它划界挂标签 —— 必须在调用前取好
+       （实测：不取快照时上一轮的正文会被挂上「已停止」）。 */
+    var roundStart = turnStartNode;
+    var box = foldTurnProcess(reason);
     if (reason === 'cancelled') {
-      // 兜底收口（后端回了 cancel 却没发 turn/end）要说明白，
-      // 否则用户看到的和正常打断一模一样，就分不清「真停了」和「没等到确认」。
-      addSysLine('■', '已停止',
-        cancelSettleTimerFired ? '后端无回应，界面按已停止处理' : '', '');
+      var stoppedMarked = false;
+      if (!box) {
+        // 没有折叠组：正文裸在对话流里，挂 dsh 式的内联小标签
+        stoppedMarked = markLastAssistantStopped(roundStart);
+      }
+      if (!stoppedMarked && !box) {
+        // 连正文都没有（纯系统回合被打断）：只能退回整行提示
+        addSysLine('■', '已停止',
+          cancelSettleTimerFired ? '后端无回应，界面按已停止处理' : '', '');
+      }
       cancelSettleTimerFired = false;
     } else if (reason === 'error') {
       // 出错后必须给一个「重试」出口。不给会怎样（实测）：限流/网络抖动/
@@ -7875,90 +8700,59 @@
   function addHistoryTool(m){
     var wrap = document.createElement('div');
     wrap.className = 'tools';
-    /** 超过 40 行的部分，等用户点「还有 N 行」时再填进 DOM */
-    var restOutLines = null;
     var isTodo = m.label === '更新计划' || m.name === 'TodoWrite';
     if (isTodo) wrap.setAttribute('data-todo', 'true');
     var failed = m.failed === true;
-    var sumText = String(m.summary || '');
-    var isPath = /[\\/]/.test(sumText) && /\.[A-Za-z0-9]{1,6}$/.test(sumText);
-    // 与实时行同一条 RTL 修正（见 addToolRow 里的长注释）
-    if (isPath && sumText.charAt(0) === '…') sumText = '\u200E' + sumText;
+    // 摘要与实时行同一条公式（argSummary）：同一个工具在实时与历史里
+    // 必须长得一样，两处各写一份就一定会分叉。
+    var sumText = argSummary(m.name, m.label, m.arguments, m.summary);
+    var outText = String(m.output || '');
     // 历史工具默认收起：一次切会话可能有几十上百条，全展开等于把屏幕淹掉。
     // 计划行例外（它本身就是一屏摘要，展开才有用）。
     var open = isTodo ? 'true' : 'false';
-    var meta = failed ? '<span class="bad">失败</span>' : '完成';
-    if (m.truncated) meta += ' · 已截断';
+    // 行头只放状态事实，不再把错误内容顶上来（与实时路径同口径：
+    // 错误在 OUT 段里完整可见，失败靠名字变红表达）。成功仍标「完成」。
+    var metaParts = [];
+    if (!failed) metaParts.push('完成');
+    if (m.truncated) metaParts.push('已截断');
     var inputText = isTodo ? '' : toolInputText(m);
-    var outHtml = '';
-    // 编辑类工具：优先画 diff（红绿行），没有 diff 才退回纯文本输出。
-    // 与实时 finishTool 用同一套 .snippet/.ln add|del/.foot 结构，
-    // 所以颜色、行号、+N −M 行头全都一致。
+    // 展开卡片由 toolCardHtml 生成：与实时 finishTool 逐字符同一套结构
+    // （IN/OUT 合成一张 .io、头尾保留截断同一套算术）。
     var diff = m.diff;
+    var outSec = null;
     if (diff && Array.isArray(diff.lines) && diff.lines.length) {
-      var dHtml = '<div class="io-lb io-out-lb">OUT</div><div class="snippet">';
-      diff.lines.forEach(function (l) {
-        var cls = l.type === 'add' ? 'ln add' : (l.type === 'del' ? 'ln del' : 'ln');
-        dHtml += '<div class="' + cls + '"><span class="no">' +
-          esc(l.no === undefined || l.no === null ? '' : l.no) + '</span>' +
-          '<span class="tx">' + esc(l.text) + '</span></div>';
-      });
-      dHtml += '<div class="foot">+' + (diff.added || 0) + ' −' + (diff.removed || 0) +
-        (diff.truncated ? ' · 只显示前 ' + diff.lines.length + ' 行改动' : '') +
-        '</div></div>';
-      outHtml = dHtml;
-    } else {
-      var outText = String(m.output || '');
-      if (outText) {
-        /* 【结构必须与实时一致】实时 finishTool 画的是
-             .io-lb(OUT 标签) + .snippet.out > .ln > .tx
-           一开始这里套了 `.io > .io-sec > .io-h + pre.snippet` —— 三层容器各自
-           有 padding/border/max-height，挤在侧边栏里结果就是：外层卡片很大、
-           真正的文字区只剩一条窄缝（实测用户点名「画布很大但中间显示文字的
-           只有一个小的长方形区域」）。现在完全照搬实时那套扁平结构，
-           只有 .snippet 一个滚动体（overflow-x:auto），行用 .ln 排列。 */
-        var outLines = outText.split('\n');
-        // 与实时相同的上限：前 40 行进 DOM，其余给一行「还有 N 行未显示」。
-        // 一次几百行会拖慢渲染，而用户真要全文可以去翻原始输出文件。
-        var headLines = outLines.slice(0, 40);
-        var restLines = outLines.length - headLines.length;
-        var oHtml = '<div class="io-lb io-out-lb">OUT</div><div class="snippet out">';
-        headLines.forEach(function (t) {
-          oHtml += '<div class="ln"><span class="tx">' + esc(t) + '</span></div>';
-        });
-        if (restLines > 0) {
-          // data-rest 供展开按钮使用（与实时 .more 同一套交互）
-          oHtml += '<div class="more" data-rest="' + restLines + '">还有 ' +
-            restLines + ' 行未显示 · 点击展开</div>';
-          restOutLines = outLines.slice(40);
-        }
-        oHtml += '</div>';
-        outHtml = oHtml;
-      }
+      outSec = {
+        kind: 'diff',
+        lines: diff.lines,
+        foot: diffFoot(diff)
+      };
+    } else if (outText) {
+      // 脚注与实时同名同口径：结构一致才谈得上「同一条工具在两条路径上一样」
+      outSec = { kind: 'out', lines: outText.split('\n'),
+        foot: failed ? '执行失败' : '完成' };
     }
+    var card = isTodo ? { html: '', more: '' } : toolCardHtml(inputText, outSec);
     // 行头也带上 +N −M：与实时一致，用户不展开也能看出改了多少
-    var diffTag = (diff && Array.isArray(diff.lines) && diff.lines.length)
+    var diffTag = (outSec && outSec.kind === 'diff')
       ? '+' + (diff.added || 0) + ' −' + (diff.removed || 0)
       : '';
-    if (diffTag) meta += ' · ' + diffTag;
+    if (diffTag) metaParts.push(esc(diffTag));
+    var meta = metaParts.join(' · ');
     wrap.innerHTML = '<div class="row" data-open="' + open + '" data-st="' +
       (failed ? 'err' : 'ok') + '" tabindex="0" role="button">' +
       '<span class="caret">▶</span>' +
       '<span class="name">' + esc(m.label || m.name || '工具') + '</span>' +
-      '<span class="arg' + (isPath ? ' path' : '') + '">' + esc(sumText) + '</span>' +
+      argSpan(sumText) +
       '<span class="meta">' + meta + '</span></div>' +
       '<div class="slot">' +
-      (isTodo ? '<div class="todo"></div><div class="extra"></div>' : ioInHtml(inputText) + outHtml) +
+      (isTodo ? '<div class="todo"></div><div class="extra"></div>' : card.html) +
       '</div>';
     convo.appendChild(wrap);
     // 同实时行：留工具名供折叠摘要合成「已读取文件」这类短语
     wrap.setAttribute('data-tool', String(m.name || ''));
     wrap.setAttribute('data-tool-label', String(m.label || ''));
-    // 剩余行挂到 .more 节点上（历史行不在 toolMap 里，见事件委托那段）
-    if (restOutLines && restOutLines.length) {
-      var moreEl = wrap.querySelector('.snippet .more');
-      if (moreEl) moreEl.__rest = restOutLines;
-    }
+    // 被折起来的中间行挂到 .more 节点上（与实时同一套交互，见 bindMoreHtml）
+    if (!isTodo) bindMoreHtml(wrap, card.more);
     // 计划行：历史里 arguments 就是当时的完整清单，直接画出来。
     // 与实时 todo/update 用同一套 class（done/now/mk），样式自动一致。
     if (isTodo) {
@@ -8013,24 +8807,43 @@
   function renderHistory(msgs){
     if (!msgs || !msgs.length) return;
     /* 历史里没有 turn/begin、turn/end 事件，只有一串 user / assistant / tool。
-       轮次边界只能靠 **user 消息** 划：它之后到下一个 user 之前，就是一轮。
-       收口时把这些工具行与思考块折起来，用户切回会话看到的才是
-       「▸ 这一轮的工作过程 · 3 次工具调用」，而不是几十行平铺的工具。
+       轮次边界只能靠 **user 消息** 划（内部注入 / 目标注入不算边界）：
+       它之后到下一个 user 之前，就是一轮。
 
-       ## 和实时一样要**分段**（第 29 轮修复）
+       ## 一轮一个组，最终回复裸在组外（任务 E 按 dsh 对齐；任务 J 修正判据）
 
-       一轮里 AI 是「做几件事 → 说一句 → 再做几件 → 再说一句」。
-       只在 user 边界收口的话，后面几段的工具会被搬到最前面、正文被挤到末尾，
-       跟当时的过程对不上（实测 order 从 `[工具][正文A][工具][正文B]`
-       变成 `[组: 全部工具][正文A][正文B]`）。
-       dsh 的做法是「遇到带正文的 assistant-step 就 flush 一次组」，
-       这里同理：**每段正文之前先把已累积的工具收口**。 */
+       组内成员 = 该轮的工具行 + 思考块 + **除最终回复外的全部 assistant 正文**。
+
+       最终回复的判据是「该轮**最后一个过程节点是正文**」（见 finalReplyOf）：
+         · 最后是工具/思考 → 没有结论 → 全部进组，折叠行标「未完成」。
+           绝不能把中间那句「我来做个工具自检」摘到组外末尾 ——
+           那样组插在前面、正文落在后面，看起来像最终总结，
+           用户会以为任务已经完成了（用户实测报障，dsh 对照是保持原顺序）。
+         · 最后是正文 → 它就是结论，摘出组外（它本来就在最后，位置不变）。
+
+       **历史里为什么把「没有最终回复」标成「未完成」而不是「已停止」**：
+       磁盘上只有 messages，没有 turn/end 的 reason（后端不持久化它），
+       所以历史重放分不清「用户点了停止」和「max_tokens 截断 / 工具报错后中止」。
+       标「未完成」是这三种情况的共同事实：「这一轮没有给出结论」，
+       既不撒谎也不含糊。实时路径知道确切 reason，会标「已停止」。
+
+       默认收起（与实时一致，dsh 也是默认折叠）：不传 o.open。 */
     var roundNodes = [];
     function flushRound(){
       if (!roundNodes.length) return null;
-      var box = buildTurnProc(roundNodes, { reason: 'history', headline: false });
+      var tail = finalReplyOf(roundNodes);
+      var members = tpMembers(roundNodes, tail);
       roundNodes = [];
-      return box;
+      if (!members.length) return null;
+      return buildTurnProc(members, {
+        reason: 'history',
+        headline: false,
+        /* 历史不标状态词。磁盘上只有 messages，没有 turn/end 的 reason，
+           重放分不清「用户点了停止」和「正常说完话又去调工具」——而后者
+           在真实数据里占多数（全库 160 轮中，以工具收尾的 44 轮里有 37 轮
+           属于这种正常结束）。标了就是冤枉，所以一律不标。 */
+        status: ''
+      });
     }
     msgs.forEach(function(m){
       if (!m) return;
@@ -8090,12 +8903,14 @@
         // 思考必须画在正文**之前**，顺序与当时流式出现的顺序一致
         // 思考进组（dsh 也是把 reasoning 归到 process 区）
         if (thinkText) roundNodes.push(addHistoryThink(thinkText));
-        // 正文出现 = 前一段工具到此为止，先收口再画正文
-        flushRound();
+        /* 正文也先入候选：它可能是「中间说明」，也可能承担最终回复 ——
+           由 flushRound 在最末一条上判定（只有最后一条且其后没有过程节点
+           时它才留在组外）。这里不再「遇到正文就收口」，否则一轮碎成多组。 */
         var a = document.createElement('div');
         a.className = 'msg assistant';
-        a.innerHTML = markdownInline(m.text);
+        a.innerHTML = markdownInline(m.text, false);
         convo.appendChild(a);
+        roundNodes.push(a);
       }
     });
     // 最后一条 user 之后的那一轮没有「下一个 user」来触发收口，这里补上

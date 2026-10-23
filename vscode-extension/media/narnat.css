@@ -211,6 +211,20 @@ body[data-settings="true"] #toBottom{display:none}
 .set-body{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:0 12px 12px}
 .set-row{padding:8px 0;border-bottom:1px solid var(--line)}
 .set-row:last-child{border-bottom:none}
+/* 高级设置折叠：常用项直出，其余收进这里。
+   用一个整行按钮而不是 <details>：需要跨 renderBody 记住展开状态（切分组回来不重置），
+   而 <details> 的 open 是 DOM 属性，renderBody 重建就丢了。 */
+.set-adv-toggle{
+  width:100%;margin:10px 0 2px;padding:6px 0;text-align:left;
+  background:none;border:none;border-top:1px solid var(--line);
+  font-size:11.5px;color:var(--fg-faint);cursor:pointer;
+}
+.set-adv-toggle:hover{color:var(--fg)}
+.set-adv{display:none}
+.set-adv[data-open="true"]{display:block}
+/* 高级区整体左边缩进一条，读起来与常用项分明 */
+.set-adv .set-row{padding-left:0}
+.set-adv[data-open="true"] .set-row:first-child{padding-top:4px}
 .set-lab{display:flex;align-items:baseline;gap:6px;font-size:12px;color:var(--fg);margin-bottom:5px}
 .set-lab .set-cur{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--fg-faint)}
 .set-hint{font-size:10.5px;color:var(--fg-faint);line-height:1.6;margin-top:4px}
@@ -486,6 +500,26 @@ body[data-real="true"] .demo-tip{display:none}
 
 /* ---------- 消息 ---------- */
 .msg{padding-bottom:22px}
+/* 被打断的标记（形态与取值抄 dsh 的 AssistantMarkdown.module.css 的 .stopped）：
+      align-self:flex-start  padding:0 6px  border-radius:6px
+      background:interactive-bg-hover  color:label-tertiary
+      font-size:11px  line-height:18px
+   dsh 的注释原话是 "Interrupted-turn terminal marker: quiet inline tag,
+   no animation" —— 安静的内联小标签，不带动画。
+   为什么换成这个：原来打断要写三种地方（折叠行加「已停止 · 」前缀、
+   折叠行右侧「任务被打断」、再来一整行「■ 已停止」），同一件事说三遍，
+   而用户真正想知道的只是「这句话说完了没有」。dsh 只在正文末尾放一个小标签，
+   其余什么都不加。 */
+.msg-stopped{
+  display:inline-block;
+  margin-top:8px;
+  padding:0 6px;
+  border-radius:6px;
+  background:var(--bg-hover);
+  color:var(--fg-faint);
+  font-size:11px;
+  line-height:18px;
+}
 /* 用户消息：右侧气泡（形态对齐 dsh 的对话气泡）。
    原来用左侧竖线标记「这句是我说的」，窄面板里一条竖线加缩进把可用宽度
    又吃掉一截；气泡右对齐既省横向空间，也一眼分得清谁说的。 */
@@ -536,6 +570,9 @@ body[data-real="true"] .demo-tip{display:none}
   margin:14px 0 8px;line-height:1.4;font-weight:600;color:var(--fg);
 }
 .msg > *:first-child{margin-top:0}
+/* 末尾元素不留 margin-bottom：否则每条回复底部都比正文多一块空白
+   （原来只覆盖了 p:last-child，h1–h6 / 列表 / 引用 / 表格都还留着 16px）。 */
+.msg > *:last-child{margin-bottom:0}
 .msg h1{font-size:16px}
 .msg h2{font-size:15px}
 .msg h3{font-size:14px}
@@ -544,6 +581,10 @@ body[data-real="true"] .demo-tip{display:none}
   margin:0 0 10px;padding:2px 0 2px 12px;
   border-left:2px solid var(--fg-faint);color:var(--fg-dim);
 }
+/* markdown 分隔线（`---` / `***` / `___`，AI 回答里极常见的分段手段）。
+   不用浏览器默认的 2px 立体边框：线与相邻分隔线（--line）同色，间距取
+   段落间距（.msg p 的下边距 16px），上下各一份。 */
+.msg hr{border:none;border-top:1px solid var(--line);margin:16px 0}
 .msg ol{margin:16px 0;padding-left:18px}
 .msg a{color:var(--accent);text-decoration:none}
 .msg a:hover{text-decoration:underline}
@@ -553,6 +594,14 @@ body[data-real="true"] .demo-tip{display:none}
   border:1px solid var(--line);color:var(--fg);
 }
 .msg ul{margin:16px 0;padding-left:18px}
+/* h4–h6 后面紧跟列表时间距收紧（dsh 是 8px）：小标题与它领起的清单
+   是一块内容，留 16px 会让人以为列表不属于这个标题。 */
+.msg h4 + ul,.msg h4 + ol,
+.msg h5 + ul,.msg h5 + ol,
+.msg h6 + ul,.msg h6 + ol{margin-top:8px}
+/* 任务列表：`- [ ] 待办` / `- [x] 已完成` 渲染成真实的 disabled checkbox
+   （GFM 口径，同 dsh）。accent-color 取次要文字色 —— 勾选态不该比正文抢眼。 */
+.msg input[type=checkbox]{margin:0 8px 0 0;accent-color:var(--fg-dim)}
 .msg li{margin-bottom:6px}
 .msg li::marker{color:var(--fg-faint)}
 .msg pre{
@@ -640,16 +689,23 @@ body[data-real="true"] .demo-tip{display:none}
 .tk-meta{color:var(--fg-faint)}
 /* Markdown 表格：形态同 dsh —— 不要竖线、不要外框，只留每行一条下边线；
    单元格 10px/16px 内边距，首列不留左侧内边距（贴着正文左缘起排）。
-   宽度必须铺满容器（width:100%）：dsh 是宽屏网页，按内容宽（max-content）
-   排没问题；我们的面板常只有 249px，max-content 会让两列短表格只占半屏，
-   右边空一大片。内容确实放不下时由外层 .tw 横向滚动兜住。 */
+
+   宽度：`max-content` 与 `min-width:100%` 两者缺一不可。
+   · 只写 width:100%（原来）→ 单元格被压到任意位置断行，6 列在 249px 下
+     首列只剩 29px、逐字换行，而 .tw 同时又横滚 —— 压扁和横滚同时发生
+   · 只写 max-content → 两列短表格只占半屏，右边空一片（dsh 是宽屏网页，
+     按内容宽排没问题，我们的面板常只有 249px）
+   min-width:100% 让短表格铺满，max-content 让长表格按内容撑开，
+   溢出统一交给外层 .tw 的 overflow-x:auto —— 它是唯一的横向滚动容器。 */
 .tw{margin:16px 0 0;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain}
-.msg table{border-collapse:collapse;width:100%}
+.msg table{border-collapse:collapse;width:max-content;min-width:100%}
 .msg th,.msg td{
   border:none;border-bottom:1px solid var(--line);
   padding:10px 16px;text-align:left;vertical-align:top;
-  /* 长串不换行的内容（URL、命令）在窄面板里会撑出横滚，允许任意位置断行 */
-  overflow-wrap:anywhere;
+  /* 单元格内不折行：折行会把多列表格压成逐字换行（首列 29px 的实测值），
+     而横滚本来就要发生 —— 让它一次滚个够，不要又压扁又滚。
+     长串（URL / 命令）的自然宽度由 .tw 的横滚承担。 */
+  white-space:nowrap;overflow-wrap:normal;
 }
 .msg th[data-a="center"],.msg td[data-a="center"]{text-align:center}
 .msg th[data-a="right"],.msg td[data-a="right"]{text-align:right}
@@ -696,7 +752,15 @@ body[data-real="true"] .demo-tip{display:none}
 }
 .row .meta{flex:none;color:var(--fg-faint);font-size:10.5px}
 .row .meta .bad{color:var(--err)}
+.row .meta .warn{color:var(--warn)}
 .row[data-st="err"] .name{color:var(--err)}
+/* 状态三档：ok / warn / err。「已取消」「中断后返回」「已中断」不是执行失败，
+   走琥珀色的 warn 一档（对应 dsh 的 StateDot state="warning"），只有真正的
+   执行失败才走 err 的红。以前这两类是同一个红字，扫一眼分不出
+   「我自己点的停止」和「它跑挂了」。 */
+.row[data-st="warn"] .name{color:var(--warn)}
+/* 失败行的收起态摘要会整条换成错误首行（见 finishTool），用错误色标出来 */
+.row .arg.bad{color:var(--err)}
 
 .think{margin-bottom:16px}
 .think .row .name{color:var(--fg-faint)}
@@ -717,21 +781,47 @@ body[data-real="true"] .demo-tip{display:none}
   font-family:var(--mono);font-size:11.5px;line-height:1.7;
   background:var(--bg-code);border-radius:6px;padding:7px 0;overflow-x:auto;
 }
-/* 工具行的展开卡片：IN（完整输入）+ OUT（完整输出），形态对齐 dsh ——
-   一个 12px 圆角、1px 描边的整体卡片，两段各带一个小标签。
-   收起时只有一行，展开才铺开；卡片自身限高滚动，不把对话区顶走。 */
+/* 工具行的展开卡片：IN（完整输入）+ OUT（完整输出）**合成一张卡**，
+   形态对齐 dsh —— 12px 圆角、1px 描边的整体，两段各带一个竖排小标签，
+   中间一条全宽发丝线。两段各自限高 220px 独立滚动：一段长输入不该把
+   一段短输出埋掉（我们原来是 IN 260px、OUT 无上限）。
+   220px ≈ 11 行（行高 1.7×11.5px≈20px）。原来 150px 只放得下约 7 行，
+   而「… 其余 N 行」入口排在第 13 行 —— 必须滚动才看得见，等于没有入口。
+   配合 OUT_MAX_LINES / DIFF_MAX_LINES = 12（head 6 + 入口 + tail 6），
+   入口固定落在第 7 行，不滚动就在视野内。
+   收起时只有一行，展开才铺开；卡片自身滚动，不把对话区顶走。 */
 .io{
-  margin-top:6px;border:1px solid var(--line-strong);border-radius:10px;
+  margin-top:6px;border:1px solid var(--line-strong);border-radius:12px;
   background:var(--bg-code);overflow:hidden;
 }
-.io-sec{display:flex;gap:12px;padding:9px 12px;max-height:260px;overflow:auto}
-.io-sec + .io-sec{border-top:1px solid var(--line)}
-.io-lb{flex:none;color:var(--fg-dim);font-size:10.5px;line-height:1.7;user-select:none}
+.io-sec{display:flex;gap:12px;padding:9px 12px;max-height:220px;overflow:auto}
+/* 两段之间的全宽发丝线。用独立元素而不是 `.io-sec + .io-sec` 的 border-top：
+   只有 IN 或只有 OUT 时（很多工具没有输出）不该画那条线。 */
+.io-div{height:1px;background:var(--line)}
+/* 标签钉在滚动区顶部：长内容滚下去之后仍然看得见这一段是 IN 还是 OUT */
+.io-lb{
+  flex:none;position:sticky;top:0;align-self:flex-start;
+  color:var(--fg-dim);font-size:10.5px;line-height:1.7;user-select:none;
+}
 .io-tx{
   flex:1;min-width:0;font-family:var(--mono);font-size:11.5px;line-height:1.7;
   white-space:pre-wrap;word-break:break-word;color:var(--fg-dim);
 }
 .io-tx.bad{color:var(--err)}
+/* OUT 段仍用 .snippet 那套行结构（.ln / .no / .add / .del / .foot 都继承），
+   但它嵌进卡片后只当行容器：背景、圆角、左右内距都由 .io 与 .io-sec 提供，
+   否则会在卡片里再套一层同样的底色和多出 24px 缩进。
+   overflow:visible 是为了让 `.more` / `.no` 的 sticky 挂到真正会滚的
+   `.io-sec` 上：`.snippet` 自己带 overflow-x:auto（按 CSS 规则 overflow-y
+   会一起变成 auto），它会成为「不会滚的滚动容器」，sticky 在里面等于失效。
+   align-self:flex-start 让 .snippet 保持内容高度 —— 被 stretch 到卡高的话，
+   它的盒子始终贴着可视区底部，`.more` 的 sticky 就变成永久钉在卡底了。 */
+.io .snippet{
+  flex:1;min-width:0;padding:0;background:none;border-radius:0;
+  overflow:visible;align-self:flex-start;
+}
+.io .snippet .ln{padding:0}
+.io .snippet .foot{padding-left:0;padding-right:0}
 /* 命令块右上角的复制按钮：只有代码块与命令提供复制 */
 .io-copy{
   flex:none;align-self:flex-start;font:inherit;font-family:var(--font);
@@ -742,11 +832,6 @@ body[data-real="true"] .demo-tip{display:none}
 .io:hover .io-copy,.io-copy:focus-visible{opacity:1}
 .io-copy:hover{color:var(--fg);border-color:var(--line)}
 .io-copy[data-done="true"]{color:var(--ok);opacity:1}
-/* 输出段的标签（IN 的标签在卡片内，输出块沿用原来的 .snippet 结构，
-   给它同样一个小标签，两段读起来才是一套东西） */
-/* 输出段标签与 IN 标签左缘对齐：IN 在 .io-sec 的 12px 内边距里，
-   这里补同样的 12px，否则同一张卡片里 IN 缩进 12px、OUT 只缩进 2px。 */
-.io-out-lb{display:block;margin:8px 0 3px 12px}
 .snippet .ln{display:flex;padding:0 12px;white-space:pre}
 /* 行号在横向滚动时不能跟着滚走。
    diff 的每行最长 74~82 个字符，而 249px 面板一屏只放得下约 31 个字符，
@@ -793,9 +878,19 @@ body[data-real="true"] .demo-tip{display:none}
   border-top:1px solid var(--line);margin-top:6px;padding-top:6px;
 }
 .snippet .foot b{color:var(--ok);font-weight:400}
-/* 工具输出被截断时的「还有 N 行」入口：可点、要显眼，不能被当成正文 */
+/* 工具输出被截断时的「还有 N 行」入口：可点、要显眼，不能被当成正文。
+   sticky bottom:0 是**滚动兜底**：作用不是「初始不可见也能救」（真正管那件事的
+   是行数与卡高，见 .io-sec 的 220px 与 OUT_MAX_LINES=12），而是当入口的自然
+   位置被压到折叠线以下时（将来有人调大 OUT_MAX_LINES、或 IN 段很长把它挤下去），
+   它能被钉在卡底、不至于彻底找不到。实测（verify-toolrow.js 的 probe）：
+   把卡高临时压到 60px 时，入口会被拉回卡内底部。
+   前提是 sticky 的滚动容器必须是**真正会滚的 .io-sec**，所以 .io .snippet 要
+   overflow:visible（见那条规则）。背景必须不透明：diff 行有 --add/--del 底色，
+   滚动时会从入口下面透出来。 */
 .snippet .more{
+  position:sticky;bottom:0;z-index:2;
   padding:4px 12px;color:var(--accent);font-size:10.5px;
+  background:var(--bg-code);
   cursor:pointer;border-top:1px dashed var(--line);margin-top:4px;
 }
 .snippet .more:hover{background:var(--bg-hover)}
@@ -1691,9 +1786,11 @@ body[data-drawer="true"] #toBottom{display:none}
    .crow .right 自带 margin-left:auto，所以整组会自己靠右，左侧留白即可。
    原来那条「460px 以下隐藏工作目录」的规则随 chip 一起删掉了 ——
    留着它就是一条永远匹配不到元素的选择器。 */
-/* ---------- 一轮的「工作过程」折叠（抄 dsh TurnProcessNodeView）----------
+/* ---------- 一轮的「工作过程」折叠（自研；dsh 没有对话折叠这层）----------
    收起：只有一行摘要 + 下方一条分割线，本轮的工具与思考全部藏在里面。
    展开：摘要行不动，下面铺开原始工具行。
+   形态上参考的是 dsh 的单行工具行几何（`packages/client/ui-tool/**` 的
+   ToolRow + `ui-primitives/src/DisclosureRow.*`）：一行摘要 + chevron；
    dsh 那版是 33px 高、0.5px 下边框、chevron 旋转 180°；这里同形，
    但字号与间距服从我们自己的面板密度（侧边栏更窄，字要小一档）。 */
 .turn-proc{margin:2px 0 6px}
@@ -1714,6 +1811,13 @@ body[data-drawer="true"] #toBottom{display:none}
 }
 .turn-proc[data-open="true"] .tp-caret{transform:rotate(90deg)}
 .tp-label{flex:none;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 副标题：类别短语（「已读取文件并搜索代码」）。主标题改计数式之后，
+   这一句不再承担「有多少」的职责，只补充「干了什么类别的事」。
+   放在主标题右侧、可无限收缩——窄面板（249px）下先让位给计数与耗时。 */
+.tp-sub{
+  flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:11.5px;color:var(--fg-faint);opacity:.8;
+}
 /* 耗时用等宽 + 数字对齐，dsh 也是这么处理的：数字跳动时行宽不变 */
 .tp-dur{
   margin-left:5px;font-family:var(--mono);font-size:10.5px;
@@ -1738,7 +1842,13 @@ body[data-drawer="true"] #toBottom{display:none}
    上限只在「用户主动展开」时生效；收起动画从屏幕上真实高度开始，不受它干扰。 */
 .tp-body[data-capped="true"]{
   max-height:min(400px,50vh);
-  overflow-y:auto;overscroll-behavior-y:contain;scrollbar-gutter:stable;
+  /* 这里**不能**写 overscroll-behavior-y:contain：它的规范语义就是「滚到边界后
+     不把剩余滚动传给父容器」。展开后的组体正好夹在 .io-sec 与 #convo 之间，
+     一旦 contain，用户在工具输出里滚到底就被截在这一层，想翻到下一条命令
+     必须松开滚轮再滚一次（真实滚轮实测：内层 94/94、组体 528/528 之后连拨
+     15 次滚轮，#convo.scrollTop 停在 2834 一动不动）。默认的 auto 才会把
+     边界后的滚动继续上传给 #convo —— 「一次滚轮翻到下一条命令」靠的就是它。 */
+  overflow-y:auto;scrollbar-gutter:stable;
 }
 /* 可滚动时上下加 24px 渐隐：不提示的话，用户看不出这块还能往下滚，
    只会以为内容就到这儿了（dsh 的 fadeTop/fadeBottom 同一个作用）。 */

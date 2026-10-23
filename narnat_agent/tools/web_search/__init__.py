@@ -1,27 +1,35 @@
-"""WebSearch工具 —— 联网搜索（MCP 搜索服务器 / DeepSeek 官方 Search REST）
+"""WebSearch工具 —— 联网搜索（适配任意 MCP 服务器 / 任意 REST 搜索接口）
 
-依赖:
-  - 任意 MCP 搜索服务器（默认 AnySearch），或 DeepSeek 官方联网搜索 API
+## 两种接入方式（narnat.json「联网搜索」的 mode 字段）
 
-经 MCP Streamable HTTP 协议调用：McpHttpClient 握手(initialize) → 列工具(tools/list)
-→ 按配置解析工具与参数 → 调用(tools/call)。JSON/SSE 响应、会话头、超时均由
-McpHttpClient 承担，本模块不碰 HTTP 细节。
+  "mcp" （默认）任意 MCP Streamable HTTP 服务器（AnySearch、Brave、Exa…）
+  "http"       任意 REST 搜索接口（POST JSON → 返回 JSON）
 
-provider 选择（narnat.json "联网搜索" 的 provider 字段）:
-  - 缺失 / "mcp": 下面这套 MCP 契约（默认）
-  - "deepseek":    DeepSeek 官方 Search REST，见 deepseek.py
-  - 其它值:        报错并列出可用值
+**不绑定任何厂商**：厂商差异全部由配置表达（地址、认证、字段名、响应解析），
+代码里没有「某厂商」的分支。哪家出了新的搜索接口，界面上填完就能用。
+
+## MCP 方式
+
+McpHttpClient 握手(initialize) → 列工具(tools/list) → 按配置解析工具与参数
+→ 调用(tools/call)。JSON/SSE 响应、会话头、超时均由 McpHttpClient 承担。
 
 MCP 契约：各服务器的工具名/参数名不同，一律由配置指定（不猜）；参数类型（数组/标量）
-查工具 inputSchema 决定。配置（narnat.json "联网搜索"，缺项即报错；旧字段名不识别）:
-  - key:          API key；空 = 无鉴权服务器
+查工具 inputSchema 决定。配置（narnat.json「联网搜索」→ mcp 子对象）:
   - url:          MCP 端点 URL
-  - auth:         认证方式：x-api-key / bearer / 自定义头名
   - tool:         搜索工具名；空 = 连接后报错列出服务器工具表
   - query_params: 查询词填入的参数名列表（可多个，数组型参数传 [query]）
   - count_param:  结果数量参数名；空串 = 不传
   - args:         可选，附加固定参数；仅当目标工具参数表（inputSchema）声明
                   该键时传入，未声明的键被忽略（防换服务器后旧配置误传给其它工具）
+
+## REST 方式
+
+见 rest.py：请求体字段名、响应数组路径、title/url/描述字段名全部可配。
+
+## 两地共用
+
+  - key:  密钥（顶层；两种接入方式共用同一把搜索钥匙）
+  - auth: 认证方式：bearer / x-api-key / 自定义头名；空 = 不加认证头
 """
 
 import json
@@ -33,7 +41,7 @@ from typing import Dict, List, Tuple
 from ...mcp.client import McpError
 from ...mcp.http_client import McpHttpClient
 from ..exec_signal import has_error
-from . import deepseek
+from . import rest
 
 
 # ── 搜索配置（原模块级全局收敛为类成员）──
@@ -321,47 +329,87 @@ def _fingerprint(cfg: _Config) -> str:
                       sort_keys=True, ensure_ascii=False)
 
 
-_PROVIDERS = ("mcp", "deepseek")
+_MODES = ("mcp", "http")
+
+# 老配置的 provider 值 → 新 mode。只为不改动用户既有 narnat.json：
+# "deepseek" 原本是「某厂商的 REST 接口」，现在归入通用 http 方式。
+_LEGACY_PROVIDER = {"deepseek": "http", "mcp": "mcp", "http": "http"}
 
 
 def _provider_name(keys) -> str:
-    """provider 字段：缺失/"mcp" = 现有 MCP 行为；"deepseek" = 官方 Search REST"""
-    raw = keys.get("provider") if isinstance(keys, dict) else None
+    """接入方式：缺失 = mcp；老配置的 provider 值自动映射到 mcp / http"""
+    if not isinstance(keys, dict):
+        return "mcp"
+    raw = keys.get("mode")
+    if raw is None:
+        raw = keys.get("provider")
     if raw is None:
         return "mcp"
     name = str(raw).strip().lower()
     if not name:
         return "mcp"
-    if name not in _PROVIDERS:
-        raise McpError(f"provider 值 '{raw}' 不被识别（可用: mcp / deepseek）")
+    name = _LEGACY_PROVIDER.get(name, name)
+    if name not in _MODES:
+        raise McpError(f"接入方式 '{raw}' 不被识别（可用: {' / '.join(_MODES)}）")
     return name
 
 
-def _read_config(api_keys):
-    """按 narnat.json "联网搜索" 读配置；字段缺失/非法即报错并指出缺什么
+def _provider_fields(keys) -> Dict:
+    """取当前 provider 专属字段所在的字典。
 
-    只认当前字段名（旧字段名如 websearch_url 一律不识别）：
-    url/auth/tool/query_params/count_param 必填；key（空=无鉴权）与 args 可选。
-    provider="deepseek" 时改读 DeepSeek 配置（返回 deepseek.Config）。
+    ## 为什么要把 MCP 的字段收进 `mcp` 子对象
+
+    原来 provider / url / auth / tool / query_params / count_param / args 全平铺在
+    「联网搜索」这一层。切到 deepseek 后，那套 anysearch 的字段仍然原样躺在配置里
+    （只在界面上被 showFor 隐藏），用户打开 narnat.json 会看到「明明选了 DeepSeek
+    官方搜索，为什么还有 anyserch.com 的配置」—— 分不清哪些在生效。
+
+    现在两个 provider 各有自己的子对象，切换互不覆盖：
+
+        "联网搜索": {
+          "provider": "deepseek",          ← 顶层只留 provider + key（共用）
+          "key": "sk-...",
+          "deepseek": { "url": ..., "count_param": ... },
+          "mcp":      { "url": ..., "tool": ..., "query_params": [...] }
+        }
+
+    兼容：老配置没有 `mcp` 子对象、字段还平铺在顶层 —— 此时回退到顶层读，
+    所以升级不需要用户改任何东西（下次保存时由 rpc 层自动迁移）。
+    """
+    sub = keys.get("mcp")
+    return sub if isinstance(sub, dict) else keys
+
+
+def _read_config(api_keys):
+    """按 narnat.json「联网搜索」读配置；字段缺失/非法即报错并指出缺什么
+
+    两种接入方式：
+      mcp  → _Config（MCP 契约，字段在 mcp 子对象，回退顶层兼容老配置）
+      http → rest.Config（REST 契约，字段在 http 子对象）
+
+    认证头由本函数统一构造（_auth_headers），两条路径共用同一份逻辑，
+    避免「同一个 key 在两种方式下认证头写法不一致」。
     """
     keys = api_keys or {}
-    if _provider_name(keys) != "mcp":
-        return deepseek.read_config(keys)
-    missing = [name for name in ("url", "auth", "tool",
-                                 "query_params", "count_param")
-               if name not in keys]
+    mode = _provider_name(keys)
+    # key / auth 在顶层共用（两种接入方式是同一把搜索钥匙）
+    auth_headers = _auth_headers(str(keys.get("key") or ""),
+                                 str(keys.get("auth") or "").strip())
+    if mode == "http":
+        return rest.read_config(keys, auth_headers)
+
+    mcp = _provider_fields(keys)
+    missing = [name for name in ("url", "tool", "query_params", "count_param")
+               if name not in mcp]
     if missing:
         raise McpError(f"联网搜索缺少配置项: {', '.join(missing)}"
                        f"（按 README「联网搜索」补全 narnat.json）")
 
-    url = str(keys["url"] or "").strip()
-    auth = str(keys["auth"] or "").strip()
+    url = str(mcp["url"] or "").strip()
     if not url:
         raise McpError("url 不能为空")
-    if not auth:
-        raise McpError("auth 不能为空（x-api-key / bearer / 自定义头名）")
 
-    raw_query = keys["query_params"]
+    raw_query = mcp["query_params"]
     if isinstance(raw_query, str):
         query_params = (raw_query.strip(),) if raw_query.strip() else ()
     elif isinstance(raw_query, list):
@@ -371,15 +419,14 @@ def _read_config(api_keys):
     if not query_params:
         raise McpError('query_params 不能为空（查询词参数名，如 ["query"]）')
 
-    count_param = str(keys["count_param"] or "").strip()
+    count_param = str(mcp["count_param"] or "").strip()
 
-    raw_args = keys.get("args", {})
+    raw_args = mcp.get("args", {})
     if not isinstance(raw_args, dict):
         raise McpError('args 必须是对象（如 {"zone": "cn"}）')
     extra_args = {str(k): v for k, v in raw_args.items()}
 
-    key = str(keys.get("key") or "")
-    return _Config(url, _auth_headers(key, auth), str(keys["tool"] or "").strip(),
+    return _Config(url, auth_headers, str(mcp["tool"] or "").strip(),
                    query_params, count_param, extra_args)
 
 
@@ -498,11 +545,11 @@ def _build_arguments(conn: _Connection, query: str, num: int) -> Dict:
 
 # ── 主入口 ──
 
-def _search_deepseek(cfg: deepseek.Config, query: str, num: int) -> str:
-    """DeepSeek 路径：请求 → 结果转同构结构 → 沿用 _render 的排序/条数/格式"""
+def _search_rest(cfg: rest.Config, query: str, num: int) -> str:
+    """REST 路径：请求 → 结果转同构结构 → 沿用 _render 的排序/条数/格式"""
     try:
-        text = deepseek.search(cfg, query, num, SearchConfig.timeout)
-        results = deepseek.to_results(text)
+        text = rest.search(cfg, query, num, SearchConfig.timeout)
+        results = rest.to_results(text, cfg)
     except Exception as e:
         return f"[错误: 搜索失败: {e}]"
     if not results:
@@ -538,9 +585,9 @@ def execute(query: str, num: int = 5, _tool_context=None) -> str:
         cfg = _read_config(_tool_context.api_keys if _tool_context else None)
     except Exception as e:
         return f"[错误: 搜索失败: {e}]"
-    if isinstance(cfg, deepseek.Config):
-        # DeepSeek 的条数由 API 的 1~50 约束（count），故传未截到 20 的原始 num
-        return _search_deepseek(cfg, query, requested)
+    if isinstance(cfg, rest.Config):
+        # REST 的条数上限由各家 API 自定，故传未截到 20 的原始 num
+        return _search_rest(cfg, query, requested)
 
     try:
         conn = _get_connection(cfg)
@@ -563,8 +610,8 @@ def execute(query: str, num: int = 5, _tool_context=None) -> str:
     if has_error(text):
         return text
     # 服务端不守 isError 规范：回 200 且 content 里是 {"error":{...}} 错误体。
-    # 判定与 DeepSeek 路径同源（deepseek.server_error，唯一定义），同样不得当正文渲染
-    detail = deepseek.server_error(text)
+    # 判定与 REST 路径同源（rest.server_error，唯一定义），同样不得当正文渲染
+    detail = rest.server_error(text)
     if detail:
         return f"[错误: 搜索失败: 服务端错误: {detail}]"
     return _render(text, query, num)
