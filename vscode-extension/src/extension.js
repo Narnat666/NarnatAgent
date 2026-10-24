@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const { getHtml } = require('./webview');
 const { RpcClient } = require('./rpc-client');
+const attachStore = require('./attach-store');
 
 /** 对话视图 id（与 package.json contributes.views 一致） */
 const CHAT_VIEW_ID = 'narnat.chatView';
@@ -29,6 +30,9 @@ const MESSAGE_METHODS = {
      这张表是严格白名单（dispatch 里 MESSAGE_METHODS[msg.type] 取不到就 return），
      没登记 = 消息被静默丢弃，界面永远等不到回执、按钮卡在「加载中…」。 */
   sessionHistory: 'session/history',
+  /* /skill 的参数补全候选（后端 skill/list）。同 sessionHistory：不登记
+     就是被 dispatch 静默丢弃，面板永远等不到候选、敲完 /skill 空格没反应。 */
+  skillList: 'skill/list',
   configSet: 'config/set',
   /* 设置面板用的三条。不需要配置面板的人也会走到这里 —— 未注册的类型
      会落到 dispatch 的 catch 里，所以必须一起登记，否则报「未知类型」。
@@ -201,6 +205,7 @@ const RECEIPT_TYPES = {
   sessionNew: 1, sessionSwitch: 1, sessionDelete: 1,
   sessionRename: 1, sessionExplore: 1, sessionDone: 1,
   sessionHistory: 1,
+  skillList: 1,
   command: 1, configSet: 1, confirmReply: 1
 };
 
@@ -378,13 +383,15 @@ async function showPrompt(p) {
 
 /* --------------------------- 附件（webview → 宿主） ---------------------------
  * 语义（用户明确要求）：拖 / 粘贴进来的**文件、文件夹不复制、不存储**，
- * 只把绝对路径发给 AI，让它自己用 Read/Grep/Glob 处理；
- * 只有「没有磁盘路径的图片」（现场截图 / 剪贴板图片）才写进临时目录。
- * 这里只做三件事：核对路径、落临时图片、读缩略图；不碰文件内容本身。
+ * 只把绝对路径发给 AI，让它自己用 Read/Grep/Glob 处理。
+ * **图片例外**：图片会被复制一份进用户附图目录（`attachUserDir`）。
+ * 原因（用户报障「图丢了」）：图片只留原路径时，原文件一被移动/清理，
+ * 历史里那条消息就永久变成「图片已不在」。dsh 的图不丢也不是因为存了多份，
+ * 而是因为它存在用户数据目录、并且只认库里的那一份
+ * （`attachment-local/src/store.ts`）。这里对齐那个「库是权威」的思路。
+ * 其余文件仍然不复制：它们是用户工作区里的真实文件，AI 直接读原文件才对。
  */
 
-/** 临时图片目录：只有截图/剪贴板图片才落这里 */
-const ATTACH_DIR = path.join(os.tmpdir(), 'narnat_attachments');
 /** 单张图片上限（与前端 ATCH_MAX_IMG 一致）：超过不读、不落盘 */
 const ATTACH_MAX_BYTES = 8 * 1024 * 1024;
 /** 扩展名 → MIME */
@@ -421,31 +428,49 @@ function attachKind(p) {
 }
 
 /**
- * 核对一批路径：存在性与类型。不存在的要如实返回 exists:false，
- * 由界面剔除并提示（不能静默丢掉用户拖进来的东西）。
- * @param {string[]} paths
- * @returns {{path: string, exists: boolean, kind: string}[]}
+ * 用户附图目录：**放在项目数据目录下，不放在系统临时目录**。
+ *
+ * 为什么改（原先是 `os.tmpdir()/narnat_attachments`）：用户报障
+ * 「图丢了」——临时目录是操作系统的清理区（Windows 磁盘清理、各种
+ * 清理工具默认就清 %TEMP%），图放那儿随时会消失，历史里的气泡于是
+ * 变成「图片已不在」。dsh 的图之所以不丢，不是因为存了多份，而是因为
+ * 它存在 DSH_HOME（用户数据目录）这种**不会被系统清理**的位置。
+ *
+ * 推导不出来（配置路径未知）时回退系统临时目录——降级也要能工作，
+ * 只是那种情况下不保证长期存在。纯逻辑在 `src/attach-store.js`（可单测）。
+ * @returns {string}
  */
-function attachCheck(paths) {
-  const items = [];
-  for (const raw of (Array.isArray(paths) ? paths : [])) {
-    const p = String(raw || '');
-    if (!p) continue;
-    let exists = false;
-    try {
-      exists = fs.existsSync(p);
-    } catch (err) {
-      exists = false;
-    }
-    items.push({ path: p, exists, kind: exists ? attachKind(p) : '' });
+function attachUserDir() {
+  let cfgPath = '';
+  try {
+    const settings = lastRpcSettings || rpcSettings();
+    cfgPath = resolveConfigPath(settings) || '';
+  } catch (err) {
+    cfgPath = '';
   }
-  return items;
+  return attachStore.userImageDir(cfgPath, path.join(os.tmpdir(), 'narnat_attachments'));
 }
 
 /**
- * 把 webview 传来的 base64 图片写到临时目录，返回绝对路径。
- * 文件名带时间戳：同名截图连拖两次不会互相覆盖（后一张顶掉前一张，
- * AI 读到的就是错的那张）。
+ * 核对一批路径：存在性与类型；**图片会被复制进用户附图目录**。
+ * 纯逻辑在 `src/attach-store.js`（那边可脱离 vscode 单测）。
+ * @param {string[]} paths
+ * @returns {{path: string, source?: string, exists: boolean, kind: string}[]}
+ */
+function attachCheck(paths) {
+  return attachStore.checkPaths(paths, {
+    dir: attachUserDir(),
+    maxBytes: ATTACH_MAX_BYTES,
+    onWarn: (msg) => console.warn('[narnat] ' + msg),
+  });
+}
+
+/**
+ * 把 webview 传来的 base64 图片（截图 / 剪贴板）存进用户附图目录。
+ *
+ * 与 `attachCheck` 里的图片走**同一个库**（`storeUserImage`）：内容寻址、
+ * 保留扩展名、放在项目数据目录下。原先是写进系统临时目录 + 时间戳文件名，
+ * 两个问题：① 系统清理 %TEMP% 后历史里的图就没了；② 同一张图贴两次占两份。
  * @param {string} name
  * @param {string} dataB64
  * @returns {{path?: string, kind?: string, error?: string}}
@@ -461,11 +486,7 @@ function attachSave(name, dataB64) {
   if (!buf.length) return { error: '图片数据为空' };
   if (buf.length > ATTACH_MAX_BYTES) return { error: '图片超过 8MB' };
   try {
-    fs.mkdirSync(ATTACH_DIR, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 17);
-    const target = path.join(ATTACH_DIR, stamp + '_' + safe);
-    fs.writeFileSync(target, buf);
-    return { path: target, kind: 'image' };
+    return { path: attachStore.storeUserImage(attachUserDir(), buf, safe), kind: 'image' };
   } catch (err) {
     return { error: err && err.message ? err.message : String(err) };
   }
@@ -1760,6 +1781,13 @@ async function dispatch(type, method, params) {
       broadcast({ type: 'narnatmd/saved', params: result });
       return;
     }
+    if (type === 'skillList') {
+      // /skill 的参数补全候选（后端 skill/list）。回执类型独立一条：
+      // 混进任何既有 result 都会被那套渲染路径接管（比如 config/result
+      // 会去刷新下拉框）。
+      broadcast({ type: 'skill/result', params: result });
+      return;
+    }
   } catch (err) {
     const message = err && err.message ? err.message : String(err);
     const authority = isAuthorityClient(client);
@@ -1803,6 +1831,10 @@ async function dispatch(type, method, params) {
       // 失败也必须回执：不回的话界面那个「加载中…」按钮永远不还原，
       // 用户反复点也没用（锁只在回执到达时解开，见 ui-full.html 的 OFFLINE_BLOCKED/回执复位）。
       broadcast({ type: 'history/result', params: { ok: false, error: message } });
+    } else if (type === 'skillList') {
+      // 技能目录读不到/扫不动时也要回执：界面在等这一份候选，
+      // 不回就永远停在「没有技能」——和「没有技能」看起来一样，但原因完全不同。
+      broadcast({ type: 'skill/result', params: { items: [], error: message } });
     } else if (type === 'sessionNew' || type === 'sessionSwitch' ||
                type === 'sessionDelete' || type === 'sessionRename' ||
                type === 'sessionExplore' || type === 'sessionDone') {
@@ -2446,13 +2478,37 @@ function activate(context) {
 }
 
 /**
+ * 只刷新「内容层配色」（改 narnat.json 的「界面.颜色/标注/代码块…」后用）。
+ *
+ * 为什么单独一条：配色是**热生效**的（后端 theme/get 现读磁盘），而其它配置
+ * （接口地址、密钥、模型）改了必须重启后端。用户调色时最烦的就是每改一个
+ * 十六进制值就重启一次，所以这里立刻推一次配色，不动进程。
+ * @param {RpcClient} client
+ */
+async function refreshTheme(client) {
+  if (!client || !client.isConnected || !client.isConnected()) return;
+  try {
+    const result = await client.request('theme/get', {});
+    if (rpc === client) {
+      broadcast({ type: 'theme/result', params: result || {} });
+    }
+  } catch (err) {
+    // 配色刷新失败不影响任何功能（界面继续用上一份配色），只记日志
+    console.warn('[narnat] theme/get 失败：',
+      err && err.message ? err.message : String(err));
+  }
+}
+
+/**
  * 监视后端配置文件的手工修改，改动后提示用户重启后端。
  *
  * 只在「文件确实变了」时提示一次，并且 3 秒内合并多次保存（编辑器
  * 保存时可能连写几次）。不自动重启：那一轮可能正在跑，静默重启会打断它。
+ * 但**配色例外**：颜色是热生效的，改完立刻刷新，不必重启（见 refreshTheme）。
  */
 let configWatcher = null;
 let configNoticeTimer = null;
+let themeRefreshTimer = null;
 function watchConfigFile() {
   try {
     if (configWatcher) {
@@ -2468,12 +2524,18 @@ function watchConfigFile() {
       require('path').basename(cfgPath));
     configWatcher = vscode.workspace.createFileSystemWatcher(pattern);
     const onChange = () => {
+      // 配色：800ms 合并连写后立刻刷新，不需要重启后端
+      if (themeRefreshTimer) clearTimeout(themeRefreshTimer);
+      themeRefreshTimer = setTimeout(() => {
+        themeRefreshTimer = null;
+        if (rpc) refreshTheme(rpc);
+      }, 800);
       // 合并连写：3 秒内的多次保存只提示一次
       if (configNoticeTimer) clearTimeout(configNoticeTimer);
       configNoticeTimer = setTimeout(() => {
         configNoticeTimer = null;
         vscode.window.showInformationMessage(
-          'Narnat: 配置文件已修改，需要重启后端才会生效',
+          'Narnat: 配置文件已修改，需要重启后端才会生效（配色已自动刷新）',
           '立即重启'
         ).then((pick) => {
           if (pick === '立即重启') {

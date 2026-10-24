@@ -100,6 +100,7 @@ DEFINITION = {
         "description": (
             "读取文件内容。文本文件返还带行号的内容（由1开始）；"
             "支持图片文件读取（png/jpg/jpeg/webp/gif）。"
+            "offset/limit 参数仅对文本文件有效。"
             "支持本地或远程读取文件。"
         ),
         "parameters": {
@@ -246,12 +247,16 @@ def _format_size(n: int) -> str:
     return "%dB" % n
 
 
-def _image_handle_text(file_path: str, ref: dict, root: str, token_est: int) -> str:
+def _image_handle_text(file_path: str, ref: dict, root: str, token_est: int,
+                       device: str = "") -> str:
     """图片句柄文本 —— 模型看到的"这张图是什么"的唯一依据。
 
     这段文本会永久留在会话 history 的 content 里（图片字节只在发送时挂到
     images 字段），所以它必须自包含：文件名、格式、尺寸、体积、指纹、副本路径。
     模型据此知道：看的是缩放版还是原图、原图多大、想重新读该读哪里。
+
+    device: 远程设备编号。远程图片的"源文件"在远端，本地只有归一化副本，
+    必须标出来，否则模型会以为源路径在本机。
     """
     name = ref.get("name") or os.path.basename(file_path)
     w, h = ref.get("width") or 0, ref.get("height") or 0
@@ -264,14 +269,20 @@ def _image_handle_text(file_path: str, ref: dict, root: str, token_est: int) -> 
     if sw and sh:
         lines.append("原图 %dx%d，已缩放至长边 %d 发送（细节以副本为准）" % (
             sw, sh, max(w, h)))
+    if device:
+        lines.append("来源: 远程设备 %s" % device)
     lines.append("附件 %s" % ref["id"])
     lines.append("副本（只读）：%s" % _attachment.object_path(root, ref["id"][7:]))
-    lines.append("源文件：%s" % file_path)
+    lines.append("源文件：%s%s" % (device + ":" if device else "", file_path))
     return "\n".join(lines)
 
 
-def _read_image(file_path: str, _tool_context) -> str:
+def _read_image(file_path: str, _tool_context, device: str = "") -> str:
     """图片分支：归一化 + 落附件库 + 返回带 .images 的句柄文本。
+
+    本地与远程走同一条归一化管线，区别只在"字节从哪来"：
+    本地 open()，远程走 SFTP 把整份文件取回。之后的解码、缩放、入库、
+    句柄文本完全一致——图片不需要分页，取回整份是正确的做法。
 
     任何失败都返回普通错误字符串（不挂图），与文本分支的错误风格一致，
     AI 拿到的是一条可读的失败原因，对话继续。
@@ -285,17 +296,23 @@ def _read_image(file_path: str, _tool_context) -> str:
         return "[错误: 附件库路径未配置，无法读取图片]"
     root = _attachment.attachment_root(data_dir)
 
-    try:
-        with open(file_path, "rb") as f:
-            source = f.read(_attachment.MAX_SOURCE_BYTES + 1)
-    except PermissionError:
-        return "[错误: 权限不足: %s" % file_path + "]"
-    except OSError as e:
-        return "[错误: 读取失败: %s" % e + "]"
-
-    if len(source) > _attachment.MAX_SOURCE_BYTES:
-        return ("[错误: 图片文件超过 %s 上限，无法读取。"
-                "请先用 Shell 缩小后再读]" % _format_size(_attachment.MAX_SOURCE_BYTES))
+    if device:
+        from ..terminal.remote import remote_read_bytes
+        source, err = remote_read_bytes(file_path, _attachment.MAX_SOURCE_BYTES, device)
+        if err:
+            return err
+    else:
+        try:
+            with open(file_path, "rb") as f:
+                source = f.read(_attachment.MAX_SOURCE_BYTES + 1)
+        except PermissionError:
+            return "[错误: 权限不足: %s" % file_path + "]"
+        except OSError as e:
+            return "[错误: 读取失败: %s" % e + "]"
+        if len(source) > _attachment.MAX_SOURCE_BYTES:
+            return ("[错误: 图片文件超过 %s 上限，无法读取。"
+                    "请先用 Shell 缩小后再读]"
+                    % _format_size(_attachment.MAX_SOURCE_BYTES))
 
     ref = _attachment.store(root, source)
     if ref is None:
@@ -308,13 +325,14 @@ def _read_image(file_path: str, _tool_context) -> str:
     from ..vision_tokens import estimate_image_tokens
     token_est = estimate_image_tokens(ref.get("width") or 0, ref.get("height") or 0)
 
-    text = _image_handle_text(file_path, ref, root, token_est)
+    text = _image_handle_text(file_path, ref, root, token_est, device)
     return ImageBearingStr(text, [ref])
 
 
 def execute(file_path: str, offset: int = 0, limit: int = 2000,
             device: str = "",
             _tool_context=None) -> str:
+
     """
     读取文件内容。
 
@@ -343,6 +361,15 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
     if device is None:
         return f"[错误: {_file_tool_device_hint()}]"
 
+    # ── 图片分支（必须放在远程/本地分派之前）──
+    # 按扩展名判定，真正是不是图片由 PIL 全解码决定（失败即返回错误文本）。
+    # 位置有两层要求：
+    #   1. 在二进制检测之前——图片首块必然含 NUL，走到那里会被误判成"二进制文件"；
+    #   2. 在 device 分派之前——远程读文本那一路是行切分管线，走不到这里。
+    # 本地与远程共用同一条归一化管线，区别只在字节从哪来（见 _read_image）。
+    if file_path.lower().endswith(_IMAGE_EXTS):
+        return _read_image(file_path, _tool_context, device)
+
     if device:
         from ..terminal.remote import remote_read
         result = remote_read(file_path, offset, limit, device)
@@ -351,7 +378,7 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
         if result and not result.startswith("["):
             result = f"[{device}] {file_path}\n{result}"
         return _apply_global_cap(result, _tool_context)
-        
+
     if os.path.isdir(file_path):
         return f"[错误: {file_path} 是目录，请用 Glob 匹配或 Shell 查看目录内容]"
 
@@ -362,14 +389,6 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
             return miss_reason
         # 相对路径解析依赖当前目录（Shell cd会改变它），报错时带上cwd帮AI一次定位
         return f"[错误: 文件不存在: {file_path}（当前目录: {os.getcwd()}）]"
-
-    # ── 图片分支 ──
-    # 按扩展名判定，真正是不是图片由 PIL 全解码决定（失败即返回错误文本）。
-    # 位置必须在二进制检测之前：图片首块必然含 NUL，走到下面会被误判成"二进制文件"。
-    # 远程设备（device 非空）不走此分支——图片归一化与附件库都在本机，
-    # 远程读图仍按原有文本路径处理（返回二进制错误提示）。
-    if (not device) and file_path.lower().endswith(_IMAGE_EXTS):
-        return _read_image(file_path, _tool_context)
 
     try:
         # 二进制检测：首块含NUL字节即视为二进制文件（与Grep检测策略一致）

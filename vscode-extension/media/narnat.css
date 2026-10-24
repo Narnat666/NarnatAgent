@@ -6,10 +6,37 @@
   --bg: var(--vscode-editor-background, #282c34);
   --bg-elev: var(--vscode-sideBar-background, #21252b);
   --bg-hover: var(--vscode-list-hoverBackground, #2c313a);
-  /* 代码块 / 工具卡片的底：取 editorWidget 那一层（One Dark 是 #21252b）。
-     原来用 textCodeBlock.background —— One Dark Pro 没定义这个键，VSCode 给的
-     默认值与编辑器底色几乎同色，代码块看不出边界，整屏就显得平。 */
-  --bg-code: var(--vscode-editorWidget-background, var(--vscode-sideBar-background, #21252b));
+  /* 代码块 / 工具卡片的底。
+     原来取 editorWidget（One Dark 是 #21252b）—— 它比编辑器底 #282c34 **暗**
+     一档，在深色面板上像「挖下去一个洞」，再套一圈 1px 灰框就成了老式文本框
+     （用户原话「背景颜色不好看太老土」）。
+     三套主流深色主题的代码块都是**比页面底亮一档**、靠底色差分层、不要外框：
+       · dsh：页面底 #151517 → 块 #1B1B1C → 头 #2C2C2E（全中性灰，无边框）
+       · Tokyo Night：底 #1a1b26 → 面板 #1f2335 → 更亮 #24283b
+       · Catppuccin Mocha：底 #1e1e2e → surface0 #313244
+     所以这里也改成「面板底色提亮一档」（见下方 @supports），One Dark 的原生
+     写法就是 #282c34 → #2c313a 这个量级。
+     优先级不变：配置的「代码块.背景」→「基础色.卡片背景」→ 派生/主题值。 */
+  --bg-code: var(--tb-codeblock-background,
+             var(--tb-code-bg,
+             var(--vscode-editorWidget-background, var(--vscode-sideBar-background, #21252b))));
+  /* 代码块标题栏（语言标签 + 换行/复制）的底：比块体**再亮一档**。
+     两者同色时只剩一条 1px 线在分隔标题和代码，视觉上就是「文本框」；
+     dsh 的 banner(850) 与 block(900) 是分开的两档，这里照做。
+     用 color-mix 从 --bg-code 派生，不另加配置键：换主题/换配置都自动跟随。 */
+  --bg-code-hd: var(--bg-code);
+  /* 行内代码的底：**不能复用代码块那一档**。
+     代码块底色是「面」，行内代码是「字间夹的一小块」；用同一档会在浅色主题
+     下把行内代码的文字对比度吃掉（实测：文字 #926d25 对块底 #d3d7dd 只有
+     3.28:1，不达 4.5）。这里只混 4% 前景色——深底上略亮、浅底上略暗，
+     两种主题都自动正确，且几乎不改变文字所在的实际底色，
+     于是 adaptColor 按面板底算出来的对比度就是真的。
+     dsh 的 `:not(pre) > code` 同理：底是 neutral-50（浅色下≈白），
+     文字色继承正文，不给行内代码另外染一档。 */
+  --bg-code-inline: var(--bg);
+  /* 代码块外框。dsh 的代码块是**无边框**的（只有底色 + 圆角），
+     留一个变量是为了让预算/截图里能对比。 */
+  --code-border: transparent;
   --fg: var(--vscode-editor-foreground, #abb2bf);
   /* 三档文字由前景色派生（见下面的 @supports）。这里先给旧内核兜底：
      不支持 color-mix 的 webview 上三档退化为同一个前景色（层级没了但读得清），
@@ -18,15 +45,20 @@
   --fg-faint: var(--fg);
   --line: var(--vscode-panel-border, #3e4452);
   --line-strong: var(--vscode-panel-border, #3e4452);
-  --accent: var(--vscode-textLink-foreground, #61afef);
+  --accent: var(--t-b-accent, var(--vscode-textLink-foreground, #61afef));
   /* 状态色直接用主题值，**不要**掺前景色：掺完 #d19a66 会变成发暗的黄褐，
      在 #282c34 上几乎看不出是警告（实测被视觉评估点名为「暗黄看不清」）。
      One Dark Pro 这几个色本来就是按深底选好的。 */
-  --ok: var(--vscode-charts-green, #98c379);
-  --warn: var(--vscode-editorWarning-foreground, #d19a66);
-  --err: var(--vscode-errorForeground, #e06c75);
-  --add: var(--vscode-diffEditor-insertedTextBackground, rgba(90,168,122,.16));
-  --del: var(--vscode-diffEditor-removedTextBackground, rgba(201,106,106,.16));
+  /* 状态色优先级：narnat.json 的「成功/警告/错误」→ VSCode 主题色 → 内置兜底。
+     用户明确要求内容层跟 narnat.json（与终端形态一致），所以配置值排第一；
+     没配或配色快照还没到时自动回落到原来的主题色，行为与改动前一致。 */
+  --ok: var(--t-b-success, var(--vscode-charts-green, #98c379));
+  --warn: var(--t-b-warning, var(--vscode-editorWarning-foreground, #d19a66));
+  --err: var(--t-b-error, var(--vscode-errorForeground, #e06c75));
+  /* diff 底色：配置里的「差异.添加/删除」是**文字色**，直接当底色会整行发光，
+     所以这里用 color-mix 把它压成一层薄底；配置没到就回落主题的 diff 底色。 */
+  --add: color-mix(in srgb, var(--t-diff-added, var(--vscode-charts-green, #98c379)) 16%, transparent);
+  --del: color-mix(in srgb, var(--t-diff-removed, var(--vscode-errorForeground, #e06c75)) 16%, transparent);
   /* 用户气泡底色：优先主题给聊天请求准备的 chat.requestBackground
      （One Dark 是 #2c313c，比编辑器底略亮一档，正是气泡该有的层次），
      没有该键的主题退到 input-background，再退到抬升层。 */
@@ -53,6 +85,19 @@
     /* panel.border 在 #282c34 上只有 1.5:1，做分隔线够、做卡片轮廓太弱
        （「边界非常微弱、不够利落」）。需要更实一档的地方用这个。 */
     --line-strong: color-mix(in srgb, var(--fg) 34%, transparent);
+    /* 代码块 / 工具卡片的底：**没有配置色时**从面板底色提亮一档。
+       混 8% 前景色 ≈ One Dark 的 #2c313a（它自己的 hover/选中层），量级与
+       dsh（#151517 → #1B1B1C）、Tokyo Night（#1a1b26 → #1f2335）一致。
+       只在没配「代码块.背景」/「基础色.卡片背景」时生效——配了就听配置的。 */
+    --bg-code: var(--tb-codeblock-background,
+                 var(--tb-code-bg,
+                 color-mix(in srgb, var(--bg) 92%, var(--fg) 8%)));
+    /* 标题栏再提亮一档（+8%），与块体拉开一层 */
+    --bg-code-hd: color-mix(in srgb, var(--bg-code) 92%, var(--fg) 8%);
+    /* 行内代码只铺一层几乎看不出的底（+3%）。这层底会吃掉一点文字对比度，
+       所以配方要极淡、并且 markdown.code_inline 的下限提到 4.7 兜住
+       （实测 4% 时浅色主题下只剩 4.42:1，差一点点不到 4.5）。 */
+    --bg-code-inline: color-mix(in srgb, var(--bg) 97%, var(--fg) 3%);
   }
 }
 /* 浏览器预览：跟随系统浅色 */
@@ -542,6 +587,60 @@ body[data-real="true"] .demo-tip{display:none}
      出现左右滚动）。anywhere 允许在任意位置断行，只在放不下时才生效。 */
   overflow-wrap:anywhere;
 }
+/* 消息气泡里的图片：**按内容尺寸展示**，不再是输入区那种 26×18 的小图标。
+   用户报障原文：「我们 ui 的图片显示太小了」——原来 addMsgThumbs 复用了
+   输入区 chip 的 `.atch img`（26×18），一张截图在气泡里只有指甲盖大。
+   口径对齐 dsh 的 MessageImage（`ui-attachment/src/MessageImage.module.css`）：
+     · 单张：长边 240px、宽高比夹在 [0.25, 4]、不放大超过原始尺寸
+     · 多张：96×96 方块（dsh 是 64×64，侧边栏里 64 太小，按面板宽度放宽一档）
+     · 圆角与气泡一致（18px），点击可放大（见 addMsgThumbs 的 lightbox）
+   限定在 `.msg` 内：输入区 chip 仍是小图标，两处互不影响。 */
+.msg .atch{
+  display:block;padding:0;background:none;border-radius:18px;
+  overflow:hidden;line-height:0;cursor:zoom-in;
+}
+/* 消息里的图片容器**不能沿用输入区的 max-height:5.5em**（≈71px）。
+   那条限制是给输入区 chip 行用的（附件多时内部滚动），复用过来会把整张
+   图裁成顶部一条 —— 实测一张 240px 高的截图只露出约 1/5，用户报障
+   「只显示了五分之一」。这里把高度与滚动一起放开，让图片按自身尺寸展示。 */
+.msg .attach{
+  max-height:none;overflow:visible;gap:8px;margin:6px 0 0;
+}
+.msg .atch .n,
+.msg .atch .ph{display:none}
+.msg .atch img{
+  max-width:min(240px, 100%);max-height:240px;width:auto;height:auto;
+  border-radius:18px;display:block;object-fit:contain;
+}
+/* 多张图：统一方块铺排，避免一张竖图把气泡撑得极高 */
+.msg .attach[data-many="true"] .atch{
+  width:96px;height:96px;border-radius:12px;
+}
+.msg .attach[data-many="true"] .atch img{
+  width:96px;height:96px;max-width:none;max-height:none;
+  border-radius:12px;object-fit:cover;
+}
+/* 图片已被清理（宿主读不到）/ 正在加载：留一个和图片同尺寸的占位块。
+   读不到时**可点击重试**（文件可能又被放回来了）——dsh 的 MessageImage
+   在 ATTACHMENT_NOT_FOUND 时也是渲染成可点击重试的按钮，不是一块空白。 */
+.msg .atch .ph{
+  display:grid;place-items:center;width:132px;height:88px;
+  border:1px dashed var(--line-strong);border-radius:12px;background:var(--bg-hover);
+  font-size:11px;color:var(--fg-faint);line-height:1.6;
+}
+.msg .atch[data-missing="true"]{cursor:pointer}
+.msg .atch[data-missing="true"] .ph{
+  border-style:dashed;color:var(--fg-dim);
+}
+/* 图片放大层（lightbox）：点缩略图看原尺寸，Esc / 点空白关闭 */
+.imgbox{
+  position:fixed;inset:0;z-index:90;display:grid;place-items:center;
+  background:rgba(0,0,0,.78);cursor:zoom-out;
+}
+.imgbox img{
+  max-width:92vw;max-height:88vh;border-radius:6px;
+  box-shadow:0 12px 40px rgba(0,0,0,.5);
+}
 /* 探索分支合并结论：不是用户说的话，用一条淡淡的分隔线示意，不做成气泡 */
 .msg.sys-note .text{
   border-left:2px solid var(--accent);padding-left:12px;margin-left:-14px;
@@ -569,8 +668,40 @@ body[data-real="true"] .demo-tip{display:none}
      · 工具确认条（.confirm .q）—— 待确认的命令原文，470px 起就溢出
    长串在 AI 输出里是常态（hash、路径、base64、URL），不是罕见输入。 */
 .think .slot p,.todo > div,.confirm .q{overflow-wrap:anywhere;min-width:0}
+/* ---------- Markdown 正文着色（颜色来自 narnat.json「界面.标注」） ----------
+   用户报障原文：「插件里的都是一片黑色，视觉会疲劳」——原来标题、粗体、行内代码
+   全是同一个 `--fg`，只有字号差。终端形态早就按配置给每个元素上色
+   （`界面.标注` 的配方，如「标题1: bold 红」「行内代码: 黄」）。
+   这里把配方落到 CSS：颜色取 `--t-markdown-*`（后端下发 + 前端按底色适配亮度），
+   字重/斜体来自同一份配方的修饰词（`--tw-*` / `--ts-*`），没配就回落原样式。 */
 .msg h1,.msg h2,.msg h3,.msg h4,.msg h5,.msg h6{
   margin:14px 0 8px;line-height:1.4;font-weight:600;color:var(--fg);
+}
+/* 标题按配置分三档：h1/h2 一档、h3 一档、h4–h6 一档（终端渲染器只有这三档） */
+.msg h1,.msg h2{
+  color:var(--t-markdown-heading-h1, var(--fg));
+  font-weight:var(--tw-markdown-heading-h1, 600);
+}
+.msg h3{
+  color:var(--t-markdown-heading-h3, var(--fg));
+  font-weight:var(--tw-markdown-heading-h3, 600);
+}
+.msg h4,.msg h5,.msg h6{
+  color:var(--t-markdown-heading-h4, var(--fg));
+  font-weight:var(--tw-markdown-heading-h4, 600);
+}
+/* 粗体/斜体/删除线：终端里这三者都是有色的，面板原来只有字重差 */
+.msg strong,.msg b{
+  color:var(--t-markdown-bold, var(--fg));
+  font-weight:var(--tw-markdown-bold, 600);
+}
+.msg em,.msg i{
+  color:var(--t-markdown-italic, inherit);
+  font-style:var(--ts-markdown-italic, italic);
+}
+.msg del,.msg s{
+  color:var(--t-markdown-strikethrough, var(--fg-dim));
+  text-decoration:line-through;
 }
 .msg > *:first-child{margin-top:0}
 /* 末尾元素不留 margin-bottom：否则每条回复底部都比正文多一块空白
@@ -582,19 +713,33 @@ body[data-real="true"] .demo-tip{display:none}
 .msg h4,.msg h5,.msg h6{font-size:13px}
 .msg blockquote{
   margin:0 0 10px;padding:2px 0 2px 12px;
-  border-left:2px solid var(--fg-faint);color:var(--fg-dim);
+  border-left:2px solid var(--t-markdown-blockquote, var(--fg-faint));
+  color:var(--t-markdown-blockquote, var(--fg-dim));
+  font-style:var(--ts-markdown-blockquote, normal);
 }
 /* markdown 分隔线（`---` / `***` / `___`，AI 回答里极常见的分段手段）。
    不用浏览器默认的 2px 立体边框：线与相邻分隔线（--line）同色，间距取
    段落间距（.msg p 的下边距 16px），上下各一份。 */
-.msg hr{border:none;border-top:1px solid var(--line);margin:16px 0}
+.msg hr{
+  border:none;margin:16px 0;
+  border-top:1px solid var(--t-markdown-hr, var(--line));
+}
 .msg ol{margin:16px 0;padding-left:18px}
-.msg a{color:var(--accent);text-decoration:none}
+.msg a{
+  color:var(--t-markdown-link, var(--accent));
+  text-decoration:var(--tu-markdown-link, none);
+}
 .msg a:hover{text-decoration:underline}
 .msg code,.think code,.tools code{
   font-family:var(--mono);font-size:11.5px;
-  background:var(--bg-code);border-radius:3px;padding:1px 4px;
-  border:1px solid var(--line);color:var(--fg);
+  /* 行内代码用自己那一档极淡的底（--bg-code-inline），不是代码块的
+     --bg-code：实测浅色主题下代码块底色会把行内代码的文字对比度压到
+     3.28:1。理由见 :root 里 --bg-code-inline 的注释。 */
+  background:var(--bg-code-inline);border-radius:3px;padding:1px 4px;
+  border:1px solid var(--line);
+  /* 行内代码是配置里最显眼的一档（默认「黄」）：AI 回答里到处都是
+     路径/命令/字段名，全用正文色时整段读起来一片糊。 */
+  color:var(--t-markdown-code-inline, var(--fg));
 }
 .msg ul{margin:16px 0;padding-left:18px}
 /* h4–h6 后面紧跟列表时间距收紧（dsh 是 8px）：小标题与它领起的清单
@@ -603,10 +748,15 @@ body[data-real="true"] .demo-tip{display:none}
 .msg h5 + ul,.msg h5 + ol,
 .msg h6 + ul,.msg h6 + ol{margin-top:8px}
 /* 任务列表：`- [ ] 待办` / `- [x] 已完成` 渲染成真实的 disabled checkbox
-   （GFM 口径，同 dsh）。accent-color 取次要文字色 —— 勾选态不该比正文抢眼。 */
-.msg input[type=checkbox]{margin:0 8px 0 0;accent-color:var(--fg-dim)}
+   （GFM 口径，同 dsh）。勾选色取配置的「任务完成」档。 */
+.msg input[type=checkbox]{
+  margin:0 8px 0 0;
+  accent-color:var(--t-markdown-task-done, var(--fg-dim));
+}
 .msg li{margin-bottom:6px}
-.msg li::marker{color:var(--fg-faint)}
+/* 列表标记：无序/有序各一档颜色（终端里分别默认绿/次文字） */
+.msg li::marker{color:var(--t-markdown-list-unordered, var(--fg-faint))}
+.msg ol li::marker{color:var(--t-markdown-list-ordered, var(--fg-faint))}
 .msg pre{
   font-family:var(--mono);font-size:11.5px;line-height:1.65;
   background:var(--bg-code);border-radius:6px;padding:10px 12px;
@@ -616,20 +766,35 @@ body[data-real="true"] .demo-tip{display:none}
 /* 不用 <pre> 直接做容器：语言标签和复制按钮要贴在右上角，
    而 <pre> 本身 overflow-x:auto，子元素会被一起横向滚走。 */
 .code{
-  margin:10px 0 0;border:1px solid var(--line-strong);border-radius:6px;
+  margin:10px 0 0;border:1px solid var(--code-border);
+  border-radius:6px;
   background:var(--bg-code);overflow:hidden;
 }
 .code-hd{
   display:flex;align-items:center;gap:8px;
   padding:4px 10px;border-bottom:1px solid var(--line);
   font-family:var(--mono);font-size:10.5px;line-height:1.6;
-  color:var(--fg-faint);background:var(--bg-elev);
+  color:var(--t-codeblock-lang-label, var(--fg-faint));
+  background:var(--bg-code-hd);
   /* 工具栏不参与文字选中：Ctrl+A / 框选整条消息时，「js」「换行」「复制」
      会混进复制出来的代码里（实测复制结果是
      「…\n\njs\n换行\n复制\nvar x = 1;…」）。代码才是要复制的目标。 */
   user-select:none;
 }
-.code-hd .lang{flex:1;text-transform:lowercase;letter-spacing:.03em}
+/* 语言标签按语言分组上色（python 青 / shell 绿 / json 紫 …），与终端
+   `RenderConfig.LANG_COLORS` 同一张表、同一套分组色。分组名由 JS 写在
+   `data-lang-group` 上，颜色在这里按分组取（不写内联 style：CSP 会丢）。 */
+.code-hd[data-lang-group="cyan"]{--lang-color:var(--t-codeblock-lang-cyan)}
+.code-hd[data-lang-group="yellow"]{--lang-color:var(--t-codeblock-lang-yellow)}
+.code-hd[data-lang-group="green"]{--lang-color:var(--t-codeblock-lang-green)}
+.code-hd[data-lang-group="magenta"]{--lang-color:var(--t-codeblock-lang-magenta)}
+.code-hd[data-lang-group="red"]{--lang-color:var(--t-codeblock-lang-red)}
+.code-hd[data-lang-group="blue"]{--lang-color:var(--t-codeblock-lang-blue)}
+.code-hd[data-lang-group="gray"]{--lang-color:var(--t-codeblock-lang-gray)}
+.code-hd .lang{
+  flex:1;text-transform:lowercase;letter-spacing:.03em;
+  color:var(--lang-color, var(--t-codeblock-lang-label, var(--fg-faint)));
+}
 .code-copy,.code-wrap{
   font-family:var(--font);font-size:10.5px;color:var(--fg-dim);
   padding:1px 7px;border-radius:3px;border:1px solid transparent;
@@ -690,8 +855,13 @@ body[data-real="true"] .demo-tip{display:none}
 .tk-del{color:var(--vscode-gitDecoration-deletedResourceForeground,#f14c4c)}
 .tk-hdr{color:var(--vscode-textLink-foreground,#569cd6)}
 .tk-meta{color:var(--fg-faint)}
-/* Markdown 表格：形态同 dsh —— 不要竖线、不要外框，只留每行一条下边线；
-   单元格 10px/16px 内边距，首列不留左侧内边距（贴着正文左缘起排）。
+/* Markdown 表格：**形态完全照 dsh**（`ui-primitives/src/markdown/
+   MarkdownText.module.css` 的 `.tableScroll th/td`）——不要竖线、不要外框、
+   不要表格底色，只留每行一条 **0.5px** 下边线；表头边框比正文深一档
+   （dsh 是 l3 : l2），字重 500（不是 600）；单元格 10px/16px 内边距，
+   首列不留左侧内边距（贴着正文左缘起排）、末列不留右侧内边距。
+   颜色不抄终端也不抄 dsh，走 narnat.json 的「标注.表格边框 / 表格内容」
+   （用户口径：几何与底色抄 dsh，文字配色用终端那套配置）。
 
    宽度：`max-content` 与 `min-width:100%` 两者缺一不可。
    · 只写 width:100%（原来）→ 单元格被压到任意位置断行，6 列在 249px 下
@@ -703,20 +873,31 @@ body[data-real="true"] .demo-tip{display:none}
 .tw{margin:16px 0 0;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain}
 .msg table{border-collapse:collapse;width:max-content;min-width:100%}
 .msg th,.msg td{
-  border:none;border-bottom:1px solid var(--line);
+  /* 0.5px：dsh 的 `.tableScroll th/td` 就是 0.5px。原来写 1px 比它重一档，
+     窄面板里一堆 1px 线会把表格画成网格。 */
+  border:none;border-bottom:0.5px solid var(--t-markdown-table-border, var(--line));
   padding:10px 16px;text-align:left;vertical-align:top;
   /* 单元格内不折行：折行会把多列表格压成逐字换行（首列 29px 的实测值），
      而横滚本来就要发生 —— 让它一次滚个够，不要又压扁又滚。
-     长串（URL / 命令）的自然宽度由 .tw 的横滚承担。 */
+     长串（URL / 命令）的自然宽度由 .tw 的横滚承担。
+     （dsh 这里用 max-width:min(30vw,320px) 靠换行收窄，那是宽屏网页的
+     做法；我们的面板常态 249~700px，换行只会把列压扁，故不照搬。） */
   white-space:nowrap;overflow-wrap:normal;
 }
 .msg th[data-a="center"],.msg td[data-a="center"]{text-align:center}
 .msg th[data-a="right"],.msg td[data-a="right"]{text-align:right}
-.msg th{border-bottom-color:var(--line-strong);color:var(--fg);font-weight:600}
-.msg td{color:var(--fg-dim)}
+.msg th{
+  /* 表头边框深一档（dsh 的 th 用 border-l3、td 用 border-l2），
+     字重 500（dsh 的 `--dsw-font-markdown-table-head` 是 500，不是 600）。 */
+  border-bottom-color:var(--t-markdown-table-border, var(--line-strong));
+  color:var(--fg);font-weight:500;
+}
+/* 表格正文用配置的「表格内容」档（默认主色），与终端渲染器一致 */
+.msg td{color:var(--t-markdown-table-content, var(--fg-dim))}
 .msg th:first-child,.msg td:first-child{padding-left:0}
 .msg td:last-child{padding-right:0}
-.msg td code{margin:0}
+/* dsh：表格内行内代码小一档（11px），否则等宽字比表格正文大一圈 */
+.msg td code,.msg th code{font-size:11px}
 
 /* ---------- 可折叠行（思考 / 工具） ----------
    形态同 dsh 的一行式步骤行：单行 24px，收起时只显示「名称 · 摘要 状态」，
@@ -1097,6 +1278,7 @@ body[data-real="true"] .demo-tip{display:none}
    附件个数没有上限（一次框选几十个文件是常态）：必须限高 + 内部纵向滚动，
    否则附件区随个数长高，把输入框与状态栏一路顶出可视区，
    用户既看不到自己在打什么，也点不到发送/停止。5.5em≈3 行 chip（13px 基准）。 */
+/* 输入区附件条：限高 5.5em（约 3 行 chip）后内部滚动，免得一堆附件把输入框顶走 */
 .attach{
   display:none;flex-wrap:wrap;gap:4px;margin:0 0 6px;
   max-height:5.5em;overflow-y:auto;overflow-x:hidden;
@@ -1116,6 +1298,7 @@ body[data-real="true"] .demo-tip{display:none}
   font-family:var(--mono);
 }
 .atch .ph{flex:none;color:var(--fg-faint)}
+/* 输入区 chip 里的图：只当图标用，26×18 足够 */
 .atch img{flex:none;max-width:26px;max-height:18px;border-radius:2px;display:block}
 .atch .x{flex:none;color:var(--fg-faint);padding:0 1px;line-height:1}
 .atch .x:hover{color:var(--err)}
@@ -1841,9 +2024,13 @@ body[data-drawer="true"] #toBottom{display:none}
 .turn-proc[data-open="true"] .tp-row{padding-bottom:12px}
 .tp-row:hover{color:var(--fg-dim)}
 .tp-caret{
-  flex:none;margin-left:auto;display:inline-flex;align-items:center;justify-content:center;
+  flex:none;margin-left:6px;display:inline-flex;align-items:center;justify-content:center;
   transition:transform .12s ease;transform-origin:50% 50%;
 }
+/* 没有耗时、也没有副标题时，让 chevron 自己吸掉剩余空间靠右（否则它会
+   紧跟标题，与其它行的 chevron 对不齐）。有副标题时副标题的 flex-grow
+   已经把空间吃掉了；有耗时时耗时用 margin-left:auto 靠右（见 .tp-meta）。 */
+.tp-row:not(:has(.tp-sub)):not(:has(.tp-meta)) .tp-caret{margin-left:auto}
 /* 收起态：向下的 chevron 转 90° 变成「向右」；展开态转回来朝下。
    与 dsh 的 TurnProcessNodeView 同一个语义（它的 chevron 常显在右侧）。 */
 .tp-caret .tp-caret-ic{display:block}
@@ -1868,6 +2055,11 @@ body[data-drawer="true"] #toBottom{display:none}
   margin-left:5px;font-family:var(--mono);font-size:10.5px;
   font-variant-numeric:tabular-nums;color:var(--fg-faint);
 }
+/* 耗时贴右：这一行是「标题 → 干了什么 → 耗时 → chevron」的阅读顺序，
+   时间是附注，不该夹在中间。
+   **只能有一个元素带 margin-left:auto** —— 之前 .tp-meta 和 .tp-caret 都写了
+   auto，flex 布局下两个 auto 会平分剩余空间，耗时被推到行中间（用户报障
+   「那个 3 秒的位置跑到哪去了」），chevron 才在最右。 */
 .tp-meta{
   margin-left:auto;flex:none;font-family:var(--mono);font-size:10px;color:var(--fg-faint);
   margin-right:6px;

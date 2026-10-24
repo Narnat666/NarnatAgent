@@ -228,6 +228,7 @@ function main() {
   // ── 2. 扩展必备文件 ──
   const need = [
     'package.json', 'src/extension.js', 'src/rpc-client.js', 'src/webview.js',
+    'src/attach-store.js',
     'media/narnat.css', 'media/narnat.js', 'media/narnat.body.js', 'media/icon.svg',
     'README.md'
   ];

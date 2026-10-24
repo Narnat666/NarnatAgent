@@ -58,6 +58,7 @@ const MUST_MATCH = [
   'src/extension.js',
   'src/rpc-client.js',
   'src/webview.js',
+  'src/attach-store.js',
   'media/narnat.js',
   'media/narnat.body.js',
   'media/narnat.css',

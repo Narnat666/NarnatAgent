@@ -39,8 +39,8 @@ DEFAULT_QUERY_FIELD = "query"
 DEFAULT_COUNT_FIELD = "count"
 # 响应解析的默认值：标准形态 + 描述按 snippet→summary→content 依次兜底
 DEFAULT_RAIL = {"list": "results",
-                "title": "title",
-                "url": "url",
+                "title": ("title",),
+                "url": ("url",),
                 "desc": ("snippet", "summary", "content")}
 
 
@@ -99,13 +99,18 @@ def read_config(keys: Dict, headers: Dict[str, str]) -> Config:
     if not isinstance(rail, dict):
         rail = {}
 
+    # 未配置（None）= 用默认数组路径；显式空串 = 响应本身就是数组。
+    # 与 count_field 同一语义：缺省取默认值，写空才表示「不传」。
+    raw_list = rail.get("list")
+    list_path = DEFAULT_RAIL["list"] if raw_list is None else str(raw_list).strip()
+
     return Config(
         url=url,
         headers=headers,
         query_field=query_field,
         count_field=count_field,
         extra_args={str(k): v for k, v in raw_args.items()},
-        list_path=str(rail.get("list") or "").strip(),
+        list_path=list_path,
         title_key=_as_str_tuple(rail.get("title"), DEFAULT_RAIL["title"]),
         url_key=_as_str_tuple(rail.get("url"), DEFAULT_RAIL["url"]),
         desc_keys=_as_str_tuple(rail.get("desc"), DEFAULT_RAIL["desc"]),

@@ -104,6 +104,33 @@ const TEST = String.raw`
     ck('K12 历史里没有「（图片内容见附件）」这种占位气泡',
        convo().textContent.indexOf('（图片内容见附件）') < 0);
 
+    // 思考耗时**不落盘**（与 dsh 一致：dsh 的会话记录里也没有 reasoning 时长，
+    // 它只在流式期间用「已思考」占位）。界面流式那份耗时由 RPC 层自己计时，
+    // 进历史后不显示时间，只显示字数。
+    var names = [].slice.call(convo().querySelectorAll('.think .name')).map(function(n){
+      return n.textContent;
+    });
+    out.push('DIAG 思考标题=' + JSON.stringify(names));
+    ck('K13 历史思考标题只有字数、不带耗时（耗时不入库）',
+       names.length > 0 && names.every(function(s){ return /^思考 · \d+ 字$/.test(s); }),
+       JSON.stringify(names));
+
+    // 就算后端/老客户端在 payload 里塞了 thinkingMs，界面也不许读它 ——
+    // 免得将来有人「顺手」把这个字段接上，又变成耗时要落盘。
+    emit({ type: 'session/result', params: { action: 'sessionSwitch', current: 'h2',
+      messages: [
+        { role: 'user', text: '再问一句' },
+        { role: 'assistant', text: '好的', thinking: '想一想。', thinkingMs: 3200 }
+      ] } });
+    await sleep(700);
+    var names2 = [].slice.call(convo().querySelectorAll('.think .name')).map(function(n){
+      return n.textContent;
+    });
+    out.push('DIAG 带 thinkingMs 的标题=' + JSON.stringify(names2));
+    ck('K14 payload 里塞了 thinkingMs 也不显示时间（界面不读该字段）',
+       names2.length > 0 && names2.every(function(s){ return /^思考 · \d+ 字$/.test(s); }),
+       JSON.stringify(names2));
+
     finish();
     function finish(){
       out.push('SUMMARY total=' + out.length + ' fail=' + fails);

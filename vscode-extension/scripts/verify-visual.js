@@ -51,6 +51,15 @@ ck('S8 静止态语义图标可见、chevron 不可见',
 ck('S9 七类语义图标齐备（search/read/run/edit/think/web/plan/other）',
   ['search', 'read', 'run', 'edit', 'think', 'web', 'plan', 'other']
     .every((k) => new RegExp('^\\s*' + k + ':', 'm').test(html)));
+// 用户报障「那个 3 秒的位置跑到哪去了」：耗时与 chevron 不能同时用
+// margin-left:auto —— flex 下两个 auto 会平分剩余空间，耗时被推到行中间。
+// 只匹配**行首的规则块**（`\n.tp-caret{`）：`:has()` 兜底那条选择器是
+// `.tp-row:not(...) .tp-caret{...}`，不算基础规则。
+const caretAuto = /(?:^|\n)\.tp-caret\{[^}]*margin-left:auto/.test(CSS);
+const metaAuto = /(?:^|\n)\.tp-meta\{[^}]*margin-left:auto/.test(CSS);
+ck('S10 折叠行里只有一个元素吃 auto 外边距（耗时或 chevron，不能都吃）',
+  !(caretAuto && metaAuto),
+  'tp-caret 基础规则 auto=' + caretAuto + ' / tp-meta auto=' + metaAuto);
 
 /* ---- 运行时断言：真跑一遍界面 ---- */
 const TEST = String.raw`
@@ -176,6 +185,28 @@ const TEST = String.raw`
     out.push('DIAG 折叠行高=' + h + 'px');
     ck('R7 折叠行高 <= 34px（对齐 24px 行高节奏，不再是 36px 的笨重块）',
       h > 0 && h <= 34, h + 'px');
+
+    // 耗时必须在行的右侧（紧跟 chevron 左边），不能停在行中间。
+    // 用户报障原文：「那个 3 秒的位置跑到哪去了」——它当时夹在中间。
+    var metaEl = tp ? tp.querySelector('.tp-meta') : null;
+    var rowEl = tp ? tp.querySelector('.tp-row') : null;
+    if (metaEl && rowEl) {
+      var mb = metaEl.getBoundingClientRect();
+      var rb = rowEl.getBoundingClientRect();
+      var caretEl = tp.querySelector('.tp-caret');
+      var cb = caretEl ? caretEl.getBoundingClientRect() : null;
+      var centre = rb.left + rb.width / 2;
+      out.push('DIAG 耗时 left=' + Math.round(mb.left) +
+        ' 行中点=' + Math.round(centre) + ' chevron.left=' + (cb ? Math.round(cb.left) : '-'));
+      ck('R8 耗时在行右半侧（不是在中间）', mb.left > centre,
+        Math.round(mb.left) + ' > ' + Math.round(centre));
+      ck('R9 耗时紧贴 chevron 左侧（两者之间不该有大段空白）',
+        !!cb && (cb.left - mb.right) >= 0 && (cb.left - mb.right) < 20,
+        cb ? Math.round(cb.left - mb.right) + 'px 间隙' : '(无 chevron)');
+    } else {
+      ck('R8 耗时在行右半侧（不是在中间）', false, '(这一轮没有耗时，无法判定)');
+      ck('R9 耗时紧贴 chevron 左侧（两者之间不该有大段空白）', false, '(同上)');
+    }
 
     finish();
     function finish(){

@@ -210,6 +210,13 @@ class RpcServer:
             "session/done": self._m_session_done,
             "config/set": self._m_config_set,
             "config/describe": self._m_config_describe,
+            # 内容层配色：initialize 会带一份，这条用于改完 narnat.json 后
+            # 不重启后端就刷新（读磁盘，与 config/describe 同口径）
+            "theme/get": self._m_theme_get,
+            # /skill 的参数补全候选（技能树）。单独一条而不是塞进 initialize：
+            # 它要扫描项目目录（自动发现所有名为 skills 的目录），握手路径上
+            # 做这件事会把首屏拖慢几百毫秒，而技能候选只有敲 /skill 时才需要。
+            "skill/list": self._m_skill_list,
             "narnatmd/get": self._m_narnatmd_get,
             "narnatmd/set": self._m_narnatmd_set,
             "shutdown": self._m_shutdown,
@@ -457,7 +464,90 @@ class RpcServer:
             # 输入框按 ↑ 能翻到的历史（最旧在前）。与终端形态同一份文件，
             # 所以关掉 VSCode/重连后照样翻得到上次的提问。
             "inputHistory": load_history(history_path(self._config.paths.data_dir), 100),
+            # 内容层配色（来自 narnat.json "界面" 分组，与终端形态同一份配置）。
+            # 面板底色/顶栏/输入框仍然跟 VSCode 主题走，这里只给
+            # markdown / 代码块 / diff / 状态 / 工具行这些「内容」的角色色。
+            "theme": self._theme_snapshot(),
         }
+
+    def _theme_snapshot(self) -> Dict[str, Any]:
+        """当前配色快照（读内存里的 UIConfig.raw，启动时已规范化）。
+
+        改完 narnat.json 想立刻看到效果走 `theme/get`（那边读磁盘）。
+        """
+        from ..ui.theme import snapshot
+
+        try:
+            return snapshot(getattr(self._config.ui, "raw", {}))
+        except Exception:
+            # 配色坏掉绝不能连累握手：面板宁可回落到主题灰，也不能白屏
+            return {"colors": {}, "bgs": {}, "decor": {}, "base": {},
+                    "baseBg": {}, "palette": {}}
+
+    def _m_theme_get(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """重新从**磁盘**读配色（改完 narnat.json 不必重启后端）。
+
+        为什么读盘：`self._config.ui` 是进程启动时的不可变快照，用户改完
+        `界面` 段再点「刷新配色」时它还是旧值 —— 界面上看不出任何变化，
+        用户会以为配置写错了（与 `_api_snapshot` 同一个理由）。
+        """
+        from ..config.loader import normalize_ui_raw
+        from ..ui.theme import snapshot
+
+        disk_ui = (self._read_json_config().get("界面") or {})
+        try:
+            raw = normalize_ui_raw(disk_ui)
+            return snapshot(raw)
+        except Exception:
+            return self._theme_snapshot()
+
+    def _m_skill_list(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """`/skill` 参数的补全候选（技能树），供界面 Tab 补全。
+
+        用户在输入框敲 `/skill ` 时，界面列表里**一条候选都没有** ——
+        后端早有 `list_skill_tree()`（它自己的注释就写着「供 /skill 按层级
+        Tab 补全」），但从来没有一条 RPC 把它下发出去，所以插件只能干等
+        用户把技能名逐字打对。
+
+        返回扁平列表而不是嵌套树：界面候选是一行一项的平铺列表，
+        层级用 `/` 串起来（`docs/api.md`）就够 —— 后端 `load_skill` 认这个写法。
+        目录用自己的完整路径作候选值（便于 Tab 逐层往下走时知道前缀）。
+
+        只在需要时调用：项目技能要扫工作目录下所有 skills 目录，
+        放进 initialize 会拖慢首屏（见方法表处的注释）。
+        """
+        from ..config.skill_store import list_skill_tree
+
+        cfg = self._config
+        tree = list_skill_tree(
+            cfg.paths.narnat_dir,
+            project_roots=getattr(cfg.skills, "project_roots", None),
+            cwd=os.getcwd(),
+            ignore_dirs=getattr(cfg.tools, "ignore_dirs", ()),
+        )
+        out = []
+
+        def walk(nodes, prefix):
+            for n in (nodes or []):
+                if not isinstance(n, dict):
+                    continue
+                name = str(n.get("name") or "")
+                if not name:
+                    continue
+                full = (prefix + "/" + name) if prefix else name
+                if n.get("type") == "dir":
+                    # 目录本身也可作为候选（含 SKILL.md 或唯一 .md 时能直接加载），
+                    # 但界面需要知道「它下面还有东西」，所以给 isDir 标记
+                    out.append({"v": full, "d": "项目技能目录", "dir": True})
+                    walk(n.get("children"), full)
+                else:
+                    origin = n.get("origin") or ""
+                    out.append({"v": full,
+                                "d": "项目技能" if origin == "project" else "系统技能",
+                                "dir": False})
+
+        walk(tree, "")
+        return {"items": out}
 
     def _kick_balance_probe(self) -> None:
         """后台查一次余额，成功后补发 stats 让界面立刻显示。"""

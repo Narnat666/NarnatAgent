@@ -13,10 +13,37 @@
   --bg: var(--vscode-editor-background, #282c34);
   --bg-elev: var(--vscode-sideBar-background, #21252b);
   --bg-hover: var(--vscode-list-hoverBackground, #2c313a);
-  /* 代码块 / 工具卡片的底：取 editorWidget 那一层（One Dark 是 #21252b）。
-     原来用 textCodeBlock.background —— One Dark Pro 没定义这个键，VSCode 给的
-     默认值与编辑器底色几乎同色，代码块看不出边界，整屏就显得平。 */
-  --bg-code: var(--vscode-editorWidget-background, var(--vscode-sideBar-background, #21252b));
+  /* 代码块 / 工具卡片的底。
+     原来取 editorWidget（One Dark 是 #21252b）—— 它比编辑器底 #282c34 **暗**
+     一档，在深色面板上像「挖下去一个洞」，再套一圈 1px 灰框就成了老式文本框
+     （用户原话「背景颜色不好看太老土」）。
+     三套主流深色主题的代码块都是**比页面底亮一档**、靠底色差分层、不要外框：
+       · dsh：页面底 #151517 → 块 #1B1B1C → 头 #2C2C2E（全中性灰，无边框）
+       · Tokyo Night：底 #1a1b26 → 面板 #1f2335 → 更亮 #24283b
+       · Catppuccin Mocha：底 #1e1e2e → surface0 #313244
+     所以这里也改成「面板底色提亮一档」（见下方 @supports），One Dark 的原生
+     写法就是 #282c34 → #2c313a 这个量级。
+     优先级不变：配置的「代码块.背景」→「基础色.卡片背景」→ 派生/主题值。 */
+  --bg-code: var(--tb-codeblock-background,
+             var(--tb-code-bg,
+             var(--vscode-editorWidget-background, var(--vscode-sideBar-background, #21252b))));
+  /* 代码块标题栏（语言标签 + 换行/复制）的底：比块体**再亮一档**。
+     两者同色时只剩一条 1px 线在分隔标题和代码，视觉上就是「文本框」；
+     dsh 的 banner(850) 与 block(900) 是分开的两档，这里照做。
+     用 color-mix 从 --bg-code 派生，不另加配置键：换主题/换配置都自动跟随。 */
+  --bg-code-hd: var(--bg-code);
+  /* 行内代码的底：**不能复用代码块那一档**。
+     代码块底色是「面」，行内代码是「字间夹的一小块」；用同一档会在浅色主题
+     下把行内代码的文字对比度吃掉（实测：文字 #926d25 对块底 #d3d7dd 只有
+     3.28:1，不达 4.5）。这里只混 4% 前景色——深底上略亮、浅底上略暗，
+     两种主题都自动正确，且几乎不改变文字所在的实际底色，
+     于是 adaptColor 按面板底算出来的对比度就是真的。
+     dsh 的 `:not(pre) > code` 同理：底是 neutral-50（浅色下≈白），
+     文字色继承正文，不给行内代码另外染一档。 */
+  --bg-code-inline: var(--bg);
+  /* 代码块外框。dsh 的代码块是**无边框**的（只有底色 + 圆角），
+     留一个变量是为了让预算/截图里能对比。 */
+  --code-border: transparent;
   --fg: var(--vscode-editor-foreground, #abb2bf);
   /* 三档文字由前景色派生（见下面的 @supports）。这里先给旧内核兜底：
      不支持 color-mix 的 webview 上三档退化为同一个前景色（层级没了但读得清），
@@ -25,15 +52,20 @@
   --fg-faint: var(--fg);
   --line: var(--vscode-panel-border, #3e4452);
   --line-strong: var(--vscode-panel-border, #3e4452);
-  --accent: var(--vscode-textLink-foreground, #61afef);
+  --accent: var(--t-b-accent, var(--vscode-textLink-foreground, #61afef));
   /* 状态色直接用主题值，**不要**掺前景色：掺完 #d19a66 会变成发暗的黄褐，
      在 #282c34 上几乎看不出是警告（实测被视觉评估点名为「暗黄看不清」）。
      One Dark Pro 这几个色本来就是按深底选好的。 */
-  --ok: var(--vscode-charts-green, #98c379);
-  --warn: var(--vscode-editorWarning-foreground, #d19a66);
-  --err: var(--vscode-errorForeground, #e06c75);
-  --add: var(--vscode-diffEditor-insertedTextBackground, rgba(90,168,122,.16));
-  --del: var(--vscode-diffEditor-removedTextBackground, rgba(201,106,106,.16));
+  /* 状态色优先级：narnat.json 的「成功/警告/错误」→ VSCode 主题色 → 内置兜底。
+     用户明确要求内容层跟 narnat.json（与终端形态一致），所以配置值排第一；
+     没配或配色快照还没到时自动回落到原来的主题色，行为与改动前一致。 */
+  --ok: var(--t-b-success, var(--vscode-charts-green, #98c379));
+  --warn: var(--t-b-warning, var(--vscode-editorWarning-foreground, #d19a66));
+  --err: var(--t-b-error, var(--vscode-errorForeground, #e06c75));
+  /* diff 底色：配置里的「差异.添加/删除」是**文字色**，直接当底色会整行发光，
+     所以这里用 color-mix 把它压成一层薄底；配置没到就回落主题的 diff 底色。 */
+  --add: color-mix(in srgb, var(--t-diff-added, var(--vscode-charts-green, #98c379)) 16%, transparent);
+  --del: color-mix(in srgb, var(--t-diff-removed, var(--vscode-errorForeground, #e06c75)) 16%, transparent);
   /* 用户气泡底色：优先主题给聊天请求准备的 chat.requestBackground
      （One Dark 是 #2c313c，比编辑器底略亮一档，正是气泡该有的层次），
      没有该键的主题退到 input-background，再退到抬升层。 */
@@ -60,6 +92,19 @@
     /* panel.border 在 #282c34 上只有 1.5:1，做分隔线够、做卡片轮廓太弱
        （「边界非常微弱、不够利落」）。需要更实一档的地方用这个。 */
     --line-strong: color-mix(in srgb, var(--fg) 34%, transparent);
+    /* 代码块 / 工具卡片的底：**没有配置色时**从面板底色提亮一档。
+       混 8% 前景色 ≈ One Dark 的 #2c313a（它自己的 hover/选中层），量级与
+       dsh（#151517 → #1B1B1C）、Tokyo Night（#1a1b26 → #1f2335）一致。
+       只在没配「代码块.背景」/「基础色.卡片背景」时生效——配了就听配置的。 */
+    --bg-code: var(--tb-codeblock-background,
+                 var(--tb-code-bg,
+                 color-mix(in srgb, var(--bg) 92%, var(--fg) 8%)));
+    /* 标题栏再提亮一档（+8%），与块体拉开一层 */
+    --bg-code-hd: color-mix(in srgb, var(--bg-code) 92%, var(--fg) 8%);
+    /* 行内代码只铺一层几乎看不出的底（+3%）。这层底会吃掉一点文字对比度，
+       所以配方要极淡、并且 markdown.code_inline 的下限提到 4.7 兜住
+       （实测 4% 时浅色主题下只剩 4.42:1，差一点点不到 4.5）。 */
+    --bg-code-inline: color-mix(in srgb, var(--bg) 97%, var(--fg) 3%);
   }
 }
 /* 浏览器预览：跟随系统浅色 */
@@ -549,6 +594,60 @@ body[data-real="true"] .demo-tip{display:none}
      出现左右滚动）。anywhere 允许在任意位置断行，只在放不下时才生效。 */
   overflow-wrap:anywhere;
 }
+/* 消息气泡里的图片：**按内容尺寸展示**，不再是输入区那种 26×18 的小图标。
+   用户报障原文：「我们 ui 的图片显示太小了」——原来 addMsgThumbs 复用了
+   输入区 chip 的 `.atch img`（26×18），一张截图在气泡里只有指甲盖大。
+   口径对齐 dsh 的 MessageImage（`ui-attachment/src/MessageImage.module.css`）：
+     · 单张：长边 240px、宽高比夹在 [0.25, 4]、不放大超过原始尺寸
+     · 多张：96×96 方块（dsh 是 64×64，侧边栏里 64 太小，按面板宽度放宽一档）
+     · 圆角与气泡一致（18px），点击可放大（见 addMsgThumbs 的 lightbox）
+   限定在 `.msg` 内：输入区 chip 仍是小图标，两处互不影响。 */
+.msg .atch{
+  display:block;padding:0;background:none;border-radius:18px;
+  overflow:hidden;line-height:0;cursor:zoom-in;
+}
+/* 消息里的图片容器**不能沿用输入区的 max-height:5.5em**（≈71px）。
+   那条限制是给输入区 chip 行用的（附件多时内部滚动），复用过来会把整张
+   图裁成顶部一条 —— 实测一张 240px 高的截图只露出约 1/5，用户报障
+   「只显示了五分之一」。这里把高度与滚动一起放开，让图片按自身尺寸展示。 */
+.msg .attach{
+  max-height:none;overflow:visible;gap:8px;margin:6px 0 0;
+}
+.msg .atch .n,
+.msg .atch .ph{display:none}
+.msg .atch img{
+  max-width:min(240px, 100%);max-height:240px;width:auto;height:auto;
+  border-radius:18px;display:block;object-fit:contain;
+}
+/* 多张图：统一方块铺排，避免一张竖图把气泡撑得极高 */
+.msg .attach[data-many="true"] .atch{
+  width:96px;height:96px;border-radius:12px;
+}
+.msg .attach[data-many="true"] .atch img{
+  width:96px;height:96px;max-width:none;max-height:none;
+  border-radius:12px;object-fit:cover;
+}
+/* 图片已被清理（宿主读不到）/ 正在加载：留一个和图片同尺寸的占位块。
+   读不到时**可点击重试**（文件可能又被放回来了）——dsh 的 MessageImage
+   在 ATTACHMENT_NOT_FOUND 时也是渲染成可点击重试的按钮，不是一块空白。 */
+.msg .atch .ph{
+  display:grid;place-items:center;width:132px;height:88px;
+  border:1px dashed var(--line-strong);border-radius:12px;background:var(--bg-hover);
+  font-size:11px;color:var(--fg-faint);line-height:1.6;
+}
+.msg .atch[data-missing="true"]{cursor:pointer}
+.msg .atch[data-missing="true"] .ph{
+  border-style:dashed;color:var(--fg-dim);
+}
+/* 图片放大层（lightbox）：点缩略图看原尺寸，Esc / 点空白关闭 */
+.imgbox{
+  position:fixed;inset:0;z-index:90;display:grid;place-items:center;
+  background:rgba(0,0,0,.78);cursor:zoom-out;
+}
+.imgbox img{
+  max-width:92vw;max-height:88vh;border-radius:6px;
+  box-shadow:0 12px 40px rgba(0,0,0,.5);
+}
 /* 探索分支合并结论：不是用户说的话，用一条淡淡的分隔线示意，不做成气泡 */
 .msg.sys-note .text{
   border-left:2px solid var(--accent);padding-left:12px;margin-left:-14px;
@@ -576,8 +675,40 @@ body[data-real="true"] .demo-tip{display:none}
      · 工具确认条（.confirm .q）—— 待确认的命令原文，470px 起就溢出
    长串在 AI 输出里是常态（hash、路径、base64、URL），不是罕见输入。 */
 .think .slot p,.todo > div,.confirm .q{overflow-wrap:anywhere;min-width:0}
+/* ---------- Markdown 正文着色（颜色来自 narnat.json「界面.标注」） ----------
+   用户报障原文：「插件里的都是一片黑色，视觉会疲劳」——原来标题、粗体、行内代码
+   全是同一个 `--fg`，只有字号差。终端形态早就按配置给每个元素上色
+   （`界面.标注` 的配方，如「标题1: bold 红」「行内代码: 黄」）。
+   这里把配方落到 CSS：颜色取 `--t-markdown-*`（后端下发 + 前端按底色适配亮度），
+   字重/斜体来自同一份配方的修饰词（`--tw-*` / `--ts-*`），没配就回落原样式。 */
 .msg h1,.msg h2,.msg h3,.msg h4,.msg h5,.msg h6{
   margin:14px 0 8px;line-height:1.4;font-weight:600;color:var(--fg);
+}
+/* 标题按配置分三档：h1/h2 一档、h3 一档、h4–h6 一档（终端渲染器只有这三档） */
+.msg h1,.msg h2{
+  color:var(--t-markdown-heading-h1, var(--fg));
+  font-weight:var(--tw-markdown-heading-h1, 600);
+}
+.msg h3{
+  color:var(--t-markdown-heading-h3, var(--fg));
+  font-weight:var(--tw-markdown-heading-h3, 600);
+}
+.msg h4,.msg h5,.msg h6{
+  color:var(--t-markdown-heading-h4, var(--fg));
+  font-weight:var(--tw-markdown-heading-h4, 600);
+}
+/* 粗体/斜体/删除线：终端里这三者都是有色的，面板原来只有字重差 */
+.msg strong,.msg b{
+  color:var(--t-markdown-bold, var(--fg));
+  font-weight:var(--tw-markdown-bold, 600);
+}
+.msg em,.msg i{
+  color:var(--t-markdown-italic, inherit);
+  font-style:var(--ts-markdown-italic, italic);
+}
+.msg del,.msg s{
+  color:var(--t-markdown-strikethrough, var(--fg-dim));
+  text-decoration:line-through;
 }
 .msg > *:first-child{margin-top:0}
 /* 末尾元素不留 margin-bottom：否则每条回复底部都比正文多一块空白
@@ -589,19 +720,33 @@ body[data-real="true"] .demo-tip{display:none}
 .msg h4,.msg h5,.msg h6{font-size:13px}
 .msg blockquote{
   margin:0 0 10px;padding:2px 0 2px 12px;
-  border-left:2px solid var(--fg-faint);color:var(--fg-dim);
+  border-left:2px solid var(--t-markdown-blockquote, var(--fg-faint));
+  color:var(--t-markdown-blockquote, var(--fg-dim));
+  font-style:var(--ts-markdown-blockquote, normal);
 }
 /* markdown 分隔线（`---` / `***` / `___`，AI 回答里极常见的分段手段）。
    不用浏览器默认的 2px 立体边框：线与相邻分隔线（--line）同色，间距取
    段落间距（.msg p 的下边距 16px），上下各一份。 */
-.msg hr{border:none;border-top:1px solid var(--line);margin:16px 0}
+.msg hr{
+  border:none;margin:16px 0;
+  border-top:1px solid var(--t-markdown-hr, var(--line));
+}
 .msg ol{margin:16px 0;padding-left:18px}
-.msg a{color:var(--accent);text-decoration:none}
+.msg a{
+  color:var(--t-markdown-link, var(--accent));
+  text-decoration:var(--tu-markdown-link, none);
+}
 .msg a:hover{text-decoration:underline}
 .msg code,.think code,.tools code{
   font-family:var(--mono);font-size:11.5px;
-  background:var(--bg-code);border-radius:3px;padding:1px 4px;
-  border:1px solid var(--line);color:var(--fg);
+  /* 行内代码用自己那一档极淡的底（--bg-code-inline），不是代码块的
+     --bg-code：实测浅色主题下代码块底色会把行内代码的文字对比度压到
+     3.28:1。理由见 :root 里 --bg-code-inline 的注释。 */
+  background:var(--bg-code-inline);border-radius:3px;padding:1px 4px;
+  border:1px solid var(--line);
+  /* 行内代码是配置里最显眼的一档（默认「黄」）：AI 回答里到处都是
+     路径/命令/字段名，全用正文色时整段读起来一片糊。 */
+  color:var(--t-markdown-code-inline, var(--fg));
 }
 .msg ul{margin:16px 0;padding-left:18px}
 /* h4–h6 后面紧跟列表时间距收紧（dsh 是 8px）：小标题与它领起的清单
@@ -610,10 +755,15 @@ body[data-real="true"] .demo-tip{display:none}
 .msg h5 + ul,.msg h5 + ol,
 .msg h6 + ul,.msg h6 + ol{margin-top:8px}
 /* 任务列表：`- [ ] 待办` / `- [x] 已完成` 渲染成真实的 disabled checkbox
-   （GFM 口径，同 dsh）。accent-color 取次要文字色 —— 勾选态不该比正文抢眼。 */
-.msg input[type=checkbox]{margin:0 8px 0 0;accent-color:var(--fg-dim)}
+   （GFM 口径，同 dsh）。勾选色取配置的「任务完成」档。 */
+.msg input[type=checkbox]{
+  margin:0 8px 0 0;
+  accent-color:var(--t-markdown-task-done, var(--fg-dim));
+}
 .msg li{margin-bottom:6px}
-.msg li::marker{color:var(--fg-faint)}
+/* 列表标记：无序/有序各一档颜色（终端里分别默认绿/次文字） */
+.msg li::marker{color:var(--t-markdown-list-unordered, var(--fg-faint))}
+.msg ol li::marker{color:var(--t-markdown-list-ordered, var(--fg-faint))}
 .msg pre{
   font-family:var(--mono);font-size:11.5px;line-height:1.65;
   background:var(--bg-code);border-radius:6px;padding:10px 12px;
@@ -623,20 +773,35 @@ body[data-real="true"] .demo-tip{display:none}
 /* 不用 <pre> 直接做容器：语言标签和复制按钮要贴在右上角，
    而 <pre> 本身 overflow-x:auto，子元素会被一起横向滚走。 */
 .code{
-  margin:10px 0 0;border:1px solid var(--line-strong);border-radius:6px;
+  margin:10px 0 0;border:1px solid var(--code-border);
+  border-radius:6px;
   background:var(--bg-code);overflow:hidden;
 }
 .code-hd{
   display:flex;align-items:center;gap:8px;
   padding:4px 10px;border-bottom:1px solid var(--line);
   font-family:var(--mono);font-size:10.5px;line-height:1.6;
-  color:var(--fg-faint);background:var(--bg-elev);
+  color:var(--t-codeblock-lang-label, var(--fg-faint));
+  background:var(--bg-code-hd);
   /* 工具栏不参与文字选中：Ctrl+A / 框选整条消息时，「js」「换行」「复制」
      会混进复制出来的代码里（实测复制结果是
      「…\n\njs\n换行\n复制\nvar x = 1;…」）。代码才是要复制的目标。 */
   user-select:none;
 }
-.code-hd .lang{flex:1;text-transform:lowercase;letter-spacing:.03em}
+/* 语言标签按语言分组上色（python 青 / shell 绿 / json 紫 …），与终端
+   `RenderConfig.LANG_COLORS` 同一张表、同一套分组色。分组名由 JS 写在
+   `data-lang-group` 上，颜色在这里按分组取（不写内联 style：CSP 会丢）。 */
+.code-hd[data-lang-group="cyan"]{--lang-color:var(--t-codeblock-lang-cyan)}
+.code-hd[data-lang-group="yellow"]{--lang-color:var(--t-codeblock-lang-yellow)}
+.code-hd[data-lang-group="green"]{--lang-color:var(--t-codeblock-lang-green)}
+.code-hd[data-lang-group="magenta"]{--lang-color:var(--t-codeblock-lang-magenta)}
+.code-hd[data-lang-group="red"]{--lang-color:var(--t-codeblock-lang-red)}
+.code-hd[data-lang-group="blue"]{--lang-color:var(--t-codeblock-lang-blue)}
+.code-hd[data-lang-group="gray"]{--lang-color:var(--t-codeblock-lang-gray)}
+.code-hd .lang{
+  flex:1;text-transform:lowercase;letter-spacing:.03em;
+  color:var(--lang-color, var(--t-codeblock-lang-label, var(--fg-faint)));
+}
 .code-copy,.code-wrap{
   font-family:var(--font);font-size:10.5px;color:var(--fg-dim);
   padding:1px 7px;border-radius:3px;border:1px solid transparent;
@@ -697,8 +862,13 @@ body[data-real="true"] .demo-tip{display:none}
 .tk-del{color:var(--vscode-gitDecoration-deletedResourceForeground,#f14c4c)}
 .tk-hdr{color:var(--vscode-textLink-foreground,#569cd6)}
 .tk-meta{color:var(--fg-faint)}
-/* Markdown 表格：形态同 dsh —— 不要竖线、不要外框，只留每行一条下边线；
-   单元格 10px/16px 内边距，首列不留左侧内边距（贴着正文左缘起排）。
+/* Markdown 表格：**形态完全照 dsh**（`ui-primitives/src/markdown/
+   MarkdownText.module.css` 的 `.tableScroll th/td`）——不要竖线、不要外框、
+   不要表格底色，只留每行一条 **0.5px** 下边线；表头边框比正文深一档
+   （dsh 是 l3 : l2），字重 500（不是 600）；单元格 10px/16px 内边距，
+   首列不留左侧内边距（贴着正文左缘起排）、末列不留右侧内边距。
+   颜色不抄终端也不抄 dsh，走 narnat.json 的「标注.表格边框 / 表格内容」
+   （用户口径：几何与底色抄 dsh，文字配色用终端那套配置）。
 
    宽度：`max-content` 与 `min-width:100%` 两者缺一不可。
    · 只写 width:100%（原来）→ 单元格被压到任意位置断行，6 列在 249px 下
@@ -710,20 +880,31 @@ body[data-real="true"] .demo-tip{display:none}
 .tw{margin:16px 0 0;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain}
 .msg table{border-collapse:collapse;width:max-content;min-width:100%}
 .msg th,.msg td{
-  border:none;border-bottom:1px solid var(--line);
+  /* 0.5px：dsh 的 `.tableScroll th/td` 就是 0.5px。原来写 1px 比它重一档，
+     窄面板里一堆 1px 线会把表格画成网格。 */
+  border:none;border-bottom:0.5px solid var(--t-markdown-table-border, var(--line));
   padding:10px 16px;text-align:left;vertical-align:top;
   /* 单元格内不折行：折行会把多列表格压成逐字换行（首列 29px 的实测值），
      而横滚本来就要发生 —— 让它一次滚个够，不要又压扁又滚。
-     长串（URL / 命令）的自然宽度由 .tw 的横滚承担。 */
+     长串（URL / 命令）的自然宽度由 .tw 的横滚承担。
+     （dsh 这里用 max-width:min(30vw,320px) 靠换行收窄，那是宽屏网页的
+     做法；我们的面板常态 249~700px，换行只会把列压扁，故不照搬。） */
   white-space:nowrap;overflow-wrap:normal;
 }
 .msg th[data-a="center"],.msg td[data-a="center"]{text-align:center}
 .msg th[data-a="right"],.msg td[data-a="right"]{text-align:right}
-.msg th{border-bottom-color:var(--line-strong);color:var(--fg);font-weight:600}
-.msg td{color:var(--fg-dim)}
+.msg th{
+  /* 表头边框深一档（dsh 的 th 用 border-l3、td 用 border-l2），
+     字重 500（dsh 的 `--dsw-font-markdown-table-head` 是 500，不是 600）。 */
+  border-bottom-color:var(--t-markdown-table-border, var(--line-strong));
+  color:var(--fg);font-weight:500;
+}
+/* 表格正文用配置的「表格内容」档（默认主色），与终端渲染器一致 */
+.msg td{color:var(--t-markdown-table-content, var(--fg-dim))}
 .msg th:first-child,.msg td:first-child{padding-left:0}
 .msg td:last-child{padding-right:0}
-.msg td code{margin:0}
+/* dsh：表格内行内代码小一档（11px），否则等宽字比表格正文大一圈 */
+.msg td code,.msg th code{font-size:11px}
 
 /* ---------- 可折叠行（思考 / 工具） ----------
    形态同 dsh 的一行式步骤行：单行 24px，收起时只显示「名称 · 摘要 状态」，
@@ -1104,6 +1285,7 @@ body[data-real="true"] .demo-tip{display:none}
    附件个数没有上限（一次框选几十个文件是常态）：必须限高 + 内部纵向滚动，
    否则附件区随个数长高，把输入框与状态栏一路顶出可视区，
    用户既看不到自己在打什么，也点不到发送/停止。5.5em≈3 行 chip（13px 基准）。 */
+/* 输入区附件条：限高 5.5em（约 3 行 chip）后内部滚动，免得一堆附件把输入框顶走 */
 .attach{
   display:none;flex-wrap:wrap;gap:4px;margin:0 0 6px;
   max-height:5.5em;overflow-y:auto;overflow-x:hidden;
@@ -1123,6 +1305,7 @@ body[data-real="true"] .demo-tip{display:none}
   font-family:var(--mono);
 }
 .atch .ph{flex:none;color:var(--fg-faint)}
+/* 输入区 chip 里的图：只当图标用，26×18 足够 */
 .atch img{flex:none;max-width:26px;max-height:18px;border-radius:2px;display:block}
 .atch .x{flex:none;color:var(--fg-faint);padding:0 1px;line-height:1}
 .atch .x:hover{color:var(--err)}
@@ -1848,9 +2031,13 @@ body[data-drawer="true"] #toBottom{display:none}
 .turn-proc[data-open="true"] .tp-row{padding-bottom:12px}
 .tp-row:hover{color:var(--fg-dim)}
 .tp-caret{
-  flex:none;margin-left:auto;display:inline-flex;align-items:center;justify-content:center;
+  flex:none;margin-left:6px;display:inline-flex;align-items:center;justify-content:center;
   transition:transform .12s ease;transform-origin:50% 50%;
 }
+/* 没有耗时、也没有副标题时，让 chevron 自己吸掉剩余空间靠右（否则它会
+   紧跟标题，与其它行的 chevron 对不齐）。有副标题时副标题的 flex-grow
+   已经把空间吃掉了；有耗时时耗时用 margin-left:auto 靠右（见 .tp-meta）。 */
+.tp-row:not(:has(.tp-sub)):not(:has(.tp-meta)) .tp-caret{margin-left:auto}
 /* 收起态：向下的 chevron 转 90° 变成「向右」；展开态转回来朝下。
    与 dsh 的 TurnProcessNodeView 同一个语义（它的 chevron 常显在右侧）。 */
 .tp-caret .tp-caret-ic{display:block}
@@ -1875,6 +2062,11 @@ body[data-drawer="true"] #toBottom{display:none}
   margin-left:5px;font-family:var(--mono);font-size:10.5px;
   font-variant-numeric:tabular-nums;color:var(--fg-faint);
 }
+/* 耗时贴右：这一行是「标题 → 干了什么 → 耗时 → chevron」的阅读顺序，
+   时间是附注，不该夹在中间。
+   **只能有一个元素带 margin-left:auto** —— 之前 .tp-meta 和 .tp-caret 都写了
+   auto，flex 布局下两个 auto 会平分剩余空间，耗时被推到行中间（用户报障
+   「那个 3 秒的位置跑到哪去了」），chevron 才在最右。 */
 .tp-meta{
   margin-left:auto;flex:none;font-family:var(--mono);font-size:10px;color:var(--fg-faint);
   margin-right:6px;
@@ -2429,6 +2621,257 @@ body[data-drawer="true"] #toBottom{display:none}
       '<svg class="row-ic" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">' +
       d + '</svg>' + CARET_SVG + '</span>';
   }
+
+  /* ══════════════════════════════════════════════════════════════
+     内容层配色（narnat.json「界面」分组 → CSS 变量）
+     ══════════════════════════════════════════════════════════════
+
+     用户报障原文：「插件里的都是一片黑色，视觉会疲劳」「终端模式的输出文字
+     都是 narnat.json 里的主题控制的，非常的好」「插件要支持按 narnat.json
+     的配置渲染 AI 输出的颜色」。
+
+     设计（已与用户逐条敲定）：
+       · 颜色来源 = narnat.json「界面」分组，与终端形态同一份配置、同一套默认
+         配方（后端 `ui/theme.py` 解析后随 initialize 下发）。
+       · 面板底色 / 顶栏 / 输入框仍然跟 VSCode 主题走，只有**内容层**
+         （markdown、代码块、diff、状态、语义色）用配置里的颜色。
+       · 亮度适配：只取配置色的**色相与饱和度**，亮度按当前面板底色重算到
+         满足对比度。理由：配置里的颜色是按终端底色挑的，用户换成浅色主题后
+         同一批颜色会糊在背景上。
+
+     后端给的是纯 hex，这里负责适配与落地。任何角色缺失都回落 CSS 里的默认值
+     （`var(--t-xxx, var(--fg))`），所以老后端 / 配置写坏都不会变成黑块。
+  */
+
+  var THEME = null;          // 最近一次收到的配色快照
+  var THEME_LANG = {};       // 语言 → 分组（cyan/yellow/…），来自后端同一张表
+
+  /** "#rrggbb" / "#rgb" → [r,g,b]（0-255）；非法返回 null */
+  function hexRgb(hex) {
+    var s = String(hex || '').trim().replace(/^#/, '');
+    if (s.length === 3) s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2];
+    if (!/^[0-9a-fA-F]{6}$/.test(s)) return null;
+    return [parseInt(s.slice(0, 2), 16), parseInt(s.slice(2, 4), 16), parseInt(s.slice(4, 6), 16)];
+  }
+
+  function rgbHex(rgb) {
+    return '#' + rgb.map(function (v) {
+      var n = Math.max(0, Math.min(255, Math.round(v)));
+      return (n < 16 ? '0' : '') + n.toString(16);
+    }).join('');
+  }
+
+  /** sRGB 相对亮度（WCAG 定义），用于算对比度 */
+  function relLum(rgb) {
+    var c = rgb.map(function (v) {
+      var x = v / 255;
+      return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  }
+
+  /** 两色的对比度（1~21） */
+  function contrastOf(a, b) {
+    var la = relLum(a), lb = relLum(b);
+    var hi = Math.max(la, lb), lo = Math.min(la, lb);
+    return (hi + 0.05) / (lo + 0.05);
+  }
+
+  function rgbToHsl(rgb) {
+    var r = rgb[0] / 255, g = rgb[1] / 255, b = rgb[2] / 255;
+    var max = Math.max(r, g, b), min = Math.min(r, g, b);
+    var h = 0, s = 0, l = (max + min) / 2;
+    var d = max - min;
+    if (d !== 0) {
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+      else if (max === g) h = ((b - r) / d + 2) / 6;
+      else h = ((r - g) / d + 4) / 6;
+    }
+    return [h, s, l];
+  }
+
+  function hslToRgb(hsl) {
+    var h = hsl[0], s = hsl[1], l = hsl[2];
+    if (s === 0) {
+      var v = l * 255;
+      return [v, v, v];
+    }
+    var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    var p = 2 * l - q;
+    function hue(t) {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1 / 6) return p + (q - p) * 6 * t;
+      if (t < 1 / 2) return q;
+      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+      return p;
+    }
+    return [hue(h + 1 / 3) * 255, hue(h) * 255, hue(h - 1 / 3) * 255];
+  }
+
+  /**
+   * 亮度适配：保留色相与饱和度，只动亮度，直到与底色达到 minRatio 对比度。
+   * 已经在阈值以上的颜色**原样返回** —— 用户挑的颜色不该被无谓地改。
+   * @param {string} hex 配置里的颜色
+   * @param {number[]} bg 面板底色的 rgb
+   * @param {number} minRatio 目标对比度（正文 4.5；分隔线一类 2.2）
+   * @returns {string} 适配后的 hex；hex 非法时返回空串（调用方回落默认）
+   */
+  function adaptColor(hex, bg, minRatio) {
+    var rgb = hexRgb(hex);
+    if (!rgb) return '';
+    var ratio = contrastOf(rgb, bg);
+    if (ratio >= minRatio) return rgbHex(rgb);
+    var hsl = rgbToHsl(rgb);
+    // 底暗就往亮推、底亮就往暗推；全程只改 l，h/s 不动
+    var dark = relLum(bg) < 0.5;
+    var best = rgbHex(rgb), bestRatio = ratio;
+    for (var i = 1; i <= 50; i++) {
+      var l = dark ? hsl[2] + (1 - hsl[2]) * (i / 50) : hsl[2] * (1 - i / 50);
+      var cand = hslToRgb([hsl[0], hsl[1], l]);
+      var r = contrastOf(cand, bg);
+      if (r > bestRatio) { bestRatio = r; best = rgbHex(cand); }
+      if (r >= minRatio) return rgbHex(cand);
+    }
+    // 到极值仍不达标（底色本身太极端）：返回能做到的最高对比度
+    return best;
+  }
+
+  /**
+   * 背景/卡片色的适配：保留「比页面底色深/浅一档」的关系。
+   * 配置里的卡片色是相对终端底色调的；面板换成浅色主题时，
+   * 直接把深色卡片搬上去会变成一块突兀的黑斑，所以这里做亮度镜像。
+   */
+  function adaptSurface(hex, bg) {
+    var rgb = hexRgb(hex);
+    if (!rgb) return '';
+    var bgDark = relLum(bg) < 0.5;
+    var hsl = rgbToHsl(rgb);
+    var bgHsl = rgbToHsl(bg);
+    if (bgDark) {
+      // 底色暗：卡片色若比底色亮太多就压回去，保持「略亮/略暗一档」
+      var maxL = Math.min(0.35, bgHsl[2] + 0.12);
+      return rgbHex(hslToRgb([hsl[0], hsl[1], Math.min(hsl[2], maxL)]));
+    }
+    // 底色亮：镜像到亮侧（深卡片 → 浅卡片）
+    // 下限 0.96 而不是原来的 0.82：镜像值（1-l）往往落在 0.85 附近，配上 0.82
+    // 的下限，浅色主题下的卡片会变成一块中灰。实测三档：
+    //   0.82 → #d3d7dd（铺在纯白上像一块脏灰，用户报障「太老土」）
+    //   0.93 → #ebedf0（干净但比主流深一档，亮度差 0.155）
+    //   0.96 → #f5f6f8（与 VSCode editorWidget #f8f8f8、dsh 浅色 code block
+    //                   #F9FAFB 同一量级，亮度差 ≈ 0.09）
+    // 深色主题那边卡片与页面只差 0.03~0.05 的亮度，浅色侧取同量级才对称；
+    // 层次交给标题栏（比块体深一档）和圆角/发丝线，不靠块体自己变灰。
+    var mirror = 1 - hsl[2];
+    return rgbHex(hslToRgb([hsl[0], hsl[1] * 0.6, Math.max(0.96, mirror)]));
+  }
+
+  /** dim 修饰：往底色方向混 22%，得到「同一色相但更弱」的效果 */
+  function dimToward(hex, bg) {
+    var a = hexRgb(hex), b = hexRgb(rgbHex(bg));
+    if (!a || !b) return hex;
+    return rgbHex([0, 1, 2].map(function (i) { return a[i] * 0.78 + b[i] * 0.22; }));
+  }
+
+  /** 角色键 → CSS 变量名：markdown.heading_h1 → --t-markdown-heading-h1 */
+  function themeVarName(prefix, role) {
+    return prefix + String(role).replace(/[._]/g, '-');
+  }
+
+  /** 读取面板实际底色（body 的 background 解析后的 rgb） */
+  function panelBg() {
+    var css = getComputedStyle(document.body).backgroundColor;
+    var m = /rgba?\(([^)]+)\)/.exec(css);
+    if (!m) return [40, 44, 52];
+    var parts = m[1].split(',').map(function (s) { return parseFloat(s); });
+    return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
+  }
+
+  /* 各角色的最低对比度：正文级 4.5，线条/装饰级 2.2（WCAG 对图形的要求） */
+  var THEME_MIN_RATIO = {
+    'markdown.hr': 2.2,
+    'markdown.table_border': 2.2,
+    'markdown.list_unordered': 3.0,
+    'markdown.list_ordered': 3.0,
+    'markdown.image': 3.0,
+    'markdown.blockquote': 3.0,
+    'codeblock.line_number': 3.0,
+    'diff.context': 3.0,
+    'ui.separator': 2.2,
+    // 行内代码的文字不是直接坐在面板底上，而是坐 --bg-code-inline 那层淡底上
+    // （浅色主题下 3% 的前景色混合会比面板暗一点点，吃掉约 0.1 的对比度）。
+    // 抬到 4.7，扣掉这层损失后仍 ≥ 4.5。
+    'markdown.code_inline': 4.7
+  };
+
+  /**
+   * 把后端下发的配色快照落地成 CSS 变量。
+   * @param {Object} theme `initialize` 里的 `theme` 字段
+   */
+  function applyTheme(theme) {
+    if (!theme || typeof theme !== 'object') return;
+    THEME = theme;
+    THEME_LANG = (theme.langGroups && typeof theme.langGroups === 'object') ? theme.langGroups : {};
+    var bg = panelBg();
+    var root = document.documentElement;
+    var colors = theme.colors || {};
+    var bgs = theme.bgs || {};
+    var decor = theme.decor || {};
+    var base = theme.base || {};
+    var baseBg = theme.baseBg || {};
+
+    Object.keys(colors).forEach(function (role) {
+      var min = THEME_MIN_RATIO[role] || 4.5;
+      var hex = adaptColor(colors[role], bg, min);
+      if (!hex) return;
+      var list = decor[role] || [];
+      if (list.indexOf('dim') >= 0) {
+        hex = dimToward(hex, bg);
+        // 弱化之后必须再压一次对比度下限。
+        // dim 是「往底色混 22%」：深色主题下底是暗的 → 变暗 → 更弱，没问题；
+        // 但浅色主题下底是亮的 → 变亮 → 与白底几乎融为一体。
+        // 实测（VSCode Light Modern）：「引用」配紫色 #9E8BB5 对白底正好 3.0:1
+        // 踩线达标，dim 之后变 #b3a5c5，只剩 2.31:1 —— 引用块整段读不清。
+        // 弱化是意图，读不清是缺陷；这里用弱化后的值当起点重新推到下限。
+        hex = adaptColor(hex, bg, min) || hex;
+      }
+      root.style.setProperty(themeVarName('--t-', role), hex);
+      // 修饰：bold → 字重，italic → 斜体，underline → 下划线
+      if (list.indexOf('bold') >= 0) root.style.setProperty(themeVarName('--tw-', role), '700');
+      if (list.indexOf('italic') >= 0) root.style.setProperty(themeVarName('--ts-', role), 'italic');
+      if (list.indexOf('underline') >= 0) {
+        root.style.setProperty(themeVarName('--tu-', role), 'underline');
+      }
+    });
+
+    Object.keys(bgs).forEach(function (role) {
+      var hex = adaptSurface(bgs[role], bg);
+      if (hex) root.style.setProperty(themeVarName('--tb-', role), hex);
+    });
+
+    // 基础角色：状态色与强调色直接用配置里的（成功绿 / 警告黄 / 错误红 / 强调青）。
+    // 这几个变量被工具行、系统行、折叠行共用，一处生效即全线一致。
+    Object.keys(base).forEach(function (role) {
+      var isSurface = role === 'code_bg';
+      var hex = isSurface ? adaptSurface(base[role], bg) : adaptColor(base[role], bg, 4.5);
+      if (!hex) return;
+      root.style.setProperty(themeVarName('--t-b-', role), hex);
+    });
+    Object.keys(baseBg).forEach(function (role) {
+      var hex = adaptSurface(baseBg[role], bg);
+      if (hex) root.style.setProperty(themeVarName('--tb-', role), hex);
+    });
+  }
+
+  /** 代码块语言 → 配色分组（cyan/yellow/green/magenta/red/blue/gray）。
+      表来自后端 `RenderConfig.LANG_COLORS`（终端渲染器同一张），
+      面板不另维护一份 —— 否则同一段 python 在终端和面板会是两种颜色。 */
+  function langGroup(lang) {
+    var key = String(lang || '').trim().toLowerCase();
+    return THEME_LANG[key] || 'gray';
+  }
+
 
 
   /* 剪贴板写入的等待上限。宿主通道与本地通道**共用这一个值**（唯一真源）：
@@ -3105,8 +3548,13 @@ body[data-drawer="true"] #toBottom{display:none}
       // 限高由 CSS 的 max-height 负责，与是否高亮无关。
       var doFold = lines > 30 && !foldOpenPref;
       var folded = doFold ? ' data-fold="true"' : '';
+      // 语言标签色：与终端同一张「语言 → 分组」表（见 langGroup）。只写分组名
+      // 到 data 属性，具体颜色由 CSS 按分组取 `--t-codeblock-lang-*` ——
+      // 不能写内联 style 属性：webview 的 CSP 会把它整条丢掉（见「通用小工具类」）。
+      var group = langGroup(lang);
       blocks.push('<div class="code" data-wrap="' + wrapOn + '"' + folded + '>' +
-        '<div class="code-hd"><span class="lang">' + esc(lang || 'text') + '</span>' +
+        '<div class="code-hd" data-lang-group="' + esc(group) + '">' +
+        '<span class="lang">' + esc(lang || 'text') + '</span>' +
         '<button class="code-wrap" type="button" data-on="' + wrapOn + '">换行</button>' +
         '<button class="code-copy" type="button">复制</button></div>' +
         '<pre data-lang="' + esc(lang) + '" data-lines="' + lines + '">' +
@@ -3115,33 +3563,91 @@ body[data-drawer="true"] #toBottom{display:none}
         '</div>');
       return '\u0000BLOCK' + (blocks.length - 1) + '\u0000';
     }
-    // 1) 成对的围栏（四个以上反引号也要能包住三个反引号：AI 讲 Markdown
-    //    语法时就会这么写）。先处理围栏更长的，避免被短的抢先配对。
-    src = src.replace(/(`{4,})([a-zA-Z0-9_+-]*)\n?([\s\S]*?)\1/g, function (_m, _f, lang, code) {
-      return pushBlock(lang, code);
-    });
-    // 2) 普通的三个反引号围栏。闭合标记必须处在**行首**（允许前导空白）：
-    //    不要求行首会怎样（实测）：代码里出现 `const s = "```"` 时，正文中
-    //    任意位置的三个反引号都会被当闭合标记，代码块被截断、后面的正文
-    //    被吞进 <pre>。
-    src = src.replace(/```([a-zA-Z0-9_+-]*)[ \t]*\n([\s\S]*?)(?:^[ \t]*```[ \t]*$|\n```)/gm,
-      function (_m, lang, code) {
-        return pushBlock(lang, code);
-      });
-    // 3) 未闭合的围栏：流式输出到一半、或回答被截断/停止时必然出现。
-    //    不处理会怎样（实测）：整段代码降级成普通段落，里面的 `**`、`#`
-    //    被当 Markdown 解析 → 标记字符被吃掉、代码无高亮，而且这是**流式
-    //    过程中每一轮都会经过的状态**。
-    //    顺序要求：先长的后短的。只写三条反引号那条会怎样（实测）：
-    //    流式中的 ````markdown\n```js 会被 "```" + 语言标签 "markdown" 消化掉，
-    //    首个反引号留在正文里渲染成一个只含 ` 的 <p>，还多出一个空段落。
-    //    （AI 讲解「怎么嵌套代码块」时就会输出长围栏，这不是罕见形态。）
-    src = src.replace(/(`{4,})([a-zA-Z0-9_+-]*)[ \t]*\n([\s\S]*)$/, function (_m, _f, lang, code) {
-      return pushBlock(lang, code);
-    });
-    src = src.replace(/```([a-zA-Z0-9_+-]*)[ \t]*\n([\s\S]*)$/, function (_m, lang, code) {
-      return pushBlock(lang, code);
-    });
+    /**
+     * 把正文按围栏代码块切开：代码段交给 emitBlock，其余原样返回。
+     * 规则见调用处注释（CommonMark 的围栏语义 + 嵌套容错）。逐行扫描而不是
+     * 正则——闭合判定要同时看「行首」「只有反引号与空白」「长度 ≥ 开围栏」
+     * 三个条件，正则写不出「长度 ≥」（反向引用只能精确相等）。
+     * @param {string} text 源文
+     * @param {(lang: string, code: string) => string} emitBlock 代码段 → 占位符
+     * @returns {string} 正文 + 占位符
+     */
+    function splitFences(text, emitBlock) {
+      var RE_FENCE = /^[ \t]{0,3}(`{3,})([^\n`]*)$/;
+      var lines = String(text || '').split('\n');
+      var parts = [];     // 每项：一段正文（多行）或一个占位符
+      var buf = [];       // 尚未确定归属的正文行
+      var body = [];      // 当前代码块的内容行
+      // 围栏深度栈：[外层长度, 内层长度, ...]。空栈 = 不在块内。
+      // 用栈是为了容错 AI 的 **3 包 3**（外层与外层等长，CommonMark 里非法，
+      // 但这是 AI 讲 Markdown 时的常态写法）。严格按 CommonMark 解析的结果是
+      // 「块 + 正文 + 末尾一个空的未闭合块」，用户看到的是整段碎成三块
+      // （实测真实会话：```markdown 套 ```json，碎成 markdown块 / 裸json /
+      // text块）。容错口径：块内遇到**带语言标签**的围栏行就当内层开围栏，
+      // 它自己那一层的闭合先弹出，弹空才闭合外层 —— 整段仍然是一个块。
+      var depth = [];
+      var lang = '';
+      // 收尾一段正文。buf 为空且已有内容时不追加 —— 否则紧挨着的两个代码块
+      // 之间会被塞进一个空行（占位符之间多出 \n\n，看不出差别但会让
+      // 「块与块之间空一行」和「原文就有一个空行」两种情形混在一起）。
+      function flushBuf() {
+        if (buf.length || !parts.length) parts.push(buf.join('\n'));
+        buf = [];
+      }
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        // CRLF：判定时去掉行尾 \r，内容也按去掉后的存（\r 进 <pre> 只会
+        // 变成看不见的字符，还让行尾的多余空白判断出错）
+        var probe = line.charAt(line.length - 1) === '\r' ? line.slice(0, -1) : line;
+        var m = RE_FENCE.exec(probe);
+        if (!depth.length) {
+          if (m) { depth = [m[1].length]; lang = m[2].trim(); body = []; continue; }
+          buf.push(probe);
+          continue;
+        }
+        var info = m ? m[2].trim() : '';
+        if (m && info) {
+          // 带语言标签的行：内层开围栏（内容里出现的 ```json 之类）
+          depth.push(m[1].length);
+          body.push(probe);
+          continue;
+        }
+        // 纯反引号行：长度够才算闭合，只弹最内层
+        if (m && m[1].length >= depth[depth.length - 1]) {
+          depth.pop();
+          if (depth.length) { body.push(probe); continue; }
+          flushBuf();
+          parts.push(emitBlock(lang, body.join('\n')));
+          body = [];
+          lang = '';
+          continue;
+        }
+        body.push(probe);
+      }
+      if (depth.length) {   // 未闭合：流式/截断，整段算代码
+        flushBuf();
+        parts.push(emitBlock(lang, body.join('\n')));
+      }
+      flushBuf();
+      return parts.join('\n');
+    }
+    // 围栏代码块：逐行扫描，严格按 CommonMark 的围栏语义。
+    // 原来是四条正则轮流替换，实测出过三类错 —— 用户截图报障的正是第一类：
+    //   a. 闭合分支写成 `\n```"`，**不要求行尾**。于是「带语言标签的行」也算
+    //      闭合：AI 讲「Markdown 文档」时写 ```markdown 外层套 ```json 内层
+    //      （3 包 3，不合 CommonMark，但这是它的常态写法），外层就在 ```json
+    //      处提前收尾 —— json 正文漏成裸文本、后面的内容再被当成一个新块，
+    //      一整段文档碎成三块。
+    //   b. 不校验闭合长度 ≥ 开围栏长度（CommonMark 要求），合法的 4 包 3
+    //      嵌套会被三个反引号提前闭合。
+    //   c. 不校验开围栏缩进 ≤ 3（4 空格是缩进代码块，不是围栏）。
+    //   d. 代码里出现 `const s = "```"` 时，正文中任意位置的三个反引号都会被
+    //      当闭合标记，代码块被截断、后面的正文被吞进 <pre>。
+    // 规则：开围栏 = 行首（≤3 空格）+ ≥3 个反引号 + 可选 info string（其中
+    // 不能再有反引号）；闭合 = 行首（≤3 空格）+ ≥开围栏长度个反引号 + 其后
+    // **只有空白**。未闭合则延续到文末 —— 流式输出到一半、回答被截断/停止时
+    // 必然出现，不处理会把整段代码降级成普通段落、`**` 和 `#` 被当标记吃掉。
+    src = splitFences(src, pushBlock);
     src = esc(src);
     src = src.replace(/`([^`\n]+)`/g, '<code>$1</code>');
     src = src.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
@@ -3550,14 +4056,35 @@ body[data-drawer="true"] #toBottom{display:none}
    * 哪些命令的参数可以就地补全，以及从哪里取候选。
    * 候选取自界面上已有的真实数据（会话列表、模型/强度/插件下拉），
    * 不另建一份——否则后端一加模型，这里就过期了。
+   *
+   * 这份表就是「哪些命令的参数能补」的唯一清单：**没登记 = 敲完命令名
+   * 加空格后候选面板直接关掉**（refreshPalette 里 `!src` 就 return）。
+   * 用户报障「/skill 不能补全已有的 skill、/ls 不能补全 --all」就是这么来的：
+   * 两个命令都在 COMMANDS 里（能补出命令名），但都没登记参数来源。
    */
   var ARG_SOURCE = {
     '/cd': 'session',
-    '/rm': 'session',
+    '/rm': 'session',      // 会话名 + `--all`（见 listArgCandidates）
     '/mode': 'model',
     '/thinking': 'think',
-    '/plugin': 'plugin'
+    '/plugin': 'plugin',
+    '/skill': 'skill',     // 技能名（后端 skill/list 现取）
+    '/ls': 'lsFlag'        // `--all`
   };
+
+  /** `/ls` / `/rm` 这类「只有几个固定开关」的命令的候选（唯一清单） */
+  var FLAG_CANDIDATES = {
+    lsFlag: [{ v: '--all', d: '列出全部会话（含更早的与探索分支）', g: '可用开关' }],
+    rmFlag: [{ v: '--all', d: '删除全部会话', g: '可用开关' }]
+  };
+
+  /**
+   * 技能候选缓存。由 `skill/list` 回执填充（见 applySkillList）。
+   * 不进 initialize：后端要扫工作目录下所有 skills 目录，放握手路径会拖慢首屏。
+   * 首次敲 `/skill ` 时先发请求，回执一到就地重刷面板 —— 本地 RPC，通常几十毫秒。
+   */
+  var SKILLS = [];
+  var skillAsked = false;
 
   function listArgCandidates(src){
     if (src === 'session') {
@@ -3571,8 +4098,27 @@ body[data-drawer="true"] #toBottom{display:none}
           out.push({ v: s.name + '/' + c.name, d: '子会话' });
         });
       });
+      // `/rm --all` 是合法用法（后端 delete_session 专门认它），
+      // `/cd` 没有这个开关 —— 放在同一个来源里按命令区分。
+      if (palCmd === '/rm') out = out.concat(FLAG_CANDIDATES.rmFlag);
       return out;
     }
+    if (src === 'skill') {
+      if (!skillAsked) {
+        skillAsked = true;
+        if (REAL) post('skill/list', {});
+      }
+      return SKILLS.map(function(x){
+        return {
+          v: x.v,
+          d: x.d + (x.dir ? '（含下级）' : ''),
+          // 分组按技能来源分：系统技能与项目技能混在一列表里时，
+          // 同名技能会让人分不清加载的是哪一个（后端的加载顺序是系统优先）。
+          g: x.d || '技能'
+        };
+      });
+    }
+    if (src === 'lsFlag') return FLAG_CANDIDATES.lsFlag.slice();
     var popId = { model: 'popModel', think: 'popThink', plugin: 'popPlugin' }[src];
     var pop = popId && document.getElementById(popId);
     if (!pop) return [];
@@ -3580,6 +4126,27 @@ body[data-drawer="true"] #toBottom{display:none}
       var lb = pi.querySelector('.lb');
       return { v: pi.getAttribute('data-v'), d: lb ? lb.textContent : '' };
     }).filter(function(x){ return x.v; });
+  }
+
+  /**
+   * `skill/list` 回执：填缓存，并**在用户还停在 /skill 参数输入时**重刷面板。
+   * 不重刷会怎样：首次敲 `/skill ` 拿到的是空列表（缓存还没到），请求回来了
+   * 面板却仍关着，用户以为「敲空格没反应」，必须再敲一个字符才弹出来。
+   */
+  function applySkillList(p){
+    if (!p || !Array.isArray(p.items)) {
+      // 失败（离线 / 后端扫不动目录）：复位请求标记，下次敲 /skill 还能再试。
+      // 不复位会怎样：一次偶发失败之后，这个会话里永远不再请求，
+      // 用户看到的是「一直没技能」，重启窗口才恢复。
+      skillAsked = false;
+      return;
+    }
+    SKILLS = p.items.filter(function(x){
+      return x && typeof x.v === 'string' && x.v;
+    });
+    if (paletteVisible() && palMode === 'arg' && palCmd === '/skill') {
+      refreshPalette();
+    }
   }
 
   function openPalette(open){
@@ -3646,6 +4213,10 @@ body[data-drawer="true"] #toBottom{display:none}
       // 还在打命令名
       palMode = 'cmd';
       palCmd = '';
+      // 回到「打命令名」就复位技能请求标记：同一次输入过程里只请求一次
+      // （每次按键都请求会刷出一串无用的 RPC），但**重新输入命令时**要能
+      // 拿到最新技能 —— 用户刚新建的 skill 文件不必重启窗口才出现在候选里。
+      skillAsked = false;
       var q = m[1].toLowerCase();
       palItems = COMMANDS.filter(function(x){
         // 探索分支里 /save /rm /explore 一定会被后端拒（_STATE_COMMANDS['child']
@@ -3676,7 +4247,11 @@ body[data-drawer="true"] #toBottom{display:none}
           var cut = v.indexOf('/');
           return cut >= 0 && v.slice(cut + 1).indexOf(arg) === 0;
         })
-        .map(function(x){ return { c: x.v, d: x.d, s: '', g: '可进入的' + x.d }; });
+        /* 分组名：候选自带 `g` 就用自己的，否则退回「可进入的<类别>」。
+           一律拼「可进入的」会说出不通的话——实测 /ls 的分组标题成了
+           「可进入的列出全部会话（含更早的与探索分支）」，/skill 成了
+           「可进入的系统技能」。会话候选确实是「可进入的」，其余不是。 */
+        .map(function(x){ return { c: x.v, d: x.d, s: '', g: x.g || ('可进入的' + x.d) }; });
     }
 
     if (!palItems.length) {
@@ -4772,6 +5347,13 @@ body[data-drawer="true"] #toBottom{display:none}
         if (it && (it.kind === 'image' || it.kind === 'folder' || it.kind === 'file')) {
           a.kind = it.kind;
         }
+        // 图片：宿主已把它复制进用户附图目录，`it.path` 是**库路径**。
+        // 后面发给 AI、以及气泡里显示的都用库路径 —— 原文件被移动/清理
+        // 也不影响这一段（用户报障「图丢了」正是只留原路径导致的）。
+        if (it && it.kind === 'image' && typeof it.path === 'string' && it.path) {
+          if (it.source) a.source = it.source;
+          if (it.path !== a.path) { a.path = it.path; a.name = String(it.path).split(/[\\/]/).pop() || a.name; }
+        }
         if (a.kind === 'image') atchThumb(a);
       });
       if (bad.length) {
@@ -4923,16 +5505,49 @@ body[data-drawer="true"] #toBottom{display:none}
   }
 
   /**
+   * 附件清单块的起始标记 —— 必须与后端 `core/input_history.py` 的
+   * `_ATTACH_MARK` **完全一致**：后端靠它把这一段从「↑ 历史」里切掉，
+   * 界面靠它把这一段从气泡里切掉。两处各写一份字符串迟早分叉，
+   * 分叉的后果是路径块重新出现在气泡里（用户报障截图就是这个）。
+   */
+  var ATTACH_BLOCK_MARK = '[用户附带了以下本地路径，请用相应工具自行读取处理]';
+
+  /**
    * 附件路径块：后端协议不变（仍走 chat/send），把绝对路径写进文本，
    * 由 AI 自己用工具去读——插件不复制、不存储文件内容。
    */
   function attachBlock(list){
     if (!list || !list.length) return '';
-    var lines = ['[用户附带了以下本地路径，请用相应工具自行读取处理]'];
+    var lines = [ATTACH_BLOCK_MARK];
     list.forEach(function(a){
       lines.push('- ' + (KIND_TEXT[a.kind] || '文件') + '：' + a.path);
+      // 图片另有一条库副本（宿主复制进来的）：告诉 AI 这条路径在项目数据
+      // 目录里、不受原文件移动/清理影响。原始路径只作说明，不必再读。
+      if (a.kind === 'image' && a.source && a.source !== a.path) {
+        lines.push('  （原文件：' + a.source + '；上面这条是库内副本，读它）');
+      }
     });
     return '\n\n' + lines.join('\n');
+  }
+
+  /**
+   * 把一条用户消息拆成「用户自己打的字」与「附件清单块」。
+   *
+   * 用户报障原文：「[用户附带了以下本地路径，请用相应工具自行读取处理]
+   * 这个不应该显示在 ui 上」——它是发给 AI 看的协议块（AI 靠路径用 Read
+   * 去读），不是用户说的话。气泡里应该只有用户打的字 + 那几张图的缩略图。
+   *
+   * 注意：**只在渲染层剥**，发给后端的文本保持完整。剥掉它 AI 就不知道
+   * 有附件了（协议、上下文都不变）。
+   *
+   * @param {string} text 正文（可能含附件块）
+   * @returns {{body:string, attach:string}} body=用户打的字；attach=附件块原文
+   */
+  function splitAttachBlock(text){
+    var s = String(text == null ? '' : text);
+    var cut = s.indexOf(ATTACH_BLOCK_MARK);
+    if (cut < 0) return { body: s, attach: '' };
+    return { body: s.slice(0, cut).replace(/\s+$/, ''), attach: s.slice(cut) };
   }
 
   /** 附件清单块里图片行：只认前置写入的这一种格式（行首 + 全角冒号） */
@@ -5002,10 +5617,19 @@ body[data-drawer="true"] #toBottom{display:none}
   }
 
   /**
-   * 在用户气泡里画缩略图行：复用输入区那套 .attach / .atch / .ph 样式与
-   * attach/thumb 宿主消息，不另造一套。
-   * 宿主读不到（文件已被清理 / 路径不存在）→ 留 [图片] 占位符：
-   * 画一个空 img 等于给用户看「一条看不见内容的附件」。
+   * 在用户气泡里画图片：**按内容尺寸展示**（不再是输入区那种 26×18 图标）。
+   *
+   * 用户报障原文：「我们 ui 的图片显示太小了」。口径对齐 dsh 的 MessageImage：
+   * 单张长边 240px、多张 96×96 方块；点击开 lightbox 看原尺寸。
+   *
+   * 图片读不到（文件已被清理 / 路径不存在）→ 留一个同尺寸的虚线占位块，
+   * 写着「图片已不在」，**可点击重试**（文件可能又被放回来了）。
+   * 这条与 dsh 的失败态一致：它的 `MessageImage` 在 `ATTACHMENT_NOT_FOUND`
+   * 时渲染成可点击重试的按钮，而不是一块空白。
+   *
+   * @param {HTMLElement} host 气泡节点
+   * @param {string[]} paths 图片本地路径
+   * @returns {?HTMLElement} 图片容器
    */
   function addMsgThumbs(host, paths){
     var list = (paths || []).filter(Boolean);
@@ -5013,32 +5637,91 @@ body[data-drawer="true"] #toBottom{display:none}
     var box = document.createElement('div');
     box.className = 'attach';
     box.setAttribute('data-on', 'true');
+    if (list.length > 1) box.setAttribute('data-many', 'true');
     list.forEach(function(p){
       var el = document.createElement('span');
       el.className = 'atch';
       el.setAttribute('data-path', p);
+      // 文件名只做 title 提示：气泡里显示文件名会把图片挤成「小图 + 长名字」，
+      // 用户要看的是图本身。悬停仍能看到路径。
+      el.setAttribute('data-tip', p);
       var ph = document.createElement('span');
       ph.className = 'ph';
-      ph.textContent = '[图片]';
+      // 初始就写一句可读文案，而不是空块：宿主回执到达前（或永远没到，
+      // 例如面板刚建好、扩展宿主忙）用户看到的是「图片加载中…」，
+      // 而不是一块什么都没有的空白。
+      ph.textContent = '图片加载中…';
       el.appendChild(ph);
       var n = document.createElement('span');
       n.className = 'n';
       n.textContent = String(p).split(/[\\/]/).pop() || p;
-      n.setAttribute('data-tip', p);
       el.appendChild(n);
       box.appendChild(el);
-      atchThumbOf(p, function(url){
-        if (!url) return;            // 读不到就留 [图片]
-        var img = document.createElement('img');
-        img.alt = '';
-        img.src = url;               // 只来自宿主，不拼进 innerHTML
-        if (ph.parentNode === el) el.replaceChild(img, ph);
-        else el.insertBefore(img, n);
+
+      function load(){
+        atchThumbOf(p, function(url){
+          if (!url) {
+            // 读不到：占位块 + 可点重试
+            el.setAttribute('data-missing', 'true');
+            ph.textContent = '图片已不在';
+            el.setAttribute('data-tip', p + '\n（文件已不存在或被清理，点击重试）');
+            return;
+          }
+          var img = document.createElement('img');
+          img.alt = '';
+          img.src = url;               // 只来自宿主，不拼进 innerHTML
+          if (ph.parentNode === el) el.removeChild(ph);
+          else el.removeChild(n);
+          el.insertBefore(img, el.firstChild);
+          el.removeAttribute('data-missing');
+        });
+      }
+      el.addEventListener('click', function(){
+        if (el.getAttribute('data-missing') === 'true') {
+          delete THUMB[p];              // 强制重新问一次宿主
+          load();
+          return;
+        }
+        var img = el.querySelector('img');
+        if (img && img.src) openImgBox(img.src, p);
       });
+      load();
     });
     host.appendChild(box);
     return box;
   }
+
+  /**
+   * 放大看原尺寸。dsh 用独立的 ImageLightbox 组件；这里同样只需要「铺满、
+   * 图居中等比缩放、Esc / 点空白 / 再点图关闭」，不值得为它引一个组件层。
+   */
+  function openImgBox(src, tip){
+    closeImgBox();
+    var box = document.createElement('div');
+    box.className = 'imgbox';
+    box.setAttribute('data-tip-off', '1');
+    var img = document.createElement('img');
+    img.src = src;
+    img.alt = tip ? String(tip).split(/[\\/]/).pop() : '';
+    box.appendChild(img);
+    box.addEventListener('click', closeImgBox);
+    document.body.appendChild(box);
+    imgboxEl = box;
+    document.addEventListener('keydown', onImgBoxKey, true);
+  }
+
+  function closeImgBox(){
+    if (imgboxEl && imgboxEl.parentNode) imgboxEl.parentNode.removeChild(imgboxEl);
+    imgboxEl = null;
+    document.removeEventListener('keydown', onImgBoxKey, true);
+  }
+
+  function onImgBoxKey(e){
+    if (e.key === 'Escape') { e.stopPropagation(); closeImgBox(); }
+  }
+
+  /** 当前打开着的放大层（同一时刻只允许一个） */
+  var imgboxEl = null;
 
   /**
    * 状态行「这一项有没有真值」的统一维护。
@@ -7729,7 +8412,7 @@ body[data-drawer="true"] #toBottom{display:none}
     // pending = 这条还没被后端接受。收到 chat/result accepted:false 时要撤回，
     // 否则「被拒绝的一句话」会以已发送的样子留在对话里、永远没有回答（实测会误导）。
     m.setAttribute('data-pending', '1');
-    m.innerHTML = '<div class="text">' + esc(text) + '</div>';
+    m.innerHTML = '<div class="text">' + esc(splitAttachBlock(text).body) + '</div>';
     // 气泡里正文之后显示缩略图行（与输入区的 chip 共用同一套样式与缓存）
     addMsgThumbs(m, sendImgs);
     convo.appendChild(m);
@@ -9162,7 +9845,13 @@ body[data-drawer="true"] #toBottom{display:none}
 
   function bgSubmit(p){
     var slot = (p && p.slot) || '';
-    addSysLine('⚙', '后台任务 ' + esc(slot) + ' 已提交', esc((p && p.logPath) || ''), '');
+    var el = addSysLine('⚙', '后台任务 ' + esc(slot) + ' 已提交', esc((p && p.logPath) || ''), '');
+    // 这行属于「过程」，不属于结论：轮末要跟工具行一起收进折叠组。
+    // 不打标记会怎样（用户报障截图）：一轮结束时工具行都收起来了，
+    // 只有这一行日志路径裸在组外，还夹在折叠行和最终回复中间。
+    // 它记的本来就是某次 Shell/Terminal 的 bg 提交（那次调用已经在折叠行
+    // 的「N 次工具调用」里算过了），所以**不额外计数**，只作为成员收进去。
+    if (el) el.setAttribute('data-turn-proc', '1');
     rendered('bg/submit', { slot: slot });
   }
 
@@ -10062,8 +10751,13 @@ body[data-drawer="true"] #toBottom{display:none}
         return;
       }
       round.push(el);
+      /* 收进组的三类成员，外加 `data-turn-proc` 这个「显式声明自己是过程」的
+         通用标记（供系统行用，目前只有 bg/submit 打）。不用「所有 .sys 都收」：
+         压缩中/重试中/失败重试那些系统行是**状态**，折起来就等于把状态藏了。 */
       if (el.hasAttribute('data-turn-tool') || el.hasAttribute('data-turn-think')
-        || el.hasAttribute('data-turn-text')) scope.push(el);
+        || el.hasAttribute('data-turn-text') || el.hasAttribute('data-turn-proc')) {
+        scope.push(el);
+      }
     });
     var box = null;
     if (scope.length) {
@@ -10507,7 +11201,10 @@ body[data-drawer="true"] #toBottom{display:none}
    * 渲染造成的少量长度差。
    */
   function normCmp(s) {
-    var t = String(s == null ? '' : s);
+    // 统一拿「用户能看见的内容」做指纹：附件清单块在渲染时被剥掉了
+    //（见 splitAttachBlock），比对前不剥会让「历史里有、DOM 里没有」
+    // 永远失配 → 误判没画过 → 每次握手都整段重画。
+    var t = splitAttachBlock(s).body;
     var fp = t.replace(/[\s*_`#>~\[\]()!|+\-]/g, '').slice(0, 40);
     return fp + '#' + Math.round(t.length / 10);
   }
@@ -10549,6 +11246,10 @@ body[data-drawer="true"] #toBottom{display:none}
     var goal = (p && p.goal) || {};
     var plugins = (p && p.plugins) || [];
     var session = (p && p.session) || {};
+
+    // 内容层配色：每次握手都重新落地一次。面板底色可能换了（用户切主题后
+    // reload），而适配算的就是「相对当前底色的亮度」，所以必须重算。
+    if (p && p.theme) applyTheme(p.theme);
 
     RPC_STATE.initialized = true;
     RPC_STATE.protocol = (p && p.protocol) || 0;
@@ -11316,7 +12017,11 @@ body[data-drawer="true"] #toBottom{display:none}
         var u = document.createElement('div');
         u.className = 'msg';
         u.setAttribute('data-role', 'user');
-        u.innerHTML = '<div class="text">' + esc(m.text) + '</div>';
+        // 附件清单块（`[用户附带了以下本地路径…]` + `- 图片：<路径>`）是发给
+        // AI 的协议块，不是用户说的话：气泡里只画用户打的字，附件改成缩略图。
+        // 不剥会怎样（用户报障截图）：气泡里整段路径明文铺开，还挤掉了正文。
+        var uParts = splitAttachBlock(m.text);
+        u.innerHTML = '<div class="text">' + esc(uParts.body) + '</div>';
         // 历史正文里的附件清单块（- 图片：<路径>）也要画出缩略图：
         // 否则切回会话 / 重载窗口后只剩一段路径文本，看不到自己发过的图。
         // 没有该块的旧消息 → 一个节点都不加。
@@ -12201,6 +12906,10 @@ body[data-drawer="true"] #toBottom{display:none}
       case 'ui/emit': handleUiAction(Object.assign({ action: 'emit' }, msg.params || {})); break;
       case 'ui/scrollTop': handleUiAction(Object.assign({ action: 'scrollTop' }, msg.params || {})); break;
       case 'initialize': applyInitialize(msg.params || {}); break;
+      // 内容层配色刷新（宿主在 narnat.json 变更后主动推，不必重启后端）
+      case 'theme/result': applyTheme(msg.params || {}); break;
+      // /skill 的参数候选（首次敲 /skill 空格时才请求）
+      case 'skill/result': applySkillList(msg.params || {}); break;
       case 'toggleInspector': toggleDrawer(); break;
       case 'rpc/error': showOffline(msg.params || {}); break;
       case 'turn/begin': turnBegin(msg.params || {}); break;

@@ -717,20 +717,20 @@ def _build_ai_config(data: dict) -> AIConfig:
     )
 
 
-def _build_ui_config(data: dict, max_output_tokens: int = 128000) -> UIConfig:
-    """从 narnat.json 的 "界面" 分组构建 UIConfig。
+def _ui_section_maps():
+    """「界面」段的中文键 → 英文键映射（单一定义源）。
 
-    支持全中文 key（如 "颜色"."强调色"），内部自动转英文。
+    返回 (section 映射, 每 section 的 key 映射)。`_build_ui_config` 与
+    `normalize_ui_raw` 共用这一份 —— 两处各写一份的话，命名迟早分叉，
+    而 webview 的配色快照就是按英文键取的。
     """
-
-    # ── 中英映射表（section 级别 + 每 section 内部 key 级别） ──
-    _SECTION_MAP = {
+    section_map = {
         "颜色": "colors", "基础色": "base_colors",
         "标注": "markdown", "标记": "markdown",
         "代码块": "codeblock", "差异": "diff", "对比": "diff",
         "框架": "ui", "命令": "cmd", "提示符": "prompt",
     }
-    _KEY_MAPS = {
+    key_maps = {
         "base_colors": {
             "用户": "user", "主色": "primary", "次色": "secondary",
             "强调色": "accent", "链接": "link", "链接色": "link",
@@ -769,7 +769,77 @@ def _build_ui_config(data: dict, max_output_tokens: int = 128000) -> UIConfig:
             "符号": "symbol", "文字": "text", "自定义": "custom",
         },
     }
+    return section_map, key_maps
 
+
+def normalize_ui_raw(ui: dict, warn=None) -> dict:
+    """把 narnat.json 的 "界面" 分组规范化成英文键 + 英文颜色角色。
+
+    只做「键名与角色名翻译」，不改值、不填默认 —— 默认值由
+    `output._DERIVED_DEFS` 与 `ui.theme` 提供（单一定义源）。
+
+    webview 的配色快照（`ui.theme.snapshot`）需要同一套英文键，所以这条
+    规范化必须可复用；`_build_ui_config` 与 RPC 的 theme/get 都走它。
+
+    @param ui: 原始 "界面" 分组（中文键）
+    @param warn: 可选告警回调（`_warn`）；为 None 时静默
+    @returns 规范化后的 dict（新对象，不修改入参）
+    """
+    import copy
+
+    do_warn = warn or (lambda _msg: None)
+    if not isinstance(ui, dict):
+        do_warn("「界面」段格式错误（应为对象），已按默认处理")
+        ui = {}
+    raw = copy.deepcopy(ui)
+
+    section_map, key_maps = _ui_section_maps()
+
+    # 2. Section 名称中→英
+    for zh, en in section_map.items():
+        if zh in raw and en not in raw:
+            raw[en] = raw.pop(zh)
+
+    # 2b. 已知 section 类型防御：非对象（字符串/数组等）时回落空对象，
+    #     防止下游 .items()/[] 取值崩溃
+    for name in ("colors", "base_colors", "markdown", "codeblock",
+                 "diff", "ui", "cmd", "prompt"):
+        if name in raw and not isinstance(raw[name], dict):
+            do_warn(f"「界面.{name}」段格式错误（应为对象），已按默认处理")
+            raw[name] = {}
+
+    # 3. 每个 section 内部 key 中→英
+    for section, key_map in key_maps.items():
+        sec = raw.get(section)
+        if not isinstance(sec, dict):
+            continue
+        for zh, en in key_map.items():
+            if zh in sec:
+                sec[en] = sec.pop(zh)
+
+    # 4. 配方值中的中文角色名 → 英文（如 "bold 强调色" → "bold accent"）；
+    #    "_" 开头的元数据不改写
+    color_zh_en = dict(key_maps.get("base_colors", {}))
+    if color_zh_en:
+        for section_name in ("colors", "markdown", "codeblock", "diff", "ui", "cmd", "prompt"):
+            sec = raw.get(section_name)
+            if not isinstance(sec, dict):
+                continue
+            for k, v in list(sec.items()):
+                if k.startswith("_") or not isinstance(v, str):
+                    continue
+                for zh, en in color_zh_en.items():
+                    v = v.replace(zh, en)
+                sec[k] = v
+
+    return raw
+
+
+def _build_ui_config(data: dict, max_output_tokens: int = 128000) -> UIConfig:
+    """从 narnat.json 的 "界面" 分组构建 UIConfig。
+
+    支持全中文 key（如 "颜色"."强调色"），内部自动转英文。
+    """
     ui = data.get("界面", {})
     if not isinstance(ui, dict):
         _warn("「界面」段格式错误（应为对象），已按默认处理")
@@ -781,43 +851,8 @@ def _build_ui_config(data: dict, max_output_tokens: int = 128000) -> UIConfig:
     show_balance = _pop_bool_any(raw, "show_balance", "显示余额")
     max_tokens = _pop_int_any(raw, default=max_output_tokens, keys=("max_output_tokens", "最大输出token数"))
 
-    # 2. Section 名称中→英
-    for zh, en in _SECTION_MAP.items():
-        if zh in raw and en not in raw:
-            raw[en] = raw.pop(zh)
-
-    # 2b. 已知 section 类型防御：非对象（字符串/数组等）时警告并回落默认，
-    #     防止 apply_style 侧 .items()/[] 取值崩溃
-    for name in ("colors", "base_colors", "markdown", "codeblock",
-                 "diff", "ui", "cmd", "prompt"):
-        if name in raw and not isinstance(raw[name], dict):
-            _warn(f"「界面.{name}」段格式错误（应为对象），已按默认处理")
-            raw[name] = {}
-
-    # 3. 每个 section 内部 key 中→英
-    for section, key_map in _KEY_MAPS.items():
-        if section not in raw:
-            continue
-        sec = raw[section]
-        if not isinstance(sec, dict):
-            continue
-        for zh, en in key_map.items():
-            if zh in sec:
-                sec[en] = sec.pop(zh)
-
-    # 4. 配方值中的中文角色名 → 英文（如 "bold 强调色" → "bold accent"）；"_" 开头的元数据不改写
-    _COLOR_ZH_EN = dict(_KEY_MAPS.get("base_colors", {}))
-    if _COLOR_ZH_EN:
-        for section_name in ("colors", "markdown", "codeblock", "diff", "ui", "cmd", "prompt"):
-            sec = raw.get(section_name)
-            if not isinstance(sec, dict):
-                continue
-            for k, v in list(sec.items()):
-                if k.startswith("_") or not isinstance(v, str):
-                    continue
-                for zh, en in _COLOR_ZH_EN.items():
-                    v = v.replace(zh, en)
-                sec[k] = v
+    # 2~4. section 名与内部 key 中→英、配方里的中文角色名 → 英文
+    raw = normalize_ui_raw(raw, _warn)
 
     return UIConfig(raw=raw, show_cost=show_cost, show_balance=show_balance,
                     max_output_tokens=max_tokens)

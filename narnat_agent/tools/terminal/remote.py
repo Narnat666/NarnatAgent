@@ -34,6 +34,65 @@ def _get_sftp(session: SSHSession):
 
 # ── 远程Read ──
 
+def remote_read_bytes(file_path: str, max_bytes: int, host: str = ""):
+    """通过SFTP把远程文件整体读成 bytes（图片等二进制用）。
+
+    与 remote_read 的区别：不做编码探测、不做行切分，只把字节原样取回。
+    调用方（Read 的图片分支）负责后续归一化与入库。
+
+    Args:
+        file_path: 远程路径
+        max_bytes: 最多读取的字节数；超过即判为过大（不读满，避免拉爆内存）
+        host: dev编号
+
+    Returns:
+        (data: bytes, error: str)。error 非空时 data 为 None。
+    """
+    session = get_session(host=host)
+    if session is None:
+        return None, _no_session_msg(host)
+
+    try:
+        sftp = _get_sftp(session)
+    except Exception as e:
+        return None, f"[错误: 远程SFTP打开失败: {e}]"
+
+    try:
+        import stat as _stat_mod
+        try:
+            info = sftp.stat(file_path)
+        except IOError:
+            info = None
+        if info is not None and _stat_mod.S_ISDIR(info.st_mode):
+            return None, (f"[错误: 远程路径是目录: {file_path}，"
+                          "请用 Terminal exec 查看目录内容]")
+        # 先看大小再决定读不读：一个 500MB 的远程文件不该先拉完再拒绝
+        if info is not None and info.st_size > max_bytes:
+            return None, ("[错误: 远程文件过大（%d 字节，上限 %d 字节），"
+                          "请用 Terminal exec 先在远程缩小]"
+                          % (info.st_size, max_bytes))
+
+        with sftp.open(file_path, "rb") as f:
+            data = f.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            return None, ("[错误: 远程文件过大（超过 %d 字节上限），"
+                          "请用 Terminal exec 先在远程缩小]" % max_bytes)
+        return data, ""
+    except OSError as e:
+        if e.errno == errno.ENOENT:
+            return None, f"[错误: 远程文件不存在: {file_path}]"
+        if e.errno == errno.EACCES:
+            return None, f"[错误: 远程文件权限不足（EACCES）: {file_path}]"
+        return None, f"[错误: 远程读取失败: {file_path} ({e})]"
+    except Exception as e:
+        return None, f"[错误: 远程读取失败: {e}]"
+    finally:
+        try:
+            sftp.close()
+        except Exception:
+            pass
+
+
 def remote_read(file_path: str, offset: int = 0, limit: int = 2000,
                 host: str = "") -> str:
     """通过SFTP读取远程文件（流式，与本地Read行为一致）
