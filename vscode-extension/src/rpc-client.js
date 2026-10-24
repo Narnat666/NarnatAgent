@@ -210,8 +210,16 @@ class RpcClient {
     // 没有监听者时是 uncaught 异常，会直接把扩展宿主干掉（实测）。
     if (child.stdin) {
       child.stdin.on('error', (err) => {
-        const unsent = this._spawnFailed || !child.pid;
-        this._emitLog('写入后端失败：' + (err && err.message ? err.message : err));
+        // 这里**必须**一律按「未写出」处理。
+        // 原来判据是 `this._spawnFailed || !child.pid`：进程启动过 ⇒ child.pid 有值
+        // ⇒ unsent=false ⇒ 沿用 _write() 的返回值当「已写出」⇒ e.sent=true，
+        // 界面于是对用户说「可能已在执行，别急着重发」。可写管道报错（EPIPE /
+        // stream destroyed / write after end）本身**就证明这次写没有到达对端** ——
+        // 按提示不重发，这条消息就永久丢了（实测：强杀后连发 20 条，第 1 条被标 sent）。
+        const unsent = true;
+        this._spawnFailed = true;
+        this._emitLog('写入后端失败：' + (err && err.message ? err.message : err) +
+          '（本次写入一律按「未发出」处理）');
         this._failAll(err, unsent);
         this._onExit(null, null, err);
       });
@@ -365,7 +373,19 @@ class RpcClient {
     try {
       return this._parser.feed(chunk);
     } catch (err) {
-      this._emitLog('解析失败：' + (err && err.message ? err.message : err));
+      const detail = err && err.message ? err.message : String(err);
+      this._emitLog('解析失败：' + detail);
+      // 单行超上限（MAX_BUFFER）会把**整段内容**丢掉，不只是"解析失败"：
+      // 只写扩展日志等于用户看到「这一轮成功了但回答是空的」，完全不知道
+      // 发生了什么（实测：桩端点回 12MB 单行 → 界面正文 0 字节、turn/end 正常）。
+      // 转成一条界面可见的 notice（与后端 notice 同一通道，已在前端白名单里）。
+      this._events.emit('*', {
+        method: 'notice',
+        params: {
+          text: '\n收到一段超长内容（单条超过 8MB），界面无法承载，已丢弃；'
+            + '这一轮的回答可能不完整\n'
+        }
+      });
       return [];
     }
   }

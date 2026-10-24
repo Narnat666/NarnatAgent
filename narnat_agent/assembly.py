@@ -167,6 +167,9 @@ class Assembly:
             project_skill_roots=config.skills.project_roots,
             skill_ignore_dirs=config.tools.ignore_dirs,
             context_reset_func=lambda: context.reset(),
+            # 传日志器：载入会话时若清掉了孤儿工具结果（删了用户数据），
+            # 必须留下一条可追查的 warning。不传的话那行日志永远打不出来。
+            logger=logger,
         )
 
         # 11. UI（显式分支：rpc / headless / 终端）

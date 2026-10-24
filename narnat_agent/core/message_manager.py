@@ -35,6 +35,45 @@ class MessageManager:
         self._messages = messages
         self._compressor = compressor
         self._logger = logger
+        # 写入守卫的当前代际（None = 不守卫，正常单轮路径就是 None）。
+        # agent_loop 在主循环开始时 bind_generation()，收尾 finally 里解绑。
+        self._bound_generation: Optional[int] = None
+
+    # ── 写入守卫（会话代际）──
+    #
+    # 为什么需要（P0，实测数据损坏）：工具还在执行时用户切会话，
+    # `_cancel_and_wait_turn` 只等 3 秒；串口/SSH 那种底层超时几十秒的工具
+    # 等不到收口，于是工具的「声明」留在上一段对话、而「结果」在这之后才
+    # append —— 此时 MessageList 已被换成新会话。结果成了孤儿 tool_result，
+    # Anthropic 协议直接 400，且该会话从此每条消息都发不出去。
+    #
+    # 守卫就是让「上一轮的结果写不进新会话」：append 前比对代际，不一致就
+    # 丢弃并记日志。这是**不依赖等待**的根治手段 —— 等待只能尽量收口，
+    # 守卫保证即使等不到也不会写错地方。
+
+    def bind_generation(self) -> Optional[int]:
+        """绑定当前代际（agent_loop 每轮开始时调）。返回值仅用于日志。"""
+        self._bound_generation = self._messages.generation
+        return self._bound_generation
+
+    def unbind_generation(self) -> None:
+        """解绑（每轮结束/异常时调）。不解绑会让下一轮沿用旧代际而拒写。"""
+        self._bound_generation = None
+
+    def _generation_stale(self, what: str) -> bool:
+        """本轮的代际是否已过期（= 期间换过会话）。过期时记一条日志。"""
+        bound = self._bound_generation
+        if bound is None:
+            return False
+        now = self._messages.generation
+        if now == bound:
+            return False
+        if self._logger:
+            self._logger.warning(
+                "core.message_manager",
+                f"丢弃「{what}」：会话已切换（代际 {bound}→{now}），"
+                f"这一轮的结果属于上一段对话，不能再写入")
+        return True
 
     @property
     def view(self) -> MessageView:
@@ -61,26 +100,46 @@ class MessageManager:
                 and not view[-1].get("images")):
             merged = dict(view[-1])
             merged["content"] = (view[-1].get("content") or "") + "\n\n" + content
-            new = view.to_list()
-            new[-1] = merged
-            self._messages.replace_all(new)
+            # 用 replace_last 而不是 replace_all：这只改一条消息，不是换会话，
+            # 不能让代际 +1（否则守卫会把这次合并当成换会话，整轮 append 全丢）
+            self._messages.replace_last(merged)
         else:
             self._messages.append_user(content)
 
     def append_user_images(self, images: list, content: str = "",
                            tool_call_id: str = "") -> None:
         """追加只携带图片引用的 user 消息（工具结果配图用），委托 MessageList。"""
+        if self._generation_stale("工具结果配图"):
+            return
         self._messages.append_user_images(images, content, tool_call_id)
 
     def append_assistant(self, content: str, tool_calls: Optional[list] = None,
                          thinking: Optional[str] = None,
-                         thinking_signature: Optional[str] = None) -> None:
-        self._messages.append_assistant(content, tool_calls, thinking, thinking_signature)
+                         thinking_signature: Optional[str] = None) -> bool:
+        """追加 assistant 消息。返回 False = 代际已过期，本次写入被丢弃。
 
-    def append_tool_result(self, tool_call_id: str, result: str) -> None:
+        返回值必须被调用方理会：agent_loop 在「已换会话」之后要立刻停下这一轮，
+        继续跑只会白烧 token（结果全部写不进去）。
+        """
+        if self._generation_stale("assistant 消息"):
+            return False
+        self._messages.append_assistant(content, tool_calls, thinking, thinking_signature)
+        return True
+
+    def append_tool_result(self, tool_call_id: str, result: str) -> bool:
+        """追加工具结果。返回 False = 代际已过期，本次写入被丢弃。
+
+        这是**最要紧的一条**：会话被劈开的直接原因就是「切会话之后工具结果
+        才 append 进来」—— 声明在旧会话、结果写进新会话，成为孤儿 tool_result。
+        """
+        if self._generation_stale("工具结果"):
+            return False
         self._messages.append_tool_result(tool_call_id, result)
+        return True
 
     def append_interrupted_tools(self, tool_calls: list, completed_ids: set) -> None:
+        if self._generation_stale("中断结果"):
+            return
         self._messages.append_interrupted_tools(tool_calls, completed_ids)
 
     # ── 内容审核拦截恢复（委托 MessageList）──
@@ -92,17 +151,35 @@ class MessageManager:
         """
         return self._messages.fold_largest_tool_result(folded_ids)
 
+    def drop_orphan_tool_results(self) -> list:
+        """删掉无对应声明的 tool 结果（结构性 400 的修复手段）。"""
+        return self._messages.drop_orphan_tool_results()
+
     # ── 修复方法（repair 逻辑原样保留，通过 view 读取）──
 
     def repair(self) -> None:
         """修复messages：打断后可能留下不完整的消息序列。
 
-        1. assistant含tool_calls但没有对应的tool消息 → 补上tool("[用户中断]")
-        2. 如果第1步修复了，且末尾是tool消息 → 补上assistant（API要求tool后不能直接跟user）
+        1. **孤儿 tool 结果**（没有对应 tool_calls 声明）→ 删掉。这类消息会让
+           Anthropic 协议整个请求 400，且删除是安全的（声明没了，结果无接收方）。
+        2. assistant含tool_calls但没有对应的tool消息 → 补上tool("[用户中断]")
+        3. 如果第2步修复了，且末尾是tool消息 → 补上assistant（API要求tool后不能直接跟user）
+
+        顺序要求：必须先删孤儿再补结果。反过来的话，刚补的 `[用户中断]` 结果
+        会因为「声明在后面某处被删了」而被误判成孤儿再删掉 —— 一轮工具调用
+        白丢，而且补 assistant 的判据也会跟着失效。
         """
         msgs = self._messages
 
-        # 1. 为未回复的tool_call补上空结果
+        # 1. 孤儿 tool 结果（声明在别的会话文件里 / 已被替换掉）
+        dropped = msgs.drop_orphan_tool_results()
+        if dropped:
+            self._logger.warning(
+                "core.message_manager",
+                f"repair: 删除 {len(dropped)} 条无对应声明的工具结果"
+                f"（声明与结果被劈到了不同会话文件）")
+
+        # 2. 为未回复的tool_call补上空结果
         replied_ids = set()
         for msg in msgs.view():
             if msg.get("role") == "tool":
@@ -110,7 +187,7 @@ class MessageManager:
                 if tc_id:
                     replied_ids.add(tc_id)
 
-        repaired = False
+        repaired = bool(dropped)
         for msg in msgs.view():
             if msg.get("role") == "assistant" and "tool_calls" in msg:
                 for tc in msg["tool_calls"]:
@@ -120,7 +197,7 @@ class MessageManager:
                         replied_ids.add(tc_id)
                         repaired = True
 
-        # 2. 只有在第1步确实修复了未回复的tool_call时，才补assistant
+        # 3. 只有在确实修复过时，才补 assistant
         if repaired and len(msgs) > 0 and msgs.view()[-1].get("role") == "tool":
             # 思考模式下请求末尾的 assistant 消息必须携带非空 thinking 块，
             # 否则 DeepSeek V4 返回 400（The content[].thinking ... must be passed back）

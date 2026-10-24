@@ -894,7 +894,8 @@ class RpcServer:
         不要当前这段，让他先手动点停止是多余的摩擦；但只打断不等待会让这一轮
         后续的工具结果 append 进刚清空的新对话（P0，实测 9/13）。
         """
-        self._settle_before_context_change("新建")
+        self._settle_before_context_change("新建",
+                                          force=bool(params.get("force")))
         # 先让轮末自动保存收尾：它可能在后台线程里正给这段内容命名落盘。
         # 不等它就 on_new，会各存一份（实测出现过两个同名会话）。
         auto = None
@@ -929,8 +930,24 @@ class RpcServer:
         mgr = self._mgr
         target, parent, err = mgr.resolve_session_name(name)
         if err:
+            # 「名字解析不出来」有两种完全不同的原因，必须分开说：
+            #   ① 真的没有这个会话；
+            #   ② **文件在，但读不成 dict**（非法 JSON / 顶层不是对象 / 超深嵌套 /
+            #      非 UTF-8）。`list_sessions_tree_checked()` 对这类文件静默
+            #      `continue`，所以名字永远解析不到。
+            # 原来 ① ② 都回「会话不存在」，用户以为会话被删了，完全不会想到
+            # 去修文件，而且列表里也看不到它 —— 等于这条会话凭空消失（实测确认）。
+            # 注意 resolve_session_name 自己就会返回「会话不存在」，所以这条
+            # 探测必须放在 `if err` 里面，放到下面 `if not target` 是走不到的。
+            if "会话不存在" in err:
+                broke = _broken_session_file_hint(mgr.narnat_dir, name)
+                if broke:
+                    return None, None, broke
             return None, None, err
         if not target:
+            broke = _broken_session_file_hint(mgr.narnat_dir, name)
+            if broke:
+                return None, None, broke
             return None, None, f"会话不存在: {name}"
         try:
             exists = session_exists(mgr.narnat_dir, target, parent=parent)
@@ -961,7 +978,8 @@ class RpcServer:
         # 而正在跑的 agent_loop 持有同一个对象，继续 append_assistant /
         # append_tool_result —— 这一轮的正文和几十条工具记录全写进**新**会话，
         # 原会话只剩一句提问、永远得不到回答。不可恢复（实测 30 条工具结果串台）。
-        self._settle_before_context_change("切换会话")
+        self._settle_before_context_change("切换会话",
+                                          force=bool(params.get("force")))
         # 切走前先把游离态那一段兜底存下来：这件事由状态机自己做
         # （NoSession.enter → carry_over，赶在 replace_messages 之前），
         # 这里不再单独调一次——两处都调会把同一段内容存出两个文件
@@ -1273,7 +1291,7 @@ class RpcServer:
         with self._turn_lock:
             return True, not self._turn_active
 
-    def _settle_before_context_change(self, action: str) -> bool:
+    def _settle_before_context_change(self, action: str, force: bool = False) -> bool:
         """换掉上下文（新建/切换/删除会话）之前，先把当前轮次真正收口。
 
         顺序必须是「打断 → 等收口 → 才动 MessageList」。
@@ -1281,17 +1299,49 @@ class RpcServer:
         on_new() 先把列表清空，这一轮的工具结果随后才 append，落进新对话
         成为孤立的 `role:"tool"`；之后每次请求都被真实端点回 400，
         用户只看到「一发消息就报错」。
-        超时就按现状继续（不能把界面卡死），但必须告知——
-        否则用户遇到的就是「点了新建、新会话却坏了」且没有任何线索。
 
-        返回 True=已收口。
+        ## 等不到收口时：默认**拒绝**，不硬切
+        原来（本轮改动前）超时就「按现状继续」—— 而那正是把会话劈成两个文件
+        的元凶：工具的声明留在旧会话、结果写进新会话。现在的分工：
+          · force=False（默认）：等不到就**抛错拒绝切换**，界面拿到可读原因，
+            用户可以再等一会、或先点停止、或改用「强制切换」。
+          · force=True：界面已经问过用户「强行切换会丢失这一轮的结果」，
+            于是放行；此时由 MessageList 的**代际守卫**保证那一轮的结果
+            一条都写不进新会话（不会污染数据，只是那次结果被丢弃）。
+
+        为什么用异常而不是返回 False：调用方（session/switch、explore、done）
+        有 4 处，返回布尔会被漏检（原来 3 处就是这么漏掉的）；抛错不可能被忽略。
+
+        返回 True = 已收口。
+
+        ## 现状（实测，第三轮回归后补记）
+        `-32010` 这条分支在当前实现下**不可达**：工具虽然跑在 executor 线程里，
+        但 `ToolDispatcher` 的等待循环是「每 50ms 查一次 `stream.cancelled`，
+        命中就 `_kill_*` 并 break」，所以打断后主循环几十毫秒就退出 →
+        `stream.abort()` → `turn/end{cancelled}` → `_turn_active` 立刻变 False →
+        这里的 3 秒等待根本耗不尽（实测两次真实注入：53ms / 30ms 就收口）。
+
+        那还要它干什么：**防御性**。它守的是「取消之后主线程仍阻塞 >3s」的形态
+        （例如将来把串口/SSH 的阻塞读放进一个不轮询取消的同步段，或确认重放路径
+        在主线程里同步执行工具时）。真正的数据安全由 MessageList 的**代际守卫**
+        保证 —— 那条路径实测有效：迟到的工具结果会被丢弃，不进任何会话文件。
+        删掉它不如留着并在文档里写清，否则下一个改这块的人会以为「没这段也安全」。
         """
         _interrupted, closed = self._cancel_and_wait_turn()
         if not closed:
+            if not force:
+                raise RpcError(
+                    -32010,
+                    f"上一轮还在执行工具，{_TURN_SETTLE_TIMEOUT:g} 秒内没能收口，"
+                    f"已取消{action}（避免把这一轮的结果写进别的会话）。"
+                    f"可以稍等它结束、先点「停止」，或选择「强制切换」"
+                    f"（强制会丢弃这一轮尚未保存的结果）",
+                    data={"busy": True, "retryable": True, "canForce": True})
             from .ui import emit
 
             emit("notice", {"text": (
-                f"上一轮未收口（等了 {_TURN_SETTLE_TIMEOUT:g} 秒），已强制{action}")})
+                f"上一轮未收口（等了 {_TURN_SETTLE_TIMEOUT:g} 秒），已强制{action}；"
+                f"这一轮尚未完成的结果会被丢弃")})
             return False
         # 收口后仍可能残留「assistant 带 tool_calls 但缺 tool 回复」的孤立对
         # （中断打断了工具结果回传）。走既有 repair 补齐，别另写一套：
@@ -1307,8 +1357,11 @@ class RpcServer:
     def _m_session_explore(self, params: Dict[str, Any]) -> Dict[str, Any]:
         # name 可以为空：不指定时由 core 用父会话内容自动命名（重名自动换序号）
         name = self._require_str(params, "name", "session/explore", allow_empty=True)
-        # explore 会 replace_messages：不先打断就串台（同 session/switch）
-        self._cancel_and_wait_turn()
+        # explore 会 replace_messages：不先打断就串台（同 session/switch）。
+        # 收口不了就抛错拒绝（reason 见 _settle_before_context_change），
+        # 不能像原来那样丢掉返回值继续切。
+        self._settle_before_context_change("新建探索分支",
+                                          force=bool(params.get("force")))
         # 进入前先判「这个分支是不是已经存在」：已存在 = 继续之前的分支。
         # core 的提示只打到 stdout，RPC 形态下 stdout 已改道到 stderr、前端
         # 看不到那一行，所以结果里要明确带上 reentered/notice。
@@ -1343,7 +1396,8 @@ class RpcServer:
         # done 会把结论合并回父会话并 replace_messages：不先打断就串台，
         # 实测正在跑的那一轮正文会写进父会话成为「没有提问的回答」，
         # 而子会话被误标 completed（数据错乱且不可恢复）。
-        self._cancel_and_wait_turn()
+        self._settle_before_context_change("合并分支",
+                                          force=bool(params.get("force")))
         err = self._mgr.on_done()
         # 「没有新的讨论内容需要总结」是业务提示（分支确实没有增量），不是错误。
         # 若当成 -32000 抛给客户端，UI 会显示红色错误框，误导用户以为合并失败。
@@ -2743,6 +2797,78 @@ def _rm_broken_session_file(narnat_dir: str, name: str) -> bool:
         return True
     except OSError:
         return False
+
+
+def _broken_session_file_hint(narnat_dir: str, name: str) -> str:
+    """目标名字解析不到时，判断「是不是文件其实在、只是读不出来」。
+
+    返回可读原因（含文件名 + 具体错因 + 修法）；不是这种情况返回 ""。
+
+    ## 为什么需要单独探一次
+
+    `list_sessions_tree_checked()` 对解析失败的会话文件是静默 `continue` 的
+    （这是对的：一条坏文件不能瘫痪整个列表），但后果是 `resolve_session_name()`
+    永远看不到它。于是用户点进去得到「会话不存在」，和「真被删了」**完全无法
+    区分**，而且列表里也看不到 —— 这条会话等于凭空消失。
+    实测（对 `{"messages": [broken` 与顶层 `[1,2,3]` 两种文件都验过）：文件一个
+    字节没动，但用户没有任何线索。
+
+    ## 判据
+
+    与 `_rm_broken_session_file()` 同一套路径规则（直属 `.json` + `_safe_filename`），
+    这样不会出现「提示有坏文件、却删不掉」的自相矛盾。
+    只报「读不成 dict」这一类；能读成 dict 的会话在列表里可见（哪怕 messages
+    不是数组，也由加载路径报真错），不该被这里抢答。
+    """
+    import json
+    import os
+
+    from ..config.session_store import _safe_filename, _sessions_dir
+
+    raw = str(name or "").strip()
+    if not raw:
+        return ""
+    root = os.path.normpath(_sessions_dir(narnat_dir))
+    parts = raw.split("/")
+    if len(parts) >= 2:
+        # 子会话：sessions/<父>/<子>.json
+        base = os.path.join(root, _safe_filename(parts[0]))
+        fname = _safe_filename("/".join(parts[1:]))
+    else:
+        base = root
+        fname = _safe_filename(raw)
+    if not fname or fname in (".", ".."):
+        return ""
+    cands = [os.path.join(base, fname + ".json")]
+    # 也认未经 _safe_filename 的原样文件名（用户可能手工放了带特殊字符的文件）
+    cands.append(os.path.join(base, raw.replace("/", os.sep) + ".json"))
+    # 子会话还有一种目录形态：父名是目录，子名里可能再带分层
+    if len(parts) >= 2:
+        cands.append(os.path.join(root, *[_safe_filename(p) for p in parts]) + ".json")
+
+    for target in cands:
+        target = os.path.normpath(target)
+        try:
+            if not os.path.isfile(target):
+                continue
+        except OSError:
+            continue
+        try:
+            with open(target, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as e:
+            reason = "%s: %s" % (type(e).__name__, str(e)[:80])
+        except OSError:
+            continue
+        else:
+            if isinstance(data, dict):
+                # 读得出来却不是这个名字：交给上层按原名报，别抢答
+                continue
+            reason = "顶层不是对象（是 %s）" % type(data).__name__
+        return ("会话文件损坏，读不出来：%s（%s）。"
+                "文件还在磁盘上，可以手工修好它，或直接删掉这个文件"
+                % (os.path.basename(target), reason))
+    return ""
 
 
 def _sweep_empty_session_dir(narnat_dir: str, name: str) -> bool:

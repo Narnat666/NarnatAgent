@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Narnat 预览</title>
 <link rel="stylesheet" href="media/narnat.css">
+<!-- KaTeX（数学公式）。顺序与 webview.js 一致：CSS 在前，JS 在 narnat.js 之前
+     ——narnat.js 渲染首屏时就会读 window.katex，晚加载会让首屏公式退回原文。
+     预览页同源加载，相对路径 media/katex/fonts/ 直接可用。 -->
+<link rel="stylesheet" href="media/katex/katex.min.css">
 </head>
 <body data-run="false" data-preview="true">
 <!--
@@ -16,6 +20,7 @@
 -->
 <script src="media/narnat.body.js"></script>
 <script>document.write(window.NARNAT_BODY);</script>
+<script src="media/katex/katex.min.js"></script>
 <script src="media/narnat.demo.js"></script>
 <script>
   // 把演示对话灌进空的 #convo（生产骨架里它是空的）

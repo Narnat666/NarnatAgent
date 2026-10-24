@@ -206,7 +206,12 @@ const RECEIPT_TYPES = {
   sessionRename: 1, sessionExplore: 1, sessionDone: 1,
   sessionHistory: 1,
   skillList: 1,
-  command: 1, configSet: 1, confirmReply: 1
+  command: 1, configSet: 1, confirmReply: 1,
+  // 这三条也走专用回执（见 failReceipt 里各自的 branch）。
+  // 不登记会怎样（第五轮 R42 实测）：失败时专用回执 + 通用 notice 双报，
+  // 同屏两句话讲同一件事。这份名单的唯一用途就是「别补通用 notice」，
+  // 所以只要 failReceipt 里有专属分支，这里就必须登记 —— 两处必须同步。
+  configDescribe: 1, narnatmdGet: 1, narnatmdSet: 1
 };
 
 /**
@@ -1645,10 +1650,113 @@ function settleChatFailure(client, err) {
  * @param {string} method
  * @param {any} params
  */
+/**
+ * 「为了让前端别停在加载态」的按类型失败回执。
+ *
+ * 两处调用：dispatch 的 catch（RPC 抛错）和 dispatch 开头的掉线早退。
+ * 抽成一个函数是因为**掉线那条更早的出口**曾经漏过（第五轮 R42 实测）：
+ * 只有 catch 里有回执，掉线时只发 rpc/error，于是 skillList / configDescribe /
+ * narnatmdGet / narnatmdSet 这四条会让界面永久停在「正在读取…」。
+ *
+ * 手工维护两份会漂移，所以这里只有一份定义。
+ * @param {string} type webview 消息类型
+ * @param {string} message 可读失败原因
+ * @param {object} [params] 原始参数（session/result 需要用它的 action/name）
+ * @param {object} [errData] JSON-RPC 错误的 data（透传 retryable/canForce）
+ */
+function failReceipt(type, message, params, errData) {
+  // chat/cancel 失败必须显式回执：否则 webview 会一直停在「运行中」
+  // （stop 按钮不还原、输入框不可用）。busy 是最常见的失败原因。
+  if (type === 'chat') {
+    broadcast({ type: 'chat/result', params: { accepted: false, error: message } });
+  } else if (type === 'cancel') {
+    broadcast({ type: 'cancel/result', params: { cancelled: false, error: message } });
+  } else if (type === 'sessionList') {
+    // sessionList 失败也必须回执：用户点「展开其余」时按钮会停在
+    // 「正在加载全部会话…」永不恢复（data-pending 不释放）；
+    // 面板打开时的自动刷新失败则让抽屉空白且毫无说明（用户以为会话全丢）。
+    // 按前端已支持的 { groups, error } 契约回，前端会画一行
+    // 「读取会话列表失败」并在下次成功时撤掉。
+    broadcast({ type: 'session/list', params: {
+      groups: [], current: null, isChild: false,
+      error: '读取会话列表失败：' + message
+    } });
+  } else if (type === 'sessionHistory') {
+    // 失败也必须回执：不回的话界面那个「加载中…」按钮永远不还原，
+    // 用户反复点也没用（锁只在回执到达时解开，见 ui-full.html 的 OFFLINE_BLOCKED/回执复位）。
+    broadcast({ type: 'history/result', params: { ok: false, error: message } });
+  } else if (type === 'skillList') {
+    // 技能目录读不到/扫不动时也要回执：界面在等这一份候选，
+    // 不回就永远停在「没有技能」——和「没有技能」看起来一样，但原因完全不同。
+    broadcast({ type: 'skill/result', params: { items: [], error: message } });
+  } else if (type === 'configDescribe') {
+    // 设置面板在等这一份配置全貌，不回就永远停在「正在读取配置…」。
+    broadcast({ type: 'config/describe', params: { ok: false, items: [], groups: [],
+      error: message, message: message } });
+  } else if (type === 'narnatmdGet') {
+    broadcast({ type: 'narnatmd/result', params: { ok: false, error: message,
+      message: message } });
+  } else if (type === 'narnatmdSet') {
+    broadcast({ type: 'narnatmd/saved', params: { ok: false, error: message,
+      message: message } });
+  } else if (type === 'configSet') {
+    // config/set 抛错（-32000 写盘失败 / -32603 内部错误）必须回执。
+    // 不回执会怎样（实测）：界面点下拉时已经本地打了勾、换了按钮文字，
+    // 后端其实没写成功 —— 用户以为切换了模型，下次重开面板又变回旧值。
+    broadcast({ type: 'config/result', params: { ok: false, error: message, message } });
+    broadcast({ type: 'configSet/result', params: { ok: false, error: message, message } });
+  } else if (type === 'confirmReply') {
+    // confirm/reply 失败（超时、后端已不在等这条确认）也必须回执。
+    // 不回执会怎样（实测）：界面点完就写了「已提交确认，等待后端执行…」，
+    // 而后端根本没收到 —— 那句话永久停在等待状态，用户一直等一个不会发生的执行。
+    broadcast({ type: 'confirm/result', params: {
+      accepted: false, ok: false, error: message, message: message
+    } });
+  } else if (type === 'command') {
+    // command/exec 抛错（-32000 业务拒绝、-32603 内部错误）时也必须回执。
+    // 原来这条只在 handled:false 时回，异常路径一条都不发 —— 界面点了
+    // 「保存当前为…」完全没反应，用户不知道存没存（实测）。
+    broadcast({ type: 'command/result', params: {
+      command: (params && params.command) || '',
+      args: (params && params.args) || '',
+      text: (params && params.text) || '',
+      origin: (params && params.origin) || '',
+      ok: false, handled: true, noop: false, lines: [message],
+      stateChanged: [], error: message
+    } });
+  } else if (type === 'sessionNew' || type === 'sessionSwitch' ||
+             type === 'sessionDelete' || type === 'sessionRename' ||
+             type === 'sessionExplore' || type === 'sessionDone') {
+    // 会话操作失败也必须回执：原来这类失败只走 reportError，
+    // 前端压根不知道「新建没成功」，用户会以为已经开了新对话，
+    // 接着 /save 就把上一段的全部历史存进新会话（实测真的发生过）。
+    //
+    // canForce（后端 -32010）：后端因为「上一轮还在执行工具、收口不了」而
+    // 拒绝切换时，界面需要知道这是**可强制继续**的拒绝（而不是真坏了），
+    // 才能弹「强制切换」让用户自己决定。掉线路径的 errData 是空对象，
+    // 透传出去就是 false —— 语义正确（掉线不是「可强制」的拒绝）。
+    broadcast({ type: 'session/result', params: {
+      action: type, error: message,
+      retryable: !!(errData && errData.retryable),
+      canForce: !!(errData && errData.canForce)
+    } });
+  }
+}
+
 async function dispatch(type, method, params) {
   const client = rpc;
   if (!client || !client.isConnected()) {
     reportError('后端未连接，无法执行 ' + type);
+    // 掉线时**必须**补该消息的类型专用回执。
+    // 只发 rpc/error 会怎样（第五轮 R42 实测）：走专用回执通道的那几条消息，
+    // 前端在等的是自己的回执类型，收不到就永久停在加载态 ——
+    //   skillList      → 候选面板永远不出现，像「没有技能」
+    //   configDescribe → 设置面板永远停在「正在读取配置…」
+    //   narnatmdGet    → 同上
+    //   narnatmdSet    → 永远停在「正在保存…」，用户以为保存没生效
+    // 通用分支（RECEIPT_TYPES 那 14 个）在 catch 里各自补过回执，掉线这条
+    // 早退路径却一条都没补 —— 这是比 catch 更早的出口，容易漏。
+    failReceipt(type, '后端未连接，无法执行 ' + type, params);
     // 用户此刻在等结果：顺手把重连排上，而不是让他干等到手动重载
     if (reconnectAttempt >= RECONNECT_MAX_TRIES && !reconnectTimer) {
       // 自动重连已经放弃过。用户主动发请求 = 明确的「再试一次」信号，
@@ -1811,77 +1919,10 @@ async function dispatch(type, method, params) {
       // 现在只看这个 client 是否曾经是权威连接（见 isAuthorityClient）。
       return;
     }
-    // chat/cancel 失败必须显式回执：否则 webview 会一直停在「运行中」
-    // （stop 按钮不还原、输入框不可用）。busy 是最常见的失败原因。
-    if (type === 'chat') {
-      broadcast({ type: 'chat/result', params: { accepted: false, error: message } });
-    } else if (type === 'cancel') {
-      broadcast({ type: 'cancel/result', params: { cancelled: false, error: message } });
-    } else if (type === 'sessionList') {
-      // sessionList 失败也必须回执：用户点「展开其余」时按钮会停在
-      // 「正在加载全部会话…」永不恢复（data-pending 不释放）；
-      // 面板打开时的自动刷新失败则让抽屉空白且毫无说明（用户以为会话全丢）。
-      // 按前端已支持的 { groups, error } 契约回，前端会画一行
-      // 「读取会话列表失败」并在下次成功时撤掉。
-      broadcast({ type: 'session/list', params: {
-        groups: [], current: null, isChild: false,
-        error: '读取会话列表失败：' + message
-      } });
-    } else if (type === 'sessionHistory') {
-      // 失败也必须回执：不回的话界面那个「加载中…」按钮永远不还原，
-      // 用户反复点也没用（锁只在回执到达时解开，见 ui-full.html 的 OFFLINE_BLOCKED/回执复位）。
-      broadcast({ type: 'history/result', params: { ok: false, error: message } });
-    } else if (type === 'skillList') {
-      // 技能目录读不到/扫不动时也要回执：界面在等这一份候选，
-      // 不回就永远停在「没有技能」——和「没有技能」看起来一样，但原因完全不同。
-      broadcast({ type: 'skill/result', params: { items: [], error: message } });
-    } else if (type === 'sessionNew' || type === 'sessionSwitch' ||
-               type === 'sessionDelete' || type === 'sessionRename' ||
-               type === 'sessionExplore' || type === 'sessionDone') {
-      // 会话操作失败也必须回执：原来这类失败只走下面的 reportError，
-      // 前端压根不知道「新建没成功」，用户会以为已经开了新对话，
-      // 接着 /save 就把上一段的全部历史存进新会话（实测真的发生过）。
-      broadcast({ type: 'session/result', params: {
-        action: type, error: message
-      } });
-    } else if (type === 'command') {
-      // command/exec 抛 JSON-RPC 错误（-32000 业务拒绝、-32603 内部错误）时也必须回执。
-      // 原来这条只在 handled:false 时回，异常路径一条都不发 —— 界面点了「保存当前为…」
-      // 完全没反应，用户不知道存没存（实测：后端回 -32000 时 webview 收到 0 条）。
-      broadcast({ type: 'command/result', params: Object.assign({
-        command: params && params.command || '',
-        args: params && params.args || '',
-        text: params && params.text || '',
-        origin: params && params.origin || ''
-      }, { ok: false, handled: true, noop: false, lines: [message], stateChanged: [],
-           error: message }) });
-    } else if (type === 'configSet') {
-      // config/set 抛错（-32000 写盘失败 / -32603 内部错误）必须回执。
-      // 不回执会怎样（实测）：界面点下拉时已经本地打了勾、换了按钮文字，
-      // 后端其实没写成功 —— 用户以为切换了模型，下次重开面板又变回旧值，
-      // 中间那几轮还在按旧模型跑（花的是另一个价）。
-      broadcast({ type: 'config/result', params: {
-        ok: false, error: message, message: message
-      } });
-      broadcast({ type: 'configSet/result', params: {
-        ok: false, error: message, message: message
-      } });
-    } else if (type === 'configDescribe' || type === 'narnatmdGet' || type === 'narnatmdSet') {
-      // 设置面板这三条失败时也必须有回执，否则面板停在「正在读取配置…」
-      // 或「正在保存…」不动 —— 用户完全看不出是网络问题还是后端拒绝。
-      const failType = type === 'configDescribe' ? 'config/describe'
-        : (type === 'narnatmdGet' ? 'narnatmd/result' : 'narnatmd/saved');
-      const failBody = Object.assign({ error: message, message: message },
-        type === 'configDescribe' ? { items: [], groups: [] } : { ok: false });
-      broadcast({ type: failType, params: failBody });
-    } else if (type === 'confirmReply') {
-      // confirm/reply 失败（超时、后端已不在等这条确认）也必须回执。
-      // 不回执会怎样（实测）：界面点完就写了「已提交确认，等待后端执行…」，
-      // 而后端根本没收到 —— 那句话永久停在等待状态，用户一直等一个不会发生的执行。
-      broadcast({ type: 'confirm/result', params: {
-        accepted: false, ok: false, error: message, message: message
-      } });
-    }
+    // 按类型补专用回执（详见 failReceipt 的注释）。
+    // 这里额外把 err.data 里的 retryable/canForce 透传出去 ——
+    // 后端 -32010 拒绝切换时界面要据此弹「强制切换」，不带就只剩一句红字。
+    failReceipt(type, message, params, (err && err.data) || {});
     // 业务拒绝不是掉线：busy 表示「上一轮还在跑」，属于正常应答。
     // 把它当离线会挂一条「⚡离线：后端未连接」横幅，还会把运行态打成 false——
     // 停止按钮随之消失，那一轮明明还在跑却停不下来（实测）。

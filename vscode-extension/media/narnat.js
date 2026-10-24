@@ -120,6 +120,102 @@
   var HIST_PAGE = [];          // 当前已渲染的合并列表（更早的页 + 尾页）
   // 「正在切往哪个会话」：回执回来前挡住连点产生的重复 sessionSwitch
   var pendingSwitchTo = '';
+  /* 「正在建哪个分支」：explore 的 name 参数（可能为空 = 交给 AI 自动命名）。
+     用途只在「收口不了 → 后端拒绝 → 用户点强制」时重发一次；
+     不记的话强制新建分支会变成建一个名字为空的另一个分支。 */
+  var pendingBranchName = '';
+
+  /* ---------- 「正在回答中」的二次确认 ----------
+     见 HTML 里 #askDlg 那段注释。这里只放三个出口（切会话 / 新建对话 /
+     删除当前会话），三个都走同一个函数，弹窗长得一样、按钮顺序也一样。 */
+  var askDlg = document.getElementById('askDlg');
+  var askOkBtn = document.getElementById('askOk');
+  var askCancelBtn = document.getElementById('askCancel');
+  var askOnOk = null;
+  var askReturnFocus = null;
+
+  /** 现在是不是有一轮正在跑（= 任何打断操作都该先问一句） */
+  function turnRunning(){
+    return body.getAttribute('data-run') === 'true';
+  }
+
+  /* ---------- 「这一轮是不是刚被打断」的跨事件记忆 ----------
+     为什么不能只看 `data-run === 'true'`：后端在换会话前会先 cancel 当前轮，
+     于是 `turn/end{reason:'cancelled'}` 与 `session/result` 是**两条独立事件**，
+     到达顺序不确定：
+       · turn/end 先到 → 它写的那句「■ 已停止」紧接着被 enterSessionFrom 的
+         resetConversationDom 抹掉，而此刻 data-run 已经是 false，补标记的判据
+         也就失效了 → 用户看到「回答没了、一个字都没提」（用户报障原文：
+         「会被打断且没有打断标记」）
+       · session/result 先到 → data-run 还是 true，能补上（这是原来唯一侥幸对的顺序）
+     所以必须记一笔「刚才那一轮是被中断收尾的」，让重画之后还能补标记。
+     3 秒窗口 = 「打断与切会话属于同一次操作」；用户主动点停止后隔很久才切会话，
+     那时系统行他早看过了，不该再补一遍。 */
+  var cutNoticeAt = 0;
+  function noteTurnCut(){
+    cutNoticeAt = Date.now();
+  }
+  /** 这次重画要不要补「已停止上一轮」。取用即清，避免重复补。 */
+  function takeCutNotice(){
+    var fresh = cutNoticeAt && (Date.now() - cutNoticeAt < 3000);
+    cutNoticeAt = 0;
+    return !!fresh;
+  }
+
+  /**
+   * 弹「这会打断当前回答」的确认。
+   * @param {string} title 标题（一句话，别超过一行）
+   * @param {string} desc  说明（讲清会发生什么、内容还在不在）
+   * @param {string} okText 确认按钮文案（写动词，不要写「确定」）
+   * @param {function} onOk 确认后的动作
+   */
+  function askInterrupt(title, desc, okText, onOk){
+    askOnOk = (typeof onOk === 'function') ? onOk : null;
+    document.getElementById('askTitle').textContent = title;
+    document.getElementById('askDesc').textContent = desc || '';
+    askOkBtn.textContent = okText || '继续';
+    // 焦点落在「取消」上：确认框出现时用户多半还在判断，
+    // 回车不该替他做那个不可挽回的决定。
+    askReturnFocus = document.activeElement;
+    askDlg.setAttribute('data-open', 'true');
+    try { askCancelBtn.focus(); } catch (e) { /* 忽略 */ }
+  }
+
+  function closeAsk(){
+    if (askDlg.getAttribute('data-open') !== 'true') return;
+    askDlg.setAttribute('data-open', 'false');
+    askOnOk = null;
+    // 焦点还回去：不还的话，键盘用户关掉弹窗后焦点掉在 <body> 上，
+    // 后续 Tab 只能从页面顶端重来（与 setDrawer 里那处同一个理由）。
+    var back = askReturnFocus;
+    askReturnFocus = null;
+    if (back && document.contains(back) && typeof back.focus === 'function') {
+      try { back.focus(); } catch (e) { /* 忽略 */ }
+    }
+  }
+
+  askOkBtn.addEventListener('click', function(){
+    // 先取出来再关：closeAsk 会把 askOnOk 清空
+    var fire = askOnOk;
+    closeAsk();
+    if (fire) fire();
+  });
+  askCancelBtn.addEventListener('click', closeAsk);
+  // 点遮罩空白处 = 取消（点盒子内部不算）
+  askDlg.addEventListener('mousedown', function(e){
+    if (e.target === askDlg) closeAsk();
+  });
+  /* Esc 取消。用捕获阶段：抽屉/下拉/面板各自的 Esc 处理都在冒泡阶段，
+     不拦住的话「关确认框」会顺带把抽屉也关了（用户只是想取消切换）。 */
+  document.addEventListener('keydown', function(e){
+    if (askDlg.getAttribute('data-open') !== 'true') return;
+    if (e.key === 'Escape' || e.key === 'Esc') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeAsk();
+    }
+  }, true);
+
   /**
    * 会话操作的就绪锁：会话名 → 到期时间戳。
    *
@@ -400,17 +496,40 @@
     var ratio = contrastOf(rgb, bg);
     if (ratio >= minRatio) return rgbHex(rgb);
     var hsl = rgbToHsl(rgb);
-    // 底暗就往亮推、底亮就往暗推；全程只改 l，h/s 不动
-    var dark = relLum(bg) < 0.5;
+    /* 往亮、往暗**两个方向都试**，取先达标的那个。
+       原来只按 `relLum(bg) < 0.5` 单向推（底暗往亮 / 底亮往暗），
+       在中间灰底上会走进死路：底色 relLum≈0.4 被判成「暗」→ 只往白推，
+       但白对 #7a7a7a 最多只有 4.29:1，永远够不到 4.5；
+       而同一个色往黑推能到 4.9:1。宽测试实测（scan-themes.js）：
+       白/浅灰/深/极深四档全达标，中间三档（#d4d4d4 / #b4b4b4 / #969696 /
+       #7a7a7a）大面积不达标 —— 就是这个单向推导的锅。
+
+       双向的额外好处：极端底（纯白/纯黑）下行为与原来完全一致
+       （另一方向必然更差，用 bestRatio 比较后不会被选中），
+       所以已经调好的深色/浅色主题**一个像素都不会变**。 */
     var best = rgbHex(rgb), bestRatio = ratio;
-    for (var i = 1; i <= 50; i++) {
-      var l = dark ? hsl[2] + (1 - hsl[2]) * (i / 50) : hsl[2] * (1 - i / 50);
-      var cand = hslToRgb([hsl[0], hsl[1], l]);
-      var r = contrastOf(cand, bg);
-      if (r > bestRatio) { bestRatio = r; best = rgbHex(cand); }
-      if (r >= minRatio) return rgbHex(cand);
+    function pushToward(up) {
+      for (var i = 1; i <= 50; i++) {
+        var l = up ? hsl[2] + (1 - hsl[2]) * (i / 50) : hsl[2] * (1 - i / 50);
+        var cand = hslToRgb([hsl[0], hsl[1], l]);
+        var r = contrastOf(cand, bg);
+        if (r > bestRatio) { bestRatio = r; best = rgbHex(cand); }
+        /* 余量 0.02 而不是精确 minRatio：
+           HSL→RGB→hex 的量化精度是 1/255，实测会出现算出 4.48 而阈值是 4.50
+           的"永远差一点"（真实可读性上与 4.5 无差别，但断言会一直红）。
+           这就是「够用还是不够用」判断题里最滑的那一格 ——
+           与其把阈值调到 4.48（等于放宽标准），不如要求推到 4.52，
+           四舍五入后一定是 4.50 以上。 */
+        if (r >= minRatio + 0.02) return rgbHex(cand);
+      }
+      return '';
     }
-    // 到极值仍不达标（底色本身太极端）：返回能做到的最高对比度
+    // 先试「离底色更远」的那个方向（底暗→往亮，底亮→往暗），
+    // 保持原来在大多数主题下的观感；它走不通再试反方向。
+    var preferUp = relLum(bg) < 0.5;
+    var got = pushToward(preferUp) || pushToward(!preferUp);
+    if (got) return got;
+    // 两个方向都到不了 minRatio（底色本身太极端）：返回能做到的最高对比度
     return best;
   }
 
@@ -418,17 +537,74 @@
    * 背景/卡片色的适配：保留「比页面底色深/浅一档」的关系。
    * 配置里的卡片色是相对终端底色调的；面板换成浅色主题时，
    * 直接把深色卡片搬上去会变成一块突兀的黑斑，所以这里做亮度镜像。
+   *
+   * ## 三个分支，不是两个（中间色是宽测扫出来的漏）
+   * 原来只有「底暗」和「底亮」两支，判据 `relLum(bg) < 0.5`。
+   * `scan-themes.js` 扫 #ffffff/#f3f3f3/#d4d4d4/#b4b4b4/#969696/#7a7a7a/
+   * #5a5a5a/#333333/#1f1f1f/#0d0d0d 十档，发现 **#b4b4b4 / #969696 落在缝里**：
+   * 它们 relLum ≥ 0.5 被判成「底亮」→ 走镜像分支，而镜像结果被
+   * `Math.max(0.96, mirror)` 抬到 0.96，于是卡片变成近乎纯白 #f3f5f6
+   * 铺在 #b4b4b4 上 —— 比页面**亮**一大截（亮度差 -43.8%，方向还反了），
+   * 而且代码文字 #262626 坐在 #1e2630 上只有 1.01:1（配置色没被适配）。
+   *
+   * 判据改成按「能不能给出可读的层次」来分：
+   *   · 底很暗（relLum < 0.35）→ 只允许比底亮一点（原逻辑）
+   *   · 底很亮（relLum > 0.75）→ 镜像到亮侧（原逻辑）
+   *   · **中间带** → 按底色的明暗**同向**偏移一小档（底色亮就给变暗的卡片，
+   *     底色暗就给变亮的卡片）。这一档不用镜像：镜像会把卡片推到极端，
+   *     而中间底最需要的是「挨着底色但分得开」。
    */
   function adaptSurface(hex, bg) {
     var rgb = hexRgb(hex);
     if (!rgb) return '';
-    var bgDark = relLum(bg) < 0.5;
+    var bgL = relLum(bg);
     var hsl = rgbToHsl(rgb);
     var bgHsl = rgbToHsl(bg);
-    if (bgDark) {
+    /* 三档的阈值按**相对亮度**取，不按 HSL 亮度。
+       实测各底色的 relLum：#ffffff=1.00、#f3f3f3=0.90、#d4d4d4=0.66、
+       #b4b4b4=0.46、#969696=0.32、#7a7a7a=0.19、#5a5a5a=0.10、
+       #333333=0.033、#1f1f1f=0.013、#0d0d0d=0.004。
+       原来的 `< 0.5` 只分出「亮/暗」，中间那一段（0.1~0.7）里
+       #d4d4d4 / #b4b4b4 / #969696 都被各自误判到了错误的分支上。
+       现在：
+         · < 0.10  → 很暗：只允许略亮（深色主题全落这里，行为不变）
+         · 0.10~0.70 → 中间带：按底色明暗同向偏移一档
+         · > 0.70  → 很亮：镜像到亮侧（纯白/浅灰落这里，行为不变） */
+    if (bgL < 0.10) {
       // 底色暗：卡片色若比底色亮太多就压回去，保持「略亮/略暗一档」
       var maxL = Math.min(0.35, bgHsl[2] + 0.12);
       return rgbHex(hslToRgb([hsl[0], hsl[1], Math.min(hsl[2], maxL)]));
+    }
+    if (bgL <= 0.70) {
+      // 中间带：**不再试图适配配置色，直接按底色重新派生一档**。
+      // 为什么：配置色是为终端深底挑的（这里 #1E2630），在中间灰上
+      // 无论怎么压/抬都拿不出「挨着底色又分得开」的结果 ——
+      // 实测 #b4b4b4 上适配成 #48515b 后，代码文字仍只有 1.88:1。
+      // 中间带的正确做法是丢掉配置色的亮度、只借它的**色相与微弱饱和度**，
+      // 让卡片跟着当前底色走（底色亮就给略暗的卡片，反之给略亮的）。
+      // 幅度 0.07：实测得到约 4~7% 的相对亮度差，与深色主题下
+      // 「卡片与页面差 0.03~0.05」的观感同一量级。
+      var base = bgHsl[2];
+      /* 中间带的偏移量随底色「离极端有多远」调，并且**用相对亮度校验**：
+         HSL 的 l 与相对亮度不是线性关系，同一个 l 步长在不同底色上得到的
+         相对亮度差能差 5 倍（实测 0.07 在 #b4b4b4 上差 4%，在 #d4d4d4 上
+         差到 36%）。所以先按步长算出候选，再夹住它与底色的相对亮度差，
+         最后落盘。目标区间 3%~12%（深色主题下卡片与页面差 3~5%，
+         浅色侧留一点余量给"看得出层次"）。 */
+      var centered = 1 - Math.min(1, Math.abs(bgL - 0.45) / 0.45);
+      var step = 0.04 + 0.06 * centered;
+      var cand = bgL >= 0.5
+        ? Math.max(0.70, base - step)   // 中间偏亮：卡片略暗
+        : Math.min(0.34, base + step);  // 中间偏暗：卡片略亮
+      var out = hslToRgb([hsl[0], hsl[1] * 0.35, cand]);
+      var outL = relLum(out);
+      // 相对亮度差超过 12% 就二分逼近底色，把它拉回来
+      for (var g = 0; g < 8 && Math.abs(outL - bgL) > 0.12; g++) {
+        cand = (cand + base) / 2;
+        out = hslToRgb([hsl[0], hsl[1] * 0.35, cand]);
+        outL = relLum(out);
+      }
+      return rgbHex(out);
     }
     // 底色亮：镜像到亮侧（深卡片 → 浅卡片）
     // 下限 0.96 而不是原来的 0.82：镜像值（1-l）往往落在 0.85 附近，配上 0.82
@@ -538,6 +714,90 @@
       var hex = adaptSurface(baseBg[role], bg);
       if (hex) root.style.setProperty(themeVarName('--tb-', role), hex);
     });
+
+    /* ── 语法高亮色：必须按**代码块自己的底色**适配，不能按面板底 ──
+       实测过的真实事故（用户报障「白色主题下配色太耀眼，根本看不清代码」）：
+       `.tk-kw/.tk-st/.tk-nu/.tk-fn` 读的是 `--vscode-debugTokenExpression-*`，
+       而 Light Modern / GitHub Light 这些主题**根本没定义**该键，
+       于是落到照 Dark+ 抄的兜底值（#c586c0 紫 / #ce9178 橙 / #b5cea8 浅绿）。
+       对白底 + #efefef 代码底：2.43 / 2.31 / **1.48** / 2.64 —— 基本读不出来。
+
+       这里在 JS 里算好再落成 CSS 变量（CSS 里调不了 adaptColor）。
+       取色顺序：主题变量现值 → 兜底常量，与原来 CSS 里的顺序一致；
+       深色主题下这些值本来就够亮，adaptColor 原样返回 → One Dark Pro 下
+       一个像素都不变（用户明确要求那边不要动）。
+       下限 4.5：代码是要逐字读的内容，不是装饰。
+       底色在 JS 里自己算，**不读 --bg-code 变量**：
+       那个变量由 `@supports` 里的 `color-mix(var(--bg) …)` 派生，而 --bg
+       也是本函数才设的 —— 同一帧里 getPropertyValue('--bg-code') 拿到的是
+       空串（实测），整段适配会被 if 直接跳过。这里按与 CSS 完全相同的配方
+       复算一次：配了「代码块.背景/基础色.卡片背景」就用适配后的那个值，
+       否则从面板底色混 8% 前景色 —— 与 `--bg-code` 的两条分支一一对应。 */
+    var codeBgRgb = (function () {
+      // 分支 1：bgs 里 codeblock.background（来自「代码块.背景」→「基础色.卡片背景」）
+      var configured = bgs['codeblock.background'] || base['code_bg'] || '';
+      if (configured) {
+        var adapted = adaptSurface(configured, bg);
+        var rgb = adapted ? hexRgb(adapted) : null;
+        if (rgb) return rgb;
+      }
+      // 分支 2：从面板底色混 8% 前景色（等价 CSS 的
+      // color-mix(in srgb, var(--bg) 92%, var(--fg) 8%)）。
+      // 前景色取主题的 editor.foreground，取不到就用面板底（混了也等于没混，
+      // 那种情况下 --bg-code ≈ --bg，适配基准仍是正确的）。
+      var fgHex = '';
+      try {
+        fgHex = getComputedStyle(document.documentElement)
+          .getPropertyValue('--vscode-editor-foreground').trim();
+      } catch (e) { fgHex = ''; }
+      var fgRgb = hexRgb(fgHex);
+      if (!fgRgb) return bg;
+      return [
+        bg[0] * 0.92 + fgRgb[0] * 0.08,
+        bg[1] * 0.92 + fgRgb[1] * 0.08,
+        bg[2] * 0.92 + fgRgb[2] * 0.08
+      ];
+    })();
+    if (codeBgRgb) {
+      // 代码正文色：同样按代码块底色推 4.5（见 `.msg pre` 的 color）。
+      // 深色/浅色主题下代码底与页面底只差一档，推出来的值与 --fg 基本一致，
+      // 观感不变；中间灰主题下才真正起作用。
+      var codeFgHex = '';
+      try {
+        codeFgHex = getComputedStyle(document.documentElement)
+          .getPropertyValue('--vscode-editor-foreground').trim();
+      } catch (e) { codeFgHex = ''; }
+      if (!codeFgHex) codeFgHex = '#cccccc';
+      var codeFg = adaptColor(codeFgHex, codeBgRgb, 4.5);
+      if (codeFg) root.style.setProperty('--code-fg', codeFg);
+      var TOKEN_VARS = [
+        ['--tk-string', ['--vscode-debugTokenExpression-string', '#ce9178']],
+        ['--tk-number', ['--vscode-debugTokenExpression-number', '#b5cea8']],
+        ['--tk-keyword', ['--vscode-debugTokenExpression-name', '#c586c0']],
+        ['--tk-function', ['--vscode-symbolIcon-methodForeground', '#b180d7']],
+        ['--tk-type', ['--vscode-textLink-foreground', '#569cd6']],
+        ['--tk-comment', ['--vscode-editorLineNumber-foreground', '']],
+        // diff 的加/删行：git 装饰色，同样有「主题没定义该键」的问题
+        ['--tk-add', ['--vscode-gitDecoration-addedResourceForeground', '#4ec9b0']],
+        ['--tk-del-fg', ['--vscode-gitDecoration-deletedResourceForeground', '#f14c4c']]
+      ];
+      TOKEN_VARS.forEach(function (pair) {
+        var name = pair[0];
+        var themeVar = pair[1][0];
+        var fallback = pair[1][1];
+        var raw = '';
+        try {
+          raw = getComputedStyle(document.documentElement)
+            .getPropertyValue(themeVar).trim();
+        } catch (e) { raw = ''; }
+        if (!raw) raw = fallback;
+        if (!raw) return;
+        // 注释是弱化层级，下限 3.0；其余 4.5
+        var min = (name === '--tk-comment') ? 3.0 : 4.5;
+        var hex = adaptColor(raw, codeBgRgb, min);
+        if (hex) root.style.setProperty(name, hex);
+      });
+    }
   }
 
   /** 代码块语言 → 配色分组（cyan/yellow/green/magenta/red/blue/gray）。
@@ -1187,18 +1447,196 @@
     return out;
   }
 
+  /* ---------- TeX 数学公式（与 dsh 同一套：KaTeX + 四种定界符） ----------
+     为什么自己写扫描器而不是几条正则：数学公式要**先于**转义与强调规则摘出来，
+     否则 TeX 源码里的 `*` `_` `<` `{` 会被当成 markdown 标记吃掉
+     （`$a*b*c$` 会变成斜体，`$x<y$` 会变成 &lt;）。这和围栏代码块是同一类问题，
+     所以用**同一套占位符机制**：先换成 \u0000BLOCK / \u0000MATH，最后再还原。
+
+     dsh 的口径（packages/client/ui-primitives/src/markdown）：
+       · 用 KaTeX 渲染，`throwOnError:true` 失败后降级 `strict:'ignore'`，
+         再失败才输出错误 span（我们不输出红色错误块，直接退回原文，见下）
+       · **流式期间完全不解析数学**（`parseGfm` 不带 math 扩展）——
+         半截的 `$$\frac{` 会在流式时闪出一堆报错，把屏幕刷成红色。
+         定稿才换成带 math 的语法。这里用 `streaming` 参数实现同样的行为。
+       · 定界符：`$…$` / `\(…\)` 行内，`$$…$$` / `\[…\]` 块级
+       · `.katex-display` 横向溢出可滚（见 CSS），不撑破面板
+     渲染失败时**退回原始文本**而不是显示错误：用户至少还能看懂
+     `\frac{1}{2}` 是什么，而 KaTeX 的红色报错框只有我们知道是什么。 */
+
+  /** KaTeX 是否可用（没加载成功时整条数学渲染自动降级为原文） */
+  function hasKatex() {
+    return typeof window !== 'undefined' && window.katex &&
+      typeof window.katex.renderToString === 'function';
+  }
+
+  /**
+   * TeX 源码 → 公式 HTML。取不到 KaTeX 或解析失败时返回 null（调用方退回原文）。
+   * @param {string} tex TeX 源码
+   * @param {boolean} display 块级还是行内
+   * @returns {?string}
+   */
+  function texToHtml(tex, display) {
+    if (!hasKatex()) return null;
+    var src = String(tex == null ? '' : tex);
+    if (!src.trim()) return null;
+    try {
+      return window.katex.renderToString(src, {
+        displayMode: !!display,
+        throwOnError: true
+      });
+    } catch (e) {
+      // 与 dsh 的第二档一致：严格模式解析不了就放宽重试（未定义命令等）
+      try {
+        return window.katex.renderToString(src, {
+          displayMode: !!display,
+          strict: 'ignore',
+          throwOnError: false
+        });
+      } catch (e2) {
+        return null;
+      }
+    }
+  }
+
+  /**
+   * 把正文里的数学公式摘成占位符（原地保留相对位置，顺序不变）。
+   *
+   * - 块级公式 → `\n\u0000BLOCK(n)\u0000\n`：独占一行，renderBlocks 会把
+   *   `\u0000BLOCK` 单独成行的那一行当块级元素（不包 `<p>`），与围栏代码块同一条路。
+   * - 行内公式 → `\u0000MATH(n)\u0000`：最后由 markdownInline 的收尾替换回来。
+   * - 反引号代码段整段跳过：`` `$x$` `` 应该是代码，不是公式（dsh 同样如此）。
+   * - 转义的 `\$` `\\` `\_` 不参与：TeX 里这些是字面量。
+   *
+   * @param {string} text 源文
+   * @param {string[]} blocks 块级 HTML 收集器（与围栏共用）
+   * @param {string[]} inlines 行内 HTML 收集器
+   * @returns {string} 正文 + 占位符
+   */
+  function splitMath(text, blocks, inlines) {
+    var s = String(text || '');
+    var out = '';
+    var i = 0;
+    var n = s.length;
+
+    function pushDisplay(tex) {
+      var html = texToHtml(tex, true);
+      if (html === null) return null;
+      blocks.push(html);
+      return '\n\u0000BLOCK' + (blocks.length - 1) + '\u0000\n';
+    }
+    function pushInline(tex) {
+      var html = texToHtml(tex, false);
+      if (html === null) return null;
+      inlines.push(html);
+      return '\u0000MATH' + (inlines.length - 1) + '\u0000';
+    }
+
+    while (i < n) {
+      var ch = s.charAt(i);
+
+      // 反引号代码段：整段跳过（单反引号，与后面的 `<code>` 规则同一口径）
+      if (ch === '`') {
+        var tickEnd = s.indexOf('`', i + 1);
+        var tickNl = s.indexOf('\n', i + 1);
+        if (tickEnd > i + 1 && (tickNl < 0 || tickEnd < tickNl)) {
+          out += s.slice(i, tickEnd + 1);
+          i = tickEnd + 1;
+          continue;
+        }
+        out += ch; i++; continue;
+      }
+
+      // 反斜杠转义：\$ 是字面美元号；\[ \( 才是公式定界符
+      if (ch === '\\') {
+        var nx = s.charAt(i + 1);
+        if (nx === '[') {
+          var endB = s.indexOf('\\]', i + 2);
+          if (endB > 0) {
+            var repB = pushDisplay(s.slice(i + 2, endB));
+            if (repB !== null) { out += repB; i = endB + 2; continue; }
+          }
+        } else if (nx === '(') {
+          var endP = s.indexOf('\\)', i + 2);
+          if (endP > 0) {
+            var repP = pushInline(s.slice(i + 2, endP));
+            if (repP !== null) { out += repP; i = endP + 2; continue; }
+          }
+        }
+        // 其它转义（含 \$ \\）原样过，交给后面的 markdown 规则
+        out += ch;
+        if (i + 1 < n) out += nx;
+        i += 2;
+        continue;
+      }
+
+      if (ch === '$') {
+        // $$…$$ 块级：同一行或跨行都能闭合（截图上就是三行那种）
+        if (s.charAt(i + 1) === '$') {
+          var endD = s.indexOf('$$', i + 2);
+          if (endD > 0) {
+            var repD = pushDisplay(s.slice(i + 2, endD));
+            if (repD !== null) { out += repD; i = endD + 2; continue; }
+          }
+          out += '$$'; i += 2; continue;
+        }
+        // $…$ 行内：开标记后不能紧贴空白、闭标记前也不能是空白，
+        // 否则 `价格 $5 到 $10` 这种会被当成公式（dsh 的同一道守卫）。
+        var j = i + 1;
+        if (j < n && !/\s/.test(s.charAt(j))) {
+          var endI = -1;
+          var k = j;
+          while (k < n) {
+            var c2 = s.charAt(k);
+            if (c2 === '\\') { k += 2; continue; }
+            if (c2 === '\n') break;                 // 行内不跨行
+            if (c2 === '$') { endI = k; break; }
+            k++;
+          }
+          if (endI > j && !/\s/.test(s.charAt(endI - 1))) {
+            var repI = pushInline(s.slice(j, endI));
+            if (repI !== null) { out += repI; i = endI + 1; continue; }
+          }
+        }
+        out += ch; i++; continue;
+      }
+
+      out += ch;
+      i++;
+    }
+    return out;
+  }
+
   /**
    * 行内 Markdown：围栏代码块 → <pre>、`x` → <code>、**x** → <strong>、[t](u) → <a>、管道表格 → <table>。先整体转义再替换。
    * @param {string} text 源文
    * @param {boolean} [streaming] 流式中间态：为 true 时**不**跑语法高亮、
    *   也不做代码块折叠（<pre> 直接 esc(raw)）。定稿（renderAssistantFinal /
    *   历史重建）传 false。理由见 pushBlock 里的注释。
+   *   同样为 true 时**不解析 TeX 公式**（dsh 也是这样：流式期间半截的
+   *   `$$\frac{` 会闪出一堆解析错误，定稿才渲染）。
    */
   function markdownInline(text, streaming) {
     var src = String(text || '');
     var blocks = [];
     function pushBlock(lang, code) {
       var raw = code.replace(/\n$/, '');
+      /* ```math 围栏 → 块级公式（与 dsh 的 renderCode 完全同一条）：
+         dsh 里 `if (!context.streaming && lang === 'math')` 就把整块交给
+         renderTexToReact(value + '\n', true)。我们照做 —— 只认**完全等于**
+         `math` 的语言标签（大小写不敏感、只取第一段 word，与 dsh 的
+         /^[\w-]+/ 截断口径一致），`mathjs` / `mathml` 之类不碰。
+         流式期间**不转换**：半截的 TeX 会闪报错，而且流式时用户还看不到
+         定稿形态，转来转去只是白算（dsh 同样只在 !streaming 时转）。 */
+      var langWord = String(lang || '').trim().toLowerCase().split(/[\s,{}]/)[0];
+      if (!streaming && langWord === 'math') {
+        var mathHtml = texToHtml(raw + '\n', true);
+        if (mathHtml !== null) {
+          blocks.push(mathHtml);
+          return '\u0000BLOCK' + (blocks.length - 1) + '\u0000';
+        }
+        // 解析不了就退回普通代码块（让用户还能看到 TeX 原文去修）
+      }
       // 语言标签 + 换行开关 + 复制按钮放在外层 .code 的头部：<pre> 自身
       // overflow-x:auto，把按钮放进 <pre> 会被长行一起横向推出可视区，永远点不到。
       // 行数进 data-lines，超阈值时由 CSS 折叠（见 .code[data-fold]）。
@@ -1324,9 +1762,45 @@
     // **只有空白**。未闭合则延续到文末 —— 流式输出到一半、回答被截断/停止时
     // 必然出现，不处理会把整段代码降级成普通段落、`**` 和 `#` 被当标记吃掉。
     src = splitFences(src, pushBlock);
+    /* 数学公式必须在 esc 与强调规则**之前**摘出来：
+       TeX 里的 `*` `_` `<` 会被当成 markdown 标记吃掉。
+       流式期间不解析（dsh 的 parseGfm 也不带 math 扩展）——
+       半截的 `$$\frac{` 会闪出报错，定稿才渲染。 */
+    var mathInlines = [];
+    if (!streaming) {
+      src = splitMath(src, blocks, mathInlines);
+    }
     src = esc(src);
     src = src.replace(/`([^`\n]+)`/g, '<code>$1</code>');
-    src = src.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+    /* 粗体：内层允许出现**单个** `*`（那是嵌套的斜体），只要不是另一个 `**`。
+       原来写成 `\*\*([^*\n]+)\*\*`（内部一律不许有星号），于是
+       `**粗里有 *斜* 吗**` **整条都不匹配** —— 连外层 `**` 都原样显示出来，
+       是界面上唯一会露出原始标记的形态（已截图确认）。
+       改成「不含连续两个星号」：`(?:(?!\*\*)[^\n])+?`，配合惰性量词，
+       内层单星号放行、遇到 `**` 就停，不会跨段误配。
+       `[^*]` 那种写法还会让 `**a ** b**` 这类串配错，这里一并避免。 */
+    src = src.replace(/\*\*((?:(?!\*\*)[^\n])+?)\*\*/g, '<strong>$1</strong>');
+    /* 斜体与删除线：样式侧早就写好了（`.msg em` / `.msg del`，连配置角色
+       `markdown.italic`（decor: italic+dim）、`markdown.strikethrough` 都在），
+       但渲染器从来没产出过 <em>/<del>，于是 `*x*`、`~~x~~` 原样显示符号 ——
+       CSS 规则永远匹配不到（实测：`del=0 em=0`）。这里补齐这两个子集。
+       顺序：删除线要在斜体之前；两条都排在 `**粗体**` 之后，所以粗体已经
+       变成 <strong>，剩下单个 `*` 才是斜体。
+
+       ## 必须做 flanking 检查（第一版漏了，实测回归 4 条）
+       标记两侧是否「贴着内容」决定它是不是强调。不判这个会把这些**原本
+       正常显示**的正文改成斜体/删除线：
+         · `a * b * c`            → 乘法/占位
+         · `文件A * 文件B * 文件C` → 中文列举（星号前后都有空格）
+         · `x ~~ 分隔 ~~ y`       → 波浪线当分隔线用
+       规则（同 CommonMark 的 flanking 思路，简化为够用的版本）：
+         开标记**后面**第一个字符不是空白；闭标记**前面**最后一个字符不是空白。
+       实现成 `([^\s*](?:[^*\n]*[^\s*])?)`：首尾都非空白，允许单字符 `*x*`。
+       下划线的 `_` 还要带词边界：`snake_case_name` 里的 `_` 不能被当成标记，
+       否则代码标识符会被吃掉半截（比不渲染更糟）。 */
+    src = src.replace(/(^|[^~])~~([^\s~](?:[^~\n]*[^\s~])?)~~(?![~])/g, '$1<del>$2</del>');
+    src = src.replace(/(^|[^*\w])\*([^\s*](?:[^*\n]*[^\s*])?)\*(?![*\w])/g, '$1<em>$2</em>');
+    src = src.replace(/(^|[^_\w])_([^\s_](?:[^_\n]*[^\s_])?)_(?![_\w])/g, '$1<em>$2</em>');
     // 链接：挡掉可执行协议，其余放行。
     // 不能用「白名单 https/mailto」——AI 常给相对路径（doc.md、../x.md、C:\x），
     // 白名单会把它们整段吞成纯文本，用户看到的链接就没了。
@@ -1343,9 +1817,16 @@
     out = out.replace(/\u0000BLOCK(\d+)\u0000/g, function (_m, i) {
       return blocks[parseInt(i, 10)] || '';
     });
-    return out.replace(/\u0000TABLE(\d+)\u0000/g, function (_m, i) {
+    out = out.replace(/\u0000TABLE(\d+)\u0000/g, function (_m, i) {
       return t.tables[parseInt(i, 10)] || '';
     });
+    // 行内公式最后还原：它只是段落里的一段 span，不影响块级结构
+    if (mathInlines.length) {
+      out = out.replace(/\u0000MATH(\d+)\u0000/g, function (_m, i) {
+        return mathInlines[parseInt(i, 10)] || '';
+      });
+    }
+    return out;
   }
 
   /**
@@ -1768,10 +2249,13 @@
       // 若候选里也只有根会话，抽屉里就再也没有入口能进子会话了。
       // 用「父/子」形式给出（后端 resolve_session_name 认这个写法）。
       var out = [];
+      // `/rm` 的候选是「要被删掉的会话」：沿用「可进入的会话」会说出不通的话
+      // （实测分组标题成了「可进入的会话」，而用户是在删它）。
+      var gname = (palCmd === '/rm') ? '可删除的会话' : '可进入的会话';
       SESS.forEach(function(s){
-        out.push({ v: s.name, d: '会话' });
+        out.push({ v: s.name, d: '会话', g: gname });
         (s.children || []).forEach(function(c){
-          out.push({ v: s.name + '/' + c.name, d: '子会话' });
+          out.push({ v: s.name + '/' + c.name, d: '子会话', g: gname + '（分支）' });
         });
       });
       // `/rm --all` 是合法用法（后端 delete_session 专门认它），
@@ -1787,7 +2271,10 @@
       return SKILLS.map(function(x){
         return {
           v: x.v,
-          d: x.d + (x.dir ? '（含下级）' : ''),
+          // 说明列不再重复来源名：分组标题已经写了「系统技能 / 项目技能」，
+          // 说明列再写一遍等于同一句话每行印两遍（实测 3/3 条重复）。
+          // 这里只说分组没说的事——这条候选是不是一个目录（含下级技能）。
+          d: x.dir ? '含下级技能' : '',
           // 分组按技能来源分：系统技能与项目技能混在一列表里时，
           // 同名技能会让人分不清加载的是哪一个（后端的加载顺序是系统优先）。
           g: x.d || '技能'
@@ -1820,7 +2307,17 @@
     SKILLS = p.items.filter(function(x){
       return x && typeof x.v === 'string' && x.v;
     });
-    if (paletteVisible() && palMode === 'arg' && palCmd === '/skill') {
+    /* 回执到了要能**自己把面板打开**。
+       原来只判 `paletteVisible()`：首次敲 `/skill ` 时缓存还是空的，
+       refreshPalette 走的是「没有候选 → openPalette(false)」那条路，面板已经关了；
+       于是回执到了这里条件不成立、什么都不做 —— 用户看到「敲了空格没反应、
+       以为没有技能」，必须再敲一个字符才弹出来（实测报障）。
+       改成看**输入框现状**：只要还停在 `/skill ` 的参数位上就重算一次。
+       refreshPalette 内部还会再判一次输入，用户已经改掉的话它自己会收起来。 */
+    if (REAL) {
+      var cur = String(input.value || '').split('\n')[0];
+      if (/^\/skill\s/.test(cur)) refreshPalette();
+    } else if (paletteVisible() && palMode === 'arg' && palCmd === '/skill') {
       refreshPalette();
     }
   }
@@ -4766,7 +5263,12 @@
     out += '<span class="m">' + esc(o.ghost ? '无记录' : metaText) + '</span>';
     // 改名 / 删除不再放在行内（hover 会盖住分支标记），改由右键菜单唤起。
     // 这里只留删除的行内二次确认条：右键「删除」后仍需用户点一次「是」。
-    out += '<span class="asks"><span>删除？</span><button class="y">是</button><button>否</button></span>';
+    /* 删的是「当前这条」且正在回答时，把后果直接写进这一问里：
+       「删除？(会停止回答)」。不再多弹一层模态框（用户已经点了删除+是两步），
+       但也不能不说 —— 后端删当前会话会先 cancel 这一轮，用户会以为回答丢了。 */
+    var delRunning = turnRunning() && fullName === CUR;
+    out += '<span class="asks"><span>' + (delRunning ? '删除？（会停止回答）' : '删除？') +
+      '</span><button class="y">是</button><button>否</button></span>';
     out += '</div>';
     return out;
   }
@@ -4975,7 +5477,9 @@
       box.appendChild(d);
     });
     if (foot) {
-      foot.textContent = kids.length + ' 个子会话 · 点击进入';
+      // 只说「有几个」：这个下拉里除了会话条什么都没有，点一条就进去，
+      // 「· 点击进入」是没有信息量的复述（用户反馈弹窗废话多）。
+      foot.textContent = kids.length + ' 个子会话';
     }
   }
 
@@ -4997,15 +5501,25 @@
       // 会话的历史」的合法操作（界面状态可能与后端不一致，比如刚压缩过），
       // 拦掉会让它永远刷不出来（实测 ui 回归「进入历史会话后显示真实消息」超时）。
       if (pendingSwitchTo === fullName) return true;
-      pendingSwitchTo = fullName;
-      // 正在回答时点别的会话 = 这一轮会被后端打断（agent_loop 换掉消息列表
-      // 前必须先 cancel，否则这一轮的正文和工具记录会串进新会话）。
-      // 原来这里什么都不说：用户只是点开另一条会话看一眼，正在生成的那段
-      // 就被砍断了，而界面上一个字都没提（实测切换后 1ms 收到 cancelled，
-      // 之后 stream/delta 归零）。
-      if (body.getAttribute('data-run') === 'true' && fullName !== CUR) {
-        sysLine('⚠', '正在回答中，进入「' + fullName + '」会停止这一轮', '', 'warn');
+      /* 正在回答时点别的会话 = 这一轮会被后端打断（agent_loop 换掉消息列表
+         前必须先 cancel，否则这一轮的正文和工具记录会串进新会话）。
+         原来只是往对话区补一行 warn、然后照切不误 —— 那一行在**抽屉里看不见**
+         （body[data-drawer=true] 时 .convo 是 display:none），用户点完发现
+         回答没了，以为是插件崩了（实测切换后 1ms 收到 cancelled）。
+         现在改成先问一句；点「取消」就什么都不做，连 pendingSwitchTo 都不占。 */
+      if (turnRunning() && fullName !== CUR) {
+        askInterrupt(
+          '切换到「' + fullName + '」？',
+          '会停止当前回答，内容仍在会话记录里。',
+          '停止并切换',
+          function(){
+            pendingSwitchTo = fullName;
+            post('sessionSwitch', { name: fullName });
+          }
+        );
+        return true;
       }
+      pendingSwitchTo = fullName;
       post('sessionSwitch', { name: fullName });
       return true;
     }
@@ -5048,6 +5562,7 @@
 
   function createBranch(n, silent){
     if (REAL) {
+      pendingBranchName = n || '';
       post('sessionExplore', { name: n });
       return true;
     }
@@ -5600,6 +6115,10 @@
     if (e.target.closest('.asks')) {
       if (e.target.classList.contains('y')) {
         item.setAttribute('data-del', '');
+        /* 删的如果是「当前这条」且正在回答：这一轮会被后端 cancel。
+           这里**不再**多弹一层确认框 —— 用户已经点了「删除」+「是」两步，
+           再插一个模态框就是三层确认。改成在行内那一问里把后果写清楚
+           （见 sessItemHtml 里 running 时的那段文案）。 */
         // 先锁住整条再提交：同坐标下一击不能再触发任何按钮
         lockSess(full, 'delete');
         markDelete(full);
@@ -5800,7 +6319,9 @@
     if (this.disabled) return;
     askText({
       title: '新建探索分支',
-      prompt: '分支用于并行试一个思路，/done 后结论合并回当前会话',
+      // 一句话说清「分支是什么」：用户没见过这个概念，只说「分支名称」
+      // 会得到一个空分支名或者干脆取消。
+      prompt: '并行试一个思路，/done 后合并回当前会话',
       placeholder: '分支名称',
       value: '',
       // 分支必须有名（不像保存会话可以交给 AI 自动命名）
@@ -5873,26 +6394,18 @@
       }
       doneBtn.setAttribute('data-ask', '1');
       doneBtn.textContent = '确认合并？再点一次（不可撤销）';
-      var askLine = sysLine('⚠', '合并不可撤销，再点一次才执行', '');
+      /* 不再额外写一行「⚠ 合并不可撤销，再点一次才执行」：按钮文案已经把
+         「再点一次」和「不可撤销」都说完了，系统行再说一遍是同一句话两次
+         （用户反馈「废话太多」）。8 秒超时复原的逻辑保留，只是不再有
+         askLine 需要跟着改文案。 */
       scrollBottom();
-      // 8 秒内没再点就撤销「待确认」状态，避免按钮长期停在确认态。
-      // 撤销时必须把上面那条提示一起改掉：否则屏幕上一直挂着「再点一次才执行」，
-      // 而按钮已经回到初始文案，用户照提示再点一次只重新进入确认态（什么也没发生）。
+      /* 8 秒内没再点就撤销「待确认」状态，避免按钮长期停在确认态。
+         复原只改按钮文案，不写系统行：按钮自己变回「✓ 完成并合并结论」
+         已经说明「没执行」，再补一行「这次没有合并」是多余的。 */
       var askTimer = setTimeout(function(){
         if (doneBtn.getAttribute('data-ask') === '1') {
           doneBtn.setAttribute('data-ask', '0');
           doneBtn.textContent = '✓ 完成并合并结论';
-          if (askLine && askLine.parentNode) {
-            // 直接重建整行，不要去找 .tail：上面 sysLine 的第三个参数是空串，
-            // cmdOne 只在 tail 非空时才生成 .tail 节点，所以 querySelector('.tail')
-            // 恒为 null —— 原来那句 `if (tail) tail.textContent = ...` 永远不执行，
-            // 屏幕上就留着一句「再点一次才执行」，而按钮已回到初始文案，
-            // 用户按提示再点一次只会重新进入确认态，什么也没发生（实测）。
-            // 主文本也必须一起换掉：只改 tail 会得到「…再点一次才执行 这次没有合并」
-            // 这种自相矛盾的一行。
-            askLine.className = 'sys';
-            askLine.innerHTML = '<span class="ico">·</span><span>这次没有合并</span>';
-          }
         }
       }, 8000);
       if (askTimer.unref) askTimer.unref();
@@ -5972,8 +6485,19 @@
       // 解锁点在 applySessionResult 的 sessionNew 分支。
       var btn = document.getElementById('newChatBtn');
       if (btn.getAttribute('data-pending') === 'true') return;
-      btn.setAttribute('data-pending', 'true');
-      post('sessionNew', {});
+      /* 正在回答中点「新建对话」= 这一轮被后端 cancel（同 enterSess）。
+         这个按钮就在抽屉底部，也是误触高发区：用户想找「保存当前为…」
+         时不慎点到的可能性比切会话还高。 */
+      if (turnRunning()) {
+        askInterrupt(
+          '新建对话？',
+          '会停止当前回答，内容仍在会话记录里。',
+          '停止并新建',
+          function(){ doNewChatRaw(); }
+        );
+        return;
+      }
+      doNewChatRaw();
       return;
     }
     // 模拟态：清空对话区、回到未保存状态
@@ -5982,6 +6506,15 @@
     seedHistory([]);
     renderSessions();
     sysLine('＋', '已新建对话', '上下文已清空');
+  }
+
+  /** 真正发出 sessionNew（确认之后走这里，避免在 askInterrupt 里递归 doNewChat）
+   *  @param {Object} [extra] 附加参数（force:true = 用户已同意丢弃未完成的结果） */
+  function doNewChatRaw(extra){
+    var btn = document.getElementById('newChatBtn');
+    if (btn.getAttribute('data-pending') === 'true') return;
+    btn.setAttribute('data-pending', 'true');
+    post('sessionNew', extra || {});
   }
 
   document.getElementById('newChatBtn').addEventListener('click', doNewChat);
@@ -7694,6 +8227,11 @@
     }
     body.setAttribute('data-run', 'true');
     resetStopBtn();
+    /* 新的一轮开始了：清掉「刚才被打断过」的记忆。
+       不清会怎样：用户上一轮被打断、随后又正常提问，下一轮结束时某个
+       session/result 会拿这条陈旧记录多补一句「已停止上一轮」——
+       而这一轮根本没被打断（假信息比没有信息更糟）。 */
+    cutNoticeAt = 0;
     // 记这一轮的起点：tool/result 到达时要知道「这条属于本轮」
     //（历史重放的工具行不带 data-turn，不该被本轮收口卷进去）
     turnStartNode = convo.lastElementChild;
@@ -8541,6 +9079,12 @@
     var roundStart = turnStartNode;
     var box = foldTurnProcess(reason);
     if (reason === 'cancelled') {
+      /* 记一笔「刚才这一轮是被中断收尾的」。
+         后端换会话前会先 cancel，于是这条 turn/end 与随后的 session/result
+         是两条独立事件：写在这儿的「■ 已停止」很可能紧接着被
+         enterSessionFrom 的清屏抹掉（见 takeCutNotice 的注释）。
+         记下时间，让重画之后还能补一句「已停止上一轮」。 */
+      noteTurnCut();
       var stoppedMarked = false;
       if (!box) {
         // 没有折叠组：正文裸在对话流里，挂 dsh 式的内联小标签
@@ -9321,9 +9865,16 @@
       rendered('session/saved', { name: name, switched: false });
       return;
     }
-    // 状态已切到正式会话：CUR 和顶栏一起跟过去。
-    // 不跟会怎样：后续 /save、新建对话都按旧的空名字处理（自动保存完再点
-    // 「保存当前为…」会又存一份，会话列表里出现两条内容相同的记录）。
+    /* 状态已切到正式会话。**这一步同样会打断正在回答的那一轮**
+       （用户报障：「新会话如果用户选择另存为新会话，然后进入后同样会打断」）。
+       但这里**不补**「■ 已停止上一轮」—— 与切换/新建那几条路径的关键差别：
+       保存**不清屏**，`turn/end{cancelled}` 挂的那句「已停止」还留在正文下方，
+       再补一行就是同一件事说两遍（实测截图里两行挨着出现）。
+       这里只做两件事：退出运行态、把「被打断」的记忆用掉（免得漏给下一条路径）。 */
+    if (turnRunning() || takeCutNotice()) {
+      body.setAttribute('data-run', 'false');
+      resetStopBtn();
+    }
     var cur = (typeof p.current === 'string' && p.current) ? p.current : name;
     if (cur) {
       CUR = cur;
@@ -9799,6 +10350,9 @@
     // 不说的后果（实测）：点幽灵父会话时后端回了「父会话记录已丢失…」，
     // 前端因为没处理 error 而完全静默——用户点了没反应，只会以为界面坏了。
     if (p.error && p.action !== 'sessionNew') {
+      /* 先把「刚才想切到哪」记下来再清 —— 下面要清 pendingSwitchTo 解锁，
+         而「强制切换」需要这个名字重发一次。原来清了就没了。 */
+      var wantedTarget = pendingSwitchTo;
       // 切换失败也要解锁，否则那一条会话从此点不动（一直被判「正在切过去」）
       pendingSwitchTo = '';
       var label = {
@@ -9826,12 +10380,59 @@
         }[p.action] || '');
       }
       scrollBottom();
-      rendered('session/result', { action: p.action, error: p.error });
+      /* 后端因为「上一轮还在执行工具、3 秒内收口不了」而**拒绝**了这次操作
+         （canForce）。这不是错误，是一次需要用户拍板的岔路：
+           · 等 —— 什么都不做，工具跑完再点一次；
+           · 强制 —— 放行，但这一轮尚未完成的结果会被丢弃（有代际守卫兜底，
+             不会写错会话，只是白跑）。
+         不给这个出口会怎样：串口/SSH 那种几十秒的工具期间，用户所有会话
+         导航都被锁死，且只看到一句红字，不知道还能怎么办。 */
+      if (p.canForce) {
+        var forceLabel = {
+          sessionSwitch: '强制切换', sessionNew: '强制新建',
+          sessionExplore: '强制新建分支', sessionDone: '强制合并',
+          sessionDelete: '强制删除'
+        }[p.action] || '强制继续';
+        var forcePost = {
+          sessionSwitch: 'sessionSwitch', sessionNew: 'sessionNew',
+          sessionExplore: 'sessionExplore', sessionDone: 'sessionDone',
+          sessionDelete: 'sessionDelete'
+        }[p.action];
+        var forceParams = { force: true };
+        if (p.action === 'sessionSwitch') forceParams.name = wantedTarget;
+        else if (p.action === 'sessionExplore') forceParams.name = pendingBranchName;
+        else if (p.action === 'sessionDelete') forceParams.name = p.name || '';
+        askInterrupt(
+          '上一轮还在执行工具',
+          '现在切换会丢弃这一轮尚未完成的结果（不会写坏会话）。也可以等它结束再操作。',
+          forceLabel,
+          function(){
+            if (!forcePost) return;
+            // 强制走同一个入口，带上 force:true —— 后端据此跳过等待；
+            // 结果安全由 MessageList 的代际守卫保证（写不进新会话）。
+            if (p.action === 'sessionSwitch' && forceParams.name) {
+              post('sessionSwitch', forceParams);
+            } else if (p.action === 'sessionNew') {
+              doNewChatRaw(forceParams);
+            } else if (p.action === 'sessionExplore') {
+              post('sessionExplore', forceParams);
+            } else if (p.action === 'sessionDone') {
+              post('sessionDone', forceParams);
+            } else if (p.action === 'sessionDelete' && forceParams.name) {
+              post('sessionDelete', forceParams);
+            }
+          }
+        );
+      }
+      rendered('session/result', { action: p.action, error: p.error, canForce: !!p.canForce });
       return;
     }
     if (p.action === 'sessionNew') {
       // 新建对话：清空对话区，回到「未保存」态
       unlockNewChat();
+      /* 新建同样会先 cancel 当前轮（_m_session_new → _cancel_and_wait_turn），
+         所以这一轮被掐断也要说一句。判据与切换同一套（见 takeCutNotice）。 */
+      var cutByNew = turnRunning() || takeCutNotice();
       resetConversationDom();
       authHintShown = false;
       CUR = '';
@@ -9844,6 +10445,9 @@
       // 用户是从会话列表里点的「＋ 新建对话」：建好了就必须把列表收起来，
       // 否则屏幕上还是那张列表、对话区仍 display:none，看起来「点完没反应」。
       setDrawer(false);
+      if (cutByNew) {
+        sysLine('■', '已停止上一轮', '');
+      }
       // p.autoSaved：上一段内容被后端自动存成的会话名。
       // 必须说出来——否则用户看到对话区清空，会以为内容丢了。
       if (p.autoSaved) {
@@ -9856,11 +10460,12 @@
     }
     if (p.action === 'sessionSwitch' && p.current) {
       pendingSwitchTo = '';
-      // 这一轮是不是被这次切换打断的。后端切会话前会 cancel_active()，
-      // 但那条 turn/end 的「■ 已打断」正好被下面的 resetConversationDom 清掉，
-      // 于是用户正在读的回答被掐断、屏幕上直接换成另一个会话的历史，
-      // 一个字都没提（实测：run true → 切完 false，sys 行 0 条）。
-      var cutTurn = body.getAttribute('data-run') === 'true';
+      /* 这一轮是不是被这次切换打断的。两个来源，缺一不可：
+         ① data-run 还是 true —— session/result 比 turn/end 先到（原来只有这条）；
+         ② takeCutNotice() —— turn/end 先到，它写的「■ 已停止」已经被下面
+            enterSessionFrom 的清屏抹掉了（用户报障的正是这个顺序）。
+         两者任一成立就补一句，且只在清屏之后补（否则又被抹掉）。 */
+      var cutTurn = turnRunning() || takeCutNotice();
       enterSessionFrom(p);
       if (cutTurn) {
         sysLine('■', '已停止上一轮', '');
@@ -9875,8 +10480,15 @@
       /* 新建/进入探索分支：与切换完全同一件事，必须走同一个入口。
          原来这里只打一行系统提示，对话区仍停在上一个会话的内容上 ——
          用户点「新建探索分支」，后端建好了、顶栏名字变了，内容却没换，
-         只能自己去列表再点一次才真正进去（实测被点名「理应自动跳转」）。 */
+         只能自己去列表再点一次才真正进去（实测被点名「理应自动跳转」）。
+         **同样会打断正在回答的那一轮**（后端 _m_session_explore 先 cancel）：
+         用户报障「创建探索分支后强行进入分支会话，再切回原会话时被打断且
+         没有打断标记」。所以这里也要补标记 —— 与 sessionSwitch 同一套判据。 */
+      var cutByExplore = turnRunning() || takeCutNotice();
       enterSessionFrom(p);
+      if (cutByExplore) {
+        sysLine('■', '已停止上一轮', '');
+      }
       sysLine('⑂', '已进入探索分支 ' + esc(p.current),
         p.reentered ? '这是之前建过的同名分支' : '');
     } else if (p.action === 'sessionDone') {
@@ -9889,7 +10501,12 @@
         // 用户接着在「父会话 + 分支内容」的错位状态下提问；而刚合并出来的
         // 「# 子会话 [x] 结论」在界面上根本看不到（要重载面板才出现）。
         // 走统一入口：顺带把会话列表收起（用户是从列表里点的「完成并合并」）。
+        // 合并同样先 cancel（_m_session_done），被打断也要说一句。
+        var cutByDone = turnRunning() || takeCutNotice();
         enterSessionFrom(p);
+        if (cutByDone) {
+          sysLine('■', '已停止上一轮', '');
+        }
         sysLine('✓', '已回到父会话 ' + esc(p.current || ''), '');
       }
     } else if (p.action === 'sessionDelete') {
@@ -9901,10 +10518,15 @@
       // 再 resetConversationDom() 把整块清空，刚写的那行跟着被抹掉 ——
       // 用户删完当前会话，屏幕上一条反馈都没有，不知道删成功没有（实测）。
       if (p.wasCurrent) {
+        // 删当前会话也会先打断并等收口（_settle_before_context_change）
+        var cutByDelete = turnRunning() || takeCutNotice();
         resetConversationDom();
         authHintShown = false;
         body.setAttribute('data-run', 'false');
         resetContextStats();
+        if (cutByDelete) {
+          sysLine('■', '已停止上一轮', '');
+        }
       }
       // 面板里删除是立即生效的（后端没有「退出时清理」这个时机），
       // 所以文案不能说「退出时生效」——那会让用户以为文件还在。

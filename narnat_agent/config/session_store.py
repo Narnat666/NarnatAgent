@@ -668,6 +668,34 @@ def delete_session(narnat_dir: str, name: str, parent: Optional[str] = None) -> 
     return ""
 
 
+def _sweep_stale_tmp(path: str, min_age_sec: float = 600.0) -> bool:
+    """删掉一个**陈旧**的 `*.tmp` 写盘残骸。返回 True=真删了。
+
+    残骸怎么来的：`_write_session_json` 写 tmp → `os.replace` 换成正式文件。
+    正常异常路径都会清 tmp，但**进程被强杀**（`taskkill /F`、蓝屏、断电）时
+    来不及清，于是会话目录里留下 `X.json.<pid>.<tid>.<n>.tmp`。
+    第五轮 R40 实测：连杀 3 次留下 9 个、共 42.5MB，而且**没有任何清理路径** ——
+    用户看到的是磁盘被悄悄占掉，删又不敢删（不知道是什么）。
+
+    为什么必须带年龄阈值：如果另一进程此刻正在写 tmp（写盘窗口是一次
+    json.dump，大会话可达几十毫秒），无脑删会把它的保存搞坏。
+    600 秒远大于任何一次 json.dump（50MB 也就几百毫秒），
+    所以「早于 10 分钟」的 tmp 必然是死人的。
+    取不到 mtime（刚被删/权限）时**不动**，宁可不删也不错删。
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    if time.time() - st.st_mtime < min_age_sec:
+        return False
+    try:
+        os.remove(path)
+        return True
+    except OSError:
+        return False
+
+
 def list_sessions_tree_checked(narnat_dir: str) -> tuple:
     """会话树 + 「读不到」的原因。返回 (tree, err)。
 
@@ -686,34 +714,35 @@ def list_sessions_tree_checked(narnat_dir: str) -> tuple:
     orphans = []
     for dirpath, dirnames, filenames in os.walk(sdir, onerror=_on_walk_error):
         for fname in filenames:
-            if not fname.endswith(".json"):
-                continue
-            fpath = os.path.join(dirpath, fname)
-            try:
-                data = _load_json_with_shared_retry(fpath)
-            except (json.JSONDecodeError, UnicodeDecodeError, OSError, RecursionError):
-                # 损坏文件（含超深嵌套）一律跳过，不影响其余会话
-                continue
-            if not isinstance(data, dict):
-                continue
-            messages = data.get("messages")
-            info = {
-                "name": data.get("name", fname[:-5]),
-                "timestamp": _safe_timestamp(data.get("timestamp", 0)),
-                "message_count": len(messages) if isinstance(messages, list) else 0,
-                "parent": data.get("parent"),
-                "status": data.get("status", "active"),
-                "summary": data.get("summary"),
-            }
-            if info["parent"]:
-                orphans.append(info)
-            else:
-                roots[info["name"]] = {
-                    "name": info["name"],
-                    "timestamp": info["timestamp"],
-                    "message_count": info["message_count"],
-                    "children": [],
+            if fname.endswith(".json"):
+                fpath = os.path.join(dirpath, fname)
+                try:
+                    data = _load_json_with_shared_retry(fpath)
+                except (json.JSONDecodeError, UnicodeDecodeError, OSError, RecursionError):
+                    # 损坏文件（含超深嵌套）一律跳过，不影响其余会话
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                messages = data.get("messages")
+                info = {
+                    "name": data.get("name", fname[:-5]),
+                    "timestamp": _safe_timestamp(data.get("timestamp", 0)),
+                    "message_count": len(messages) if isinstance(messages, list) else 0,
+                    "parent": data.get("parent"),
+                    "status": data.get("status", "active"),
+                    "summary": data.get("summary"),
                 }
+                if info["parent"]:
+                    orphans.append(info)
+                else:
+                    roots[info["name"]] = {
+                        "name": info["name"],
+                        "timestamp": info["timestamp"],
+                        "message_count": info["message_count"],
+                        "children": [],
+                    }
+            elif fname.endswith(".tmp"):
+                _sweep_stale_tmp(os.path.join(dirpath, fname))
     if errors:
         # 只报枚举失败，不把「部分读到的」吞掉：tree 照常返回，调用方两边都要看
         return _sort_session_tree(roots, orphans), f"无法读取会话目录：{errors[0]}"

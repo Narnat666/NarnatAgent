@@ -70,6 +70,13 @@ vscode-extension/
 | 17 | 浅色主题下三处对比度缺陷（换白主题才暴露） | ①行内代码复用 `--bg-code` 当底 → 文字 3.28:1；改用 `--bg-code-inline`（只混 3% 前景色）→ 4.50:1。②`dim` 修饰往底色混 22%，浅底上越混越亮 → 「引用」2.31:1；弱化后再压一次对比度下限（`adaptColor(hex, bg, min)`）→ 3.09:1。③`adaptSurface` 亮侧下限 0.82 让卡片变中灰 `#d3d7dd`；提到 0.96 → `#f5f6f8` |
 | 18 | 后台任务提交行裸在折叠组外（`⚙ 后台任务 bg1 已提交 …log`） | `bgSubmit` 建的普通 `.sys` 没有 `data-turn-tool/think/text` 任何一个标记，`foldTurnProcess` 永远不收它。给这行打 `data-turn-proc="1"`，并把该标记加进收组判据 —— 用**显式声明**而不是「所有 .sys 都收」：压缩中/重试那些是**状态**，折起来等于把状态藏了 |
 | 19 | `/skill` 补不出技能、`/ls` 补不出 `--all`、`/rm` 没有 `--all` | 根因是插件里 `ARG_SOURCE` 这张「哪些命令的参数可补」的清单只登记了 5 个命令（没登记 = 敲空格后面板直接关）。补登 `/skill`、`/ls`，并让 `/rm` 也带 `--all`。技能候选靠**新增后端 RPC `skill/list`**（`list_skill_tree` 一直存在、注释都写着「供 /skill Tab 补全」，但从来没有下发通道）；不吃 initialize 是为了不拖慢首屏（它要扫工作目录下所有 skills 目录）。`/plugin` 本来就是好的（实测有 4 个候选），未改 |
+| 20 | 「回到对话」的 × 找不到 | **两个原因，不只是小**：①`.dw-head button` 没有 `margin-left:auto` —— 它一直紧贴着「对话记录」四个字，而用户找的是右上角（所有面板的关闭按钮都在那儿）；②22×22 / 14px 字形 / `--fg-faint`，在深色面板上是个影子。改成 `margin-left:auto` + 28×28 + 18px + `--fg-dim` + 默认可见淡底。两个出口（对话记录 / 设置）同一规格 |
+| 21 | 回答中切会话 / 新建对话直接把这一轮打断，用户不知情 | 加居中确认浮层 `.askdlg`（`askInterrupt()`）。**为什么不是把确认条塞进对话区**：打断操作分别发生在抽屉、顶栏下拉里，而抽屉/设置打开时 `.convo` 是 `display:none` —— 画在对话区里用户根本看不见。取消 = 一个请求都不发、`pendingSwitchTo` 不被占用。Esc 用捕获阶段拦（否则会顺带把抽屉也关了）。删除当前会话**不**多弹一层（已经是删除+是一共两步），改成把「会停止回答」写进行内那一问 |
+| 22 | 用户气泡底色没层次 | 原来直接取主题 `chat.requestBackground`（One Dark #2c313c），与页面底 #282c34 只差 1% 亮度，深色面板上「谁说的话」只能靠位置分辨。改成掺 14% 配置里的强调色（`color-mix`），实测气泡 #343f45、与页面底亮度差 2.2%、色度差 17 —— 一眼能分出。掺强调色而不是写死蓝：换 narnat.json 配色自动跟随 |
+| 23 | 弹窗文案「废话太多」 | 用户原话：二次确认那段「这一轮还在回答，新建会停止它。已经生成的内容会保存在当前会话里，之后仍能从对话记录里进去看」太长。**核心是「会停止当前回答，内容仍在会话记录里」**。同一批清掉的还有：① `popThink` 脚注「直接影响 token 消耗与推理深度。彻底关闭请改配置…」→「越高越慢、越费 token。关闭：配置…」；② `popModel` 的「写回 config.」（英文缩写 + 句号错）→「写入 narnat.json」；③ 「合并不可撤销，再点一次才执行」系统行整条删掉（按钮文案「确认合并？再点一次（不可撤销）」已说完）；④ 子会话下拉脚注去掉「· 点击进入」；⑤ `branchTip` 去掉「由 AI 总结这段讨论」。**判据：一句话只承担一个信息，按钮能说清的就不另起一行** |
+| 24 | 被打断却没有打断标记（探索分支 / 另存为新会话） | 根因是**事件顺序**：后端换会话前一定先 cancel，于是 `turn/end{cancelled}` 与 `session/result` 是两条独立事件。`turn/end` 先到时它写的「■ 已停止」紧接着被 `enterSessionFrom`/`resetConversationDom` 的清屏抹掉，而此刻 `data-run` 已是 false —— 老判据（只看 data-run）全失效。加 `noteTurnCut()`/`takeCutNotice()`（3 秒窗口）记住「刚才这一轮是被中断收尾的」，五条换会话路径统一用 `turnRunning() \|\| takeCutNotice()`：switch / explore / done / new / delete(wasCurrent) 补「■ 已停止上一轮」；**save 那条不补**（它不清屏，turn/end 的「已停止」还在正文下方，补了就是同一件事说两遍 —— 实测截图两行挨着出现）。`turnBegin` 里清掉记忆，免得上一条漏给下一轮假报 |
+| 25 | 会话被劈成两个文件（声明在 A、结果在 B），随后被误报成「内容审核拦截」 | **三个 bug 叠加**。现场：`b.json` 有 4 条 tool 结果、`b/b_g.json` 有声明它们的 assistant。① `llm.py` 把**所有** 400 当内容审核 → 结构错误也走折叠；② 折叠把工具结果原文永久改写成「不再保留」；③ `repair()` 只会补「声明了没结果」，不会删「有结果没声明」，而后者正是 400 的直接原因。修法：`_classify_400()`（结构/风控/超限/认不出，**结构优先**，认不出的当普通错误报出来不动数据）；折叠前存 `folded_original`（转换层 pop 不进请求）；`drop_orphan_tool_results()` 进 repair + `replace_messages`（载入即修）；Anthropic 转换层跳过无对应 `tool_use` 的 `tool_result` |
+| 26 | 「切会话必须保证上一段结束」 | 原来 `_cancel_and_wait_turn` 只等 **3 秒**，且 switch/explore/done 三处**丢弃返回值**（只有 new/delete 检查）。串口/SSH 底层超时几十秒，注定等不到 → 硬切 → 劈文件。方案 C 两层：**① 代际守卫**（不依赖等待的根治）：`MessageList.generation` 在 `replace_all` 时 +1，`agent_loop` 开始时 `bind_generation()`、`finally` 解绑；`append_*` 比对代际，不一致就丢弃并记日志（`replace_last` 合并连续 user **不** +1，否则守卫会把自己的合并当换会话，整轮 append 全丢）。**② 收口失败默认拒绝**：`_settle_before_context_change(action, force=False)` 抛 `-32010` + `data.canForce`，五处入口都传 `force=bool(params.force)`；界面收 `canForce` 弹「强制切换」，用户拍板后才 `force:true` |
 
 ---
 
@@ -120,6 +127,15 @@ vscode-extension/
     这一条是**有意偏离 dsh**（dsh 用 micromark+mdast 严格解析，会碎），记在这里
     避免后人当 bug 改回去。
 17. 正则写不出「长度 ≥」（反向引用只能精确相等），这类判定必须逐行扫描。
+17a. **HTML 注释必须用 `-->` 收尾，写成 `*/` 会吞掉后面整段 DOM。**
+    本轮踩过：给新加的确认浮层写注释时习惯性写了 CSS 的 `*/`，浏览器把它当
+    bogus comment 一直吃到下一个 `-->`，于是 `#askDlg` 那一段整个没进 DOM
+    （`getElementById` 返回 null），页面里所有 `askDlg.addEventListener` 抛
+    TypeError，**整个 IIFE 中断 → message 监听器根本没注册**。
+    症状特别误导：CSS 全对（`getComputedStyle` 量得到颜色）、页面不白屏、
+    `onerror` 也是空的，只有「initialize 发出去没反应」。
+    排查手段：`document.body.innerHTML.indexOf('askDlg')` 有值但
+    `getElementById` 为 null → 内容在文本/注释里，不在元素树里。
 
 ### 配色层次
 17b. **深色界面里，浮起来的块要比底「亮」一档，不是更暗。** 旧代码块取
@@ -174,6 +190,51 @@ vscode-extension/
     回归脚本 `verify-history-thinking` 的 K13/K14 现在反向锁住这个决定：
     历史标题必须只有字数、即便 payload 里塞了 `thinkingMs` 也不许显示。
 
+### 会话结构与数据完整性（这一轮的核心）
+27. **「声明」与「结果」必须落在同一个会话文件里。** 这是本轮最贵的教训。
+    工具的 `assistant.tool_calls`（声明）和 `role:"tool"`（结果）是两条消息，
+    分两次 append。只要中间发生过 `replace_all`（切会话/新建/建分支/删除），
+    声明留在旧会话、结果写进新会话 → 结果成了「没有声明的孤儿 tool_result」。
+    Anthropic 协议强校验「tool_result 必须能在前一条 assistant 找到 tool_use」，
+    一个不匹配就整份请求 400，且**该会话从此每条消息都发不出去**。
+    现场数据（`.narnat/data/sessions/b.json` + `b/b_g.json`）：父会话 4 条结果、
+    子会话有那条声明，两边各一半。诊断脚本 `nn-tasks/diag-session-b-400.py` 可复跑。
+28. **不要靠"等待"解决并发写入，要靠"代际"。** `_cancel_and_wait_turn` 只等
+    3 秒，而串口/SSH 这类工具底层超时几十秒 —— 注定等不到。等不到就硬切，
+    就劈文件。正确做法是给数据加代际（`MessageList.generation`，`replace_all`
+    时 +1），写入方绑定时快照、每次写前比对，不一致就丢弃。
+    等待只能"尽量收口"，代际才能"保证不写错地方"。
+29. **抛错比返回布尔可靠。** `_settle_before_context_change` 原来返回 bool，
+    5 个调用方里有 3 个（switch/explore/done）直接把返回值丢了 —— 等于没检查。
+    改成收口失败就抛 `-32010`（带 `data.canForce`），不可能被忽略。
+    界面据此弹「等 / 强制切换」，把决定权交回用户。
+30. **`replace_all` 与 `replace_last` 语义必须分开。** `append_user_merged`
+    （合并连续 user）内部原来也调 `replace_all`，加了代际后它会让守卫把自己
+    的合并当成换会话 → 整轮 append 全被判定过期而丢弃。拆出 `replace_last`
+    （只改一条消息、不动代际）。**凡是"长得像换会话但不是"的操作都要单独入口。**
+31. **400 不能一刀切当内容审核。** 原来所有 400 → `content_rejected` → 折叠
+    工具结果。而 `invalid_request_error: unexpected tool_use_id ...` 是**结构**
+    错误，折叠既治不好又改写用户数据（现场被折 4 条：896/268/204/220 字符）。
+    现在 `_classify_400()` 按证据四分类：context_overflow / invalid_structure /
+    content_rejected / 认不出（当普通错误报出来，**不动数据**）。
+    **判定顺序：结构优先**，两类特征同时出现时按结构处理（保护数据）。
+32. **治「孤儿结果」的三个必须点**（缺一个都还会 400）：
+    ① `repair()` 里 `drop_orphan_tool_results()`（删无声明的结果）；
+    ② `replace_messages()` 载入会话时也删（切回来就能用，不必先撞假警报）；
+    ③ Anthropic 转换层最后一道闸，跳过无对应 `tool_use` 的 `tool_result`。
+    注意 repair 里**先删孤儿再补 `[用户中断]`**：反过来的话刚补的结果会被
+    当成孤儿删掉，一轮工具调用白丢。
+33. **折叠不能毁原文。** 折叠前把原文存进 `folded_original`（转换层 pop，
+    不进请求）。折叠是被**误判**触发的，一次误判不能永久毁数据。
+    文案也要改：「原文已存档」而不是「不再保留」。
+34. **抽函数时本轮的可变状态必须跟着走。** 为给代际绑定套 try/finally 把
+    `run()` 拆出 `_run_loop()`，把 `used_tools` 等初始化留在了 `run()` ——
+    结果 `-p` 直接崩 `cannot access local variable 'used_tools'`。
+    自查手段：用 AST 扫「函数内读取但既不赋值、也不是参数/全局」的名字。
+35. **诊断脚本要写"现场固化"**：`diag-session-b-400.py` 把「孤儿 4 条 /
+    声明在子会话 / 折叠 4 条 / 连续 user」逐条打成 PASS/FAIL，文件被清理时
+    `SKIP` 而不是 FAIL。这样用户报障的现场可以反复取证，也不怕数据被删。
+
 ---
 
 ## 四、验证方式（每次改完照跑）
@@ -183,17 +244,37 @@ cd /d E:\桌面\narnat\NarnatAgent\vscode-extension
 node scripts/sync-ui.js
 npm run check
 
-:: 界面回归（17 个，串跑）
-for %f in (verify-palette verify-bg-fold verify-light verify-fence verify-fail-count ^
-  verify-fail-row verify-history-mode verify-history-thinking verify-history-page ^
-  verify-interrupt verify-interrupt-order verify-tag-scope verify-tool-copy ^
-  verify-visual verify-theme-ui verify-attach-ui verify-attach-store) do @node scripts\%f.js
+:: 界面回归（22 个，串跑）
+:: `scripts/verify-*.js` 一共 25 个；verify-c / verify-c-host 是早期独立的宿主壳子
+:: 测试、verify-real-history 要读真实会话库，这 3 个不在这套 UI 回归里。
+for %f in (verify-cut-notice verify-interrupt-ask verify-palette verify-bg-fold verify-light ^
+  verify-fence verify-fail-count verify-fail-row verify-history-mode verify-history-thinking ^
+  verify-history-page verify-interrupt verify-interrupt-order verify-tag-scope ^
+  verify-tool-copy verify-visual verify-theme-ui verify-attach-ui verify-attach-store ^
+  verify-settings-ui verify-md-inline verify-send-btn) do @node scripts\%f.js
+:: 另有 regress-md-emphasis.js：行内强调的**反面**用例（`a * b * c`、`snake_case_name`
+:: 不许被改成斜体）。它不在上面这套里，单独跑：node scripts\regress-md-emphasis.js
+:: verify-math.js / verify-math-narrow.js 需要 KaTeX 资源（media/katex/），
+:: 脚本自己会加载，直接跑即可。后者把面板钉成 249px（辅助侧边栏真实宽度）。
+
+:: 交叉验证（主控用，走真 RPC / 直读 JSON）
+cd /d E:\桌面\narnat\NarnatAgent
+python nn-tasks\xcheck-orphans.py           :: 直读 JSON 扫孤儿（不经项目代码）
+node nn-tasks\xcheck-bad-session.js         :: 坏会话能否救回 + 清理留痕
+node nn-tasks\xcheck-big-paging.js          :: 真实 1649 条会话分页
+node nn-tasks\xcheck-real-sessions.js       :: 真实 62 会话可列出/可载入
+node nn-tasks\xcheck-content-type.js        :: content 非字符串 5 种类型
+node nn-tasks\xcheck-concurrent-save.js     :: 并发保存不产生 (2) 副本
 
 :: 后端回归
 cd /d E:\桌面\narnat\NarnatAgent
 python nn-tasks\verify-history-thinking.py     :: _history_payload 口径
+python nn-tasks\verify-400-structure.py        :: 400 分类 / 折叠存档 / 孤儿清理（含现场数据）
+python nn-tasks\verify-session-generation.py   :: 代际守卫 + 收口拒绝 + 强制
+python nn-tasks\diag-session-b-400.py          :: 现场证据固化（可复跑）
 python nn-tasks\R32\verify-theme.py           :: 配色快照（含真实 narnat.json 交叉验证）
 python nn-tasks\R29\verify-history-page.py    :: 分页（含真实 --rpc 到 E7）
+node nn-tasks\e2e-400-structure.js            :: 现场坏会话 → 真 --rpc → 抓真实请求体
 node nn-tasks\verify-history-rpc.js           :: 真实 --rpc 端到端
 node nn-tasks\verify-skill-list-rpc.js        :: skill/list 与磁盘技能一致
 node nn-tasks\e2e-skill-palette.js            :: 真后端产出 → 界面候选（含宿主白名单）
@@ -234,6 +315,9 @@ node scripts\install-vsix.js --skip-exe
 | `ruff` | 仓库无配置文件、既有约 208 条告警；改动遵循原有 `%` 格式化风格即可 |
 | AI 用 ```markdown 包整篇文档时要不要**剥掉外层围栏按正文渲染** | 未定。现在收成一个代码块（源码可复制、语义明确）；剥掉更接近「看渲染效果」，但会让「AI 教学 markdown 语法」的场景失真 |
 | 老会话的思考耗时 | 不显示（决定：耗时不落盘，与 dsh 一致）。流式期间仍有「思考 3.2s」，历史回放只显示字数 |
+| 已被误折的 4 条工具结果原文 | **补不回来**（旧代码真的丢了原文）。新代码有 `folded_original` 存档，但只对之后的折叠生效 |
+| 现场坏会话 `b.json` / `b/b_g.json` | 已能自愈（载入即删孤儿），但**声明与结果仍分处两个文件**、`b_g` 里少 4 条结果。要合并需要人工决策，未动 |
+| 串口/SSH 长工具期间的会话导航 | 现在会「等 / 强制切换」二选一。若嫌每次都要点，可考虑给 `_TURN_SETTLE_TIMEOUT` 加配置项（未做，等用户反馈） |
 
 ---
 
@@ -248,3 +332,51 @@ node scripts\install-vsix.js --skip-exe
 - 配色：43 个语义角色 + 11 个基础角色 + 7 组语言色，全部来自 narnat.json，
   前端按当前底色重算亮度（正文 4.5:1、线条 2.2:1 兜底）
 - 改 `narnat.json` 的「界面」段 → 800ms 内自动换色（`theme/get` 现读磁盘，不重启后端）
+- 数学公式：KaTeX（与 dsh 同一个库，vendor 在 `media/katex/`，20 个 woff2 字体）。
+  定界符 `$…$` / `\(…\)` 行内，`$$…$$` / `\[…\]` 块级；
+  **流式期间不解析**（dsh 的 parseGfm 不带 math 扩展），定稿才渲染；
+  渲染失败退回原文而不是红框。CSS 在 `design/ui-full.html` 的 `.msg .katex*`
+  （块级 `overflow-x:auto` 与 dsh 同一条），JS 在 `splitMath` / `texToHtml`。
+- 语法高亮配色：`--tk-*` 变量（`applyTheme()` 里按**代码块底色**做
+  `adaptColor`，下限 4.5 / 注释 3.0）。**不要**在 CSS 里直接读
+  `--vscode-debugTokenExpression-*` —— 很多亮色主题没定义该键，会落到照
+  Dark+ 抄的兜底值，在白底上只有 1.5~2.5:1（实测事故）。深色主题下
+  `adaptColor` 原样返回，One Dark Pro 的观感一个像素都不变。
+- **中间色主题**：`scan-themes.js` 扫 10 档底色（#ffffff → #0d0d0d），
+  全达标。两个适配函数为此改过：
+  - `adaptColor` 原来按 `relLum(bg) < 0.5` **单向**推亮度，中间灰上会走进
+    死路（白对 #7a7a7a 最多 4.29，够不到 4.5）。现在往亮/往暗两个方向都试，
+    先试「离底色远」的那侧（保持原观感），走不通再试反向。极端底行为不变。
+  - `adaptSurface` 原来只有「亮/暗」两支，中间带落进了错误分支。
+    现在三支：`relLum<0.10` 很暗（原逻辑）/ `0.10~0.70` 中间带（**丢掉配置色
+    亮度、只借色相，按底色同向偏移一档，并用相对亮度差 12% 封顶**）/
+    `>0.70` 很亮（镜像，原逻辑）。
+  - 另加 `--code-fg`：代码块正文色按**代码块底色**单独适配（原来继承 `--fg`，
+    只在代码底与页面底接近时才对）。
+
+---
+
+## 八、数据完整性链路速查（这一轮新增的防线）
+
+```
+用户切会话
+  → 后端 _settle_before_context_change(action, force=False)
+      ├─ 3 秒内收口成功 → 继续切
+      └─ 收不到口
+           ├─ force=False → 抛 -32010{canForce:true} → 界面弹「等 / 强制切换」
+           └─ force=True  → 放行（结果安全由下一层保证）
+  → MessageList.replace_all() 代际 +1
+  → agent_loop 里的 bind_generation() 快照已过期
+      → append_assistant / append_tool_result / append_user_images 一律返回 False
+      → agent_loop 收到 False 立刻 `_notice + stream.abort()` 收尾这一轮
+  → 结果一条都没进新会话（不再产生孤儿 tool_result）
+
+另外三道兜底（即使上面全失效也不会 400）：
+  载入会话 replace_messages() → drop_orphan_tool_results()
+  repair() → 先 drop_orphan 再补 [用户中断]
+  Anthropic 转换层 → 跳过无对应 tool_use 的 tool_result
+```
+
+**当前可用的验证命令一览**（细节见第四节）：
+`verify-session-generation.py`（20 项）、`verify-400-structure.py`（19 项）、
+`e2e-400-structure.js`（7 项）、`diag-session-b-400.py`（现场取证）。

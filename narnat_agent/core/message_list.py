@@ -15,7 +15,9 @@ SYNTHETIC_THINKING = "（用户中断了工具执行）"
 
 # 内容审核拦截恢复：被折叠工具结果的替换文案。原文不留存——服务端按内容
 # 判定，残留原文会让后续每次请求继续被拒（折叠必须真正从上下文里移除）。
-FOLDED_TOOL_MARKER = "[已折叠: 原工具结果共{n}字符，疑似触发服务端内容审核，原文不再保留]"
+# 注意「不发给服务端」≠「本地丢弃」：原文另存进消息的 folded_original 字段
+# （转换层 pop，不进请求），见 fold_largest_tool_result。
+FOLDED_TOOL_MARKER = "[已折叠: 原工具结果共{n}字符，疑似触发服务端内容审核，原文已存档]"
 
 # 可折叠的最小长度：过低无收益（替换文案本身更长，反而增大上下文），
 # 且会让"参数类 400"白跑折叠重试——低于此值一律视为无可折叠项
@@ -115,6 +117,30 @@ class MessageList:
         self._archived: List[Dict[str, Any]] = []
         # 已归档消息的对象 id 集合（判重口径，见 archive）
         self._archived_ids: Set[int] = set()
+        # 会话代际：每换一次会话内容 +1（见 generation 属性）
+        self._generation: int = 0
+
+    @property
+    def generation(self) -> int:
+        """会话代际：`replace_all` 每调一次 +1。
+
+        用途是**写入守卫**：agent_loop 在主循环开始时绑定当时的代际，之后每次
+        append 前比对。不一致 = 这一轮已经被「切会话」打断，它算出来的结果属于
+        上一段对话，绝不能写进现在这个列表。
+
+        为什么必须有（P0，实测）：工具还在执行时用户切会话，`_cancel_and_wait_turn`
+        只等 3 秒；串口/SSH 那种底层超时几十秒的工具等不到收口，于是：
+          · 工具的**声明**（assistant.tool_calls）已经在上一段对话里落盘
+          · 工具的**结果**在这之后才 append，而 MessageList 已被换成新会话
+        两边分处不同会话文件 → 结果成了「没有声明的孤儿 tool_result」→
+        Anthropic 协议直接 400（`each tool_result block must have a
+        corresponding tool_use block`），且该会话从此每条消息都发不出去。
+
+        只在 `replace_all` 里 +1，**压缩路径不算换会话**（clear_and_rebuild /
+        compress_and_rebuild 不动代际）：压缩前后是同一段对话，正在跑的轮次
+        应当继续正常写入。
+        """
+        return self._generation
 
     # ── 只读接口 ──
 
@@ -258,6 +284,12 @@ class MessageList:
         就地改写消息内容——请求副本是同一批 dict 的浅拷贝，改写同步可见。
         返回 (tool_call_id, 原字符数)；无可折叠项（无工具结果 / 均已折叠 /
         均低于 MIN_FOLDABLE_TOOL_CHARS）时返回 None。
+
+        **原文不丢**：折叠前把原文存进 `folded_original` 字段（本地留存，
+        转换层发请求时会 pop 掉，不占服务端上下文）。原来直接丢弃原文，
+        而折叠是被**误判**触发的（见 llm._classify_400），一次误判就永久
+        毁掉用户几条工具结果（实测：896/268/204/220 字符各一条）。
+        用户要看原文时还能从这里取回来。
         """
         best_idx, best_len = -1, 0
         for i, msg in enumerate(self._messages):
@@ -272,9 +304,47 @@ class MessageList:
             return None
         msg = self._messages[best_idx]
         tc_id = msg.get("tool_call_id") or ""
+        original = msg.get("content") or ""
+        # 已经折过一次就不再覆盖存档（保留最早那份原文）
+        if "folded_original" not in msg:
+            msg["folded_original"] = original
         msg["content"] = FOLDED_TOOL_MARKER.format(n=best_len)
         folded_ids.add(tc_id)
         return tc_id, best_len
+
+    def drop_orphan_tool_results(self) -> List[str]:
+        """删掉「没有对应 tool_calls 声明」的 tool 消息。返回被删的 tool_call_id。
+
+        什么时候会有孤儿：工具正在执行时用户切会话/建分支，`assistant`（带
+        tool_calls）与它的 `tool` 结果被写进了**不同文件**（实测：父会话
+        b.json 有 4 条结果、子会话 b/b_g.json 有那条声明）。合并回来时
+        就只有结果没有声明。
+
+        为什么必须删而不是留着：Anthropic 协议里 tool_result 必须能在
+        **紧邻的前一条 assistant 消息**里找到对应 tool_use，否则整份请求
+        400（`unexpected tool_use_id found in tool_result blocks`）。
+        留着它 = 这个会话从此每条消息都发不出去，用户只能弃用。
+
+        删掉是安全的：声明都没了，这条结果已经没有任何接收方。
+        """
+        declared: Set[str] = set()
+        for msg in self._messages:
+            for tc in (msg.get("tool_calls") or []):
+                tid = tc.get("id")
+                if tid:
+                    declared.add(tid)
+        keep: List[Dict[str, Any]] = []
+        dropped: List[str] = []
+        for msg in self._messages:
+            if msg.get("role") == "tool":
+                tid = msg.get("tool_call_id") or ""
+                if tid and tid not in declared:
+                    dropped.append(tid)
+                    continue
+            keep.append(msg)
+        if dropped:
+            self._messages = keep
+        return dropped
 
     def archive(self, msgs) -> int:
         """把一批消息追加进归档（归档的唯一入口）。返回实际归档条数。
@@ -308,8 +378,25 @@ class MessageList:
 
         注意：本方法不动归档（压缩路径正是「先 archive 再 replace_all」）。
         会话切换必须走 SessionManager.replace_messages()，它先 clear_archive()。
+
+        代际 +1 也在这里：这是「换了一段对话」的唯一汇聚点（切换/新建/删除/
+        载入/压缩后重建都经过它）。agent_loop 靠代际判断自己的结果还该不该写。
         """
         self._messages = list(new_messages)
+        self._generation += 1
+
+    def replace_last(self, msg: Dict[str, Any]) -> None:
+        """替换最后一条消息（**不是**换会话，代际不变）。
+
+        专供「合并连续 user」这类就地改写：它和 replace_all 长得像，
+        但语义完全不同 —— 代际守卫靠 +1 识别「换了一段对话」，
+        就地改一条消息如果也算，守卫会把自己的合并操作当成换会话，
+        之后整轮 append 全被判定过期而丢弃（实测会静默丢掉整轮回复）。
+        """
+        if not self._messages:
+            self._messages = [msg]
+            return
+        self._messages[-1] = msg
 
     def clear_and_rebuild(self, system_prompt: str, summary: str,
                           compressor) -> None:

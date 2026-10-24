@@ -230,6 +230,12 @@ function main() {
     'package.json', 'src/extension.js', 'src/rpc-client.js', 'src/webview.js',
     'src/attach-store.js',
     'media/narnat.css', 'media/narnat.js', 'media/narnat.body.js', 'media/icon.svg',
+    // KaTeX（数学公式）。少了任一项：JS 缺失 → 公式退回原始源码；
+    // 字体缺失 → 公式变成豆腐块。两者都是「看起来坏了但没人报错」，
+    // 所以在打包前就当作必备文件检查。
+    'media/katex/katex.min.js', 'media/katex/katex.min.css',
+    'media/katex/fonts/KaTeX_Main-Regular.woff2',
+    'media/katex/fonts/KaTeX_Math-Italic.woff2',
     'README.md'
   ];
   const missing = need.filter((f) => !fs.existsSync(path.join(ROOT, f)));
@@ -300,6 +306,19 @@ function main() {
         // 曾出过「装的还是旧界面」事故：确认界面产物确实进了包
         ck('vsix 含 media/narnat.js', names.indexOf('extension/media/narnat.js') >= 0);
         ck('vsix 含 src/extension.js', names.indexOf('extension/src/extension.js') >= 0);
+        // KaTeX：JS + CSS + 全部 woff2 字体。少一个字体只会让某个符号变成方块，
+        // 界面上很难发现，所以在这里数个数（源目录几个包里就得几个）。
+        const katexJs = names.indexOf('extension/media/katex/katex.min.js') >= 0;
+        const katexCss = names.indexOf('extension/media/katex/katex.min.css') >= 0;
+        ck('vsix 含 KaTeX 的 js 与 css', katexJs && katexCss,
+          'js=' + katexJs + ' css=' + katexCss);
+        const fontSrc = path.join(ROOT, 'media', 'katex', 'fonts');
+        const wantFonts = fs.existsSync(fontSrc)
+          ? fs.readdirSync(fontSrc).filter((f) => f.endsWith('.woff2')).length : 0;
+        const gotFonts = names.filter((n) => n.indexOf('extension/media/katex/fonts/') === 0
+          && n.endsWith('.woff2')).length;
+        ck('vsix 含全部 KaTeX 字体', wantFonts > 0 && gotFonts === wantFonts,
+          gotFonts + ' / ' + wantFonts + ' 个 woff2');
       }
     } else {
       ck('生成 vsix', false, '未生成 ' + out);

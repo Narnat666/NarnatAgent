@@ -59,9 +59,9 @@
      所以这里用 color-mix 把它压成一层薄底；配置没到就回落主题的 diff 底色。 */
   --add: color-mix(in srgb, var(--t-diff-added, var(--vscode-charts-green, #98c379)) 16%, transparent);
   --del: color-mix(in srgb, var(--t-diff-removed, var(--vscode-errorForeground, #e06c75)) 16%, transparent);
-  /* 用户气泡底色：优先主题给聊天请求准备的 chat.requestBackground
-     （One Dark 是 #2c313c，比编辑器底略亮一档，正是气泡该有的层次），
-     没有该键的主题退到 input-background，再退到抬升层。 */
+  /* 用户气泡底色（旧内核兜底；现代内核走下面 @supports 里那版掺强调色的）。
+     优先主题给聊天请求准备的 chat.requestBackground（One Dark 是 #2c313c，
+     比编辑器底略亮一档）。 */
   --bubble: var(--vscode-chat-requestBackground, var(--vscode-input-background, #2b2b2b));
   /* 胶囊控件底色（输入框下面的会话/路径/目标 chip）。
      One Dark 的 button.secondaryBackground = #30333d，比底色亮一档。 */
@@ -98,6 +98,18 @@
        所以配方要极淡、并且 markdown.code_inline 的下限提到 4.7 兜住
        （实测 4% 时浅色主题下只剩 4.42:1，差一点点不到 4.5）。 */
     --bg-code-inline: color-mix(in srgb, var(--bg) 97%, var(--fg) 3%);
+    /* 用户气泡：在主题的聊天底上掺 14% 强调色（配置里的「强调色」）。
+       原来直接用主题的 chat.requestBackground —— One Dark 的 #2c313c 与编辑器底
+       #282c34 只差 1% 亮度，深色面板上「谁说的话」只能靠位置分辨，扫一眼没层次
+       （用户反馈「用户说的话那个气泡颜色可以优化」）。
+       dsh 也是这个方向：它的气泡用品牌色系（--dsw-specific-bubble =
+       deepseek-50 / neutral-bluish-850），不是纯中性灰。
+       比例是实测的：10% 时亮度只比页面底高 1.5%（仍偏近），14% 到 4% 左右、
+       色度差 20 上下，一眼能分出「这块是我说的」；再往上（20%）浅色主题下
+       气泡会变成色块，而气泡里是用户自己的字，底色不该抢注意力。
+       掺的是**强调色**而不是写死的蓝：换 narnat.json 的配色，气泡自动跟着变。 */
+    --bubble: color-mix(in srgb, var(--accent) 14%,
+               var(--vscode-chat-requestBackground, var(--bg)));
   }
 }
 /* 浏览器预览：跟随系统浅色 */
@@ -231,15 +243,17 @@ body[data-settings="true"] #toBottom{display:none}
   display:flex;align-items:center;flex:none;padding:12px 14px 8px;
   font-size:11px;color:var(--fg-faint);letter-spacing:.04em;
 }
+/* 「回到对话」的 ×（设置面板）。
+   与对话记录那个同规格、同理由（用户报障「找不到叉号」）：28×28 / 18px
+   字形 / --fg-dim / 默认可见的淡底。两个出口必须长得一样，用户认一次就会了。 */
 .set-head button{
-  margin-left:auto;color:var(--fg-faint);
-  /* 与顶栏图标同规格（26×26 / 16px）—— 它也是字形图标，
-     只加大底座不加大字号会显得空。 */
-  font-size:16px;width:26px;height:26px;
+  margin-left:auto;color:var(--fg-dim);
+  font-size:18px;width:28px;height:28px;
   display:inline-flex;align-items:center;justify-content:center;
-  border-radius:6px;background:transparent;border:1px solid transparent;
+  border-radius:6px;background:color-mix(in srgb, var(--fg) 8%, transparent);
+  border:1px solid var(--line);
 }
-.set-head button:hover{color:var(--fg);background:var(--bg-hover);border-color:var(--line)}
+.set-head button:hover{color:var(--fg);background:var(--bg-hover);border-color:var(--line-strong)}
 /* 分段按钮横排。条数少（3 个），宽度用 flex:1 均分，窄面板也不会挤成两行。 */
 .set-tabs{display:flex;gap:4px;flex:none;padding:0 12px 8px}
 .set-tabs button{
@@ -703,6 +717,31 @@ body[data-real="true"] .demo-tip{display:none}
   color:var(--t-markdown-strikethrough, var(--fg-dim));
   text-decoration:line-through;
 }
+/* TeX 数学公式（KaTeX 产物）。配色跟正文走，不另立一套：
+   KaTeX 自带的 CSS 只用 currentColor 画字形，所以这里定好 color 就整体一致，
+   换 narnat.json 的配色自动跟随。 */
+.msg .katex{font-size:1.05em}
+/* 块级公式横向溢出可滚（与 dsh 的 `.markdown :global(.katex-display)`
+   完全同一套：max-width:100% + overflow-x:auto）。
+   不加会怎样：长公式（矩阵、多行推导）会把面板撑出横向滚动条，
+   整个对话区跟着左右晃，正文全跑偏。 */
+.msg .katex-display{
+  max-width:100%;
+  overflow-x:auto;
+  overflow-y:hidden;
+  margin:10px 0;
+  padding-bottom:1px;
+}
+/* 块级公式上下留白比段落略小：公式本身就是视觉重心的分隔，
+   再给满 16px 会让一页里只有公式没有呼吸。 */
+.msg .katex-display:first-child{margin-top:0}
+.msg .katex-display:last-child{margin-bottom:0}
+/* 行内公式：只在确实需要时才允许所在段落横向滚动（dsh 的 compact 口径）。
+   行内公式通常很短，撑破的概率远低于块级，所以这里只兜底不主动开滚动。 */
+.msg p:has(> .katex){overflow-x:auto;overflow-y:hidden}
+/* KaTeX 渲染失败时我们退回原文，不留红框；这条只兜住极端情况下的
+   KaTeX 自带错误节点（例如 strict 放宽后仍产出的 .katex-error）。 */
+.msg .katex-error{color:var(--t-markdown-strikethrough, var(--fg-dim));font-family:var(--mono)}
 .msg > *:first-child{margin-top:0}
 /* 末尾元素不留 margin-bottom：否则每条回复底部都比正文多一块空白
    （原来只覆盖了 p:last-child，h1–h6 / 列表 / 引用 / 表格都还留着 16px）。 */
@@ -761,6 +800,12 @@ body[data-real="true"] .demo-tip{display:none}
   font-family:var(--mono);font-size:11.5px;line-height:1.65;
   background:var(--bg-code);border-radius:6px;padding:10px 12px;
   margin:10px 0 0;overflow-x:auto;
+  /* 代码正文色必须**按代码块底色**单独适配，不能靠继承 --fg。
+     继承在极端主题上没问题（代码底与页面底只差一档，--fg 对两者都够），
+     但中间灰主题下代码底会明显偏离页面底，继承来的 --fg 只对页面底正确 ——
+     实测 #b4b4b4 上代码内纯文本只有 2.04:1。
+     变量由 applyTheme() 算好（沿用 adaptColor 对 --bg-code 推 4.5）。 */
+  color:var(--code-fg, inherit);
 }
 /* ---------- 代码块（语言标签 + 复制 + 语法高亮） ---------- */
 /* 不用 <pre> 直接做容器：语言标签和复制按钮要贴在右上角，
@@ -838,22 +883,44 @@ body[data-real="true"] .demo-tip{display:none}
    关键字不能用 --vscode-symbolIcon-keywordForeground：该键的默认值就是
    foreground（实测 Dark+ #CCCCCC / Light+ #616161），拿它当关键字颜色
    等于没高亮。debugTokenExpression-name 才是紫红（Dark+ #c586c0 /
-   Light+ #9b46b0），且语义相符（调试视图里的 token 名）。 */
-.tk-cm{color:var(--vscode-editorLineNumber-foreground,var(--fg-faint));font-style:italic}
-.tk-st{color:var(--vscode-debugTokenExpression-string,#ce9178)}
-.tk-nu{color:var(--vscode-debugTokenExpression-number,#b5cea8)}
-.tk-kw{color:var(--vscode-debugTokenExpression-name,#c586c0)}
-.tk-fn{color:var(--vscode-symbolIcon-methodForeground,#b180d7)}
+   Light+ #9b46b0），且语义相符（调试视图里的 token 名）。
+
+   ## 为什么每个词法色都要过 adaptColor（实测过的真实事故）
+
+   这些 `--vscode-debugTokenExpression-*` 在**很多流行主题里根本没有定义**
+   （Light Modern、GitHub Light 都没有），于是落到兜底值 —— 而那组兜底
+   是照 Dark+ 抄的：`#c586c0` 紫 / `#ce9178` 橙 / `#b5cea8` 浅绿。
+   在白底上它们分别是 2.43 / 2.31 / **1.48**:1，代码基本读不出来
+   （用户报障：「白色主题下配色太耀眼，根本看不清代码」）。
+
+   所以这里不再直接用主题变量，而是经 `adaptColor(色, --bg-code, 下限)`：
+   保留色相与饱和度，只把亮度压到在白底/深底上都够读的位置。
+   `adaptColor` 对"本来就够亮"的颜色原样返回 —— 深色主题下一个像素都不变
+   （用户明确要求：One Dark Pro 下的配色非常好，不用改）。
+
+   下限取 4.5（正文级）：代码块里这些是**要逐字读的内容**，
+   不是装饰。注释类(3.0)已经由 `--fg-faint` 那一档兜住。
+
+   实际取值来自 `applyTheme()` 算好的 `--tk-*` 变量（那里做亮度适配），
+   CSS 里只负责消费 —— 不能在 CSS 里调 adaptColor（它是 JS 函数）。
+   变量没算出来时退回原来的主题变量，保证任何情况下都有颜色。 */
+.tk-cm{color:var(--tk-comment, var(--vscode-editorLineNumber-foreground, var(--fg-faint)));font-style:italic}
+.tk-st{color:var(--tk-string, var(--vscode-debugTokenExpression-string, #ce9178))}
+.tk-nu{color:var(--tk-number, var(--vscode-debugTokenExpression-number, #b5cea8))}
+.tk-kw{color:var(--tk-keyword, var(--vscode-debugTokenExpression-name, #c586c0))}
+.tk-fn{color:var(--tk-function, var(--vscode-symbolIcon-methodForeground, #b180d7))}
 /* 类型名不能借 symbolIcon-classForeground：Light+ 给的是 #D67E00，
    在 #F1F1F1 代码底色上只有 2.72:1（连 3:1 的图标线都不到）——
    类名/类型名是代码里的关键标识，看不清等于没高亮。
    换成 textLink 色：VSCode 保证它在两套主题下都是可读的强调色。 */
-.tk-ty{color:var(--vscode-textLink-foreground,#569cd6)}
+.tk-ty{color:var(--tk-type, var(--vscode-textLink-foreground, #569cd6))}
 /* diff 代码块（```diff）：按行首字符染色。
-   取 git 装饰色，VSCode 保证四套主题下都可读。 */
-.tk-add{color:var(--vscode-gitDecoration-addedResourceForeground,#4ec9b0)}
-.tk-del{color:var(--vscode-gitDecoration-deletedResourceForeground,#f14c4c)}
-.tk-hdr{color:var(--vscode-textLink-foreground,#569cd6)}
+   gitDecoration-* 同样是「有些主题没有该键」的变量，Light Modern 下
+   绿 #587c0c / 红 #ad0707 对 #efefef 尚可，但别的亮色主题不一定。
+   一样过 applyTheme 算出的 --tk-* 变量，深色主题原样返回。 */
+.tk-add{color:var(--tk-add, var(--vscode-gitDecoration-addedResourceForeground, #4ec9b0))}
+.tk-del{color:var(--tk-del-fg, var(--vscode-gitDecoration-deletedResourceForeground, #f14c4c))}
+.tk-hdr{color:var(--tk-type, var(--vscode-textLink-foreground, #569cd6))}
 .tk-meta{color:var(--fg-faint)}
 /* Markdown 表格：**形态完全照 dsh**（`ui-primitives/src/markdown/
    MarkdownText.module.css` 的 `.tableScroll th/td`）——不要竖线、不要外框、
@@ -1348,15 +1415,25 @@ body[data-run="true"] .send{display:none}
 }
 .send:hover{background:var(--vscode-button-hoverBackground,var(--accent))}
 .send .ar{display:block;line-height:1;transform:translateY(-.5px)}
-/* 空输入时发送按钮变暗：一眼能看出「现在按了也没用」，而不是按下去才被忽略。
-   只降饱和度与不透明度，不改尺寸与位置——按钮跳动比颜色不好看更刺眼。
-   只判「有没有字」；运行中这个按钮根本不显示（body[data-run] 换成停止）。 */
+/* 空输入时发送按钮变「空心」：一眼能看出「现在按了也没用」，而不是按下去才被忽略。
+   只改颜色/底，不改尺寸与位置——按钮跳动比颜色不好看更刺眼。
+   只判「有没有字」；运行中这个按钮根本不显示（body[data-run] 换成停止）。
+
+   为什么是空心 + 次要色，而不是「实心淡底 + 淡符号」（原实现）：
+   原来 `background:--pill; color:--fg-faint`，在深色主题下没问题，但浅色主题里
+   `--fg-faint` 是「对白底可读的暗灰」，配上深色圆底 `--pill` 就成了**暗叠暗**
+   —— 实测放大后圆里只有一个 1.25:1 的脏点，`＋` 和 `↑` 都认不出（用户报障：
+   「浅色下两个按钮是实心灰圆，看不见图标」）。这是「同一套派生式在另一主题
+   失效」的又一例：两个各自正确的颜色组合起来互相抵消。
+   `--line-strong` 与 `--fg-dim` 都经 `adaptColor` 按当前底色算过对比度下限，
+   两套主题都成立；形态与「停止」按钮（.stop）一致，一排圆钮看着是同一套。 */
 .send[data-empty="true"]{
-  background:var(--pill);
-  color:var(--fg-faint);
+  background:transparent;
+  box-shadow:inset 0 0 0 1px var(--line-strong);
+  color:var(--fg-dim);
   cursor:default;
 }
-.send[data-empty="true"]:hover{background:var(--pill)}
+.send[data-empty="true"]:hover{background:transparent}
 .kbd{font-family:var(--mono);font-size:10px;color:var(--fg-faint)}
 
 /* ---------- 命令面板 ---------- */
@@ -1433,6 +1510,35 @@ body[data-run="true"] .send{display:none}
 }
 .palette .item .s{color:var(--fg-faint);font-family:var(--mono);font-size:10.5px;flex:none}
 
+/* ---------- 「正在回答中」的二次确认 ----------
+   居中模态框，fixed 盖住一切（抽屉/设置/narnat.md 全屏都在它下面）。
+   半透明遮罩只是「把注意力拉过来」，不是内容：面板只有 249~700px 宽，
+   遮罩太重会让整个界面像卡死，所以用 0.42 而不是 0.6。 */
+.askdlg{
+  display:none;position:fixed;inset:0;z-index:90;
+  place-items:center;padding:24px;
+  background:rgba(0,0,0,.42);
+}
+.askdlg[data-open="true"]{display:grid}
+.askdlg .box{
+  width:100%;max-width:320px;box-sizing:border-box;
+  padding:14px 16px 12px;
+  background:var(--bg-elev);border:1px solid var(--line-strong);
+  border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.45);
+}
+.askdlg .t{font-size:13px;color:var(--fg);margin-bottom:6px}
+.askdlg .d{font-size:11.5px;color:var(--fg-dim);line-height:1.7;margin-bottom:12px}
+.askdlg .acts{display:flex;gap:8px;justify-content:flex-end}
+.askdlg button{
+  font-size:11.5px;padding:4px 12px;border-radius:5px;
+  color:var(--fg-dim);border:1px solid var(--line-strong);background:transparent;
+}
+.askdlg button:hover{color:var(--fg);border-color:var(--fg-dim)}
+/* 主按钮是「会打断回答」的那一下，用警告色而不是强调色：
+   强调色在这套界面里等同「推荐/正常」，而这里是要用户想清楚的动作。 */
+.askdlg button.primary{color:var(--warn);border-color:var(--warn)}
+.askdlg button.primary:hover{background:color-mix(in srgb, var(--warn) 14%, transparent)}
+
 /* ---------- 会话列表（面板内全宽列表态）---------- */
 /* 侧边栏只有 ~300px 宽，放不下「列表 + 对话」并排两栏。
    所以列表是**同一个面板里的另一种状态**：打开时铺满整个内容区，
@@ -1459,10 +1565,23 @@ body[data-drawer="true"] #toBottom{display:none}
 }
 /* 右侧动作（关闭）。 */
 .dw-head-acts{margin-left:auto;display:flex;align-items:center;gap:2px}
-.dw-head button{color:var(--fg-faint);font-size:14px;width:22px;height:22px;
+/* 「回到对话」的 ×。
+   用户报障：「点了对话记录，想返回对话，发现找不到叉号」。
+   两个原因，都要修：
+   ① 位置：原来它没有 margin-left:auto，一直紧贴着「对话记录」四个字，
+      而用户的眼睛在找的是**右上角**（所有面板的关闭按钮都在那儿）。
+      这不是「小」，是「不在预期位置」—— 加了 auto 它才真的靠右。
+   ② 规格：原来 22×22 / 14px 字形 / --fg-faint（前景色 80%），在深色面板上
+      几乎是个影子。现在 28×28 底座 + 18px 字形 + --fg-dim + 默认可见的淡底，
+      「一眼能看出是个按钮」而不是「藏在角落的符号」。 */
+.dw-head button{
+  margin-left:auto;
+  color:var(--fg-dim);font-size:18px;width:28px;height:28px;
   display:inline-flex;align-items:center;justify-content:center;
-  border-radius:4px;background:transparent;border:1px solid transparent}
-.dw-head button:hover{color:var(--fg);background:var(--bg-hover);border-color:var(--line)}
+  border-radius:6px;background:color-mix(in srgb, var(--fg) 8%, transparent);
+  border:1px solid var(--line);
+}
+.dw-head button:hover{color:var(--fg);background:var(--bg-hover);border-color:var(--line-strong)}
 .dw-head button:focus-visible{outline:none;border-color:var(--accent)}
 .dw-item{
   display:flex;align-items:baseline;gap:7px;
@@ -1530,7 +1649,10 @@ body[data-drawer="true"] #toBottom{display:none}
   position:absolute;left:8px;top:50%;transform:translateY(-50%);
   background:var(--bg-hover);z-index:2;
 }
-.dw-item[data-del="ask"] .n{padding-left:100px}
+/* 让出确认行的宽度。172px 是按最长的那一问量的：「删除？（会停止回答）」+
+   两个按钮 ≈ 168px（10px 字号）。窄到 249px 时名字只剩 ~70px，但那是
+   「正在回答中删当前会话」这一瞬间才出现的确认态，读完就点掉了。 */
+.dw-item[data-del="ask"] .n{padding-left:172px}
 .dw-item[data-del="ask"] .asks{display:flex}
 .dw-item[data-del="ask"] .acts{display:none}
 .dw-item[data-del="ask"]{background:var(--bg-hover)}

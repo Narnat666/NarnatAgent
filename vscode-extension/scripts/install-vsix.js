@@ -62,7 +62,13 @@ const MUST_MATCH = [
   'media/narnat.js',
   'media/narnat.body.js',
   'media/narnat.css',
-  'media/icon.svg'
+  'media/icon.svg',
+  // 数学公式：装错/装丢的后果是「公式退回原始源码」或「符号变豆腐块」，
+  // 两种都不报错，只靠肉眼发现。所以逐字节比一次。
+  'media/katex/katex.min.js',
+  'media/katex/katex.min.css',
+  'media/katex/fonts/KaTeX_Main-Regular.woff2',
+  'media/katex/fonts/KaTeX_Math-Italic.woff2'
 ];
 
 /**

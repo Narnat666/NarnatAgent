@@ -195,11 +195,6 @@ class AgentLoop:
         self._last_round_ok = False
         # 本轮验证打回次数k（每轮清零；预算结算上移到 agent.py：未完成时本轮消耗 1+k）
         self._last_round_blocks = 0
-        stream_interrupted_retries = 0  # 响应流中断（无完成标记）的自动重试计数
-        overflow_compacted = False      # 本次 run 内是否已做过溢出恢复压缩（重发再溢出则放弃）
-        content_folds = 0               # 本次 run 内内容审核恢复的折叠条数（上限 CONTENT_REJECT_MAX_FOLDS）
-        folded_tool_ids = set()         # 本次 run 内已折叠的 tool_call_id（防同一结果被反复选中）
-        used_tools = False              # 本次 run 内是否调用过工具（风格提醒：干活轮不算讨论）
         # 流中断重试上限 = 配置的"LLM重试次数"（每轮独立：收到正常完成标记后重置，
         # 与连接层重试语义一致，仅累计同一次中断后的连续重试）
         try:
@@ -208,6 +203,39 @@ class AgentLoop:
             stream_retry_max = 3
         # 同步LLM层重试次数：网络/5xx/429 与流中断重试统一由同一配置值控制
         self._llm.set_retry_count(stream_retry_max)
+        # 绑定会话代际：之后每次 append 都会比对，一旦用户切了会话就拒写。
+        # 不绑定会怎样（用户报障的 P0）：工具执行中切会话，`_cancel_and_wait_turn`
+        # 只等 3 秒，串口/SSH 这类底层超时几十秒的工具等不到收口 —— 工具的
+        # 声明留在旧会话、结果写进新会话，成为孤儿 tool_result，该会话从此 400。
+        self._msg_manager.bind_generation()
+        try:
+            self._run_loop(
+                stream, goal_mode=goal_mode, force_final=force_final,
+                goal_task=goal_task, round_budget_left=round_budget_left,
+                stream_retry_max=stream_retry_max)
+        finally:
+            # 无论正常/异常/中断都必须解绑：不解绑会让下一轮沿用旧代际
+            # （代际早已变过），整轮 append 全被判过期而丢弃。
+            self._msg_manager.unbind_generation()
+
+    def _run_loop(self, stream, goal_mode: bool, force_final: bool,
+                  goal_task: str, round_budget_left: int,
+                  stream_retry_max: int):
+        """内循环主体（从 run() 抽出来，只为了给代际绑定套上 try/finally）。
+
+        **本轮的所有可变状态必须在这里初始化**：它们是 while 循环的局部变量，
+        放在 run() 里初始化会让本函数读到未赋值的名字
+        （实测：`cannot access local variable 'used_tools'`，整轮直接崩）。
+        """
+        stream_interrupted_retries = 0  # 响应流中断（无完成标记）的自动重试计数
+        overflow_compacted = False      # 本次 run 内是否已做过溢出恢复压缩（重发再溢出则放弃）
+        content_folds = 0               # 本次 run 内内容审核恢复的折叠条数（上限 CONTENT_REJECT_MAX_FOLDS）
+        folded_tool_ids = set()         # 本次 run 内已折叠的 tool_call_id（防同一结果被反复选中）
+        used_tools = False              # 本次 run 内是否调用过工具（风格提醒：干活轮不算讨论）
+        # 消息结构错误的重试配额（跨轮累计，不随 chunk 循环重置）：
+        # 修一次就够了（repair 删孤儿结果是幂等的），修完还报同样的错说明
+        # 另有原因，再重试只是刷屏。见下面 invalid_structure 分支。
+        structure_retries = 0
         while True:
             # a0. 运行中自查：占比超阈值时先压缩再发本次请求
             #     （AI 自我运行期间不经过用户轮边界；占比由每轮 usage 到达时刷新）
@@ -233,6 +261,7 @@ class AgentLoop:
             parsed_finish_reason = None
             stream_interrupted_info = None  # LLM层上报的流中断信息（kind/detail）
             content_reject_detail = None    # LLM层上报的内容审核拦截详情（原错误文案）
+            structure_error_detail = None   # LLM层上报的消息结构错误详情（400 的另一类）
             thinking_text = None            # 本轮思考内容（仅工具轮回传，学官方 harness 规则）
             thinking_signature = None       # 本轮思考签名（Claude 回传思考块必需）
 
@@ -310,6 +339,12 @@ class AgentLoop:
                         # 内容审核拦截：跳出chunk循环，走折叠恢复分支
                         content_reject_detail = chunk.get("detail", "")
                         break
+                    if parsed_finish_reason == "invalid_structure":
+                        # 消息结构错误（典型：tool_result 找不到对应 tool_use）。
+                        # 与内容审核完全两回事：不改数据，改**结构**。走下面
+                        # 的修复分支（repair 删孤儿结果后重发一次）。
+                        structure_error_detail = chunk.get("detail", "")
+                        break
                     if parsed_finish_reason == "error":
                         # 拒连 / 401 / 429 / 5xx 重试耗尽都汇总到这里：本轮是失败收尾，
                         # 标成 error 才能让界面显示「本轮出错」+「重试这一条」
@@ -363,6 +398,47 @@ class AgentLoop:
                     balance=self._stats.balance,
                     thinking_effort=self._thinking_label,
                             balance_fresh=self._stats.balance_fresh,
+                )
+                return
+
+            # ── 消息结构错误恢复：修结构后重发一次 ──
+            # 400 里有一类**与内容无关**的错误：`tool_result` 找不到对应的
+            # `tool_use`（Anthropic 协议）、角色不交替、tool 后面直接跟 user…
+            # 典型来源是我们自己的 bug：工具执行期间用户切会话/建分支，
+            # 声明与结果被写进不同会话文件（实测 b.json / b/b_g.json）。
+            # 处理方式必须是「修结构」，绝不能折叠内容——折叠既治不好，
+            # 又会把用户几条工具结果原文改写掉（这正是本轮报障的第二个 bug）。
+            # repair() 在循环开头已经会删孤儿结果，所以这里 continue 即可生效。
+            if parsed_finish_reason == "invalid_structure":
+                if structure_retries < 1:
+                    structure_retries += 1
+                    if self._logger:
+                        self._logger.warning(
+                            "agent_loop",
+                            f"消息结构错误，修复后重发(第{structure_retries}次): "
+                            f"{structure_error_detail}")
+                    _notice(stream,
+                        "\n会话消息结构有异常，已修复后重试\n")
+                    continue
+                # 修过一次还报同样的错：说明不是孤儿结果能解释的，如实收尾
+                if self._logger:
+                    self._logger.error(
+                        "agent_loop",
+                        f"消息结构错误(已修复{structure_retries}次仍失败): "
+                        f"{structure_error_detail}")
+                _notice(stream,
+                    f"\n[错误: 会话消息结构异常，发送失败: {structure_error_detail}]\n"
+                )
+                _mark_failed(stream,
+                             f"会话消息结构异常（已自动修复但未解决）：{structure_error_detail}")
+                stream.finish(
+                    self._stats.input_tokens,
+                    self._stats.output_tokens,
+                    cache_ratio=self._stats.cache_hit_ratio,
+                    cost=self._stats.cost,
+                    balance=self._stats.balance,
+                    thinking_effort=self._thinking_label,
+                    balance_fresh=self._stats.balance_fresh,
                 )
                 return
 
@@ -442,12 +518,18 @@ class AgentLoop:
 
             # 有tool_call → 执行工具 → 继续内循环
             if tool_calls_result:
-                self._msg_manager.append_assistant(
+                if not self._msg_manager.append_assistant(
                     "".join(content_parts) or None,
                     tool_calls=tool_calls_result,
                     thinking=thinking_text or None,
                     thinking_signature=thinking_signature or None,
-                )
+                ):
+                    # 用户在这批工具「刚算出来、还没写进去」之间切了会话：
+                    # 这条声明属于上一段对话，写进去只会污染新会话。
+                    # 立刻停下这一轮（继续跑等于白烧 token，结果一条都写不进）。
+                    _notice(stream, "\n会话已切换，本轮结果已丢弃\n")
+                    stream.abort()
+                    return
 
                 tool_results = self._dispatcher.execute_tool_calls(tool_calls_result, stream)
 
@@ -477,8 +559,15 @@ class AgentLoop:
                         return
 
                 # 回传工具结果
+                results_written = True
                 for tc_id, result in tool_results:
-                    self._msg_manager.append_tool_result(tc_id, result)
+                    # 每条都检查返回值：**这里就是会话被劈开的地方**。
+                    # 工具执行期间用户切了会话 → 代际变了 → 拒绝写入，
+                    # 否则这些结果就成了新会话里「没有声明的孤儿 tool_result」，
+                    # 下次请求必被 400 拒（Anthropic 强校验 tool_use 紧邻）。
+                    if not self._msg_manager.append_tool_result(tc_id, result):
+                        results_written = False
+                        break
                     # 工具结果携带图片（Read 读到图片文件）时，紧跟一条 user 消息挂图。
                     # 为什么必须另起一条：OpenAI 协议的 role=tool 消息 content 只能是
                     # 字符串，装不下图片块。带上 tool_call_id 让 Anthropic 转换层能把
@@ -487,6 +576,11 @@ class AgentLoop:
                     images = getattr(result, "images", None)
                     if images:
                         self._msg_manager.append_user_images(images, tool_call_id=tc_id)
+                if not results_written:
+                    # 会话已切走：剩下的结果一条都不写，直接收尾这一轮。
+                    _notice(stream, "\n会话已切换，本轮工具结果已丢弃\n")
+                    stream.abort()
+                    return
 
                 # （本轮的 usage 落账已上移至工具执行前统一处理）
 
@@ -561,11 +655,16 @@ class AgentLoop:
                 # 思考内容同样落盘（供会话记录留存）；回传侧对纯文本轮有保护
                 # （llm._prepare_messages / _convert_messages 只回传工具轮），
                 # 所以这里带上 thinking 不会把纯文本轮的思考塞回请求。
-                self._msg_manager.append_assistant(
+                if not self._msg_manager.append_assistant(
                     "".join(content_parts),
                     thinking=thinking_text or None,
                     thinking_signature=thinking_signature or None,
-                )
+                ):
+                    # 正文也不写：这一轮属于上一段对话，写进去会让新会话凭空
+                    # 冒出一段与问题无关的回答（比丢失更难解释）。
+                    _notice(stream, "\n会话已切换，本轮回复已丢弃\n")
+                    stream.abort()
+                    return
             else:
                 # 空回复
                 self._dump_empty_debug(content_parts, tool_calls_result, parsed_finish_reason, call_usage)

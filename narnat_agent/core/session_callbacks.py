@@ -12,6 +12,7 @@ SessionManager 持有共享资源，状态对象通过 manager 引用访问。
 import hashlib
 import json
 import os
+import threading
 import time
 from typing import Optional, List, Dict, Any, Callable, Set, Tuple
 
@@ -239,7 +240,7 @@ def _check_reserved_session_name(name: str) -> str:
     return ""
 
 
-def _quick_session_name(msgs, limit: int = 24) -> str:
+def _quick_session_name(msgs, limit: int = 10) -> str:
     """用首条用户消息截断成会话名，不调用 LLM。
 
     「新建对话」时的兜底保存必须**立刻返回**：走 LLM 命名要同步等一次网络，
@@ -403,10 +404,25 @@ class NoSession(SessionState):
         if session_exists(self._mgr.narnat_dir, name):
             return (f"[错误: 会话 '{name}' 已存在，请换名保存，或 /cd {name} 进入已有会话"
                     f"（如需覆盖请先 /rm {name} 删除）]")
-        err = save_session(self._mgr.narnat_dir, name, msgs)
+        # 用「占名」而不是「预检 + 直接写」（P0，第五轮 R40 实测）：
+        # 原来这里是 session_exists 预检通过后 save_session(name)（无 expected_signature），
+        # 于是两个后端进程（两个 VSCode 窗口）同时建同名会话时**都通过预检、
+        # 都收到成功回执**，后 os.replace 的那个把先写的整段覆盖掉 ——
+        # 用户在窗口 A 存的东西在窗口 B 保存后凭空消失，而且两边都显示「已保存」。
+        # 传 expected_signature="" 表示「期望这个名字此刻还不存在」：
+        # save_session 会在写盘前校验，已被别人抢先就 conflict → 改落 "X (2)"，
+        # 谁的内容都不会丢。这是该函数本来就有的语义，只是这里没用。
+        out: Dict[str, Any] = {}
+        err = save_session(self._mgr.narnat_dir, name, msgs,
+                           expected_signature="", result=out)
         if err:
             return readable_save_error(err)
-        new_state = self._mgr.create_root_state(name)
+        saved = out.get("name") or name
+        if out.get("conflict") and saved != name:
+            # 抢名失败但内容已另存：必须告诉用户实际存到了哪个名字，
+            # 否则他之后按原名 /cd 会进到别人的会话里。
+            _report_conflict_notice(saved)
+        new_state = self._mgr.create_root_state(saved)
         self._mgr.switch_state(new_state)
         return ""
 
@@ -608,21 +624,48 @@ class RootSession(SessionState):
         （另一个窗口/后端）也在这个会话里写，直接覆盖会让对方刚写的那一整段
         静默消失。此时 save_session 改为另存成 "X (2)"，这里把状态与提示
         一并切到新名字（否则下一轮又会另存一份）。
+
+        ## 「自己人」不能判成「另一个实例」（实测过的假警报）
+
+        同一进程里有两条保存路径：轮末自动保存（`agent.py` 的 `on_auto_save`）
+        和用户 `/save`（RPC 主线程）。两者在**同一个旧 `_sig`** 上先后进入
+        `save_session`，中间只隔一次 `json.dump`（2MB ≈16ms）。后落盘的那次
+        看到指纹已变，`_write_session_json` 报 `raced=True`，于是被判成
+        「另一个实例正在写」→ 另存 `X (2)` + 弹假警报。实测确定性复现 3/3，
+        自然时序 6/6；等 400ms 再保存则 0/3（窗口就那么大）。
+
+        所以这里做的是**串行化**：`_persist` 整段（读 `_sig` → 写盘 → 写回 `_sig`）
+        放进一把按会话名分片的锁里。后进的那次看到的 `_sig` 已经是前一次写完后
+        更新过的值，指纹自然对得上，不会再误判，也不会另存。
+
+        锁按会话名分片而不是全局：保存 A 不能阻塞保存 B。锁内只有一次
+        `json.dump`（2MB ≈16ms），不碰 LLM / 压缩 / 命名。
+
+        跨进程保护一点不退：真·另一个窗口写进来的指纹不会等于本进程的 `_sig`，
+        该冲突的照旧冲突、该另存的照旧另存。
         """
         # 落盘用完整历史（归档 + 当前）：压缩只替换「发给模型的上下文」，
         # 用户看得见的会话文件必须保留压缩前的原文，否则翻历史就少了内容。
         msgs = self._mgr.get_full_messages()
         if len(msgs) > self._msg_count and self._status in ("new", "completed"):
             self._status = "active"
+        # 整段放进按会话名分片的锁里：并发的两次 _persist（轮末自动保存 +
+        # /save）必须串行，后进的那次才能看到前一次刚更新的 _sig，
+        # 从而不会把「自己人刚写的」判成「外部改动」。
+        with self._mgr.persist_lock(self._name):
+            return self._persist_locked(msgs)
+
+    def _persist_locked(self, msgs: List[Dict[str, Any]]) -> str:
+        """`_persist` 的锁内部分（调用方必须已持锁）。"""
         out: Dict[str, Any] = {}
         err = save_session(self._mgr.narnat_dir, self._name, msgs,
                            status=self._status or "active",
                            summary=self._summary,
                            expected_signature=self._sig,
                            result=out)
-        _report_save_error(err)
         self._msg_count = len(msgs)
         if err:
+            _report_save_error(err)
             self._mgr._last_save_error = err
             return err
         self._mgr._last_save_error = ""
@@ -630,7 +673,7 @@ class RootSession(SessionState):
         self._sig = out.get("signature") or self._sig
         if out.get("conflict"):
             self._adopt_saved_name(out.get("name"))
-        return err
+        return ""
 
     def _adopt_saved_name(self, name: Optional[str]) -> None:
         """冲突另存后把状态指到实际写入的那个会话，并告诉用户内容去了哪。"""
@@ -656,10 +699,16 @@ class RootSession(SessionState):
             # 完整历史（归档 + 当前）：与 _persist 同一口径。用压缩后的上下文
             # 另存会让新文件丢掉压缩前的原文（P1，实测）。
             msgs = self._mgr.get_full_messages()
-            err = save_session(self._mgr.narnat_dir, name, msgs)
+            # 同 NoSession.save：用「占名」防跨进程抢名后互相覆盖（P0，R40 实测）。
+            out_new: Dict[str, Any] = {}
+            err = save_session(self._mgr.narnat_dir, name, msgs,
+                               expected_signature="", result=out_new)
             if err:
                 return readable_save_error(err)
-            new_state = self._mgr.create_root_state(name)
+            saved = out_new.get("name") or name
+            if out_new.get("conflict") and saved != name:
+                _report_conflict_notice(saved)
+            new_state = self._mgr.create_root_state(saved)
             self._mgr.switch_state(new_state)
         return ""
 
@@ -922,6 +971,12 @@ class ChildSession(SessionState):
         msgs = self._mgr.get_full_messages()
         if len(msgs) > self._msg_count and self._status in ("new", "completed"):
             self._status = "active"
+        # 同 RootSession：串行化「读指纹 → 写盘 → 写回指纹」，避免自己人误判。
+        # 锁键带父会话名，避免不同父下的同名分支互相阻塞。
+        with self._mgr.persist_lock((self._parent or "") + "/" + self._name):
+            return self._persist_locked(msgs)
+
+    def _persist_locked(self, msgs):
         out: Dict[str, Any] = {}
         err = save_session(self._mgr.narnat_dir, self._name, msgs,
                            parent=self._parent,
@@ -931,16 +986,16 @@ class ChildSession(SessionState):
                            last_summarized_at=self._last_summarized_at,
                            expected_signature=self._sig,
                            result=out)
-        _report_save_error(err)
         self._msg_count = len(msgs)
         if err:
+            _report_save_error(err)
             self._mgr._last_save_error = err
             return err
         self._mgr._last_save_error = ""
         self._sig = out.get("signature") or self._sig
         if out.get("conflict"):
             self._adopt_saved_name(out.get("name"))
-        return err
+        return ""
 
     def _adopt_saved_name(self, name: Optional[str]) -> None:
         """冲突另存后把状态指到实际写入的分支名（仍在同一个父会话下）。"""
@@ -1154,9 +1209,23 @@ class SessionManager:
                  goal_max_rounds: int = 0,
                  project_skill_roots=None,
                  skill_ignore_dirs: tuple = (),
-                 context_reset_func: Callable[[], None] = None):
+                 context_reset_func: Callable[[], None] = None,
+                 logger=None):
         self.narnat_dir = narnat_dir
         self._messages = messages
+        # 同一个会话的「读指纹 → 写盘 → 更新指纹」必须串行。
+        # 谁在并发：轮末自动保存（agent.py 的 on_auto_save，跑在 narnat-agent
+        # 线程）与用户 /save（RPC 主线程）打在同一个 RootSession 上，两者读到
+        # 同一个旧 _sig；先写的那次换掉文件后，后写的就把「自己人刚写的」
+        # 判成「另一个实例改的」→ 另存 X (2) + 弹假警报（实测确定性 3/3）。
+        # 锁按会话名分片（不能用全局锁，否则保存 A 会阻塞保存 B），
+        # 并且**必须把读 _sig 一起圈进来**，只锁写没用。
+        self._persist_locks: Dict[str, Any] = {}
+        self._persist_locks_guard = threading.Lock()
+        # 日志器：只为「载入会话时清掉了 N 条孤儿工具结果」这类**删了用户数据**
+        # 的动作留痕。没有它时 replace_messages 里那行 warning 永远打不出来
+        # （线上用户报「历史里少了几条工具结果」将无从追查）。
+        self._logger = logger
         self._config_dir = config_dir
         self._context_reset = context_reset_func
         self._get_thinking_effort = thinking_effort_getter
@@ -1211,6 +1280,20 @@ class SessionManager:
         """返回 messages 的浅拷贝列表（供状态类读取/保存使用）"""
         return self._messages.view().to_list()
 
+    def persist_lock(self, key: str):
+        """取某个会话的写盘锁（按名分片；同一把锁跨线程共享）。
+
+        只包住 `_persist` 的「读 _sig → save_session → 写回 _sig」这一段，
+        **绝不能**在锁内调 LLM / 压缩 / 命名：那会把 /save 卡在长耗时操作上，
+        而锁的目的只是防止两次覆盖写互相把对方误判成外部改动。
+        """
+        with self._persist_locks_guard:
+            lock = self._persist_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._persist_locks[key] = lock
+            return lock
+
     def get_full_messages(self) -> List[Dict[str, Any]]:
         """返回完整历史（归档 + 当前）的浅拷贝列表，供展示/落盘使用。
 
@@ -1234,6 +1317,22 @@ class SessionManager:
         # 首条系统提示词由拆分解法保证存在且只有一条（缺了就补 config 的）。
         current, archived = split_loaded_history(new_msgs, self._messages.system_prompt)
         self._messages.replace_all(current)
+        # 载入即修结构：会话文件可能是**被劈开**的状态（工具还在跑时切了会话，
+        # assistant 声明与 tool 结果分别落在两个文件里 —— 实测 b.json 有 4 条
+        # 结果、b/b_g.json 有那条声明）。这种状态一旦发出去必然 400
+        # （`tool_result` 找不到对应 `tool_use`），而用户此时还什么都没做。
+        # 在这里修比等下一次发消息再修好：用户切回来就能正常继续，不会先撞一个
+        # 「内容审核拦截」的假警报。
+        dropped = self._messages.drop_orphan_tool_results()
+        if dropped:
+            # SessionManager 没有 _logger（日志在 AutoSaveManager 那侧），
+            # 用 getattr 兜住：这里绝不能因为「打日志」把切换会话搞崩。
+            _lg = getattr(self, "_logger", None) or getattr(self, "logger", None)
+            if _lg is not None:
+                _lg.warning(
+                    "core.session_callbacks",
+                    f"载入会话时清理了 {len(dropped)} 条无对应声明的工具结果"
+                    f"（声明与结果被劈到了不同会话文件）")
         if archived:
             self._messages.archive(archived)
         # 恢复历史会话时占比从 0 开始（历史 token 数未持久化），第一轮回复结束后恢复真实值

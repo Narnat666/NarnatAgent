@@ -187,6 +187,68 @@ def _is_retryable_http(status: int) -> bool:
     return status in (408, 409) or status >= 500
 
 
+def _as_text(content) -> str:
+    """把消息正文规整成字符串 —— 转换层唯一的出口，两套协议都走它。
+
+    ## 为什么必须有这道
+
+    会话文件是普通 JSON，用户可以手改、同步工具可以写坏、旧版本也可能留下脏数据。
+    `content` 一旦不是字符串，原实现会把它**原样塞进请求体**：
+
+        {"role": "user", "content": 12345}          → 真端点 422（DeepSeek 实测）
+        {"role": "user", "content": true}           → 同上
+        {"role": "user", "content": {"text": "…"}}  → 同上
+
+    后果不是"这一条发不出"，而是**该会话从此永久发不出去**：坏消息总在历史里，
+    每一轮新请求都会重发它，用户看到的是"一发消息就报错"，且没有任何线索
+    （`session/switch` 回执还是正常的、条数也对）。
+
+    更隐蔽的一种：`content: 0` 或 `null`。原实现 `content or ""` 把 0 也吞成空串，
+    **静默丢掉一条提问** —— 不报错，但用户会发现"我明明问过这句"。
+
+    ## 规整规则（优先保内容，其次可读）
+
+      · 字符串 → 原样
+      · None / "" → ""
+      · 0 / False → "0" / "False"   ← 不吞掉（原实现的 bug 就在这）
+      · 列表 → 若是标准内容块 `[{"text": …}]` 就拼出文本；否则 JSON 序列化
+      · 字典 / 其它 → JSON 序列化（sort_keys 保证同一份数据每次得到同一串，
+        避免"看起来没变但请求体变了"导致上游缓存失效）
+
+    返回的一定是 `str`，所以调用方不需要再判类型。
+    """
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ""
+    if isinstance(content, bool):
+        # 不用 str(True)="True"/str(False)="False" 之外的花样：保持可预测
+        return str(content)
+    if isinstance(content, (int, float)):
+        return str(content)
+    if isinstance(content, (list, tuple)):
+        # 标准 Anthropic 内容块列表：只取 text 块拼起来（其余块类型在
+        # "content 本该是字符串" 的位置上没有意义）。拼不出东西就整体序列化。
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+            elif isinstance(item, str):
+                parts.append(item)
+        if parts:
+            return "\n".join(parts)
+        try:
+            return json.dumps(list(content), ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            return str(content)
+    if isinstance(content, dict):
+        try:
+            return json.dumps(content, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            return str(content)
+    return str(content)
+
+
 # ── Anthropic 转换层的"开放位置 assistant"占位思考块 ──
 # DeepSeek 思考模式校验：请求中处于"开放位置"的 assistant——尾部 assistant、
 # 或后面紧跟另一条 assistant（连续链前序）——必须携带 thinking 块，否则 400
@@ -222,6 +284,65 @@ def _is_context_overflow(text: str) -> bool:
     """
     lowered = text.lower()
     return any(hint in lowered for hint in _CONTEXT_OVERFLOW_HINTS)
+
+
+# ── 400 的另外两类：结构错误 vs 内容风控 ──
+# 原来**所有** 400 都被当成「内容审核拦截」，于是走折叠恢复（改写工具结果
+# 原文后重发）。实测代价极大：用户切分支后消息被劈到两个文件，上下文里
+# 出现「tool_result 找不到对应 tool_use」的结构错误，服务端回的是
+#   invalid_request_error: unexpected `messages.34.content.4: tool_use_id` ...
+# 我们把它当风控，白折了 5 条工具结果原文（用户数据被永久改写），
+# 最后还报「请求被内容审核拦截」——用户以为自己的内容违规了，实际是格式坏了。
+#
+# 分类原则：**只认明确证据**。命中结构错误特征 → 修结构；命中风控特征 →
+# 才折叠；两样都不命中 → 当普通错误如实上报（不动数据）。
+_STRUCTURE_ERROR_HINTS = (
+    "invalid_request_error",
+    "tool_use_id",
+    "tool_result",
+    "tool_use",
+    "tool_calls",
+    "must have a corresponding",
+    "unexpected `messages",
+    "messages.",          # OpenAI/Anthropic 都按 messages.N 定位出错的条目
+    "roles must alternate",
+    "invalid role",
+    "must be passed back",
+    "content[].thinking",
+)
+
+# 内容风控的措辞。宁可漏判（当普通错误报出来）也不要误判——误判会改写数据。
+_CONTENT_REJECT_HINTS = (
+    "content_filter",
+    "content filter",
+    "content_policy",
+    "sensitive",
+    "responsible ai",
+    "risk control",
+    "内容安全",
+    "内容审核",
+    "违规",
+    "不当内容",
+    "风控",
+)
+
+
+def _classify_400(text: str) -> str:
+    """把 400 归类为 'context_overflow' | 'invalid_structure' | 'content_rejected' | ''
+
+    返回空串 = 认不出来，交给调用方按普通错误处理（**不改数据**）。
+    判定顺序要紧：结构错误优先。两边的特征可能同时出现（服务端会把整份
+    请求摘要放进报错），而「格式坏了」这个结论比「内容有问题」更可操作，
+    也更能保护用户数据不被折叠误伤。
+    """
+    lowered = (text or "").lower()
+    if _is_context_overflow(lowered):
+        return "context_overflow"
+    if any(h in lowered for h in _STRUCTURE_ERROR_HINTS):
+        return "invalid_structure"
+    if any(h in lowered for h in _CONTENT_REJECT_HINTS):
+        return "content_rejected"
+    return ""
 
 
 # ── 认证类失败特征（401 响应归类，给出可操作的短提示）──
@@ -565,7 +686,13 @@ class _OpenAIBackend:
             m.pop("thinking_signature", None)
             # 图片归属标记只服务于 Anthropic 转换层，不属于任何协议字段
             m.pop("image_for_tool_call", None)
+            # 折叠前的工具结果原文（本地存档，供用户取回），不进请求
+            m.pop("folded_original", None)
             images = m.pop("images", None)
+            # 正文一律规整成字符串：脏数据（数字/布尔/字典）原样进请求体会被
+            # 真端点拒收，且坏消息永久留在历史里 → 该会话从此发不出去。
+            if m.get("role") in ("user", "assistant") and "content" in m:
+                m["content"] = _as_text(m.get("content"))
             if (use_rc and m.get("role") == "assistant"
                     and m.get("tool_calls") and thinking is not None):
                 m["reasoning_content"] = thinking
@@ -680,13 +807,30 @@ class _OpenAIBackend:
                             self._logger.warning("core.llm", "API返回400: 上下文超限")
                         yield {"finish_reason": "context_overflow"}
                         return
-                    # 其余 400 归类为内容审核拦截：上层折叠工具结果后重发
-                    # （不匹配错误文案——服务端措辞多变；能否推进由上层"还有无
-                    #  可折叠工具结果"判定，见 agent_loop 的恢复分支）
+                    # 其余 400 按**证据**分类（见 _classify_400）：
+                    #   invalid_structure → 修消息结构；content_rejected → 折叠重发；
+                    #   认不出来 → 当普通错误报出来，绝不动数据。
+                    # 原来这里一刀切当「内容审核」，把结构错误也拖进折叠路径，
+                    # 结果改写掉用户 5 条工具结果原文（实测数据损坏）。
                     if status == 400:
+                        detail = f"{e}{getattr(e, 'body', '')}"
+                        kind = _classify_400(detail)
+                        if kind == "invalid_structure":
+                            if self._logger:
+                                self._logger.warning(
+                                    "core.llm", f"API返回400: 消息结构错误 {detail[:200]}")
+                            yield {"finish_reason": "invalid_structure",
+                                   "detail": detail[:500]}
+                            return
+                        if kind == "content_rejected":
+                            if self._logger:
+                                self._logger.warning("core.llm", "API返回400: 内容审核拦截")
+                            yield {"finish_reason": "content_rejected", "detail": detail[:500]}
+                            return
                         if self._logger:
-                            self._logger.warning("core.llm", "API返回400: 内容审核拦截")
-                        yield {"finish_reason": "content_rejected", "detail": f"{e}"}
+                            self._logger.error("core.llm", f"API返回400(未归类): {detail[:300]}")
+                        yield {"content": f"[错误: API调用失败(400): {detail[:500]}]",
+                               "finish_reason": "error"}
                         return
                     if self._logger:
                         self._logger.error("core.llm", f"API调用失败(不可重试): {e}")
@@ -1027,11 +1171,25 @@ class _AnthropicBackend:
                             self._logger.warning("core.llm", "API返回400: 上下文超限")
                         yield {"finish_reason": "context_overflow"}
                         return
-                    # 其余 400 归类为内容审核拦截：上层折叠工具结果后重发（见 llm 另一后端同款分支）
+                    # 其余 400 按证据分类（同上方另一后端，见 _classify_400）
                     if status == 400:
+                        kind = _classify_400(err_text)
+                        if kind == "invalid_structure":
+                            if self._logger:
+                                self._logger.warning(
+                                    "core.llm", f"API返回400: 消息结构错误 {err_text[:200]}")
+                            yield {"finish_reason": "invalid_structure",
+                                   "detail": err_text[:500]}
+                            return
+                        if kind == "content_rejected":
+                            if self._logger:
+                                self._logger.warning("core.llm", "API返回400: 内容审核拦截")
+                            yield {"finish_reason": "content_rejected", "detail": err_text[:500]}
+                            return
                         if self._logger:
-                            self._logger.warning("core.llm", "API返回400: 内容审核拦截")
-                        yield {"finish_reason": "content_rejected", "detail": err_text[:500]}
+                            self._logger.error("core.llm", f"API返回400(未归类): {err_text[:300]}")
+                        yield {"content": f"[错误: API调用失败(400): {err_text[:500]}]",
+                               "finish_reason": "error"}
                         return
                     if self._logger:
                         self._logger.error("core.llm", f"API调用失败(不可重试): {status} {err_text[:500]}")
@@ -1452,7 +1610,9 @@ class _AnthropicBackend:
             供"最终没有图可发"时退回字符串 content 使用。
         """
         available, notes = _resolve_images(images, self._data_dir, supports_image)
-        text = content or ""
+        # 用 _as_text 而不是 `content or ""`：后者会把 0/False 吞成空串，
+        # 静默丢掉一条真实提问，也会让非字符串 content 原样进请求体（→ 真端点 422）。
+        text = _as_text(content)
         if notes:
             text = (text + "\n" + "\n".join(notes)) if text else "\n".join(notes)
 
@@ -1485,6 +1645,16 @@ class _AnthropicBackend:
                 key = m["image_for_tool_call"]
                 images_by_call.setdefault(key, []).extend(m.get("images") or [])
 
+        # 全部已声明的 tool_use id（供下面过滤孤儿 tool_result）。
+        # 会话被劈成两个文件时（切会话/建分支期间工具还在跑，实测），
+        # 结果在这里而声明在另一个文件里 —— 那种结果发出去必然 400。
+        declared_tool_use = set()
+        for m in messages:
+            for tc in (m.get("tool_calls") or []):
+                tid = tc.get("id")
+                if tid:
+                    declared_tool_use.add(tid)
+
         for msg in messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
@@ -1501,7 +1671,8 @@ class _AnthropicBackend:
                 continue
 
             if role == "user":
-                content = content or ""
+                # 同 _user_blocks 里的理由：不能用 `content or ""`（0/False 会被吞）
+                content = _as_text(content)
                 blocks, text = self._user_blocks(content, images, supports_image)
                 prev = anthropic_msgs[-1] if anthropic_msgs else None
                 if (content and prev is not None and prev["role"] == "user"
@@ -1584,6 +1755,17 @@ class _AnthropicBackend:
 
             elif role == "tool":
                 tc_id = msg.get("tool_call_id", "")
+                # 最后一道闸：没有对应 tool_use 的 tool_result 一律不发。
+                # Anthropic 强校验「每个 tool_result 都要在前一条 assistant 里
+                # 找到 tool_use」，漏一个整份请求 400。repair() 会把它从历史里
+                # 删掉，这里再兜一道 —— 修历史是异步的，发请求是即时的。
+                if tc_id and tc_id not in declared_tool_use:
+                    if self._logger:
+                        self._logger.warning(
+                            "core.llm",
+                            f"跳过无对应 tool_use 的工具结果 {tc_id}"
+                            f"（会造成请求 400；repair 会把它从历史里删掉）")
+                    continue
                 # 该工具调用若携带图片（Read 读到图），从预归集里取出来内嵌
                 tool_images = images_by_call.get(tc_id)
                 blocks = self._tool_result_blocks(tc_id, msg.get("content") or "",
