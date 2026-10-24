@@ -202,6 +202,8 @@ class RpcServer:
             "session/list": self._m_session_list,
             "session/new": self._m_session_new,
             "session/switch": self._m_session_switch,
+            # 历史分页：往前翻更早的一页（session/switch 只给尾页）
+            "session/history": self._m_session_history,
             "session/delete": self._m_session_delete,
             "session/rename": self._m_session_rename,
             "session/explore": self._m_session_explore,
@@ -441,7 +443,8 @@ class RpcServer:
                                                   DEFAULT_THINKING_PASSBACK))},
             "goal": {"enabled": enabled, "maxRounds": int(max_rounds)},
             "plugins": self._plugins(),
-            "session": self._session_brief(),
+            "session": self._session_brief(params.get("historyLimit"),
+                                           params.get("historyMaxItems")),
             "workdir": os.getcwd(),
             # 配置文件的加载警告（暂时取一次即清空）。配置坏掉时后端会按默认
             # 配置继续跑，界面上一切正常，直到发消息收到 401 —— 用户会以为是
@@ -506,7 +509,8 @@ class RpcServer:
         parent = state.session_parent()
         return f"{parent}/{name}" if parent else name
 
-    def _session_brief(self) -> Dict[str, Any]:
+    def _session_brief(self, history_limit: Optional[int] = None,
+                       history_max_items: Optional[int] = None) -> Dict[str, Any]:
         from ..config.session_store import list_sessions_tree
 
         state = self._mgr.state
@@ -532,12 +536,17 @@ class RpcServer:
         # 原来只回 current/children/isChild，界面于是清空且不再回填 ——
         # 用户以为刚才那几十分钟的对话丢了（实测重载后对话区空白，
         # 只剩一行「已连接后端」）。历史本来就在内存里，顺手带走即可。
+        # 历史只带尾页（对齐 dsh：打开会话先拿最后一页，更早的由
+        # session/history 往前翻）。原来的全量回执在大会话上会把面板顶死。
+        brief = {"current": current, "children": children,
+                 "isChild": bool(parent)}
         try:
-            messages = _history_payload(self._mgr.get_full_messages())
+            brief.update(_history_page_fields(self._mgr.get_full_messages(),
+                                              history_limit,
+                                              None, history_max_items))
         except Exception:
-            messages = []
-        return {"current": current, "children": children,
-                "isChild": bool(parent), "messages": messages}
+            brief["messages"] = []
+        return brief
 
     # ── 方法：chat ──
 
@@ -734,7 +743,10 @@ class RpcServer:
             history = self._mgr.get_full_messages()
             payload["current"] = self._current_path()
             payload["isChild"] = bool(state.session_parent())
-            payload["messages"] = _history_payload(history)
+            payload.update(_history_page_fields(history,
+                                               params.get("historyLimit"),
+                                               None,
+                                               params.get("historyMaxItems")))
             # 合并进父会话的「# 子会话 [X] 结论」是 system 消息，_history_payload
             # 对它保留了例外，所以结论就在上面这串 messages 里。
             #
@@ -805,9 +817,13 @@ class RpcServer:
             raise RpcError(-32000, err)
         # autoSaved：新建前那段内容被自动存成的会话名（None=本来就是空对话）。
         # 界面据此告诉用户「已自动保存为 xxx」，而不是让人以为内容丢了。
-        return {"current": None, "messageCount": len(self._mgr.get_messages()),
-                "autoSaved": auto or self._mgr._last_auto_saved,
-                "messages": _history_payload(self._mgr.get_full_messages())}
+        payload = {"current": None, "messageCount": len(self._mgr.get_messages()),
+                   "autoSaved": auto or self._mgr._last_auto_saved}
+        payload.update(_history_page_fields(self._mgr.get_full_messages(),
+                                            params.get("historyLimit"),
+                                            None,
+                                            params.get("historyMaxItems")))
+        return payload
 
     def _preflight_switch_target(self, name: str):
         """只读校验目标会话是否进得去。返回 (target, parent, error)。
@@ -863,12 +879,50 @@ class RpcServer:
         err = self._mgr.on_enter(name)
         if err:
             raise RpcError(-32000, err)
-        return {"current": self._current_path(),
-                "messageCount": len(self._mgr.get_messages()),
-                "isChild": bool(self._mgr.state.session_parent()),
-                "messages": _history_payload(self._mgr.get_full_messages()),
-                # 由 NoSession.enter 填（与 /cd 回执同一份结果）
-                "autoSaved": getattr(self._mgr, "_last_auto_saved", None)}
+        payload = {"current": self._current_path(),
+                   "messageCount": len(self._mgr.get_messages()),
+                   "isChild": bool(self._mgr.state.session_parent()),
+                   # 由 NoSession.enter 填（与 /cd 回执同一份结果）
+                   "autoSaved": getattr(self._mgr, "_last_auto_saved", None)}
+        # 只带尾页 + 三个分页字段：更早的页由 session/history 往前翻。
+        payload.update(_history_page_fields(self._mgr.get_full_messages(),
+                                            params.get("historyLimit"),
+                                            None,
+                                            params.get("historyMaxItems")))
+        return payload
+
+    def _m_session_history(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """取历史的一页（从尾部往前翻）。入参 `{before, limit?, name?}`。
+
+        与 session/switch 那条一次性全量回执互补：打开会话先拿尾页，
+        用户点「加载更早」时用本页的 `before` 作为入参往前翻（对齐 dsh 的
+        `open({limit})` / `prepend({before, limit})`）。
+
+        `name` 只为「翻某个会话更早的一页」而存在：传了就**只读**地按名字
+        加载会话文件，不走 on_enter、不动当前会话状态（翻别人的历史不该把
+        用户切过去）；不传则用当前会话的内存历史（与 switch 同一份数据源）。
+        回执形状与其它历史回执统一：`{messages, hasMore, before, total}`。
+        """
+        name = params.get("name")
+        limit = params.get("limit", params.get("historyLimit"))
+        before = params.get("before")
+        if isinstance(name, str) and name.strip():
+            # 复用「切会话前」那套纯读校验：目标不存在 / 幽灵父 / 损坏文件
+            # 都回加载路径的原话，与 session/switch 的口径一致。
+            target, parent, pre_err = self._preflight_switch_target(name)
+            if pre_err:
+                raise RpcError(-32000, pre_err)
+            if parent is not None:
+                messages, load_err = self._mgr.load_child_with_boundary(target, parent)
+            else:
+                from ..config.session_store import load_session
+
+                messages, load_err = load_session(self._mgr.narnat_dir, target)
+            if load_err:
+                raise RpcError(-32000, load_err)
+        else:
+            messages = self._mgr.get_full_messages()
+        return _history_page(messages, limit, before, params.get("historyMaxItems"))
 
     def _rm_all_sessions(self) -> Dict[str, Any]:
         """面板形态的 /rm --all：把会话列表里所有根会话逐个删掉。
@@ -1185,8 +1239,11 @@ class RpcServer:
             "current": self._current_path(),
             "messageCount": len(self._mgr.get_messages()),
             "isChild": bool(self._mgr.state.session_parent()),
-            "messages": _history_payload(self._mgr.get_full_messages()),
         }
+        payload.update(_history_page_fields(self._mgr.get_full_messages(),
+                                            params.get("historyLimit"),
+                                            None,
+                                            params.get("historyMaxItems")))
         if reentered:
             payload["reentered"] = True
             payload["notice"] = f"已重新进入分支 {name}"
@@ -1216,9 +1273,12 @@ class RpcServer:
         # 界面却还留着刚刚那个分支的全部内容。不给 messages 会怎样（实测）：
         # 用户在「父会话的标题 + 分支的内容」下继续提问；/done 合并出来的
         # 结论在界面上根本看不到（要重载面板才会出现）。
-        return {"merged": True, "current": self._current_path(), "bytes": merged,
-                "isChild": bool(self._mgr.state.session_parent()),
-                "messages": _history_payload(messages)}
+        payload = {"merged": True, "current": self._current_path(), "bytes": merged,
+                   "isChild": bool(self._mgr.state.session_parent())}
+        payload.update(_history_page_fields(messages, params.get("historyLimit"),
+                                            None,
+                                            params.get("historyMaxItems")))
+        return payload
 
     # ── 方法：config ──
 
@@ -1998,7 +2058,12 @@ def _history_payload(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     assistant 项额外带上 `thinking`：该条消息有思考内容时才有这个键
     （字符串，可能很长），没有则整键省略——界面靠键是否存在判断
-    要不要渲染「思考过程」。`text` 始终是正文 content，思考不算正文。
+    要不要渲染「思考过程」。`text` 始终是正文 content，思考不算正文；
+    **只有思考、没有正文**的中间步也会输出，此时 `text` 是空串。
+
+    工具结果配图（`image_for_tool_call` 的 user 消息）整条跳过：它不是
+    用户说的话，画出来会凭空多一条用户气泡，还会被界面当成轮次边界，
+    把同一轮的工具调度劈成两组。
     """
     # 先建「tool_call_id → 输出文本」的索引：工具结果在下一条 role="tool" 消息里，
     # 而我们要把它挂回**发起调用**的那个工具条目上，两条消息距离可能隔好几条
@@ -2024,23 +2089,38 @@ def _history_payload(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         if role not in ("user", "assistant"):
             continue
+        # 工具结果配图（append_user_images 造的 user 消息）**不是用户说的话**。
+        # 它是 `Read` 读到图片文件时，为了让图片能进模型上下文而另起的一条
+        # user 消息，content 只是占位文案「（图片内容见附件）」。
+        # 不跳过会怎样（用户实测报障，附截图）：历史里凭空多出一条用户气泡
+        # 「（图片内容见附件）」——用户根本没发过这句话；更糟的是它 role=user，
+        # 界面按「user 消息 = 轮次边界」划分折叠组，于是**同一轮**的工具调度
+        # 被劈成两组（实测一轮 62 次工具调用被切成「2 次 + 62 次」两段）。
+        # 实时路径也不渲染这种配图（agent_loop 只把它挂给模型），历史保持一致。
+        if role == "user" and m.get("image_for_tool_call"):
+            continue
         # 后端注入的纠偏指令不是用户说的话，不进界面历史（见 _is_internal_notice）。
         if role == "user" and _is_internal_notice(content):
             continue
         calls = m.get("tool_calls")
         has_text = isinstance(content, str) and content.strip()
+        thinking = m.get("thinking") if role == "assistant" else None
+        has_think = isinstance(thinking, str) and thinking.strip()
         if role == "assistant" and isinstance(calls, list) and calls:
             # 中间步（只有 tool_calls、正文为空）不能整条丢掉 —— 丢了就等于
             # 把这一轮的工具调度信息抹掉，这正是原来的 bug。
             pass
-        elif not has_text:
+        elif not has_text and not has_think:
             continue
-        if has_text:
-            item: Dict[str, Any] = {"role": role, "text": content}
-            if role == "assistant":
-                thinking = m.get("thinking")
-                if isinstance(thinking, str) and thinking.strip():
-                    item["thinking"] = thinking
+        # 只有思考、没有正文的中间步也必须输出（第 28 轮用户报障）：
+        # 原来这条 item 只在 has_text 时生成，于是 `content=None + thinking=…`
+        # 的步骤把思考整段丢掉 —— 历史里只剩工具行，「思考」一块都看不到
+        # （用户截图：整段历史只有工具，没有思考）。text 给空串而不是 None，
+        # 界面据此知道「这条只有思考，不建正文气泡」。
+        if has_text or has_think:
+            item: Dict[str, Any] = {"role": role, "text": content if has_text else ""}
+            if has_think:
+                item["thinking"] = thinking
             out.append(item)
         if role == "assistant" and isinstance(calls, list):
             for tc in calls:
@@ -2048,6 +2128,116 @@ def _history_payload(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 if entry is not None:
                     out.append(entry)
     return out
+
+
+# 历史分页的缺省页大小（对齐 dsh 的 DEFAULT_MAX_MESSAGES = 50）。
+# 不设页大小会怎样：最大的会话有 1649 条消息，session/switch 一次回几十 MB
+# JSON，界面再一次性建上千个 DOM 节点，面板卡住/白屏（用户报障原文：
+# 「打开一个历史对话后，不用都加载成功…按需加载」）。
+_HISTORY_PAGE_LIMIT = 50
+# 单页上界。用户/客户端传大数值时也不能把「分页」退化成全量。
+_HISTORY_PAGE_LIMIT_MAX = 500
+# 单页**条目**硬上限：`limit` 数的是正文条数，一轮里的工具条目全都附带着进来，
+# 所以光靠它拦不住「一条 user 塞下整段任务」的会话。实测用户报障的那个会话
+# （Narnat Agent 25轮测试与70项修复）1649 条 messages、扁平 1355 条里
+# `user` 只有 1 条 —— 数满 50 条正文后左移到最近的 user，只有一个 user
+# 就一直走到头，一页 = 全量 1355 条，分页等于没做（R29 遗留风险，R30 收敛）。
+_HISTORY_MAX_ITEMS = 300
+_HISTORY_MAX_ITEMS_MAX = 2000
+
+
+def _history_page(messages: List[Dict[str, Any]], limit: Optional[int] = None,
+                  before: Optional[int] = None,
+                  max_items: Optional[int] = None) -> Dict[str, Any]:
+    """取历史的一页（从尾部往前翻），对齐 dsh 的 paginate()。
+
+    扁平列表仍由 `_history_payload` 产出 —— 这一层不重复任何过滤口径
+    （system 子会话结论、只有思考的中间步、配图 user 消息跳过、工具条目的
+    真实顺序），只负责「切哪一段」。
+
+    ## 切点为什么要对齐轮边界
+
+    页边界落在一轮中间时（例如把 user 提问切到上一页、工具与回答留在本页），
+    界面按「user 消息 = 轮次边界」分组，半轮会被画成一个独立的折叠组，
+    用户看到的是「同一轮被劈成两截」。所以数满 `limit` 后，若 `out[start]`
+    不是 user，就往左移到最近的 user 条目。
+
+    ## 轮对齐之后还要按条目数收敛（`max_items`）
+
+    轮对齐是**次要优化**，不能反过来把分页废掉：历史里 `user` 极少而工具极多
+    的会话（一条 user 里塞下整段 25 轮任务，实测 1355 条扁平条目里只有 1 条
+    user）左移会一直走到头，一页就是全量。所以对齐完之后若本页条目数超过
+    `max_items`，直接放弃轮对齐按条目切 —— 打开会话时建的 DOM 数量有上界，
+    是分页的首要目的。劈轮的副作用（页首不是 user）界面能容错：那串工具会被
+    `renderHistory` 收成一个折叠组，点「加载更早」合并重画后页边界自然消失。
+
+    ## 返回
+
+    `{"messages", "hasMore", "before", "total"}`
+      · `messages`：本页条目（形状与全量列表逐条一致）
+      · `hasMore`  ：还没有更早的页（`start > 0`）
+      · `before`   ：本页在完整历史里的起点索引，就是下一次翻页的入参
+      · `total`    ：全量条数（界面喂给 `historyDrawn` 判据，见 ui-full.html）
+    """
+    out = _history_payload(messages)
+    total = len(out)
+    # limit 钳制到 [1, 500]：0/负数/超大值都不该抛异常，也不该退化成全量。
+    try:
+        n = _HISTORY_PAGE_LIMIT if limit is None else int(limit)
+    except (TypeError, ValueError):
+        n = _HISTORY_PAGE_LIMIT
+    n = max(1, min(_HISTORY_PAGE_LIMIT_MAX, n))
+    try:
+        end = total if before is None else max(0, min(int(before), total))
+    except (TypeError, ValueError):
+        end = total
+    # 从 end-1 往前数 user/assistant 条目，数满 n 即停。
+    # 只数这两类：工具条目附属于它所在的那一轮，不单独算一页的份额。
+    start = 0
+    seen = 0
+    i = end - 1
+    while i >= 0:
+        if out[i].get("role") in ("user", "assistant"):
+            seen += 1
+            if seen >= n:
+                start = i
+                break
+        i -= 1
+    # 切点对齐轮边界：start 落在轮中间就往左移到最近的 user。
+    # 前面一条 user 都没有时（历史开头就是工具/正文）移不过去，保持原样。
+    if 0 < start < total and out[start].get("role") != "user":
+        j = start
+        while j > 0 and out[j].get("role") != "user":
+            j -= 1
+        if out[j].get("role") == "user":
+            start = j
+    # 条目硬上限：轮对齐可能把一整段「只有 1 条 user」的历史全并进来，
+    # 这时放弃对齐、直接按条目切（理由见函数头 JSDoc）。
+    try:
+        cap = _HISTORY_MAX_ITEMS if max_items is None else int(max_items)
+    except (TypeError, ValueError):
+        cap = _HISTORY_MAX_ITEMS
+    cap = max(1, min(_HISTORY_MAX_ITEMS_MAX, cap))
+    if end - start > cap:
+        start = max(0, end - cap)
+    return {"messages": out[start:end], "hasMore": start > 0,
+            "before": start, "total": total}
+
+
+def _history_page_fields(messages: List[Dict[str, Any]],
+                         limit: Optional[int] = None,
+                         before: Optional[int] = None,
+                         max_items: Optional[int] = None) -> Dict[str, Any]:
+    """`_history_page` 结果摊平成回执字段（各 RPC 回执同一层新增三项）。
+
+    `messages` 仍是列表（尾页），形状不变 —— 界面不必适配；另外三项让界面
+    知道「后面还有多少 / 下一页从哪翻 / 全量共几条」。
+    """
+    page = _history_page(messages, limit, before, max_items)
+    return {"messages": page["messages"],
+            "historyHasMore": page["hasMore"],
+            "historyBefore": page["before"],
+            "historyTotal": page["total"]}
 
 
 # 单条工具输出在历史里的长度上限。

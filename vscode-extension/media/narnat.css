@@ -531,7 +531,10 @@ body[data-real="true"] .demo-tip{display:none}
    实测 32 行 → 显示成 1 行、高度 840px vs 应 1701px。 */
 .msg[data-role="user"] .text{
   max-width:min(520px,88%);
-  padding:8px 14px;border-radius:16px;
+  /* 圆角与内距对齐 dsh 的对话气泡（MessageItem.module.css：radius-xl 20px、
+     padding 10px 16px、宽度上限 82%）：18px 在实际宽度 249~520px 的气泡上
+     与 20px 视觉等价，但不至于在小气泡上被吃成半圆。 */
+  padding:9px 15px;border-radius:18px;
   background:var(--bubble);
   white-space:pre-wrap;
   /* 长串不换行的内容（URL、文件路径、base64）在 pre-wrap 下不会自动断，
@@ -725,13 +728,39 @@ body[data-real="true"] .demo-tip{display:none}
   padding-left:8px;border-radius:4px;cursor:pointer;
   font-size:12px;line-height:24px;
 }
-.row:hover{background:var(--bg-hover)}
-.row .caret{flex:none;width:13px;font-size:8px;color:var(--fg-faint);transition:transform .1s}
-.row[data-open="true"] .caret{transform:rotate(90deg)}
+.row:hover{background:color-mix(in srgb, var(--fg) 6%, transparent)}
+/* 行首图标槽：语义图标与 chevron 叠在同一个 16px 盒里（dsh 的 DisclosureRow：
+   `.leading` 16px 盒 + 14px 字形 + `.iconIdle` ↔ `.chevronHover` 透明度互换）。
+   盒子尺寸固定，两者切换时行内文字不左右跳动。 */
+.row .caret{
+  flex:none;position:relative;width:16px;height:16px;margin-right:4px;
+  display:inline-flex;align-items:center;justify-content:center;
+  color:var(--fg-faint);
+}
+.row .caret > svg{
+  position:absolute;inset:0;margin:auto;
+  transition:opacity .1s ease, transform .12s ease;
+}
+/* 静止：显示语义图标，chevron 隐藏 */
+.row .caret .row-ic{opacity:1}
+.row .caret .caret-ic{opacity:0;transform:rotate(0deg)}
+/* hover：语义图标退场、chevron 入场（只到这一档，不铺整行底色） */
+.row:hover .caret .row-ic{opacity:0}
+.row:hover .caret .caret-ic{opacity:1}
+/* 展开：chevron 常显并转向下（收起是向右） */
+.row[data-open="true"] .caret .row-ic{opacity:0}
+.row[data-open="true"] .caret .caret-ic{opacity:1;transform:rotate(90deg)}
+.row:hover .caret{color:var(--fg-dim)}
 .row .name{flex:none;color:var(--fg-dim);padding-right:8px}
 /* 名称与摘要之间的小圆点分隔（dsh 的 `name · summary`）。
-   只加在工具行：思考行的标题本来就是「思考 3.2s · 616 字」，再加就多了一个点。 */
-.tools .row .name::after{content:"·";margin-left:8px;color:var(--fg-faint)}
+   只加在工具行：思考行的标题本来就是「思考 3.2s · 616 字」，再加就多了一个点。
+   用 2px 圆点而不是「·」字符：字符点的大小/基线随字体变（与 chevron 同一个
+   病根），而 dsh 的 ReasoningRow / MessageItem 都用 `width:2px;height:2px;
+   border-radius:1px` 的实体点。 */
+.tools .row .name::after{
+  content:"";display:inline-block;width:2px;height:2px;border-radius:1px;
+  margin-left:8px;vertical-align:middle;background:currentColor;opacity:.5;
+}
 .row .arg{
   /* 摘要是用户要读的内容（命令、路径），不能压到最淡那一档 */
   flex:1;min-width:0;color:var(--fg-dim);
@@ -768,7 +797,7 @@ body[data-real="true"] .demo-tip{display:none}
 .dot-anim::after{content:"…";animation:dots 1.2s steps(4,end) infinite}
 @keyframes dots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
 
-.slot{display:none;padding:4px 0 12px 21px}
+.slot{display:none;padding:4px 0 12px 24px}
 .row[data-open="true"] + .slot{display:block}
 /* 工具行的展开卡片按 dsh 的 4px 缩进贴着行首，不再用 21px 的正文缩进 */
 .tools .slot{padding:2px 0 12px 4px}
@@ -822,7 +851,10 @@ body[data-real="true"] .demo-tip{display:none}
 }
 .io .snippet .ln{padding:0}
 .io .snippet .foot{padding-left:0;padding-right:0}
-/* 命令块右上角的复制按钮：只有代码块与命令提供复制 */
+/* 工具卡片右上角的复制按钮。哪些工具给，见 JS 的 IO_COPY_TOOLS：
+   口径跟 dsh 一致（只有 Read / 命令 / diff / 搜索 这四类卡片带复制控件），
+   其余工具（WebSearch / MCP / Serial / 未知工具）不给 —— 每行两个按钮
+   反而看不出哪个值得点。按钮默认透明，hover 或键盘聚焦才显形。 */
 .io-copy{
   flex:none;align-self:flex-start;font:inherit;font-family:var(--font);
   font-size:10px;color:var(--fg-faint);border:1px solid transparent;
@@ -1796,27 +1828,40 @@ body[data-drawer="true"] #toBottom{display:none}
 .turn-proc{margin:2px 0 6px}
 .tp-row{
   display:flex;align-items:center;gap:6px;width:100%;
-  padding:7px 2px 8px;border:none;background:none;
+  /* 行高节奏对齐工具行（dsh 的 DisclosureRow 是 24px 单行）：原来是 7/8px
+     上下内距 + 1.7 行高 ≈ 36px，比它下面任何一条工具行都高，一屏里
+     折叠行显得笨重。展开时再多留一点（5→12），让标题与内容分开。 */
+  padding:5px 2px 6px;border:none;background:none;
   color:var(--fg-faint);font:inherit;font-size:12.5px;
   text-align:left;cursor:pointer;
-  /* 展开时标题下方多留 6px（8→14），抄 dsh 的 `[aria-expanded=true]{padding-bottom:8px}`：
+  /* 展开时标题下方多留 6px（6→12），抄 dsh 的 `[aria-expanded=true]{padding-bottom:8px}`：
      不加的话标题和展开内容贴在一起，看起来像同一行被拆断。 */
   transition:color .1s ease, padding-bottom .11s cubic-bezier(.4,0,.2,1);
 }
-.turn-proc[data-open="true"] .tp-row{padding-bottom:14px}
+.turn-proc[data-open="true"] .tp-row{padding-bottom:12px}
 .tp-row:hover{color:var(--fg-dim)}
 .tp-caret{
-  flex:none;font-size:10px;line-height:1;
-  transition:transform .12s;transform-origin:50% 50%;
+  flex:none;margin-left:auto;display:inline-flex;align-items:center;justify-content:center;
+  transition:transform .12s ease;transform-origin:50% 50%;
 }
-.turn-proc[data-open="true"] .tp-caret{transform:rotate(90deg)}
-.tp-label{flex:none;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 收起态：向下的 chevron 转 90° 变成「向右」；展开态转回来朝下。
+   与 dsh 的 TurnProcessNodeView 同一个语义（它的 chevron 常显在右侧）。 */
+.tp-caret .tp-caret-ic{display:block}
+.turn-proc[data-open="false"] .tp-caret{transform:rotate(-90deg)}
+.turn-proc[data-open="true"] .tp-caret{transform:rotate(0deg)}
+/* 主标题实一档、副标题留淡：一行里只允许一个「主」。
+   原来两者同色（都 faint），只靠字号差 1px 分层，扫过去是一片灰。 */
+.tp-label{
+  flex:none;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--fg-dim);
+}
 /* 副标题：类别短语（「已读取文件并搜索代码」）。主标题改计数式之后，
    这一句不再承担「有多少」的职责，只补充「干了什么类别的事」。
    放在主标题右侧、可无限收缩——窄面板（249px）下先让位给计数与耗时。 */
 .tp-sub{
   flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   font-size:11.5px;color:var(--fg-faint);opacity:.8;
+  margin-right:6px;
 }
 /* 耗时用等宽 + 数字对齐，dsh 也是这么处理的：数字跳动时行宽不变 */
 .tp-dur{
@@ -1825,12 +1870,24 @@ body[data-drawer="true"] #toBottom{display:none}
 }
 .tp-meta{
   margin-left:auto;flex:none;font-family:var(--mono);font-size:10px;color:var(--fg-faint);
+  margin-right:6px;
 }
 /* 被打断 / 失败时摘要行用对应色的左边框条，读起来一眼能分 */
 .turn-proc[data-reason="cancelled"] .tp-row,
 .turn-proc[data-reason="aborted"] .tp-row,
 .turn-proc[data-reason="interrupted"] .tp-row{color:var(--warn)}
 .turn-proc[data-reason="error"] .tp-row{color:var(--err)}
+/* 历史分页的「加载更早」入口（对齐 dsh 的 chat.loadOlder）。
+   刻意做得安静：12px、居中、无边框，只是对话区顶部的一行小字——
+   它不是主操作，不该和正文/工具行抢注意力，也不该做成大按钮。 */
+.hist-more{
+  display:block;width:100%;margin:8px 0;
+  padding:0;border:none;background:none;
+  font:inherit;font-family:var(--font);font-size:12px;line-height:1.7;
+  text-align:center;color:var(--fg-faint);cursor:pointer;
+}
+.hist-more:hover{color:var(--fg-dim)}
+.hist-more[disabled]{cursor:default;color:var(--fg-faint);opacity:.6}
 /* 展开内容。高度由 JS 动画驱动（见 tpCollapse/tpReveal），
    所以这里不能再写 display:none/block 的开关 —— 那会让高度过渡失效。
    收起态用 hidden 属性（动画结束后才加，这样收缩过程看得见）。 */

@@ -25,6 +25,10 @@ const MESSAGE_METHODS = {
   sessionRename: 'session/rename',
   sessionExplore: 'session/explore',
   sessionDone: 'session/done',
+  /* 历史分页：界面点「加载更早」时往前翻一页（server.py 的 session/history）。
+     这张表是严格白名单（dispatch 里 MESSAGE_METHODS[msg.type] 取不到就 return），
+     没登记 = 消息被静默丢弃，界面永远等不到回执、按钮卡在「加载中…」。 */
+  sessionHistory: 'session/history',
   configSet: 'config/set',
   /* 设置面板用的三条。不需要配置面板的人也会走到这里 —— 未注册的类型
      会落到 dispatch 的 catch 里，所以必须一起登记，否则报「未知类型」。
@@ -196,6 +200,7 @@ const RECEIPT_TYPES = {
   chat: 1, cancel: 1, sessionList: 1,
   sessionNew: 1, sessionSwitch: 1, sessionDelete: 1,
   sessionRename: 1, sessionExplore: 1, sessionDone: 1,
+  sessionHistory: 1,
   command: 1, configSet: 1, confirmReply: 1
 };
 
@@ -1719,6 +1724,13 @@ async function dispatch(type, method, params) {
       broadcast({ type: 'session/list', params: result });
       return;
     }
+    if (type === 'sessionHistory') {
+      // 历史分页回执单独一条类型：它只有「更早一页」这一件事要说，
+      // 混进 session/result 会被会话切换那套渲染路径接管（会走 enterSessionFrom
+      // 整段清屏重画，用户刚点的「加载更早」反而把当前内容冲掉）。
+      broadcast({ type: 'history/result', params: result || {} });
+      return;
+    }
     if (type === 'sessionSwitch' || type === 'sessionDelete' ||
         type === 'sessionRename' ||
         type === 'sessionExplore' || type === 'sessionDone' ||
@@ -1787,6 +1799,10 @@ async function dispatch(type, method, params) {
         groups: [], current: null, isChild: false,
         error: '读取会话列表失败：' + message
       } });
+    } else if (type === 'sessionHistory') {
+      // 失败也必须回执：不回的话界面那个「加载中…」按钮永远不还原，
+      // 用户反复点也没用（锁只在回执到达时解开，见 ui-full.html 的 OFFLINE_BLOCKED/回执复位）。
+      broadcast({ type: 'history/result', params: { ok: false, error: message } });
     } else if (type === 'sessionNew' || type === 'sessionSwitch' ||
                type === 'sessionDelete' || type === 'sessionRename' ||
                type === 'sessionExplore' || type === 'sessionDone') {

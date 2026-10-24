@@ -27,6 +27,9 @@
     // 陈旧 key 配对，失败回退时模型按钮显示成 high、下拉连勾都没有（实测）。
     // 而且下拉本身已经把界面改成新值了，离线根本不可能生效。
     configSet: 1,
+    // 历史翻页同样靠回执：离线时发不出去，回执永远不来 —— 按钮会永久停在
+    // 「加载中…」（置灰且点不动），用户只能重开面板。
+    sessionHistory: 1,
     chat: 0, command: 0, cancel: 0
   };
 
@@ -44,6 +47,7 @@
       // 否则那一条永久点不动（实测：离线时点删除→是，条目锁死，
       // 0 请求 0 提示，直到会话列表重画）。
       if (type === 'sessionNew') unlockNewChat();
+      if (type === 'sessionHistory') { HIST_LOADING = false; syncHistMore(); }
       unlockAllSess();
       pendingSwitchTo = '';
       return;
@@ -99,6 +103,21 @@
   //     把整段清空重画
   var historyDrawn = 0;      // 这个 webview 已画过几条后端历史（0=还没画过）
   var historyDrawnFor = '';  // 上面的历史属于哪个会话。会话变了就必须重画
+  /* ---------- 历史分页（对齐 dsh：打开只取尾页 + 顶部「加载更早」） ----------
+     后端 session/switch 与 initialize 只回**尾页**（默认 50 条 user/assistant），
+     更早的由 RPC `session/history` 按 `before` 往前翻。四个状态各有分工：
+       · HIST_HAS_MORE：后端说还有更早的一页 → 才渲染翻页入口
+       · HIST_BEFORE  ：当前已渲染内容在完整历史里的起点索引（下一页的入参）
+       · HIST_TOTAL   ：后端全量条数。**historyDrawn 的语义不变**（仍是「后端
+                        全量历史条数」），所以判据一律拿它比，而不是拿这一页
+                        的条数比 —— 否则「画了尾页」会被当成「历史缩水」。
+       · HIST_LOADING ：正在拉更早一页（按钮置灰，防连点重复请求）
+     HIST_PAGE 是「当前已渲染的合并列表」：翻页时把新的一页拼在前面再整段重画。 */
+  var HIST_HAS_MORE = false;   // 后端还有更早的一页
+  var HIST_BEFORE = 0;         // 当前已渲染的最早一页在完整历史里的起点索引
+  var HIST_TOTAL = 0;          // 后端全量历史条数（喂给 historyDrawn 判据）
+  var HIST_LOADING = false;    // 正在拉更早一页
+  var HIST_PAGE = [];          // 当前已渲染的合并列表（更早的页 + 尾页）
   // 「正在切往哪个会话」：回执回来前挡住连点产生的重复 sessionSwitch
   var pendingSwitchTo = '';
   /**
@@ -176,6 +195,109 @@
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
     });
   }
+
+  /**
+   * 折叠行行首的 chevron（内联 SVG，12px，描边跟随文字色）。
+   *
+   * 原来用的是 `▶` 字形。字形做箭头有三个绕不开的毛病，正是界面「不精致」
+   * 最直观的一处（对照 dsh：它用 `IconChevronRightOutlineRegular` 这套统一
+   * 描边图标，`ui-primitives/src/DisclosureRow.*`）：
+   *   · ▶ 是「播放」语义，不是「展开」；
+   *   · 字形的大小、基线与粗细由字体决定，Segoe UI / 微软雅黑 / VSCode 自带
+   *     字体三种下同一行的箭头粗细都不同，和旁边的细描边文字不在一个色阶上；
+   *   · 无法用 stroke-width 统一成 1.5px 细线，深色主题下看起来是实心块。
+   * 用 SVG 之后粗细、圆角、尺寸都固定，旋转动画也只是 transform。
+   */
+  var CARET_SVG = '<svg class="caret-ic" viewBox="0 0 16 16" width="12" height="12"' +
+    ' aria-hidden="true"><path d="M6 12L9.29289 8.70711C9.68342 8.31658 9.68342 7.68342' +
+    ' 9.29289 7.29289L6 4" fill="none" stroke="currentColor" stroke-width="1"' +
+    ' stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+  /** 向下的 chevron：折叠组的收口指示（dsh 的 IconChevronDownOutlineRegular）。 */
+  var CARET_SVG_DOWN = '<svg class="tp-caret-ic" viewBox="0 0 16 16" width="12" height="12"' +
+    ' aria-hidden="true"><path d="M4 6L7.29289 9.29289C7.68342 9.68342 8.31658 9.68342' +
+    ' 8.70711 9.29289L12 6" fill="none" stroke="currentColor" stroke-width="1"' +
+    ' stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+  /**
+   * 行首的语义图标（dsh 的 `Icon*OutlineRegular` 那套 16×16 / 1px 描边）。
+   *
+   * 用户报障原文：「我们的图标都是 >，你看 dsh，没把鼠标放上去之前每个都是
+   * 有自己的图标的，鼠标放上去后才有这个展开图标」。
+   *
+   * dsh 的做法（`ui-primitives/src/DisclosureRow.tsx` + `ui-tool/src/client/
+   * tool/toolviews/GenericToolCard.tsx`）：
+   *   · 静止态显示**这一步干了什么**的语义图标（搜索 / 阅读 / 命令 / 编辑 / 思考）；
+   *   · hover 时语义图标淡出、chevron 淡入（`css.iconIdle` ↔ `css.chevronHover`）；
+   *   · 展开后固定显示 chevron。
+   * 好处是收起态一列工具行靠图标就能扫出「读了几次、跑了几条命令」，
+   * 而不用逐行读文字；chevron 只在你要点它的时候才出现，不抢注意力。
+   *
+   * 槽位固定 16px（dsh 的 `.leading` 也是 16px 盒 + 14px 字形），所以图标与
+   * chevron 切换时行内文字不会左右跳动。
+   */
+  var ROW_ICONS = {
+    /* 搜索 / 列目录 */
+    search: '<circle cx="6.6" cy="6.5" r="4.6" fill="none" stroke="currentColor"' +
+      ' stroke-width="1"/><path d="M10.3 10.4L14.8 14.9" fill="none"' +
+      ' stroke="currentColor" stroke-width="1" stroke-linecap="round"/>',
+    /* 读取 / 浏览 */
+    read: '<path d="M4.94 5.9h6.12M4.94 9.03h3.34" fill="none" stroke="currentColor"' +
+      ' stroke-width="1" stroke-linecap="round"/><rect x="2.5" y="1.83" width="11"' +
+      ' height="12.35" rx="1.2" fill="none" stroke="currentColor" stroke-width="1"/>',
+    /* 命令 / 终端 */
+    run: '<path d="M3 4l4 4-4 4M9 12h4" fill="none" stroke="currentColor"' +
+      ' stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>',
+    /* 写入 / 编辑 */
+    edit: '<path d="M8.86 2.7H4.2c-.83 0-1.5.67-1.5 1.5v7.6c0 .83.67 1.5 1.5 1.5h7.6' +
+      'c.83 0 1.5-.67 1.5-1.5V7.9" fill="none" stroke="currentColor" stroke-width="1"/>' +
+      '<path d="M7.78 8.24l6.1-6.1" fill="none" stroke="currentColor" stroke-width="1"' +
+      ' stroke-linecap="round"/>',
+    /* 思考 */
+    think: '<path d="M10.29 5.71c2.68 2.68 3.83 5.88 2.57 7.14-1.26 1.26-4.46.11-7.14-2.57' +
+      'C3.03 7.6 1.88 4.41 3.14 3.14c1.26-1.26 4.46-.11 7.14 2.57z" fill="none"' +
+      ' stroke="currentColor" stroke-width="1"/><circle cx="8" cy="8" r=".86"' +
+      ' fill="currentColor"/>',
+    /* 联网 */
+    web: '<circle cx="8" cy="8" r="6.09" fill="none" stroke="currentColor" stroke-width="1"/>' +
+      '<path d="M2.35 8h11.3" fill="none" stroke="currentColor" stroke-width="1"/>' +
+      '<path d="M8 14.09c1.24 0 2.17-2.73 2.17-6.09S9.24 1.91 8 1.91" fill="none"' +
+      ' stroke="currentColor" stroke-width="1"/>',
+    /* 计划 */
+    plan: '<path d="M3.5 4.5l1.2 1.2L7 3.5M3.5 9.5l1.2 1.2L7 8.5M9 5h4M9 10h4"' +
+      ' fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round"' +
+      ' stroke-linejoin="round"/>',
+    /* 兜底：dsh 的 others 用 IconSparkle */
+    other: '<path d="M5.88 3c0 3.33 1.66 5 5 5-3.34 0-5 1.67-5 5 0-3.33-1.67-5-5-5' +
+      ' 3.33 0 5-1.67 5-5z" fill="none" stroke="currentColor" stroke-width="1"' +
+      ' stroke-linejoin="round"/>'
+  };
+
+  /** 工具名 → 语义图标键（口径同 dsh 的 GenericToolCard VARIANT_ICONS）。 */
+  function rowIconKey(name) {
+    var n = String(name || '');
+    if (n === 'Read') return 'read';
+    if (n === 'Grep' || n === 'Glob') return 'search';
+    if (n === 'Shell' || n === 'Terminal' || n === 'Serial') return 'run';
+    if (n === 'Edit' || n === 'Write') return 'edit';
+    if (n === 'WebSearch') return 'web';
+    if (n === 'TodoWrite') return 'plan';
+    if (/^think$/i.test(n)) return 'think';
+    return 'other';
+  }
+
+  /**
+   * 行首图标槽：语义图标 + chevron 两层叠在同一个 16px 盒里。
+   * @param {string} key ROW_ICONS 的键
+   * @returns {string} 槽位的 HTML
+   */
+  function rowGlyph(key) {
+    var d = ROW_ICONS[key] || ROW_ICONS.other;
+    return '<span class="caret">' +
+      '<svg class="row-ic" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">' +
+      d + '</svg>' + CARET_SVG + '</span>';
+  }
+
 
   /* 剪贴板写入的等待上限。宿主通道与本地通道**共用这一个值**（唯一真源）：
      不同值只会在降级时把等待叠起来，用户以为卡死。
@@ -1154,6 +1276,14 @@
     //（实测：/clear 之后重载窗口，历史永远回不来）。
     historyDrawn = 0;
     historyDrawnFor = '';
+    // 分页状态跟着对话区一起复位：「加载更早」按钮已随 convo 消失，若留着
+    // HIST_HAS_MORE=true，下一次渲染会凭空在另一个会话顶上插一个翻页入口
+    //（后端对这个会话可能根本没有更早的页）。
+    HIST_HAS_MORE = false;
+    HIST_BEFORE = 0;
+    HIST_TOTAL = 0;
+    HIST_LOADING = false;
+    HIST_PAGE = [];
     pendingSwitchTo = '';
     lastSentText = '';
     lastOfflineSend = { text: '', ts: 0 };
@@ -3315,6 +3445,17 @@
     // 代码块交互。放在 .row 之前判断：这些按钮不在 .row 里，
     // 但都靠事件委托，顺序错了会被 .row 分支吃掉。
     if (e.target.closest) {
+      // 「加载更早」：历史分页的翻页入口（见 syncHistMore / applyHistoryPage）。
+      // 点它 = 按当前已渲染内容的起点往前再要一页。HIST_LOADING 期间忽略
+      // 重复点击：连点会发出多条同样的请求，回来的页还会被拼两遍。
+      var histMoreBtn = e.target.closest('.hist-more');
+      if (histMoreBtn) {
+        if (HIST_LOADING || !HIST_HAS_MORE) return;
+        HIST_LOADING = true;
+        syncHistMore();
+        post('sessionHistory', { before: HIST_BEFORE, name: CUR });
+        return;
+      }
       // 工具卡片里「… 其余 N 行」的展开入口。
       // 被折起来的中间行以 HTML 字符串挂在 `.more` 节点自己的 __html 上
       // （见 bindMoreHtml）：实时与历史两条路径都挂节点自身，不用先去 toolMap
@@ -6081,7 +6222,7 @@
     wrap.setAttribute('data-open', 'false');
     wrap.setAttribute('data-stream', 'true');
     wrap.innerHTML = '<div class="row" data-open="false" tabindex="0" role="button">' +
-      '<span class="caret">▶</span><span class="name">思考中</span></div>' +
+      rowGlyph('think') + '<span class="name">思考中</span></div>' +
       '<div class="slot"><p></p></div>';
     convo.appendChild(wrap);
     wrap.setAttribute('data-turn-think', '1');
@@ -6434,16 +6575,45 @@
    *
    * @param {string} inText IN 段正文（命令 / 路径 / 参数）
    * @param {?Object} out OUT 段：{ kind:'out'|'diff', lines:Array, foot:string(HTML) }
+   * @param {boolean} copyable 是否给「复制」按钮（见下面的 IO_COPY_TOOLS 口径）
    * @returns {{html:string, more:string}} `more` 是被折起来的中间行 HTML，
    *   要在节点插进 DOM 之后挂到 `.more` 上（见 bindMoreHtml / convo 的 click 委托）。
    */
-  function toolCardHtml(inText, out){
+  /**
+   * 哪些工具的卡片给「复制」按钮。
+   *
+   * 口径对齐 dsh（用户明确要求：「所有复制按钮，你看看 dsh 是否有，如果 dsh 这个
+   * 地方没给复制按钮我们也不给，ai 输出的代码和命令是要给复制按钮的」）。
+   * dsh 只有专门的卡片带复制控件（`packages/client/ui-primitives/src/`）：
+   *   · ReadBlock      → 读取结果（顶部工具栏复制图标）
+   *   · TerminalBlock  → 命令/终端输出（右上「复制」）
+   *   · DiffBlock      → 编辑差异（顶部工具栏复制图标）
+   *   · SearchBlock    → 搜索/列目录结果（右上「复制」）
+   * 而普通工具结果走 `ToolRow` 的 `.ioCard`（IN/OUT 两段纯文本），**没有**复制
+   * 按钮；`WebBlock`、MCP、Serial 也一样没有。
+   *
+   * 所以这里只放这四类对应的工具名，其余（WebSearch / MCP / Serial / Serial
+   * 的自定义名 / mcp__* / 未知工具 / TodoWrite / GoalComplete）一律不给 ——
+   * 每个工具行挂两个按钮，界面上到处是按钮，反而看不出哪个值得点。
+   */
+  var IO_COPY_TOOLS = {
+    Read: 1, Grep: 1, Glob: 1,
+    Shell: 1, Terminal: 1,
+    Edit: 1, Write: 1
+  };
+
+  function toolHasCopy(name){
+    return IO_COPY_TOOLS[String(name || '')] === 1;
+  }
+
+  function toolCardHtml(inText, out, copyable){
+    var copyBtn = copyable ? '<button class="io-copy" type="button">复制</button>' : '';
     var inHtml = '';
     if (inText) {
       inHtml = '<div class="io-sec">' +
         '<span class="io-lb">IN</span>' +
         '<span class="io-tx">' + esc(inText) + '</span>' +
-        '<button class="io-copy" type="button">复制</button>' +
+        copyBtn +
         '</div>';
     }
     var outHtml = '';
@@ -6474,8 +6644,9 @@
         '</div>' +
         /* OUT 段也要能复制：用户想贴给同事的是**渲染出来的输出/diff 文本**，
            不是 IN 段里那条命令或 old_string/new_string。按钮本身与 IN 段同一个
-           类、同一套状态机（点击处理见 convo 的 click 委托，按所在段取正文）。 */
-        '<button class="io-copy" type="button">复制</button></div>';
+           类、同一套状态机（点击处理见 convo 的 click 委托，按所在段取正文）。
+           是否给按钮由 copyable 决定（见 toolHasCopy 的 dsh 口径）。 */
+        copyBtn + '</div>';
     }
     if (!inHtml && !outHtml) return { html: '', more: '' };
     return {
@@ -6515,12 +6686,13 @@
     // 计划行的参数是整份清单，塞进 IN 段只会是一大坨 JSON，跳过
     var inputText = isTodo ? '' : toolInputText(p);
     wrap.innerHTML = '<div class="row" data-open="' + (isTodo ? 'true' : 'false') + '" data-st="running" tabindex="0" role="button">' +
-      '<span class="caret">▶</span>' +
+      rowGlyph(rowIconKey(p.name)) +
       '<span class="name">' + esc(p.label || p.name || '工具') + '</span>' +
       argSpan(sumText) +
       '<span class="meta dot-anim">执行中</span></div>' +
       '<div class="slot">' +
-      (isTodo ? '<div class="todo"></div><div class="extra"></div>' : toolCardHtml(inputText, null).html) +
+      (isTodo ? '<div class="todo"></div><div class="extra"></div>'
+        : toolCardHtml(inputText, null, toolHasCopy(p.name)).html) +
       '</div>';
     convo.appendChild(wrap);
     var entry = {
@@ -6530,6 +6702,7 @@
       isTodo: isTodo,
       input: inputText,
       sum: sumText,
+      copyable: toolHasCopy(p.name),
       todo: isTodo ? wrap.querySelector('.todo') : null,
       extra: isTodo ? wrap.querySelector('.extra') : null
     };
@@ -6681,7 +6854,7 @@
         : (uncertain ? '退出码 0，但输出里有失败' : '完成');
       outSec = { kind: 'out', lines: String(p.output).split('\n'), foot: footText };
     }
-    var card = entry.isTodo ? { html: '', more: '' } : toolCardHtml(entry.input, outSec);
+    var card = entry.isTodo ? { html: '', more: '' } : toolCardHtml(entry.input, outSec, entry.copyable);
     if (entry.isTodo) {
       // 带计划的行：slot 里的 .todo 归 todo/update 独占，这里绝不覆盖 slot，
       // 否则清单会被清空（无论 tool/result 与 todo/update 谁先到）。
@@ -6715,7 +6888,7 @@
       wrap.className = 'tools';
       wrap.setAttribute('data-todo', 'true');
       wrap.innerHTML = '<div class="row" data-open="true" tabindex="0" role="button">' +
-        '<span class="caret">▶</span><span class="name">更新计划</span>' +
+        rowGlyph('plan') + '<span class="name">更新计划</span>' +
         '<span class="arg"></span><span class="meta"></span></div>' +
         '<div class="slot"><div class="todo"></div></div>';
       convo.appendChild(wrap);
@@ -7141,7 +7314,7 @@
       只靠 name 会整段退化成「已调用工具」，用户看不出到底干了什么。
       不认识的名字返回 **null**（不是 `'tools'`）：`'tools'` 是「已调用工具」，
       一条 `weird_mcp_tool` 和一条 `Serial` 混用同一个词，用户永远看不出
-      它到底调了什么。调用方（tpTitle）拿到 null 时改用原始工具名。 */
+      它到底调了什么。调用方（tpPhrase）拿到 null 时改用原始工具名。 */
   function tpActivityName(name, label) {
     var n = String(name || '');
     if (n === 'Read') return 'read';
@@ -7162,19 +7335,20 @@
     if (l === '执行命令') return 'commands';
     if (l === '联网搜索' || l === '搜索网页') return 'webSearch';
     if (l === '更新计划') return 'plan';
-    // 未知：交给 tpTitle 用原始工具名，绝不冒充「已调用工具」
+    // 未知：交给 tpPhrase 用原始工具名，绝不冒充「已调用工具」
     return null;
   }
 
-  /** 组内是否存在真正执行失败的工具行。
-      原来标题完全不看状态，1 条失败 + 3 条成功时标题只写「执行了命令」，
-      失败信息只在整轮 reason==='error' 时出现在右侧 meta 里。 */
-  function tpHasError(moving) {
+  /** 组内执行失败的工具行数（按 .row 数，一个 .tools 里可能有多行）。
+      这是整轮里的**子集**，只能用于计数，不能拿来给整轮定性（见 tpCountLabel）。 */
+  function tpErrorCount(moving) {
+    var n = 0;
     for (var i = 0; i < moving.length; i++) {
       var el = moving[i];
-      if (el.querySelector && el.querySelector('.row[data-st="err"]')) return true;
+      if (!el.querySelectorAll) continue;
+      n += el.querySelectorAll('.row[data-st="err"]').length;
     }
-    return false;
+    return n;
   }
 
   /**
@@ -7202,19 +7376,39 @@
    * 的 `summarizeTurn()` 拼 `{steps} steps · {toolCalls} tool calls`）。
    * 类别短语退到副标题（.tp-sub）：标题回答「有多少东西」，副标题回答「干了什么」。
    *
+   * ## 失败数只能写成「其中 N 次」，不能单独摆在计数旁边
+   *
+   * 用户报障原文：「这里有个失败字样，后面是 950 次工具调度，用户很容易理解成
+   * 这 950 次工具调度都失败了」。原来的写法是「失败 · 950 次工具调用」——
+   * 状态词与计数并排、又没有任何数量限定，读起来就是「950 次都失败」，
+   * 而实测那轮 950 条工具里一条没失败（agent 跑测试时偶有命令退出码非零，
+   * 整轮照样正常收尾并给出交付报告）。
+   *
+   * dsh 的做法更彻底：折叠行标题**只有**状态词（`已完成 / 处理失败 / 已停止`，
+   * 见 `ui-chat/src/client/chat/TurnProcessNodeView.tsx`），计数完全不进标题
+   * （只落在 `data-turn-process-tool-calls` 等属性上供测试与无障碍用），
+   * 且「处理失败」仅由**整轮** `turn.end.reason === 'error'` 决定，
+   * 单个工具失败只反映在那一行自己身上。这里保留计数（用户明确要求
+   * 「一眼看出有多少东西」），把个别失败降级为工具计数的子集说明，
+   * 整轮失败仍由调用方给「失败」前缀。
+   *
    * @param {HTMLElement[]} moving 组内成员
    * @param {string} status 状态前缀（'' = 不标）。由调用方决定用词：
    *   · 用户主动打断 → '已停止'
-   *   · 其它没有最终回复的情况（max_tokens / 工具报错后中止）→ '未完成'
-   *   · 组内有失败工具 → '失败'
+   *   · 整轮失败（reason==='error'）→ '失败'
    *   用入参而不是内部布尔，是因为「为什么没结论」只有调用方知道；
    *   猜错会把 max_tokens 说成「已停止」，那也是撒谎。
-   * @returns {string} 例如「2 次工具调用 · 1 条消息」/「未完成 · 3 次工具调用」
+   * @returns {string} 例如「2 次工具调用 · 1 条消息」/「950 次工具调用（其中 2 次失败）」
    */
   function tpCountLabel(moving, status) {
     var c = tpCounts(moving);
     var parts = [];
-    if (c.tools > 0) parts.push(c.tools + ' 次工具调用');
+    if (c.tools > 0) {
+      // 整轮已经被定性为「失败」时不再写子集说明：同一件事说两遍，
+      // 而且「失败 · 1 次工具调用（其中 1 次失败）」自己和自己绕。
+      var errs = status === '失败' ? 0 : tpErrorCount(moving);
+      parts.push(c.tools + ' 次工具调用' + (errs ? '（其中 ' + errs + ' 次失败）' : ''));
+    }
     if (c.texts > 0) parts.push(c.texts + ' 条消息');
     // 只有思考块（本轮一次工具都没调）：也得说清里面有东西，不能空着
     if (!parts.length) parts.push(c.thinks > 0 ? '思考过程' : '工作过程');
@@ -7276,23 +7470,9 @@
         body = first + '，' + rest.join('，') + (ranked.length > 3 ? ' 等' : '');
       }
     }
-    // 状态词不进这里：主标题（tpCountLabel）已经带了「失败 · 」/「已停止 · 」，
-    // 副标题只负责「干了什么类别的事」。
-    return body;
-  }
-
-  /**
-   * 类别短语 + 状态前缀（任务 B2 的既有形态，保留给副标题与既有断言用）。
-   * @param {HTMLElement[]} moving 组内成员
-   * @param {boolean} stopped 整轮是否被打断（cancelled / aborted / interrupted）
-   * @returns {string} 例如「已读取文件并搜索代码」；组内有失败行时前置「失败 · 」
-   */
-  function tpTitle(moving, stopped) {
-    var body = tpPhrase(moving);
-    // 整轮被打断优先于组内失败：被打断时那些失败多半是中断的后果，
-    // 先说「停了」才说得通。
-    if (stopped) return '已停止 · ' + body;
-    if (tpHasError(moving)) return '失败 · ' + body;
+    // 状态词不进这里：状态只由主标题（tpCountLabel 的 status）表达，
+    // 副标题只负责「干了什么类别的事」。组内个别失败也不进副标题 ——
+    // 它是主标题里工具计数的子集说明，两处都写等于同一件事说两遍。
     return body;
   }
 
@@ -7440,16 +7620,17 @@
     box.setAttribute('data-reason', reason);
 
     /* 折叠行的状态词由调用方给（见 tpCountLabel 的 status 参数）：
-         · o.status           显式指定（历史重放传「未完成」，因为它不知道确切原因）
+         · o.status           显式指定（实时打断传「已停止」，历史重放不传）
          · reason=cancelled   用户主动打断 → 「已停止」
          · reason=error       这一轮失败 → 「失败」
-         · 其它且组内有失败工具 → 「失败」
+       组内个别工具失败**不在这里定性**：它只是这一轮里的子集，写成状态前缀
+       会读成「整轮都失败」（用户报障：「失败 · 950 次工具调用」被理解成
+       950 次全部失败）。它由 tpCountLabel 写成「（其中 N 次失败）」。
        都不满足就不标前缀（正常完成）。 */
     var status = '';
     if (typeof o.status === 'string' && o.status) status = o.status;
     else if (stopped) status = '已停止';
     else if (failed) status = '失败';
-    else if (tpHasError(moving)) status = '失败';
 
     var row = document.createElement('button');
     row.type = 'button';
@@ -7458,9 +7639,7 @@
        「2 次工具调用 · 1 条消息」。类别短语降级为副标题（.tp-sub）：
        标题回答「有多少东西」，副标题回答「干了什么类别的事」。 */
     var label = tpCountLabel(moving, status);
-    var sub = tpTitle(moving, stopped);
-    // 状态前缀已经进了主标题，副标题只留类别短语本身
-    sub = sub.replace(/^(?:已停止|失败|未完成) · /, '');
+    var sub = tpPhrase(moving);
     /* 耗时放右侧：标题留给「干了什么」，时间是附注。
        有状态词时右侧留空 —— 同一件事不要说两遍。 */
     var metaText = '';
@@ -7474,14 +7653,19 @@
     box.setAttribute('data-tool-count', String(counts.tools));
     box.setAttribute('data-think-count', String(counts.thinks));
     box.setAttribute('data-text-count', String(counts.texts));
-    row.innerHTML = '<span class="tp-caret">▶</span>' +
+    row.innerHTML =
       '<span class="tp-label">' + esc(label) + '</span>' +
       /* 副标题只在「主标题是计数式」时才有意义：它补的是「这些工具干了什么类别
          的事」。组里一个工具都没有（纯思考轮）时主标题已经是「思考过程」，
          副标题再写「已完成分析」等于同一句话说两遍，窄面板里白占一行宽度。 */
       (sub && sub !== label && (counts.tools > 0 || counts.texts > 0)
         ? '<span class="tp-sub">' + esc(sub) + '</span>' : '') +
-      (metaText ? '<span class="tp-meta">' + esc(metaText) + '</span>' : '');
+      (metaText ? '<span class="tp-meta">' + esc(metaText) + '</span>' : '') +
+      /* chevron 放**右侧**且常显，与 dsh 的 TurnProcessNodeView 一致：
+         `<span className={css.label}>…</span>{canCollapse && <IconChevronDown…/>}`。
+         放左侧会让整列工具行的语义图标与它并排，两种图标挤在同一个位置上
+         互相干扰（用户报障：「我们的图标都是 >」）。 */
+      '<span class="tp-caret">' + CARET_SVG_DOWN + '</span>';
 
     var bodyBox = document.createElement('div');
     bodyBox.className = 'tp-body';
@@ -8300,6 +8484,12 @@
     //   ② 运行中且已画过历史：后端多出来的那些，对话区已经实时画过，只更新计数
     //   ③ 其余（空闲 / 全新 webview 还没画过）：整体重画，拿到最新一版
     var initMsgs = (session && session.messages) || [];
+    /* 历史分页元信息。`messages` 只是**尾页**；`histTotal` 才是后端全量条数，
+       下面所有判据一律拿它比（historyDrawn 的语义没有变，仍是「后端全量历史
+       条数」）。老后端不带这三项 → histTotal 退回本页条数，行为与分页前一致。 */
+    var histMeta = readHistMeta(p, session);
+    var histMore = histMeta.hasMore;
+    var histTotal = histMeta.total >= 0 ? histMeta.total : initMsgs.length;
     // ↑ 能翻到的提问来自磁盘上的全局输入历史（与终端形态同一个文件）。
     // initialize 会在重载窗口、重连后端时**重复到达**：整份替换而不是追加，
     // 所以同一份重复灌不会让列表变长或乱序（幂等）。
@@ -8342,7 +8532,7 @@
       // 条数变少 = 后端上下文缩水了（压缩、裁剪），界面必须跟着缩。
       // 只更新计数会怎样（实测）：压缩后后端只剩 3 条，界面还摆着 6 条，
       // 用户以为那 6 条还在上下文里，后续追问时模型看不到其中一半。
-      var shrunk = initMsgs.length < historyDrawn;
+      var shrunk = histTotal < historyDrawn;
       // 「只更新计数」只适用于两种情况：
       //   ① 条数没变：没什么可画的
       //   ② 条数变多，且多出来的那条对话区里已经有了（这一轮实时流出来的）
@@ -8351,7 +8541,7 @@
       // 用户刚问的问题，屏幕上从来没见过。照 wasRunning 跳过重画，用户重开面板
       // 后看不到自己问的什么（实测）。
       // 所以真正的判据是：未画的第一条，在对话区里找得到吗？
-      var firstUndrawn = (initMsgs.length > historyDrawn) ? initMsgs[historyDrawn] : null;
+      var firstUndrawn = (histTotal > historyDrawn) ? initMsgs[historyDrawn] : null;
       var undrawnShown = true;
       if (firstUndrawn) {
         var wantText = normCmp(firstUndrawn.text);
@@ -8374,13 +8564,18 @@
         }
         undrawnShown = found;
       }
-      var nothingToDraw = (initMsgs.length === historyDrawn) || undrawnShown;
-      if (historyDrawn > 0 && histSess === historyDrawnFor && !shrunk && nothingToDraw) {
+      var nothingToDraw = (histTotal === historyDrawn) || undrawnShown;
+      if (!histMore && historyDrawn > 0 && histSess === historyDrawnFor
+          && !shrunk && nothingToDraw) {
         // 已画过历史且还是同一个会话：只更新计数。
         // 重画会顶掉正在流式的正文，也会抹掉工具行/思考块/计划占位行
         // （那些行没有任何恢复路径——后端不会重发 tool/call）。
         // 确认条挂着时更不能重画——那会把条清掉，后端永远等不到应答。
-        historyDrawn = Math.max(historyDrawn, initMsgs.length);
+        //
+        // histMore 为真时**不能**走这条「逐条补画」路径：分页后对话区里放的是
+        // 尾页，用索引判断「这一条画过没有」失去意义，而 dsh 的快照语义本来
+        // 就是整页替换 —— 所以分页状态下直接走下面的整段重画。
+        historyDrawn = Math.max(historyDrawn, histTotal);
       } else {
         // 这个 webview 还没画过后端历史（全新 / 重建后第一次握手）：整体重画。
         //
@@ -8435,10 +8630,18 @@
           }
         }
         resetConversationDom();
-        historyDrawn = initMsgs.length;
+        // 「后端全量条数」而不是这一页的条数：分页后尾页通常只有 50 条，
+        // 按本页条数记账会让下一次 initialize 把「历史还在」误判成「缩水」。
+        historyDrawn = histTotal;
         historyDrawnFor = histSess;
+        HIST_HAS_MORE = histMore;
+        HIST_BEFORE = histMeta.before;
+        HIST_TOTAL = histTotal;
+        HIST_PAGE = initMsgs;
         authHintShown = false;
         renderHistory(initMsgs);
+        // 还有更早的页时，在对话区顶部补「加载更早」入口
+        syncHistMore();
         // ↑ 能翻到的提问：全局历史 + 这个会话的提问（重载后 HIST 本来是空的）
         seedHistory(initMsgs);
         if (keepBuf && !bufAlreadyInHist) {
@@ -8652,7 +8855,7 @@
     wrap.className = 'think';
     wrap.setAttribute('data-open', 'false');
     wrap.innerHTML = '<div class="row" data-open="false" tabindex="0" role="button">' +
-      '<span class="caret">▶</span><span class="name"></span></div>' +
+      rowGlyph('think') + '<span class="name"></span></div>' +
       '<div class="slot"><p></p></div>';
     // 思考全文可能很长且含 < >，用 textContent 而不是拼 HTML
     wrap.querySelector('.name').textContent = '思考 · ' + text.length + ' 字';
@@ -8731,7 +8934,7 @@
       outSec = { kind: 'out', lines: outText.split('\n'),
         foot: failed ? '执行失败' : '完成' };
     }
-    var card = isTodo ? { html: '', more: '' } : toolCardHtml(inputText, outSec);
+    var card = isTodo ? { html: '', more: '' } : toolCardHtml(inputText, outSec, toolHasCopy(m.name));
     // 行头也带上 +N −M：与实时一致，用户不展开也能看出改了多少
     var diffTag = (outSec && outSec.kind === 'diff')
       ? '+' + (diff.added || 0) + ' −' + (diff.removed || 0)
@@ -8740,7 +8943,7 @@
     var meta = metaParts.join(' · ');
     wrap.innerHTML = '<div class="row" data-open="' + open + '" data-st="' +
       (failed ? 'err' : 'ok') + '" tabindex="0" role="button">' +
-      '<span class="caret">▶</span>' +
+      rowGlyph(rowIconKey(m.name)) +
       '<span class="name">' + esc(m.label || m.name || '工具') + '</span>' +
       argSpan(sumText) +
       '<span class="meta">' + meta + '</span></div>' +
@@ -8802,6 +9005,103 @@
     var s = String(text == null ? '' : text);
     // 后端注入时可能在前面带空白（append 之间夹了空行），先去掉再判
     return RE_INTERNAL_ONLY.test(s.replace(/^\s+/, ''));
+  }
+
+  /**
+   * 从后端回执里读历史分页元信息。
+   *
+   * 三项与 `messages` 同一层：`initialize` 把 messages 放在 `p.session` 里，
+   * 其它回执（session/switch、session/explore、session/done、command/exec）
+   * 放在顶层。两层都认。老后端一个字段都不带 → `total` 返回 -1，
+   * 调用点据此退回「按这一页的条数记账」的老行为。
+   */
+  function readHistMeta(p, layer){
+    var src = null;
+    if (layer && typeof layer.historyTotal === 'number') src = layer;
+    else if (p && typeof p.historyTotal === 'number') src = p;
+    if (!src) return { hasMore: false, before: 0, total: -1 };
+    return {
+      hasMore: !!src.historyHasMore,
+      before: src.historyBefore | 0,
+      total: src.historyTotal | 0
+    };
+  }
+
+  /**
+   * 同步对话区顶部的「加载更早」入口。
+   *
+   * 形态对齐 dsh（ChatView 顶部的 `chat.loadOlder`）：只在后端说还有更早的
+   * 一页时出现，插在对话区**第一个子节点之前**（滚到顶就能看到）；翻到最
+   * 开头就一个节点都不留。按钮复用同一个节点，避免每次重画都造新的。
+   */
+  function syncHistMore(){
+    var btn = convo.querySelector('.hist-more');
+    if (!HIST_HAS_MORE) {
+      if (btn && btn.parentNode) btn.parentNode.removeChild(btn);
+      return;
+    }
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.className = 'hist-more';
+      btn.setAttribute('type', 'button');
+      if (convo.firstElementChild) convo.insertBefore(btn, convo.firstElementChild);
+      else convo.appendChild(btn);
+    }
+    btn.textContent = HIST_LOADING ? '加载中…' : '加载更早';
+    if (HIST_LOADING) btn.setAttribute('disabled', 'disabled');
+    else btn.removeAttribute('disabled');
+  }
+
+  /**
+   * 处理更早一页的回执（webview 发出 `sessionHistory` 后宿主转回的那条）。
+   *
+   * 做法与 dsh 的 `prepend` 一致：把这一页拼到已渲染内容**前面**，整段重画。
+   * 不用「往前面插 DOM」是因为历史里没有轮次事件，只有一串 user/assistant/tool，
+   * 分组要重新算；整段重画的结果与重新打开会话完全一致。
+   *
+   * **必须补偿滚动位置**：内容插在上方，`scrollHeight` 会长出一截，视口按
+   * 原 `scrollTop` 显示的话画面会往上跳一屏，用户刚在看的正文跑出屏幕。
+   */
+  function applyHistoryPage(p){
+    HIST_LOADING = false;
+    if (!p || p.error) {
+      if (p && p.error) {
+        sysLine('✗', '加载更早的历史失败', esc(String(p.error).slice(0, 160)), 'err');
+      }
+      syncHistMore();
+      scrollBottom();
+      rendered('history/result', { ok: false });
+      return;
+    }
+    var older = Array.isArray(p.messages) ? p.messages : [];
+    var merged = older.concat(HIST_PAGE);
+    var keepMore = !!p.hasMore;
+    var keepBefore = p.before | 0;
+    var keepTotal = (typeof p.total === 'number' && p.total >= 0) ? (p.total | 0) : HIST_TOTAL;
+    var sh = convo.scrollHeight;
+    var st = convo.scrollTop;
+    var keepFollow = followBottom;
+    resetConversationDom();
+    HIST_PAGE = merged;
+    HIST_HAS_MORE = keepMore;
+    HIST_BEFORE = keepBefore;
+    HIST_TOTAL = keepTotal;
+    // historyDrawn 仍是「后端全量条数」，不是「已画几条」——判据见 applyInitialize。
+    historyDrawn = keepTotal > 0 ? keepTotal : merged.length;
+    historyDrawnFor = CUR;
+    authHintShown = false;
+    renderHistory(HIST_PAGE);
+    // renderHistory 末尾排了一次 scrollBottom(true)。不取消的话下一帧会把
+    // 下面刚恢复的位置再拉到底——用户点「加载更早」正是为了往上读。
+    scrollPending.queued = false;
+    scrollPending.force = false;
+    followBottom = keepFollow;
+    convo.scrollTop = st + (convo.scrollHeight - sh);
+    progTarget = convo.scrollTop;
+    lastProgHeight = convo.scrollHeight;
+    syncToBottomBtn();
+    syncHistMore();
+    rendered('history/result', { ok: true, count: older.length });
   }
 
   function renderHistory(msgs){
@@ -8905,12 +9205,17 @@
         if (thinkText) roundNodes.push(addHistoryThink(thinkText));
         /* 正文也先入候选：它可能是「中间说明」，也可能承担最终回复 ——
            由 flushRound 在最末一条上判定（只有最后一条且其后没有过程节点
-           时它才留在组外）。这里不再「遇到正文就收口」，否则一轮碎成多组。 */
-        var a = document.createElement('div');
-        a.className = 'msg assistant';
-        a.innerHTML = markdownInline(m.text, false);
-        convo.appendChild(a);
-        roundNodes.push(a);
+           时它才留在组外）。这里不再「遇到正文就收口」，否则一轮碎成多组。
+           **只有思考没有正文**的中间步（后端 text 为空串）不建正文节点：
+           建了就是一个空气泡，还会被 tpCounts 记成「1 条消息」，
+           折叠行写着「N 条消息」而展开一个字都没有。 */
+        if (m.text) {
+          var a = document.createElement('div');
+          a.className = 'msg assistant';
+          a.innerHTML = markdownInline(m.text, false);
+          convo.appendChild(a);
+          roundNodes.push(a);
+        }
       }
     });
     // 最后一条 user 之后的那一轮没有「下一个 user」来触发收口，这里补上
@@ -8936,6 +9241,9 @@
     CUR = p.current;
     CUR_IS_CHILD = !!p.isChild;
     if (Array.isArray(p.messages)) {
+      // 后端只回尾页 + 分页三字段（老后端没有 → histTotal 退回本页条数）
+      var hm = readHistMeta(p, null);
+      var hTotal = hm.total >= 0 ? hm.total : p.messages.length;
       resetConversationDom();
       authHintShown = false;
       body.setAttribute('data-run', 'false');
@@ -8943,8 +9251,15 @@
       renderHistory(p.messages);
       // 这个会话的提问也叠进来（全局历史保留，见 seedHistory）
       seedHistory(p.messages);
-      historyDrawn = p.messages.length;
+      // historyDrawn 是「后端全量条数」：分页后本页只有尾页，按本页条数记账
+      // 会与下一个 initialize 的 histTotal 冲突（被误判成历史缩水）。
+      historyDrawn = hTotal;
       historyDrawnFor = p.current;
+      HIST_HAS_MORE = hm.hasMore;
+      HIST_BEFORE = hm.before;
+      HIST_TOTAL = hTotal;
+      HIST_PAGE = p.messages;
+      syncHistMore();
     } else {
       // 后端没带历史（老版本 / 空会话）：只换名字与列表状态，不清屏 ——
       // 清屏会得到一片空白，比留着旧内容更让人以为数据丢了。
@@ -9406,11 +9721,21 @@
       var cmdLines = lines.map(esc).join('\n');
       cmdMulti(esc(cmdText), cmdLines, '', 'cmdout--wrap');
       if (cdSwitched && p.messages && p.messages.length) {
+        // 与 enterSessionFrom 同一口径：这里是第三条「切进某个会话」的路径
+        //（/cd 命令），分页字段同样要记，否则下一个 initialize 的 histTotal
+        // 会被当成「历史变多/变少」而误判。
+        var cm2 = readHistMeta(p, null);
+        var cdTotal = cm2.total >= 0 ? cm2.total : p.messages.length;
         renderHistory(p.messages);
         seedHistory(p.messages);
         // 同 sessionSwitch：画完必须记账，否则下一个 initialize 会清空重画
-        historyDrawn = p.messages.length;
+        historyDrawn = cdTotal;
         historyDrawnFor = CUR;
+        HIST_HAS_MORE = cm2.hasMore;
+        HIST_BEFORE = cm2.before;
+        HIST_TOTAL = cdTotal;
+        HIST_PAGE = p.messages;
+        syncHistMore();
       }
       if (rmCurrent) {
         // 删掉的是当前会话：状态栏那几项（上下文/缓存/费用/余额）属于这个
@@ -9767,6 +10092,10 @@
       case 'session/list': applySessionList(msg.params || {}); break;
       case 'session/saved': applySessionSaved(msg.params || {}); break;
       case 'session/result': applySessionResult(msg.params || {}); break;
+      // 历史分页：webview 发出 sessionHistory，宿主转发到 RPC session/history，
+      // 回执以 history/result 回到这里（与 session/result 分开放：
+      // 前者是「会话换了」，这里只是「往同一个对话区前面续了一页」）。
+      case 'history/result': applyHistoryPage(msg.params || {}); break;
       case 'attach/picked': atchOnReply(msg.params || {}); break;
       case 'attach/checked': atchOnReply(msg.params || {}); break;
       case 'attach/saved': atchOnReply(msg.params || {}); break;
