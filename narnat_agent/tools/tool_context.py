@@ -180,6 +180,10 @@ class ToolContext:
     # 工具输出全局硬上限（字符数），0=不限制。由配置"工具输出上限KB"驱动
     max_tool_output_chars: int = 65536
 
+    # 数据目录（<项目>/.narnat/data），Read 的图片附件库建在其下的 attachments/。
+    # 由 assembly 从 config.paths.data_dir 注入；为空时 Read 读图直接报错（不静默降级）
+    data_dir: str = ""
+
     # 工具超时全局上限（秒），0=不限制。由配置"工具超时上限秒"驱动
     max_timeout_seconds: int = 1800
 

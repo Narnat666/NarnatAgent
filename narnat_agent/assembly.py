@@ -85,6 +85,7 @@ class Assembly:
             logger,
             max_output_tokens=config.ui.max_output_tokens,
             tool_definitions=tool_definitions,
+            data_dir=config.paths.data_dir,
         )
 
         # 6.5 MCP 工具热更新接线：AI 运行时 connect/disconnect 的工具
@@ -97,7 +98,15 @@ class Assembly:
             context_window=config.ai.context_window,
             warn_ratio=config.session.warn_ratio,
             compress_ratio=config.session.compress_ratio,
+            max_output_tokens=config.ui.max_output_tokens,
+            headroom_tokens=config.session.compress_headroom,
         )
+
+        # 6.6 配置体检：压缩阈值是否被安全上限夹取、余量是否已耗尽。
+        # 不阻断启动，但必须在启动时说出来——否则用户会在运行中反复撞
+        # "压缩失败: 压缩请求自身超出模型上下文限制"，却不知道是配置问题。
+        for _warn in context.config_warnings():
+            logger.warning("core.context", "配置警告: " + _warn)
 
         # 7. 压缩器
         compressor = Compressor()
@@ -128,6 +137,7 @@ class Assembly:
             max_transfer_mb=config.tools.max_transfer_mb,
             max_tool_output_chars=config.tools.max_output_chars,
             max_timeout_seconds=config.tools.max_timeout_seconds,
+            data_dir=config.paths.data_dir,
             mcp_manager=mcp_manager,
             # 用户中断（ESC）时长耗时只读工具（Grep/Glob 扫大目录）在扫描中途提前返回
             cancel_check=lambda: _interrupt_ctrl.is_set,

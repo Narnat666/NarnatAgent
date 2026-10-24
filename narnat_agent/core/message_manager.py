@@ -50,9 +50,15 @@ class MessageManager:
         self._messages.append_user(content)
 
     def append_user_merged(self, content: str) -> None:
-        """追加 user 消息；末尾已是 user 时合并进该条（防连续 user，Anthropic 严格后端要求角色交替）"""
+        """追加 user 消息；末尾已是 user 时合并进该条（防连续 user，Anthropic 严格后端要求角色交替）
+
+        带 images 的 user 消息（工具结果配图）不参与合并：拼接只动字符串，
+        合并会让 images 字段静默丢失（图还在历史里但再也发不出去）。
+        这类消息后面直接新起一条，Anthropic 侧的连续 user 由转换层合并内容块处理。
+        """
         view = self._messages.view()
-        if len(view) > 0 and view[-1].get("role") == "user":
+        if (len(view) > 0 and view[-1].get("role") == "user"
+                and not view[-1].get("images")):
             merged = dict(view[-1])
             merged["content"] = (view[-1].get("content") or "") + "\n\n" + content
             new = view.to_list()
@@ -60,6 +66,11 @@ class MessageManager:
             self._messages.replace_all(new)
         else:
             self._messages.append_user(content)
+
+    def append_user_images(self, images: list, content: str = "",
+                           tool_call_id: str = "") -> None:
+        """追加只携带图片引用的 user 消息（工具结果配图用），委托 MessageList。"""
+        self._messages.append_user_images(images, content, tool_call_id)
 
     def append_assistant(self, content: str, tool_calls: Optional[list] = None,
                          thinking: Optional[str] = None,
@@ -131,7 +142,8 @@ class MessageManager:
 
     def handle_compress(self, pending_input: Optional[str], system_prompt: str,
                         llm_client, cancel_check, on_interrupt, on_llm_error,
-                        retain_tokens: int = 0, on_usage=None) -> CompressResult:
+                        retain_tokens: int = 0, on_usage=None,
+                        compress_max_tokens: Optional[int] = None) -> CompressResult:
         """
         处理上下文压缩。
 
@@ -139,6 +151,13 @@ class MessageManager:
         （/compact），不携带新输入。
         retain_tokens: 逐字保留的近期尾部预算（启发式估价token），0=全量压缩。
         摘要输入始终为全部历史；切点选择只决定压缩后保留哪些近期消息。
+        compress_max_tokens: 压缩请求的输出上限（None=沿用主会话配置）。
+
+        为什么压缩要单独给输出上限：压缩请求的输入是全部历史，本身已经接近
+        窗口上限；若输出上限仍与正常轮次相同（如 128k），"历史 + 压缩输出"
+        很容易超出窗口，压缩请求自己先溢出——压缩永远失败。给一个小预算后
+        这件事在数学上不可能发生。
+
         中断/失败不改动 messages，由调用方回调善后。
 
         Returns:
@@ -180,7 +199,9 @@ class MessageManager:
         summary_content = []
         llm_error = False
         try:
-            for chunk in llm_client.chat_stream(compress_messages, no_tools=True, cancel_check=cancel_check):
+            for chunk in llm_client.chat_stream(compress_messages, no_tools=True,
+                                                cancel_check=cancel_check,
+                                                max_tokens=compress_max_tokens):
                 if cancel_check and cancel_check():
                     on_interrupt()
                     return CompressResult(False, reason="interrupted")

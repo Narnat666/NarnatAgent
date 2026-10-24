@@ -1,8 +1,13 @@
-"""Read工具 —— 读取文件内容，带行号
+"""Read工具 —— 读取文件内容，带行号；图片文件自动转为可视图
 
 默认上限2000行，超出自动截断并提示。limit需为正整数。最终输出由系统全局上限控制。
 
 设备语义: device=dev0或省略 → 本机(dev0)；device=dev1..devn → 被控设备(需先Terminal connect)。
+
+图片语义: 读到图片文件时不再是文本，返回句柄文本（文件名、格式、尺寸、副本路径、
+内容指纹）并附一张归一化副本。副本落在 <data_dir>/attachments/，与用户原文件解耦——
+原文件之后被删/改名都不影响对话。图片引用挂在返回值的 .images 属性上（见 ImageBearingStr），
+由 agent_loop 追加一条 user 消息携带；文本文件的返回值与旧实现逐字节一致。
 """
 
 import errno
@@ -11,6 +16,26 @@ import re
 
 from ..terminal import _normalize_device_for_tools, _file_tool_device_hint
 from ..token_estimate import estimate_text_tokens
+from ...core import attachment as _attachment
+
+
+class ImageBearingStr(str):
+    """带图片引用的工具结果字符串。
+
+    继承 str，所以 registry.execute 的 len() 硬截断、dispatcher 透传、
+    append_tool_result、json.dump 全部照常工作，零改动；
+    只有 agent_loop 回传结果时检查 .images，有图就额外追加一条 user 消息。
+
+    images 为图片引用 list（见 attachment.make_ref），空 list 表示纯文本结果。
+    """
+
+    __slots__ = ("images",)
+
+    def __new__(cls, value, images=None):
+        obj = super().__new__(cls, value)
+        obj.images = list(images or [])
+        return obj
+
 
 # ── 读取窗口常量 ──
 # 单行显示上限（对齐官方 harness readMaxLineLength 默认值）：
@@ -18,6 +43,10 @@ from ..token_estimate import estimate_text_tokens
 READ_MAX_LINE_CHARS = 2000
 # 截断时统计总行数的文件大小上限：超过则跳过计数（避免秒级阻塞），提示不显示总行数。
 READ_MAX_COUNT_BYTES = 20 * 1024 * 1024
+
+# 图片文件按扩展名快速识别（真正是不是图片由 attachment.normalize 全解码判定，
+# 扩展名只用来决定"要不要走图分支"——避免把每个文本文件都拿去试探解码）
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
 
 def _apply_global_cap(text: str, _tool_context, total_lines: int = None) -> str:
@@ -69,8 +98,8 @@ DEFINITION = {
     "function": {
         "name": "Read",
         "description": (
-            "读取纯文本文件内容，返还内容带行号（由1开始）。"
-            "自动识别UTF-8/GBK编码。"
+            "读取文件内容。文本文件返还带行号的内容（由1开始）；"
+            "支持图片文件读取（png/jpg/jpeg/webp/gif）。"
             "支持本地或远程读取文件。"
         ),
         "parameters": {
@@ -208,6 +237,81 @@ def _isfile_miss_reason(file_path: str) -> str:
     return ""
 
 
+def _format_size(n: int) -> str:
+    """字节数 → 人类可读（AI 也用得上：判断这张图是不是高清截图）"""
+    if n >= 1024 * 1024:
+        return "%.1fMB" % (n / 1024.0 / 1024.0)
+    if n >= 1024:
+        return "%dKB" % int(n / 1024)
+    return "%dB" % n
+
+
+def _image_handle_text(file_path: str, ref: dict, root: str, token_est: int) -> str:
+    """图片句柄文本 —— 模型看到的"这张图是什么"的唯一依据。
+
+    这段文本会永久留在会话 history 的 content 里（图片字节只在发送时挂到
+    images 字段），所以它必须自包含：文件名、格式、尺寸、体积、指纹、副本路径。
+    模型据此知道：看的是缩放版还是原图、原图多大、想重新读该读哪里。
+    """
+    name = ref.get("name") or os.path.basename(file_path)
+    w, h = ref.get("width") or 0, ref.get("height") or 0
+    sw, sh = ref.get("source_width"), ref.get("source_height")
+
+    lines = [
+        "[图片] %s — %s %dx%d，约 %s token" % (
+            name, ref.get("media_type") or "未知格式", w, h, token_est),
+    ]
+    if sw and sh:
+        lines.append("原图 %dx%d，已缩放至长边 %d 发送（细节以副本为准）" % (
+            sw, sh, max(w, h)))
+    lines.append("附件 %s" % ref["id"])
+    lines.append("副本（只读）：%s" % _attachment.object_path(root, ref["id"][7:]))
+    lines.append("源文件：%s" % file_path)
+    return "\n".join(lines)
+
+
+def _read_image(file_path: str, _tool_context) -> str:
+    """图片分支：归一化 + 落附件库 + 返回带 .images 的句柄文本。
+
+    任何失败都返回普通错误字符串（不挂图），与文本分支的错误风格一致，
+    AI 拿到的是一条可读的失败原因，对话继续。
+    """
+    if not _attachment.pil_available():
+        return ("[错误: 当前环境缺少 Pillow，无法读取图片。"
+                "请安装 Pillow，或改用 Shell 调用外部工具处理此文件]")
+
+    data_dir = getattr(_tool_context, "data_dir", "") if _tool_context else ""
+    if not data_dir:
+        return "[错误: 附件库路径未配置，无法读取图片]"
+    root = _attachment.attachment_root(data_dir)
+
+    try:
+        with open(file_path, "rb") as f:
+            source = f.read(_attachment.MAX_SOURCE_BYTES + 1)
+    except PermissionError:
+        return "[错误: 权限不足: %s" % file_path + "]"
+    except OSError as e:
+        return "[错误: 读取失败: %s" % e + "]"
+
+    if len(source) > _attachment.MAX_SOURCE_BYTES:
+        return ("[错误: 图片文件超过 %s 上限，无法读取。"
+                "请先用 Shell 缩小后再读]" % _format_size(_attachment.MAX_SOURCE_BYTES))
+
+    ref = _attachment.store(root, source)
+    if ref is None:
+        return ("[错误: 无法解码图片（文件损坏、格式不支持或尺寸过大）。"
+                "支持 PNG/JPEG/WebP/GIF；若确为图片请用 Shell 检查]")
+
+    ref["name"] = os.path.basename(file_path)
+
+    # token 估价（DeepSeek 视觉网格口径，见 core/vision_tokens.py）
+    from ..vision_tokens import estimate_image_tokens
+    token_est = estimate_image_tokens(ref.get("width") or 0, ref.get("height") or 0)
+
+    text = _image_handle_text(file_path, ref, root, token_est)
+    return ImageBearingStr(text, [ref])
+
+
 def execute(file_path: str, offset: int = 0, limit: int = 2000,
             device: str = "",
             _tool_context=None) -> str:
@@ -258,6 +362,14 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
             return miss_reason
         # 相对路径解析依赖当前目录（Shell cd会改变它），报错时带上cwd帮AI一次定位
         return f"[错误: 文件不存在: {file_path}（当前目录: {os.getcwd()}）]"
+
+    # ── 图片分支 ──
+    # 按扩展名判定，真正是不是图片由 PIL 全解码决定（失败即返回错误文本）。
+    # 位置必须在二进制检测之前：图片首块必然含 NUL，走到下面会被误判成"二进制文件"。
+    # 远程设备（device 非空）不走此分支——图片归一化与附件库都在本机，
+    # 远程读图仍按原有文本路径处理（返回二进制错误提示）。
+    if (not device) and file_path.lower().endswith(_IMAGE_EXTS):
+        return _read_image(file_path, _tool_context)
 
     try:
         # 二进制检测：首块含NUL字节即视为二进制文件（与Grep检测策略一致）

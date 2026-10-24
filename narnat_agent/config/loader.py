@@ -19,7 +19,7 @@ from .defaults import (
     DEFAULT_PROTOCOL, DEFAULT_THINKING_ENABLED, DEFAULT_THINKING_EFFORT,
     DEFAULT_THINKING_PASSBACK,
     DEFAULT_CONTEXT_WINDOW, DEFAULT_SHOW_RATIO, DEFAULT_WARN_RATIO, DEFAULT_COMPRESS_RATIO,
-    DEFAULT_COMPRESS_RETAIN_TOKENS,
+    DEFAULT_COMPRESS_RETAIN_TOKENS, DEFAULT_COMPRESS_HEADROOM,
     DEFAULT_GIT_SKIP, DEFAULT_RM_SKIP,
     DEFAULT_MAX_TOOL_OUTPUT_KB,
     DEFAULT_MAX_TIMEOUT_SECONDS,
@@ -125,6 +125,7 @@ class SessionConfig:
     warn_ratio: int = DEFAULT_WARN_RATIO
     compress_ratio: int = DEFAULT_COMPRESS_RATIO
     retain_tokens: int = DEFAULT_COMPRESS_RETAIN_TOKENS  # 压缩保留尾部预算（token），0=不保留
+    compress_headroom: int = DEFAULT_COMPRESS_HEADROOM   # 压缩安全余量（token），夹取阈值上限
 
 
 @dataclass(frozen=True)
@@ -1010,6 +1011,7 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
                             "告警": DEFAULT_WARN_RATIO,
                             "压缩": DEFAULT_COMPRESS_RATIO,
                             "保留尾部": DEFAULT_COMPRESS_RETAIN_TOKENS,
+                            "安全余量": DEFAULT_COMPRESS_HEADROOM,
                         },
                         "风格": {
                             "启用": DEFAULT_STYLE_NOTICE_ENABLED,
@@ -1065,6 +1067,11 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
     _retain_raw = _coerce(data.get("压缩", {}).get("保留尾部"), int)
     compress_retain = (DEFAULT_COMPRESS_RETAIN_TOKENS if _retain_raw is None
                        else max(0, _retain_raw))
+
+    # 压缩安全余量：同上，0 合法（关闭余量）；缺项用默认
+    _headroom_raw = _coerce(data.get("压缩", {}).get("安全余量"), int)
+    compress_headroom = (DEFAULT_COMPRESS_HEADROOM if _headroom_raw is None
+                         else max(0, _headroom_raw))
 
     # 风格提醒语：非字符串或空白 → 内置默认文案（配置写坏不至于变哑巴）
     _notice_raw = data.get("风格", {}).get("提醒语")
@@ -1125,6 +1132,7 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
             warn_ratio=_coerce(data.get("压缩", {}).get("告警"), int) or DEFAULT_WARN_RATIO,
             compress_ratio=_coerce(data.get("压缩", {}).get("压缩"), int) or DEFAULT_COMPRESS_RATIO,
             retain_tokens=compress_retain,
+            compress_headroom=compress_headroom,
         ),
         skills=SkillConfig(project_roots=_parse_project_skill_roots(data)),
         style=StyleConfig(

@@ -475,6 +475,14 @@ class AgentLoop:
                 # 回传工具结果
                 for tc_id, result in tool_results:
                     self._msg_manager.append_tool_result(tc_id, result)
+                    # 工具结果携带图片（Read 读到图片文件）时，紧跟一条 user 消息挂图。
+                    # 为什么必须另起一条：OpenAI 协议的 role=tool 消息 content 只能是
+                    # 字符串，装不下图片块。带上 tool_call_id 让 Anthropic 转换层能把
+                    # 图片并入对应 tool_result（那里要求 tool_result 必须是 user 首块，
+                    # 另起独立 user 会破坏 tool_use/tool_result 紧邻约束 → 400）。
+                    images = getattr(result, "images", None)
+                    if images:
+                        self._msg_manager.append_user_images(images, tool_call_id=tc_id)
 
                 # （本轮的 usage 落账已上移至工具执行前统一处理）
 

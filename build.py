@@ -321,6 +321,13 @@ def main():
         "--lto=yes",
         "--python-flag=no_docstrings",
         "--include-module=openai",
+        # Pillow：Read 工具的识图能力依赖它。Nuitka 按 import 图静态收集，
+        # PIL 是可选导入（缺失时识图静默关闭），静态分析容易漏掉，
+        # 必须显式声明模块与包数据，否则发布版识图功能直接不可用。
+        "--include-module=PIL",
+        "--include-module=PIL.Image",
+        "--include-module=PIL.ImageOps",
+        "--include-package-data=PIL",
     ]
     for name in NOFOLLOW_IMPORTS:
         cmd.append("--nofollow-import-to=%s" % name)

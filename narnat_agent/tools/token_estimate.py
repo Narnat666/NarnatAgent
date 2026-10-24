@@ -36,9 +36,11 @@ def estimate_text_tokens(text: str) -> int:
 
 
 def estimate_message_tokens(msg: dict) -> int:
-    """估算一条消息占用的 token 数（content/thinking/tool_calls 汇总）。
+    """估算一条消息占用的 token 数（content/thinking/tool_calls/images 汇总）。
 
     content 覆盖 str/list 两种形态；tool_calls 按 name+arguments 估价。
+    images（图片引用）按视觉网格单独估价——**不能**走文本口径：
+    一张图的 base64 若按字符计价会被估成数万 token，直接把压缩阈值打爆。
     """
     tokens = _MSG_OVERHEAD
     content = msg.get("content")
@@ -54,4 +56,8 @@ def estimate_message_tokens(msg: dict) -> int:
         fn = tc.get("function", {})
         tokens += estimate_text_tokens(fn.get("name", "") or "")
         tokens += estimate_text_tokens(fn.get("arguments", "") or "")
+    refs = msg.get("images")
+    if refs:
+        from .vision_tokens import estimate_refs_tokens
+        tokens += estimate_refs_tokens(refs)
     return tokens

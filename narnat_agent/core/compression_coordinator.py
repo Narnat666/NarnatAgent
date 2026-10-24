@@ -139,6 +139,15 @@ class CompressionCoordinator:
         elif content.endswith("\n\n"):
             last["content"] = content[:-2]
 
+    def _compress_budget(self) -> int:
+        """压缩请求的输出上限：等于安全余量（与 deepseek-harness 同口径）。
+
+        上限取余量而非固定常数：余量本身就是"给压缩输出留的空间"，
+        两者取同一个值后，"历史 + 压缩输出 ≤ 窗口"由阈值夹取直接保证。
+        下限 1024 防止用户把余量配成 0 时压缩输出被压到写不完全摘要。
+        """
+        return max(1024, int(self._config.session.compress_headroom))
+
     def compress(self, pending_input: str) -> bool:
         """处理上下文压缩。
 
@@ -186,6 +195,7 @@ class CompressionCoordinator:
             on_llm_error=on_llm_error,
             retain_tokens=self._config.session.retain_tokens,
             on_usage=self._log_usage if self._stats is not None else None,
+            compress_max_tokens=self._compress_budget(),
         )
         if res.ok:
             self._ui.end_compressing()
@@ -242,6 +252,7 @@ class CompressionCoordinator:
             on_llm_error=on_llm_error,
             retain_tokens=self._config.session.retain_tokens,
             on_usage=self._log_usage if self._stats is not None else None,
+            compress_max_tokens=self._compress_budget(),
         )
         if res.ok:
             self._ui.end_compressing()
@@ -283,6 +294,7 @@ class CompressionCoordinator:
                 on_llm_error=on_llm_error,
                 retain_tokens=self._config.session.retain_tokens,
                 on_usage=self._log_usage if self._stats is not None else None,
+                compress_max_tokens=self._compress_budget(),
             )
         finally:
             # 无论 handle_compress 还是 UI 回调抛异常，都必须回到输入模式，

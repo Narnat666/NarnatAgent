@@ -179,6 +179,42 @@ class MessageList:
         """追加用户消息"""
         self._messages.append({"role": "user", "content": content})
 
+    def append_user_images(self, images: list, content: str = "",
+                           tool_call_id: str = "") -> None:
+        """追加一条只携带图片引用的 user 消息（工具结果配图用）。
+
+        content 保持字符串形态（"图片标记 + 发送端二次适配"的核心）：
+        图片引用挂在 images 字段上，发送端按"图片状态 x 模型能力"决定展开成
+        真实图片块、降级成文本、还是丢弃。会话里永远不存图片字节。
+
+        tool_call_id: 该图片归属的工具调用 id。Anthropic 协议要求
+        tool_result 与 tool_use 紧邻且 tool_result 必须是 user 消息的首块，
+        因此转换时会把图片**并入对应的 tool_result**（源码见 llm.py
+        _convert_messages）；OpenAI 协议的 tool 消息只能字符串，只能另起
+        user 消息。两种协议各自的限制在转换层分流，消息层只记录归属。
+
+        引用格式见 core/attachment.py: make_ref。
+        """
+        refs = [dict(r) for r in (images or []) if isinstance(r, dict)]
+        if not refs:
+            return
+        msg = {
+            "role": "user",
+            "content": content or "（图片内容见附件）",
+            "images": refs,
+        }
+        if tool_call_id:
+            msg["image_for_tool_call"] = tool_call_id
+        self._messages.append(msg)
+
+    def append_user_with_images(self, content: str, images: list) -> None:
+        """追加一条既有文本又有图片的用户消息（用户自带输入用）。"""
+        msg = {"role": "user", "content": content}
+        refs = [dict(r) for r in (images or []) if isinstance(r, dict)]
+        if refs:
+            msg["images"] = refs
+        self._messages.append(msg)
+
     def append_assistant(self, content: str, tool_calls: Optional[list] = None,
                          thinking: Optional[str] = None,
                          thinking_signature: Optional[str] = None) -> None:

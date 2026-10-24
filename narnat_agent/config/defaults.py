@@ -43,6 +43,13 @@ DEFAULT_SHOW_RATIO = False        # 统计栏是否显示 窗口占比:x%
 DEFAULT_WARN_RATIO = 50           # 窗口占比 ≥ 此百分比时提示一次
 DEFAULT_COMPRESS_RATIO = 95       # 窗口占比 ≥ 此百分比时先压缩再请求
 
+# 压缩安全余量：压缩阈值被夹在「窗口 - 输出预留 - 本余量」以内。
+# 为什么需要：压缩请求本身要吃掉窗口（全量历史 + 压缩指令 + 压缩输出），
+# 只看比例会出现"历史 90% + 压缩输出 128k > 100% 窗口"，压缩请求自己先溢出，
+# 压缩永远失败。留出余量后，压缩请求自身超窗在数学上不可能。
+# 65536 取自 deepseek-harness 的 headroomTokens 默认值。
+DEFAULT_COMPRESS_HEADROOM = 65536
+
 # ── 压缩保留尾部预算（token）──
 # 压缩时逐字保留的近期消息预算（启发式估价）；0=不保留（压缩后仅剩摘要，即旧行为）
 DEFAULT_COMPRESS_RETAIN_TOKENS = 16000
@@ -293,6 +300,59 @@ THINKING_PARAM_MAP = {
         "passback": "thinking_block_signed",
     },
 }
+
+
+# ── 识图能力表 ──
+# 与 THINKING_PARAM_MAP 同一范式：(协议, 模型前缀) → 是否接受图片输入。
+#
+# 缺省方向是**保守的**：未列出的模型一律视为不支持识图。
+# 理由是 narnat 允许用户自填 base_url（中转站、自建网关、各种兼容端点），
+# 未编目模型占多数；猜"支持"会直接吃服务端 400 打断对话，
+# 猜"不支持"只是少发一张图（模型仍能看到句柄文本并据此提示用户切模型）。
+# 两个方向的代价不对等，故取保守值。
+#
+# 新增支持识图的模型只需在此追加一条，无需改任何判定代码。
+IMAGE_CAPABLE_MODELS = {
+    # DeepSeek：V4 Flash 线自 2026-08 起原生识图，Anthropic 兼容端点接受
+    # {"type":"image","source":{"type":"base64",...}}（deepseek-harness 同一端点实证）
+    ("anthropic", "deepseek-flash"): True,
+    ("openai", "deepseek-flash"): True,
+
+    # Claude 全系原生支持
+    ("anthropic", "claude"): True,
+
+    # GPT / Qwen-VL / GLM-V 等视觉模型
+    ("openai", "gpt-4o"): True,
+    ("openai", "gpt-4.1"): True,
+    ("openai", "qwen-vl"): True,
+}
+
+# 显式不支持：名单里写了 False 的优先于前缀匹配（用于"前缀像但实际不支持"的型号）
+IMAGE_MODEL_EXCLUSIONS = {
+    # V4 Pro 是纯文本模型（deepseek-harness 默认目录条目 inputModalities=['text']）
+    ("anthropic", "deepseek-v4-pro"): False,
+    ("openai", "deepseek-v4-pro"): False,
+}
+
+
+def resolve_image_support(protocol: str, model: str) -> bool:
+    """查表：该 (协议, 模型) 是否接受图片输入。
+
+    匹配顺序：排除名单 → 能力表前缀匹配 → 缺省 False（保守）。
+    """
+    if not model:
+        return False
+    model_lower = model.lower()
+
+    for (proto, prefix), supported in IMAGE_MODEL_EXCLUSIONS.items():
+        if proto == protocol and model_lower.startswith(prefix):
+            return supported
+
+    for (proto, prefix), supported in IMAGE_CAPABLE_MODELS.items():
+        if proto == protocol and model_lower.startswith(prefix):
+            return supported
+
+    return False
 
 
 def resolve_thinking_passback(protocol: str, model: str) -> str:

@@ -496,7 +496,16 @@ class ToolDispatcher:
                 and has_error(llm_result)
             )
             if isinstance(llm_result, str):
-                llm_result = strip_tags(llm_result)
+                stripped = strip_tags(llm_result)
+                # Read 读到图片时结果携带 .images（ImageBearingStr 子类）。
+                # strip_tags 返回普通 str 会把图片引用丢掉——那等于"工具报告
+                # 有图但图永远发不出去"，模型只能看到句柄文本却看不到画面。
+                # 原位回填原字符串内容，保留子类与附带引用。
+                images = getattr(llm_result, "images", None)
+                if images:
+                    llm_result = type(llm_result)(stripped, images)
+                else:
+                    llm_result = stripped
             self._logger.info(
                 f"tools.{name.lower()}",
                 f"调用: {json.dumps(arguments, ensure_ascii=False)[:200]}",

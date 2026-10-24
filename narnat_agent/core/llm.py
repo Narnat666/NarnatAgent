@@ -22,6 +22,7 @@ from typing import List, Dict, Any, Iterator, Optional
 from ..config.loader import AIConfig
 from ..config.defaults import (
     DEFAULT_THINKING_PASSBACK, resolve_thinking_params, resolve_thinking_passback,
+    resolve_image_support,
 )
 from .interrupt import register_abort
 from .message_list import SYNTHETIC_THINKING
@@ -257,6 +258,59 @@ def _user_has_tool_result(user_msg: Dict[str, Any]) -> bool:
         isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
 
 
+# ── 图片块展开（发送端二次适配的唯一实现处）──
+# 历史里图片只以引用形式存在（msg["images"]，见 core/attachment.py），
+# 每次请求前按"图片状态 x 模型能力"决定这一刻怎么发：
+#   副本在 + 模型支持   → 句柄文本 + 真实图片块
+#   副本在 + 模型不支持 → 句柄文本 + 一句"未发送"说明
+#   副本丢失            → 句柄文本 + 一句"已丢失"说明
+# 三种情况都**不改历史**：切回支持识图的模型，同一份历史立刻恢复发图。
+_IMAGE_UNSUPPORTED_TEXT = "[图片未发送：当前模型不支持图片输入]"
+
+
+def _load_image_bytes(data_dir: str, ref: Dict[str, Any]):
+    """取图片 base64 + 媒体类型；失败返回 (None, 原因文本)。
+
+    走附件库的进程内缓存：多图多轮对话每轮都要重新拼请求，
+    没有缓存就是每轮几十 MB 的重复读盘+编码。
+    data_dir 是 <项目>/.narnat/data，附件库在其下的 attachments/。
+    """
+    if not data_dir:
+        return None, "[图片不可用：附件库路径未配置]"
+    from . import attachment as _attachment
+    root = _attachment.attachment_root(data_dir)
+    try:
+        b64 = _attachment.load_base64_cached(root, ref.get("id") or "")
+    except _attachment.ImageUnavailable as e:
+        return None, "[图片已丢失：%s。如仍需要该图，请让用户重新提供 %s]" % (
+            e, ref.get("name") or ref.get("id") or "原文件")
+    return b64, ""
+
+
+def _resolve_images(refs, data_dir: str, supports_image: bool):
+    """把一组图片引用展开成 (可用图列表, 降级说明文本列表)。
+
+    可用图列表元素：(media_type, base64)。
+    refs 直接接受 msg["images"] 的值（调用方通常已把字段 pop 出来）。
+    """
+    if not isinstance(refs, list) or not refs:
+        return [], []
+
+    available, notes = [], []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        if not supports_image:
+            notes.append(_IMAGE_UNSUPPORTED_TEXT)
+            continue
+        b64, reason = _load_image_bytes(data_dir, ref)
+        if b64 is None:
+            notes.append(reason)
+            continue
+        available.append((ref.get("media_type") or "image/png", b64))
+    return available, notes
+
+
 def abort_active_llm_request():
     """关闭当前LLM请求的HTTP连接。"""
     resp = LLMClient._active_response
@@ -312,9 +366,11 @@ class LLMClient:
         cls._max_rate_retries = max(1, min(n, 10))     # 429 与网络重试同源同值
 
     def __init__(self, config: AIConfig, logger=None, max_output_tokens: int = 128000,
-                 tool_definitions: list = None):
+                 tool_definitions: list = None, data_dir: str = ""):
         self._config = config
         self._logger = logger
+        # 附件库根目录（<项目>/.narnat/data）：发请求时把图片引用展开成真实图片块
+        self._data_dir = data_dir
         # 复制一份：set_goal_tool 动态增删 GoalComplete 时不影响调用方持有的原列表
         self._tool_defs = list(tool_definitions or [])
         self._max_output_tokens = max_output_tokens
@@ -327,20 +383,23 @@ class LLMClient:
         if protocol not in ("anthropic", "openai"):
             raise ValueError(f"不支持的协议: {protocol}（可选: anthropic / openai）")
         if protocol == "anthropic":
-            self._backend = _AnthropicBackend(config, self._tool_defs, logger, max_output_tokens)
+            self._backend = _AnthropicBackend(config, self._tool_defs, logger, max_output_tokens,
+                                              data_dir=data_dir)
         else:
-            self._backend = _OpenAIBackend(config, self._tool_defs, logger)
+            self._backend = _OpenAIBackend(config, self._tool_defs, logger, data_dir=data_dir)
 
     def chat_stream(self, messages: List[Dict[str, Any]], no_tools: bool = False,
                     no_thinking: bool = False, cancel_check=None,
                     tool_defs: Optional[list] = None,
-                    model: Optional[str] = None) -> Iterator:
-        """流式对话。tool_defs/model 为请求级覆盖（None=用实例默认）：
-        验证器等独立请求可不触碰主会话工具表与模型配置，只影响本次请求。
+                    model: Optional[str] = None,
+                    max_tokens: Optional[int] = None) -> Iterator:
+        """流式对话。tool_defs/model/max_tokens 为请求级覆盖（None=用实例默认）：
+        验证器等独立请求可不触碰主会话工具表、模型配置与输出上限，只影响本次请求。
         """
         return self._backend.chat_stream(_strip_surrogates(messages), no_tools=no_tools,
                                          no_thinking=no_thinking, cancel_check=cancel_check,
-                                         tool_defs=tool_defs, model=model)
+                                         tool_defs=tool_defs, model=model,
+                                         max_tokens=max_tokens)
 
     def set_goal_tool(self, enabled: bool) -> None:
         """动态注入/移除 GoalComplete 工具定义。
@@ -437,10 +496,11 @@ class _RequestScope:
 class _OpenAIBackend:
     """OpenAI SDK 后端"""
 
-    def __init__(self, config, tool_defs, logger):
+    def __init__(self, config, tool_defs, logger, data_dir=""):
         self._config = config
         self._tool_defs = tool_defs
         self._logger = logger
+        self._data_dir = data_dir
         self._client_lock = threading.Lock()
         # 中断标记：请求级scope被关闭后置位，下次请求前重建客户端
         self._need_rebuild = False
@@ -484,6 +544,12 @@ class _OpenAIBackend:
           时才 thinking → 顶层 reasoning_content 字段
         - 其余（none / 纯文本轮 / 开关关闭）：剥离 thinking 字段
         model: 本次请求实际生效模型（请求级覆盖），查表用
+
+        图片：内部 msg["images"] 是引用列表（不是字节），此处按当前模型能力展开。
+        OpenAI 协议的图片块形如
+            {"type":"image_url","image_url":{"url":"data:<mime>;base64,<b64>"}}
+        content 因此从 str 变成块列表 —— 只在**本条消息确实有可发图**时改变形态，
+        纯文本消息仍是 str，与旧请求逐字节一致（保住 KV cache 前缀）。
         """
         model = model or self._config.model
         use_rc = (
@@ -491,26 +557,56 @@ class _OpenAIBackend:
             and getattr(self._config, "thinking_passback", DEFAULT_THINKING_PASSBACK)
             and resolve_thinking_passback("openai", model) == "reasoning_content"
         )
+        supports_image = resolve_image_support("openai", model)
         out = []
         for m in messages:
             m = dict(m)
             thinking = m.pop("thinking", None)
             m.pop("thinking_signature", None)
+            # 图片归属标记只服务于 Anthropic 转换层，不属于任何协议字段
+            m.pop("image_for_tool_call", None)
+            images = m.pop("images", None)
             if (use_rc and m.get("role") == "assistant"
                     and m.get("tool_calls") and thinking is not None):
                 m["reasoning_content"] = thinking
+            if images:
+                self._apply_images(m, images, supports_image)
             out.append(m)
         return out
 
+    def _apply_images(self, msg, images, supports_image):
+        """把图片引用就地展开进 msg["content"]（OpenAI 形块列表）。
+
+        无法发送的图（模型不支持 / 副本丢失）只追加一句说明文本，
+        句柄文本本就在 content 里，模型仍知道有这张图、多大、在哪。
+        """
+        available, notes = _resolve_images(images, self._data_dir, supports_image)
+        text = msg.get("content") or ""
+        if notes:
+            text = (text + "\n" + "\n".join(notes)) if text else "\n".join(notes)
+        if not available:
+            msg["content"] = text
+            return
+        blocks = [{"type": "text", "text": text}] if text else []
+        for media_type, b64 in available:
+            blocks.append({
+                "type": "image_url",
+                "image_url": {"url": "data:%s;base64,%s" % (media_type, b64)},
+            })
+        msg["content"] = blocks
+
+
     def chat_stream(self, messages, no_tools=False, no_thinking=False, cancel_check=None,
-                    tool_defs=None, model=None):
+                    tool_defs=None, model=None, max_tokens=None):
         """流式请求并产出统一事件流（生成器；首次迭代才真正发请求）。
 
         请求发送（建连/等响应头）与流式接收期间均以 0.05 秒粒度轮询取消标记，
         取消命中即静默结束本轮：消除"中断后仍等服务端响应头到达才收敛"的慢路径。
 
-        tool_defs/model：请求级覆盖（None=用实例默认）——本次请求单独指定工具表
-        与模型（含 thinking 参数查表），不改动实例状态。
+        tool_defs/model/max_tokens：请求级覆盖（None=用实例默认）——本次请求单独
+        指定工具表、模型（含 thinking 参数查表）与输出上限，不改动实例状态。
+        max_tokens 用于压缩请求：压缩输出给一个独立的小预算，避免压缩请求
+        自身把上下文窗口撑爆。
         """
         request_model = model or self._config.model
         if self._logger:
@@ -555,6 +651,9 @@ class _OpenAIBackend:
                     kwargs["temperature"] = self._config.temperature
                 if self._config.max_tokens is not None:
                     kwargs["max_tokens"] = self._config.max_tokens
+                if max_tokens is not None:
+                    # 请求级覆盖优先：压缩请求用独立的小输出预算
+                    kwargs["max_tokens"] = max_tokens
                 # 发送移入子线程 + 主流程轮询取消标记：建连/等响应头期间取消也能立即
                 # 收敛（直接调用时生成器体卡在create上，取消检查点不可达）；取消同样
                 # 标记客户端重建，避免下一轮复用已被关闭的客户端
@@ -815,10 +914,11 @@ class _AnthropicBackend:
     使用 httpx 替代 requests，统一HTTP客户端依赖。
     """
 
-    def __init__(self, config, tool_defs, logger, max_output_tokens=128000):
+    def __init__(self, config, tool_defs, logger, max_output_tokens=128000, data_dir=""):
         self._config = config
         self._tool_defs = tool_defs
         self._logger = logger
+        self._data_dir = data_dir
         self._max_output_tokens = max_output_tokens
         self._url = f"{config.base_url.rstrip('/')}/v1/messages"
         self._last_raw_sse = []
@@ -829,15 +929,17 @@ class _AnthropicBackend:
         }
 
     def chat_stream(self, messages, no_tools=False, no_thinking=False, cancel_check=None,
-                    tool_defs=None, model=None):
+                    tool_defs=None, model=None, max_tokens=None):
         """流式请求并产出统一事件流（生成器；首次迭代才真正发请求）。
 
         请求发送（建连/等响应头）与流式接收期间均以 0.05 秒粒度轮询取消标记，
         取消命中即静默结束本轮并清理活跃请求句柄：消除"中断后仍等服务端响应头
         到达才收敛"的慢路径。
 
-        tool_defs/model：请求级覆盖（None=用实例默认）——本次请求单独指定工具表
-        与模型（含 thinking 参数查表），不改动实例状态。
+        tool_defs/model/max_tokens：请求级覆盖（None=用实例默认）——本次请求单独
+        指定工具表、模型（含 thinking 参数查表）与输出上限，不改动实例状态。
+        max_tokens 用于压缩请求：压缩输出给一个独立的小预算，避免压缩请求
+        自身把上下文窗口撑爆。
         """
         request_model = model or self._config.model
         self._last_raw_sse.clear()
@@ -877,6 +979,9 @@ class _AnthropicBackend:
             body["temperature"] = self._config.temperature
         if self._config.max_tokens is not None:
             body["max_tokens"] = self._config.max_tokens
+        if max_tokens is not None:
+            # 请求级覆盖优先：压缩请求用独立的小输出预算
+            body["max_tokens"] = max_tokens
 
         # 发送请求（带重试，使用 httpx 流式）
         network_retries = 0
@@ -1298,22 +1403,106 @@ class _AnthropicBackend:
 
     # ── 消息格式转换：OpenAI → Anthropic ──
 
+    @staticmethod
+    def _is_tool_result_only(content):
+        """该 user 消息的 content 是否**只**含 tool_result 块。
+
+        只有这种情况才允许继续往里追 tool_result：Anthropic 要求
+        tool_result 必须紧跟 tool_use 且是 user 消息首块，
+        一旦这条 user 已经含 text/image，再追 tool_result 就是 400。
+        """
+        return (isinstance(content, list) and bool(content)
+                and all(isinstance(b, dict) and b.get("type") == "tool_result"
+                        for b in content))
+
+    def _tool_result_blocks(self, tool_call_id, text, images, supports_image):
+        """构造一条 tool 消息对应的 tool_result 块（图片直接内嵌）。
+
+        Anthropic 的 tool_result.content 接受字符串或内容块数组，
+        块数组里可以含 image（已用真实端点验证）。把 Read 读到的图直接放进
+        tool_result，比"另起一条 user 挂图"更合规：天然满足
+        tool_use/tool_result 紧邻，也不会多出一条 user 打断角色交替。
+        """
+        available, notes = _resolve_images(images, self._data_dir, supports_image)
+        body = text or ""
+        if notes:
+            body = (body + "\n" + "\n".join(notes)) if body else "\n".join(notes)
+        if not available:
+            return [{"type": "tool_result", "tool_use_id": tool_call_id,
+                     "content": body}]
+
+        parts = []
+        if body:
+            parts.append({"type": "text", "text": body})
+        for media_type, b64 in available:
+            parts.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": b64},
+            })
+        return [{"type": "tool_result", "tool_use_id": tool_call_id,
+                 "content": parts}]
+
+    def _user_blocks(self, content, images, supports_image):
+        """把一条 user 消息的文本 + 图片引用转成 Anthropic 内容块列表。
+
+        Returns:
+            (blocks, text)：blocks 为内容块列表（文本块在前、图片块在后，
+            与 deepseek-harness 的 handle-then-image 顺序一致：模型先读到
+            "这是什么图"再看到图）；text 为拼好降级说明后的正文，
+            供"最终没有图可发"时退回字符串 content 使用。
+        """
+        available, notes = _resolve_images(images, self._data_dir, supports_image)
+        text = content or ""
+        if notes:
+            text = (text + "\n" + "\n".join(notes)) if text else "\n".join(notes)
+
+        blocks = []
+        if text:
+            blocks.append({"type": "text", "text": text})
+        for media_type, b64 in available:
+            blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": b64,
+                },
+            })
+        return blocks, text
+
     def _convert_messages(self, messages, model=None):
         model = model or self._config.model
+        supports_image = resolve_image_support("anthropic", model)
         system_parts = []
         anthropic_msgs = []
+
+        # 图片归属预归集：带 image_for_tool_call 的 user 消息，其图片要并进
+        # 对应 tool_result（而不是另起一条 user 打断 tool_use 紧邻约束）。
+        # 先扫一遍建 map，转换主循环里据此取出并跳过那条 user 消息。
+        images_by_call = {}
+        for m in messages:
+            if m.get("role") == "user" and m.get("image_for_tool_call"):
+                key = m["image_for_tool_call"]
+                images_by_call.setdefault(key, []).extend(m.get("images") or [])
 
         for msg in messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
+            images = msg.get("images")
 
             if role == "system":
                 if content:
                     system_parts.append(content)
                 continue
 
+            # 图片已被并进 tool_result 的那条 user 消息：整体跳过。
+            # 它只是消息层的"图片转运站"，在 Anthropic 侧没有独立语义。
+            if role == "user" and msg.get("image_for_tool_call"):
+                continue
+
             if role == "user":
                 content = content or ""
+                blocks, text = self._user_blocks(content, images, supports_image)
                 prev = anthropic_msgs[-1] if anthropic_msgs else None
                 if (content and prev is not None and prev["role"] == "user"
                         and not _user_has_tool_result(prev)):
@@ -1322,14 +1511,18 @@ class _AnthropicBackend:
                     # tool_result 必须紧邻 tool_use（同消息插入 text 会破坏
                     # 校验），且 tool_result 后的独立 user 已被真实API验证可接受。
                     if isinstance(prev["content"], list):
-                        prev["content"].append({"type": "text", "text": content})
+                        prev["content"].extend(blocks)
                     else:
-                        prev["content"] = [
-                            {"type": "text", "text": prev["content"]},
-                            {"type": "text", "text": content},
-                        ]
+                        prev["content"] = (
+                            [{"type": "text", "text": prev["content"]}] + blocks)
                 else:
-                    anthropic_msgs.append({"role": "user", "content": content})
+                    if blocks and any(b.get("type") == "image" for b in blocks):
+                        # 有图：必须用块列表（图片块不能塞进字符串 content）
+                        anthropic_msgs.append({"role": "user", "content": blocks})
+                    else:
+                        # 无图（含"图发不出去"的降级情况）：用 text 而非原始 content，
+                        # text 里可能已拼上"[图片未发送 / 已丢失]"说明；无说明时二者相同
+                        anthropic_msgs.append({"role": "user", "content": text})
 
             elif role == "assistant":
                 tool_calls = msg.get("tool_calls")
@@ -1390,16 +1583,20 @@ class _AnthropicBackend:
                     anthropic_msgs.append({"role": "assistant", "content": content or ""})
 
             elif role == "tool":
-                tool_result = {
-                    "type": "tool_result",
-                    "tool_use_id": msg.get("tool_call_id", ""),
-                    "content": content or "",
-                }
-                if anthropic_msgs and anthropic_msgs[-1]["role"] == "user" \
-                        and isinstance(anthropic_msgs[-1]["content"], list):
-                    anthropic_msgs[-1]["content"].append(tool_result)
+                tc_id = msg.get("tool_call_id", "")
+                # 该工具调用若携带图片（Read 读到图），从预归集里取出来内嵌
+                tool_images = images_by_call.get(tc_id)
+                blocks = self._tool_result_blocks(tc_id, msg.get("content") or "",
+                                                  tool_images, supports_image)
+                # tool_result 必须是 user 消息的首块（Anthropic 强校验），
+                # 因此只有当上一条 user 是"纯 tool_result 容器"时才并进去；
+                # 若上一条含 text/image（图片配图消息等），必须新起一条，
+                # 否则 tool_result 不在首位 → 400，且会插到别的块中间。
+                if (anthropic_msgs and anthropic_msgs[-1]["role"] == "user"
+                        and self._is_tool_result_only(anthropic_msgs[-1]["content"])):
+                    anthropic_msgs[-1]["content"].extend(blocks)
                 else:
-                    anthropic_msgs.append({"role": "user", "content": [tool_result]})
+                    anthropic_msgs.append({"role": "user", "content": blocks})
 
         # 开放位置 assistant 补占位思考块（见 _PLACEHOLDER_THINKING 注释）：
         # 尾部 assistant 与连续 assistant 链前序缺 thinking 块会被 API 拒
