@@ -221,7 +221,12 @@ def _style_pattern_path(name: str, arguments: dict) -> str:
 
 
 def _style_query(name: str, arguments: dict) -> str:
-    return arguments.get("query", "")
+    action = str(arguments.get("action") or "")
+    if action == "fetch":
+        return str(arguments.get("url") or "")
+    if action == "search":
+        return str(arguments.get("query") or "")
+    return str(arguments.get("query") or arguments.get("url") or "")
 
 
 def _style_todos(name: str, arguments: dict) -> str:

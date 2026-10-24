@@ -72,7 +72,7 @@ def _read_search_section(path: str):
 class _HotSearchKeys(dict):
     """「联网搜索」配置的热读视图（dict 子类，读取前按 mtime 判断要不要重读磁盘）
 
-    为什么需要它：这段配置决定 WebSearch 走哪个 provider、用哪个 key。用户按
+    为什么需要它：这段配置决定 WebSearch 连哪个搜索/抓取接口、用哪个 key。用户按
     README 改完 narnat.json 却发现工具仍用旧配置，只会得到 401 或走错通道，
     然后以为自己配置写错了——而 load_config 只在启动时跑一次，一改就得重启。
     这里只让 api_keys 这一项按需重读，其它配置（模型/思考/会话…）的生效时机
@@ -165,7 +165,8 @@ class ToolContext:
 
     # API密钥组（web_search使用）。实际是 _HotSearchKeys（dict 子类）：
     # 每次读取都按 mtime 判断要不要重读 narnat.json 的「联网搜索」段，
-    # 改完 provider/key 不必重启后端；其它配置仍按启动时的 load_config 结果生效
+    # 改完接口地址/key 不必重启后端（extra_params 例外：它进了工具定义，需重启）；
+    # 其它配置仍按启动时的 load_config 结果生效
     api_keys: Dict[str, str] = field(default_factory=dict)
 
     # 忽略目录（glob/grep使用）

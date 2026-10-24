@@ -1,72 +1,105 @@
-"""WebSearch工具 —— 联网搜索（适配任意 MCP 服务器 / 任意 REST 搜索接口）
+"""WebSearch —— 联网搜索与网页抓取（纯 REST 双接口）
 
-## 两种接入方式（narnat.json「联网搜索」的 mode 字段）
+## 只有一个工具形态：action 判别
 
-  "mcp" （默认）任意 MCP Streamable HTTP 服务器（AnySearch、Brave、Exa…）
-  "http"       任意 REST 搜索接口（POST JSON → 返回 JSON）
+  action=search  按关键词搜索 → 返回编号列表（标题 / URL / 摘要）
+  action=fetch   抓取指定网页 → 返回 Markdown 正文（不自行截断）
 
-**不绑定任何厂商**：厂商差异全部由配置表达（地址、认证、字段名、响应解析），
-代码里没有「某厂商」的分支。哪家出了新的搜索接口，界面上填完就能用。
+两个动作走同一个 narnat.json「联网搜索」段里的两套子配置（http.search /
+http.fetch）。换服务商只改 json，不改代码。
 
-## MCP 方式
+## MCP 联网请用 MCP 工具
 
-McpHttpClient 握手(initialize) → 列工具(tools/list) → 按配置解析工具与参数
-→ 调用(tools/call)。JSON/SSE 响应、会话头、超时均由 McpHttpClient 承担。
+本工具**不再自带 MCP 接入**。以前那层「MCP 握手 → 选单个工具 → 映射参数名」
+是在项目自带的 MCP 框架之上又包了一层，且会丢信息（正文抓取拿不到）。
+需要任意 MCP 联网服务器时，用 `MCP` 工具的 connect 接上（工具名
+`mcp__<服务器>__<工具>`），schema 原样来自服务器。
 
-MCP 契约：各服务器的工具名/参数名不同，一律由配置指定（不猜）；参数类型（数组/标量）
-查工具 inputSchema 决定。配置（narnat.json「联网搜索」→ mcp 子对象）:
-  - url:          MCP 端点 URL
-  - tool:         搜索工具名；空 = 连接后报错列出服务器工具表
-  - query_params: 查询词填入的参数名列表（可多个，数组型参数传 [query]）
-  - count_param:  结果数量参数名；空串 = 不传
-  - args:         可选，附加固定参数；仅当目标工具参数表（inputSchema）声明
-                  该键时传入，未声明的键被忽略（防换服务器后旧配置误传给其它工具）
+## 配置示例
 
-## REST 方式
+```jsonc
+"联网搜索": {
+  "key": "sk-...",
+  "auth": "bearer",                          // 空=不认证 / bearer / 自定义头名
+  "http": {
+    "search": {
+      "url": "https://api.deepseek.com/v1/tools/search",
+      "query_field": "query",
+      "count_field": "count",                // 空串 = 不传条数
+      "args": {},
+      "rail": {"list": "results", "title": "title", "url": "url",
+               "desc": ["snippet", "summary", "content"]},
+      "extra_params": {}
+    },
+    "fetch": {
+      "url": "https://api.deepseek.com/v1/tools/fetch",
+      "url_field": "url",
+      "args": {},
+      "rail": {"title": "title", "content": "content"}
+    }
+  }
+}
+```
 
-见 rest.py：请求体字段名、响应数组路径、title/url/描述字段名全部可配。
+`rail` 是响应解析规则（数组路径 + 字段名，全部可配）；`args` 是固定附加参数；
+两个 `url` 至少填一个（缺哪个就只是那个 action 报「未配置」，另一个照常可用）。
 
-## 两地共用
+## extra_params —— 让模型能填厂商扩展参数
 
-  - key:  密钥（顶层；两种接入方式共用同一把搜索钥匙）
-  - auth: 认证方式：bearer / x-api-key / 自定义头名；空 = 不加认证头
+`http.search.extra_params` 声明「模型可填的参数」，形如：
+
+```jsonc
+"extra_params": {
+  "domains": {"type": "array", "items": {"type": "string"},
+              "description": "域名过滤", "field": "include_domains"}
+}
+```
+
+模块加载时把去掉 `field` 的副本并入工具定义的 properties（与 action/query/url/num
+冲突的条目跳过，`required` 不变），运行时把模型填的值按 `{参数名 → 字段名}`
+翻译进请求体。所以给某家厂商加一个参数不需要改代码，也不需要多一轮发版。
 """
 
-import json
 import re
-import threading
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List
 
-from ...mcp.client import McpError
-from ...mcp.http_client import McpHttpClient
-from ..exec_signal import has_error
+from ..tool_context import _narnat_json_path, _read_search_section
 from . import rest
 
 
-# ── 搜索配置（原模块级全局收敛为类成员）──
+# ── 搜索配置（超时）──
 
 class SearchConfig:
     """WebSearch 固定参数。
 
-    连接/工具/参数契约全部来自 narnat.json "联网搜索"，由 execute() 每次调用时经
-    tool_context.api_keys 读取（不缓存到模块级全局，避免跨调用残留脏状态）；
-    握手建立的连接按配置指纹缓存，配置变化自然重建。
+    接口地址/字段名/认证契约全部来自 narnat.json 的「联网搜索」段，
+    由 execute() 每次调用时经 tool_context.api_keys 读取（不缓存到模块级全局，
+    避免跨调用残留脏状态）。
     """
-    timeout = 15          # 工具调用超时（秒）；握手/列工具为 timeout + _CONNECT_TIMEOUT_EXTRA
+    timeout = 15          # 单次 HTTP 调用超时（秒）
 
 DEFINITION = {
     "type": "function",
     "function": {
         "name": "WebSearch",
-        "description": "网页搜索（用于查找API文档、解决方案、技术文章等）。",
+        "description": "联网搜索或抓取网页。action=search 按关键词搜索并返回标题、"
+                       "URL 与摘要；action=fetch 抓取指定网页并返回 Markdown 全文。"
+                       "需要正文时，先 search 再对选中的 URL 执行 fetch。",
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "搜索查询词"},
-                "num": {"type": "integer", "description": "返回结果数量（正整数，默认5，上限20）"},
+                "action": {"type": "string", "enum": ["search", "fetch"],
+                           "description": "search=按关键词搜索；fetch=抓取指定网页正文"},
+                "query": {"type": "string",
+                          "description": "搜索词，action=search 时必填。"
+                                         "支持 site: / lang: / after: / before: 等语法"},
+                "url": {"type": "string",
+                        "description": "要抓取正文的网页地址（http/https），"
+                                       "action=fetch 时必填"},
+                "num": {"type": "integer",
+                        "description": "返回条数，action=search 时有效，默认 10，上限 20"},
             },
-            "required": ["query"],
+            "required": ["action"],
         },
     },
 }
@@ -78,6 +111,48 @@ CAPABILITY = {
     "summary": "query",
     "trusted_output": True,
 }
+
+
+# ── 扩展参数（narnat.json 声明 → 工具定义 properties + 运行时字段翻译）──
+
+# {工具参数名: 请求体字段名}，运行时据此把模型填的值翻译成厂商字段
+_EXTRA_FIELDS: Dict[str, str] = {}
+
+
+def _apply_extra_params() -> None:
+    """把「联网搜索」→ http.search.extra_params 声明的扩展参数并入 DEFINITION
+
+    模块加载时调一次；重复调用是幂等的（先撤掉上一次注入的项）。
+    读盘失败/段缺失/声明非法一律静默跳过：扩展参数是可选增强，
+    读不到不能影响工具本身的可用性。
+    """
+    props = DEFINITION["function"]["parameters"]["properties"]
+    for name in list(_EXTRA_FIELDS):
+        props.pop(name, None)
+    _EXTRA_FIELDS.clear()
+
+    declared: Dict = {}
+    try:
+        path = _narnat_json_path()
+        section = _read_search_section(path) if path else None
+        search = (section or {}).get("http", {}).get("search", {})
+        raw = search.get("extra_params") if isinstance(search, dict) else None
+        if isinstance(raw, dict):
+            declared = raw
+    except Exception:
+        return
+
+    for name, spec in declared.items():
+        name = str(name).strip()
+        if not name or not isinstance(spec, dict) or name in props:
+            # 与 action/query/url/num 冲突（或已注入过）的条目一律跳过，不许覆盖固定参数
+            continue
+        field = str(spec.get("field") or name).strip() or name
+        _EXTRA_FIELDS[name] = field
+        props[name] = {k: v for k, v in spec.items() if k != "field"}
+
+
+_apply_extra_params()
 
 
 # ── 工具函数 ──
@@ -127,491 +202,92 @@ def _format_results(results: List[Dict]) -> str:
     return "\n".join(lines)
 
 
-# ── 结果解析 ──
-
-def _parse_anysearch_markdown(text: str) -> List[Dict]:
-    """解析 AnySearch 返回的 markdown 文本为结构化结果"""
-    results = []
-    # 格式: ### N. Title\n- **URL**: url\n- description\n...
-    blocks = re.split(r"\n(?=### \d+\.)", text)
-    for block in blocks:
-        title_m = re.search(r"^### \d+\.\s*(.+)$", block, re.MULTILINE)
-        url_m = re.search(r"-\s*\*\*URL\*\*:\s*(https?://[^\s\n]+)", block)
-        if title_m and url_m:
-            title = title_m.group(1).strip()
-            url = url_m.group(1).strip()
-            # 提取描述：URL之后的文本，去掉前缀标记
-            desc_start = url_m.end()
-            rest = block[desc_start:].strip()
-            # 去掉可能的 "**Description**: " 等前缀
-            desc = re.sub(r"^[-*]+\s*(\*\*Description\*\*:\s*)?", "", rest).strip()
-            results.append({"title": title, "url": url, "description": desc})
-    return results
-
-
-# markdown 链接 [标题](url)；裸 URL 行（可带列表前缀）
-_MD_LINK_RE = re.compile(r"\[([^\]\n]{1,200})\]\((https?://[^\s)]+)\)")
-_BARE_URL_LINE_RE = re.compile(r"^[ \t]*(?:[-*+]\s*|\d+[.)]\s*)?(https?://\S+?)[ \t]*$",
-                               re.MULTILINE)
-
-
-def _line_tail(text: str, pos: int) -> str:
-    """取 pos 所在行从 pos 起的剩余文本"""
-    end = text.find("\n", pos)
-    return text[pos:] if end < 0 else text[pos:end]
-
-
-def _parse_links(text: str) -> List[Dict]:
-    """通用兜底：提取「标题 + URL」对 —— markdown 链接优先，无则取裸 URL 行（标题用 URL）"""
-    results = []
-    for m in _MD_LINK_RE.finditer(text):
-        desc = _line_tail(text, m.end())
-        results.append({"title": m.group(1).strip(),
-                        "url": m.group(2).strip(),
-                        "description": re.sub(r"^[)\s:：|\-–—]+", "", desc)})
-    if results:
-        return results
-    for m in _BARE_URL_LINE_RE.finditer(text):
-        url = m.group(1)
-        results.append({"title": url, "url": url, "description": ""})
-    return results
-
-
-# JSON 结果常见键名（不同搜索服务器的字段命名）
-_JSON_URL_KEYS = ("url", "link", "href")
-_JSON_TITLE_KEYS = ("title", "name", "headline", "text")
-_JSON_DESC_KEYS = ("description", "snippet", "content", "summary")
-_JSON_MAX_RESULTS = 50
-
-
-def _first_text(node: Dict, keys: Tuple[str, ...]) -> str:
-    """取 node 中第一个非空字符串字段"""
-    for key in keys:
-        value = node.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
-def _walk_json(node, out: List[Dict]) -> None:
-    """递归遍历 JSON，收集带 URL 字段的对象"""
-    if len(out) >= _JSON_MAX_RESULTS:
-        return
-    if isinstance(node, list):
-        for item in node:
-            _walk_json(item, out)
-    elif isinstance(node, dict):
-        url = _first_text(node, _JSON_URL_KEYS)
-        if url.lower().startswith(("http://", "https://")):
-            out.append({"title": _first_text(node, _JSON_TITLE_KEYS) or url,
-                        "url": url,
-                        "description": _first_text(node, _JSON_DESC_KEYS)})
-        else:
-            for value in node.values():
-                _walk_json(value, out)
-
-
-def _parse_json_results(text: str) -> List[Dict]:
-    """通用兜底：整段文本为 JSON 时递归提取结果对象（深度异常时放弃解析）"""
-    try:
-        data = json.loads(text)
-    except (ValueError, RecursionError):
-        return []
-    results: List[Dict] = []
-    try:
-        _walk_json(data, results)
-    except RecursionError:
-        pass
-    return results
-
-
-# "标签: 值" 块（Exa 等返回格式：Title: xxx / URL: https://...）
-_LABEL_TITLE_RE = re.compile(r"^[ \t]*(?:Title|标题)[ \t]*[:：][ \t]*(.+?)[ \t]*$")
-_LABEL_URL_RE = re.compile(r"^[ \t]*(?:URL|Link|链接)[ \t]*[:：][ \t]*(https?://\S+)[ \t]*$")
-
-
-def _parse_labeled_blocks(text: str) -> List[Dict]:
-    """通用兜底：'Title: xxx' + 'URL: https://...' 标签块解析
-
-    URL 行收尾一个结果，标题取紧邻其上的 Title 行（无/无效则用 URL）；
-    描述取 URL 行之后到下一个标签行之间的文本。
-    """
-    results: List[Dict] = []
-    lines = text.splitlines()
-    title = ""
-    i, n = 0, len(lines)
-    while i < n:
-        tm = _LABEL_TITLE_RE.match(lines[i])
-        if tm:
-            value = tm.group(1).strip()
-            title = "" if value in ("N/A", "-", "null", "None") else value
-            i += 1
+def _translate_extras(values: Dict) -> Dict:
+    """本次调用填的扩展参数 → 请求体字段名（跳过空值/空数组）"""
+    extras: Dict = {}
+    for name, value in values.items():
+        field = _EXTRA_FIELDS.get(name)
+        if not field or value is None or value == "" or value == [] or value == {}:
             continue
-        um = _LABEL_URL_RE.match(lines[i])
-        if um:
-            url = um.group(1).strip()
-            desc: List[str] = []
-            j = i + 1
-            while j < n and not (_LABEL_TITLE_RE.match(lines[j])
-                                 or _LABEL_URL_RE.match(lines[j])):
-                if lines[j].strip():
-                    desc.append(lines[j].strip())
-                j += 1
-            results.append({"title": title or url, "url": url,
-                            "description": re.sub(r"\s+", " ", " ".join(desc)).strip()})
-            title = ""
-            i = j
-            continue
-        i += 1
-    return results
+        extras[field] = value
+    return extras
 
 
-_RAW_LIMIT = 2000           # 解析不出结构化结果时的原文截断长度
-
-
-def _truncate_raw(text: str) -> str:
-    """原文兜底输出（截断到 _RAW_LIMIT，不丢内容优先于丢格式）"""
-    if len(text) <= _RAW_LIMIT:
-        return text
-    return f"{text[:_RAW_LIMIT]}\n...[已截断: 原文共{len(text)}字符]"
-
-
-def _render(text: str, query: str, num: int) -> str:
-    """结果文本 → AI 可读输出：结构化解析优先，全解析不出则返回原文"""
-    if not text.strip():
-        return "[无搜索结果]"
-    results = (_parse_anysearch_markdown(text)
-               or _parse_json_results(text)
-               or _parse_labeled_blocks(text)
-               or _parse_links(text))
-    if not results:
-        return _truncate_raw(text)
-    results.sort(key=lambda r: _relevance_score(r, query), reverse=True)
-    return _format_results(results[:num])
-
-
-# ── MCP 连接（惰性握手 + 按配置解析契约，缓存）──
-
-_CONNECT_TIMEOUT_EXTRA = 5      # initialize/list_tools 相对调用超时多给的余量（秒）
-
-_CACHE_LOCK = threading.Lock()
-_CACHE: Dict[str, "_Connection"] = {}
-
-
-@dataclass(frozen=True)
-class _Config:
-    """一次 execute 解析出的搜索配置（含认证头）"""
-    url: str
-    headers: Dict[str, str]
-    tool: str                 # 搜索工具名；空 = 服务器仅一个工具时采用
-    query_params: tuple       # 查询词填入的参数名
-    count_param: str          # 结果数量参数名；空 = 不传
-    extra_args: Dict          # 附加固定参数
-
-
-class _Connection:
-    """一次握手 + 契约解析得到的连接与调用参数（缓存单元）"""
-
-    def __init__(self, fingerprint: str, client: McpHttpClient, tool_name: str,
-                 query_fills: tuple, count_param: str, extra_args: Dict):
-        self.fingerprint = fingerprint
-        self.client = client
-        self.tool_name = tool_name
-        self.query_fills = query_fills    # ((参数名, 是否数组), ...)：查询词填入这些参数
-        self.count_param = count_param    # 已过滤：仅在 schema 中存在才非空
-        self.extra_args = extra_args      # 已过滤：仅保留 schema 中声明的参数
-
-
-def _fingerprint(cfg: _Config) -> str:
-    """连接缓存键：全部影响请求的配置（url/头/工具/参数契约）序列化"""
-    return json.dumps([cfg.url, sorted(cfg.headers.items()), cfg.tool,
-                       list(cfg.query_params), cfg.count_param, cfg.extra_args],
-                      sort_keys=True, ensure_ascii=False)
-
-
-_MODES = ("mcp", "http")
-
-# 老配置的 provider 值 → 新 mode。只为不改动用户既有 narnat.json：
-# "deepseek" 原本是「某厂商的 REST 接口」，现在归入通用 http 方式。
-_LEGACY_PROVIDER = {"deepseek": "http", "mcp": "mcp", "http": "http"}
-
-
-def _provider_name(keys) -> str:
-    """接入方式：缺失 = mcp；老配置的 provider 值自动映射到 mcp / http"""
-    if not isinstance(keys, dict):
-        return "mcp"
-    raw = keys.get("mode")
-    if raw is None:
-        raw = keys.get("provider")
-    if raw is None:
-        return "mcp"
-    name = str(raw).strip().lower()
-    if not name:
-        return "mcp"
-    name = _LEGACY_PROVIDER.get(name, name)
-    if name not in _MODES:
-        raise McpError(f"接入方式 '{raw}' 不被识别（可用: {' / '.join(_MODES)}）")
-    return name
-
-
-def _provider_fields(keys) -> Dict:
-    """取当前 provider 专属字段所在的字典。
-
-    ## 为什么要把 MCP 的字段收进 `mcp` 子对象
-
-    原来 provider / url / auth / tool / query_params / count_param / args 全平铺在
-    「联网搜索」这一层。切到 deepseek 后，那套 anysearch 的字段仍然原样躺在配置里
-    （只在界面上被 showFor 隐藏），用户打开 narnat.json 会看到「明明选了 DeepSeek
-    官方搜索，为什么还有 anyserch.com 的配置」—— 分不清哪些在生效。
-
-    现在两个 provider 各有自己的子对象，切换互不覆盖：
-
-        "联网搜索": {
-          "provider": "deepseek",          ← 顶层只留 provider + key（共用）
-          "key": "sk-...",
-          "deepseek": { "url": ..., "count_param": ... },
-          "mcp":      { "url": ..., "tool": ..., "query_params": [...] }
-        }
-
-    兼容：老配置没有 `mcp` 子对象、字段还平铺在顶层 —— 此时回退到顶层读，
-    所以升级不需要用户改任何东西（下次保存时由 rpc 层自动迁移）。
-    """
-    sub = keys.get("mcp")
-    return sub if isinstance(sub, dict) else keys
-
-
-def _read_config(api_keys):
-    """按 narnat.json「联网搜索」读配置；字段缺失/非法即报错并指出缺什么
-
-    两种接入方式：
-      mcp  → _Config（MCP 契约，字段在 mcp 子对象，回退顶层兼容老配置）
-      http → rest.Config（REST 契约，字段在 http 子对象）
-
-    认证头由本函数统一构造（_auth_headers），两条路径共用同一份逻辑，
-    避免「同一个 key 在两种方式下认证头写法不一致」。
-    """
-    keys = api_keys or {}
-    mode = _provider_name(keys)
-    # key / auth 在顶层共用（两种接入方式是同一把搜索钥匙）
-    auth_headers = _auth_headers(str(keys.get("key") or ""),
-                                 str(keys.get("auth") or "").strip())
-    if mode == "http":
-        return rest.read_config(keys, auth_headers)
-
-    mcp = _provider_fields(keys)
-    missing = [name for name in ("url", "tool", "query_params", "count_param")
-               if name not in mcp]
-    if missing:
-        raise McpError(f"联网搜索缺少配置项: {', '.join(missing)}"
-                       f"（按 README「联网搜索」补全 narnat.json）")
-
-    url = str(mcp["url"] or "").strip()
-    if not url:
-        raise McpError("url 不能为空")
-
-    raw_query = mcp["query_params"]
-    if isinstance(raw_query, str):
-        query_params = (raw_query.strip(),) if raw_query.strip() else ()
-    elif isinstance(raw_query, list):
-        query_params = tuple(s for x in raw_query if (s := str(x).strip()))
-    else:
-        query_params = ()
-    if not query_params:
-        raise McpError('query_params 不能为空（查询词参数名，如 ["query"]）')
-
-    count_param = str(mcp["count_param"] or "").strip()
-
-    raw_args = mcp.get("args", {})
-    if not isinstance(raw_args, dict):
-        raise McpError('args 必须是对象（如 {"zone": "cn"}）')
-    extra_args = {str(k): v for k, v in raw_args.items()}
-
-    return _Config(url, auth_headers, str(mcp["tool"] or "").strip(),
-                   query_params, count_param, extra_args)
-
-
-def _auth_headers(key: str, auth: str) -> Dict[str, str]:
-    """按认证方式构造请求头；key 为空 = 无鉴权服务器（不加认证头）"""
-    if not key:
-        return {}
-    if auth.lower() == "bearer":
-        return {"Authorization": f"Bearer {key}"}
-    if auth.lower() == "x-api-key":
-        return {"X-API-Key": key}
-    return {auth: key}          # 其它非空串 = 自定义头名
-
-
-def _schema_props(tool: Dict) -> Dict:
-    """取工具 inputSchema.properties（无/非法时返回空 dict）"""
-    schema = tool.get("inputSchema") if isinstance(tool, dict) else None
-    props = schema.get("properties") if isinstance(schema, dict) else None
-    return props if isinstance(props, dict) else {}
-
-
-def _describe_tools(specs: List[Dict], max_params: int = 6) -> str:
-    """工具名(参数: a, b) 一览，报错时提示用户配置什么"""
-    parts = []
-    for spec in specs:
-        params = list(_schema_props(spec))[:max_params]
-        parts.append(f"{spec['name']}({', '.join(params)})" if params else spec["name"])
-    return "、".join(parts) or "(无)"
-
-
-def _resolve_tool_name(tools: list, configured: str) -> str:
-    """确定搜索工具：配置名命中服务器工具表即用；否则报错列出工具表（不猜）"""
-    specs = [t for t in tools if isinstance(t, dict) and t.get("name")]
-    names = [str(t["name"]) for t in specs]
-    if configured and configured in names:
-        return configured
-    raise McpError(f"搜索工具未确定（tool={configured or '空'}）；"
-                   f"服务器工具表: {_describe_tools(specs)}；"
-                   f"请在 narnat.json「联网搜索」配置 tool")
-
-
-def _resolve_params(tool: Dict, tool_name: str, query_params: tuple,
-                    count_param: str, extra_args: Dict) -> tuple:
-    """按配置 + inputSchema 解析调用契约：(query_fills, count_param, extra_args)
-
-    query 参数查 schema 决定标量/数组，不在 schema 中即报错（列可用参数名）；
-    count 与附加参数不在 schema 中时静默不传（换服务器后旧配置不会误传给其它工具）。
-    """
-    if not query_params:
-        raise McpError("query_params 为空；请在 narnat.json「联网搜索」配置查询词参数名")
-    props = _schema_props(tool)
-    query_fills = []
-    for name in query_params:
-        spec = props.get(name)
-        if props and spec is None:
-            raise McpError(f"参数 {name} 不在工具 {tool_name} 的参数表: "
-                           f"{', '.join(props) or '(无)'}；请在 narnat.json「联网搜索」配置 query_params")
-        is_array = isinstance(spec, dict) and spec.get("type") == "array"
-        query_fills.append((name, is_array))
-    if not props:
-        # 无 schema 可查：照配置传（标量），附加参数原样并入
-        return tuple(query_fills), count_param, dict(extra_args)
-    return (tuple(query_fills),
-            count_param if count_param in props else "",
-            {k: v for k, v in extra_args.items() if k in props})
-
-
-def _connect(cfg: _Config, timeout: float, fingerprint: str) -> _Connection:
-    """握手 → 列工具 → 契约解析。失败抛 McpError 并关闭连接（不留半初始化状态）"""
-    client = McpHttpClient("websearch", cfg.url, headers=cfg.headers)
+def _do_fetch(cfg: rest.Config, url: str) -> str:
+    """action=fetch：抓取网页正文（不截断，体积由全局输出上限控制）"""
+    target = str(url or "").strip()
+    if not target:
+        return "[错误: action=fetch 需要 url]"
+    if not target.lower().startswith(("http://", "https://")):
+        return "[错误: url 必须是 http/https 地址]"
+    if cfg.fetch is None:
+        return "[错误: 未配置抓取接口（narnat.json「联网搜索」→ http.fetch.url）]"
     try:
-        client.initialize(timeout)
-        tools = client.list_tools(timeout)
-        tool_name = _resolve_tool_name(tools, cfg.tool)
-        tool_spec = next((t for t in tools if isinstance(t, dict)
-                          and str(t.get("name")) == tool_name), {})
-        query_fills, count_param, extra_args = _resolve_params(
-            tool_spec, tool_name, cfg.query_params, cfg.count_param, cfg.extra_args)
-    except Exception:
-        client.close()
-        raise
-    return _Connection(fingerprint, client, tool_name, query_fills, count_param, extra_args)
-
-
-def _get_connection(cfg: _Config) -> _Connection:
-    """取连接（缓存命中直接复用）。首调持锁构建：并发首调只握手一次"""
-    fingerprint = _fingerprint(cfg)
-    with _CACHE_LOCK:
-        conn = _CACHE.get(fingerprint)
-        if conn is None:
-            conn = _connect(cfg, SearchConfig.timeout + _CONNECT_TIMEOUT_EXTRA, fingerprint)
-            _CACHE[fingerprint] = conn
-        return conn
-
-
-def _drop_connection(conn: _Connection) -> None:
-    """调用失败后清缓存（下次自然重建）。锁外 close，不长时间持锁"""
-    with _CACHE_LOCK:
-        dropped = _CACHE.get(conn.fingerprint) is conn
-        if dropped:
-            _CACHE.pop(conn.fingerprint, None)
-    if dropped:
-        conn.client.close()
-
-
-def _build_arguments(conn: _Connection, query: str, num: int) -> Dict:
-    """按解析出的契约组装调用参数（数组参数传 [query]；附加参数原样并入）"""
-    args = {name: ([query] if is_array else query)
-            for name, is_array in conn.query_fills}
-    if conn.count_param:
-        args[conn.count_param] = num
-    for name, value in conn.extra_args.items():
-        args.setdefault(name, value)
-    return args
-
-
-# ── 主入口 ──
-
-def _search_rest(cfg: rest.Config, query: str, num: int) -> str:
-    """REST 路径：请求 → 结果转同构结构 → 沿用 _render 的排序/条数/格式"""
-    try:
-        text = rest.search(cfg, query, num, SearchConfig.timeout)
-        results = rest.to_results(text, cfg)
+        text = rest.fetch(cfg.fetch, cfg.headers, target, SearchConfig.timeout)
+        title, content = rest.to_page(text, cfg.fetch)
     except Exception as e:
-        return f"[错误: 搜索失败: {e}]"
-    if not results:
-        return "[无搜索结果]"
-    results.sort(key=lambda r: _relevance_score(r, query), reverse=True)
-    return _format_results(results[:num])
+        return f"[错误: 抓取失败: {e}]"
+    if not content:
+        return f"[错误: 抓取失败: 服务端未返回正文（title: {title}）]"
+    return f"标题: {title or target}\nURL: {target}\n\n{content}"
 
 
-def execute(query: str, num: int = 5, _tool_context=None) -> str:
-    """
-    联网搜索。
-
-    Args:
-        query: 搜索关键词
-        num: 返回结果数，默认5
-        _tool_context: 工具运行时上下文（内部参数，由registry注入）
-
-    Returns:
-        格式化的搜索结果，每条含标题、URL、描述
-    """
+def _do_search(cfg: rest.Config, query: str, num: Any, extra_values: Dict) -> str:
+    """action=search：搜索 → 相关性排序 → 编号列表"""
+    q = str(query or "").strip()
+    if not q:
+        return "[错误: action=search 需要 query]"
     # AI可能传字符串类型的数值参数，统一转int（与Grep/Read容错风格一致）
     try:
-        num = int(num) if num is not None else 5
+        num = int(num) if num is not None else 10
     except (TypeError, ValueError, OverflowError):
         return "[错误: num需为正整数]"
     if num <= 0:
         return "[错误: num需为正整数]"
-    requested = num
     # 上限20：结果逐条灌给LLM，超大num既拖慢响应又浪费配额，且全局截断会砍掉尾部
     num = min(num, 20)
-    # 每次调用从 tool_context 读取配置（不缓存到全局，避免跨调用残留）
+    if cfg.search is None:
+        return "[错误: 未配置搜索接口（narnat.json「联网搜索」→ http.search.url）]"
     try:
-        cfg = _read_config(_tool_context.api_keys if _tool_context else None)
+        text = rest.search(cfg.search, cfg.headers, q, num,
+                           _translate_extras(extra_values), SearchConfig.timeout)
+        results = rest.to_results(text, cfg.search)
     except Exception as e:
         return f"[错误: 搜索失败: {e}]"
-    if isinstance(cfg, rest.Config):
-        # REST 的条数上限由各家 API 自定，故传未截到 20 的原始 num
-        return _search_rest(cfg, query, requested)
+    if not results:
+        return "[无搜索结果]"
+    results.sort(key=lambda r: _relevance_score(r, q), reverse=True)
+    return _format_results(results[:num])
 
+
+# ── 主入口 ──
+
+def execute(action: str = "", query: str = "", num: int = 10, url: str = "",
+            _tool_context=None, **kwargs) -> str:
+    """
+    联网搜索 / 网页抓取。
+
+    Args:
+        action: "search" 或 "fetch"（必填）
+        query: 搜索词（action=search 时必填）
+        num: 返回条数（action=search 时有效，默认 10，上限 20）
+        url: 要抓取正文的网页地址（action=fetch 时必填）
+        _tool_context: 工具运行时上下文（内部参数，由registry注入）
+        kwargs: narnat.json「extra_params」声明的厂商扩展参数
+
+    Returns:
+        search: 编号列表（标题 / URL / 摘要）；fetch: 标题 + URL + Markdown 正文
+    """
+    act = str(action or "").strip().lower()
+    if act not in ("search", "fetch"):
+        return "[错误: action 必须是 search 或 fetch]"
     try:
-        conn = _get_connection(cfg)
+        cfg = rest.read_config(_tool_context.api_keys if _tool_context else None)
     except Exception as e:
-        return f"[错误: 搜索失败: {e}]"
-
-    try:
-        text = conn.client.call_tool(conn.tool_name,
-                                     _build_arguments(conn, query, num),
-                                     SearchConfig.timeout)
-    except McpError as e:
-        _drop_connection(conn)      # 连接可能已损坏：清缓存，下次自然重建
-        return f"[错误: 搜索失败: {e}]"
-    except Exception as e:
-        return f"[错误: 搜索失败: {e}]"
-
-    # 服务端 isError：call_tool 已包成框架错误行（带不可伪造标签）。
-    # 必须原样透传——若进 _render 解析，错误文本里的链接会被当"搜索结果"，
-    # 失败语义丢失（UI 不显示失败、AI 可能把错误文档链接当结果）。
-    if has_error(text):
-        return text
-    # 服务端不守 isError 规范：回 200 且 content 里是 {"error":{...}} 错误体。
-    # 判定与 REST 路径同源（rest.server_error，唯一定义），同样不得当正文渲染
-    detail = rest.server_error(text)
-    if detail:
-        return f"[错误: 搜索失败: 服务端错误: {detail}]"
-    return _render(text, query, num)
+        return f"[错误: 联网配置无效: {e}]"
+    if act == "fetch":
+        return _do_fetch(cfg, url)
+    unknown = [k for k in kwargs if k not in _EXTRA_FIELDS]
+    if unknown:
+        raise TypeError(f"got an unexpected keyword argument '{unknown[0]}'")
+    return _do_search(cfg, query, num, kwargs)

@@ -2236,16 +2236,6 @@
       return;
     }
     var rows = setItems.filter(function(it){ return it.group === setGroup; });
-    // 条件字段：showFor 列出的接入方式才显示。判据取同分组里 mode 那项的值 ——
-    // MCP 的工具名/查询参数字段在 REST 方式下毫无意义，摆在界面上只会让人
-    // 以为必须填（这种"看起来必填但实际无关"的字段最容易劝退）。
-    if (setGroup === 'websearch') {
-      var modeEl = setItems.filter(function(x){ return x.id === 'websearch.mode'; })[0] || {};
-      var mode = modeEl.value || 'mcp';
-      rows = rows.filter(function(it){
-        return !it.showFor || it.showFor.indexOf(mode) >= 0;
-      });
-    }
     if (!rows.length) {
       body.innerHTML = '<div class="set-msg">这一组没有可配置项</div>';
       return;
@@ -2480,25 +2470,31 @@
     } else if (it.id.indexOf('websearch.') === 0) {
       key = 'websearch';
       var f = it.id.slice('websearch.'.length);
-      if (f === 'mode') payload = { mode: value };
-      else if (f === 'args') {
-        // 附加参数是 JSON 文本：解析失败就报错，不能把半截 JSON 存进配置
-        var txt = String(value == null ? '' : value).trim();
-        if (!txt) payload = { args: {} };
+      if (f === 'args_search' || f === 'args_fetch' || f === 'extra_params') {
+        // 这三项是 JSON 文本：解析失败就报错，不能把半截 JSON 存进配置
+        var jtxt = String(value == null ? '' : value).trim();
+        var jobj = {};
+        if (!jtxt) jobj[f] = {};
         else {
-          try { payload = { args: JSON.parse(txt) }; }
-          catch (e) { setMsg('附加参数必须是合法 JSON：' + e.message, 'err'); return; }
+          try { jobj[f] = JSON.parse(jtxt); }
+          catch (e) { setMsg('「' + (it.label || f) + '」必须是合法 JSON：' + e.message, 'err'); return; }
         }
+        payload = jobj;
       }
-      else if (f === 'query_params') payload = { query_params: value };
       else if (f === 'rail_list' || f === 'rail_title' || f === 'rail_url' || f === 'rail_desc') {
-        // 四个 rail 字段合并成一个 rail 对象提交（后端只认 rail 整体）
+        // 搜索的四个 rail 字段合并成一个 rail 对象提交（后端 rail 是整体合并的）
         const RAIL = { rail_list: 'list', rail_title: 'title', rail_url: 'url', rail_desc: 'desc' };
         var rail = {};
         rail[RAIL[f]] = (f === 'rail_desc')
           ? String(value || '').split(',').map(function(x){ return x.trim(); }).filter(Boolean)
           : value;
         payload = { rail: rail };
+      }
+      else if (f === 'rail_fetch_title' || f === 'rail_fetch_content') {
+        // 抓取的 rail 字段没有合并入口：按单键提交，后端按路径落到 fetch.rail.*
+        var fobj = {};
+        fobj[f] = String(value || '').split(',').map(function(x){ return x.trim(); }).filter(Boolean);
+        payload = fobj;
       }
       else payload = (function(){ var o = {}; o[f] = value; return o; })();
     } else {

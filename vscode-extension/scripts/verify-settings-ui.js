@@ -32,37 +32,39 @@ const DESC = {
       value: 'high', writable: true,
       options: [{ value: 'high', label: '深度' }, { value: 'max', label: '极致' }] },
 
-    { id: 'websearch.mode', group: 'websearch', label: '接入方式', kind: 'select',
-      value: 'mcp', writable: true,
-      options: [{ value: 'mcp', label: 'MCP 服务器（任意厂商）' },
-                { value: 'http', label: 'REST 接口（任意厂商）' }] },
-    { id: 'websearch.url', group: 'websearch', label: '接口地址', kind: 'text',
-      value: 'https://api.anysearch.com/mcp', writable: true },
+    { id: 'websearch.url_search', group: 'websearch', label: '搜索接口地址', kind: 'text',
+      value: 'https://api.deepseek.com/v1/tools/search', writable: true },
     { id: 'websearch.key', group: 'websearch', label: '密钥', kind: 'secret',
       value: '', masked: 'sk-9***c4b7', isSet: true, writable: true },
     { id: 'websearch.auth', group: 'websearch', label: '认证方式', kind: 'select',
-      value: 'x-api-key', writable: true,
+      value: 'bearer', writable: true,
       options: [{ value: 'x-api-key', label: 'X-API-Key' }, { value: 'bearer', label: 'Bearer' },
                 { value: 'none', label: '不认证' }] },
-    { id: 'websearch.tool', group: 'websearch', label: '工具名', kind: 'text',
-      value: 'search', writable: true, showFor: ['mcp'], advanced: true },
-    { id: 'websearch.query_params', group: 'websearch', label: '查询参数字段', kind: 'text',
-      value: 'query', writable: true, showFor: ['mcp'], advanced: true },
-    { id: 'websearch.count_param', group: 'websearch', label: '条数字段', kind: 'text',
-      value: 'max_results', writable: true, showFor: ['mcp'], advanced: true },
-    { id: 'websearch.query_field', group: 'websearch', label: '查询字段', kind: 'text',
-      value: '', writable: true, showFor: ['http'], advanced: true },
-    { id: 'websearch.count_field', group: 'websearch', label: '条数字段', kind: 'text',
-      value: '', writable: true, showFor: ['http'], advanced: true },
-    { id: 'websearch.rail_list', group: 'websearch', label: '结果数组路径', kind: 'text',
-      value: '', writable: true, showFor: ['http'], advanced: true },
-    { id: 'websearch.rail_title', group: 'websearch', label: '标题字段', kind: 'text',
-      value: '', writable: true, showFor: ['http'], advanced: true },
-    { id: 'websearch.rail_url', group: 'websearch', label: '链接字段', kind: 'text',
-      value: '', writable: true, showFor: ['http'], advanced: true },
-    { id: 'websearch.rail_desc', group: 'websearch', label: '描述字段', kind: 'text',
-      value: '', writable: true, showFor: ['http'], advanced: true },
-    { id: 'websearch.args', group: 'websearch', label: '附加参数（JSON）', kind: 'text',
+    { id: 'websearch.url_fetch', group: 'websearch', label: '抓取接口地址', kind: 'text',
+      value: 'https://api.deepseek.com/v1/tools/fetch', writable: true },
+    { id: 'websearch.query_field', group: 'websearch', label: '搜索·查询字段', kind: 'text',
+      value: '', writable: true, advanced: true },
+    { id: 'websearch.count_field', group: 'websearch', label: '搜索·条数字段', kind: 'text',
+      value: '', writable: true, advanced: true },
+    { id: 'websearch.rail_list', group: 'websearch', label: '搜索·结果数组路径', kind: 'text',
+      value: '', writable: true, advanced: true },
+    { id: 'websearch.rail_title', group: 'websearch', label: '搜索·标题字段', kind: 'text',
+      value: 'title', writable: true, advanced: true },
+    { id: 'websearch.rail_url', group: 'websearch', label: '搜索·链接字段', kind: 'text',
+      value: '', writable: true, advanced: true },
+    { id: 'websearch.rail_desc', group: 'websearch', label: '搜索·描述字段', kind: 'text',
+      value: '', writable: true, advanced: true },
+    { id: 'websearch.args_search', group: 'websearch', label: '搜索·附加参数（JSON）', kind: 'text',
+      value: '', writable: true, advanced: true },
+    { id: 'websearch.url_field', group: 'websearch', label: '抓取·链接字段', kind: 'text',
+      value: '', writable: true, advanced: true },
+    { id: 'websearch.rail_fetch_title', group: 'websearch', label: '抓取·标题字段', kind: 'text',
+      value: '', writable: true, advanced: true },
+    { id: 'websearch.rail_fetch_content', group: 'websearch', label: '抓取·正文字段', kind: 'text',
+      value: '', writable: true, advanced: true },
+    { id: 'websearch.args_fetch', group: 'websearch', label: '抓取·附加参数（JSON）', kind: 'text',
+      value: '', writable: true, advanced: true },
+    { id: 'websearch.extra_params', group: 'websearch', label: '搜索·扩展参数（JSON）', kind: 'text',
       value: '', writable: true, advanced: true }
   ]
 };
@@ -91,6 +93,10 @@ const TEST = String.raw`
   function tabAt(i){
     var bs = document.querySelectorAll('#setTabs button');
     return bs[i] || null;
+  }
+  function advRows(){
+    return [].slice.call(document.querySelectorAll('#setBody .set-adv .set-row'))
+      .map(function(r){ return r.getAttribute('data-id'); });
   }
   function advOpen(){
     var b = document.querySelector('.set-adv');
@@ -148,22 +154,28 @@ const TEST = String.raw`
     ck('warning 显示出来了（用户能知道为什么没切）',
        msg && msg.textContent.indexOf('无效值') >= 0, msg ? msg.textContent : '(无提示)');
 
-    // ── 联网工具分组 ──
+    // ── 联网工具分组（REST 双接口，没有接入方式切换）──
     emit({ type: 'config/describe', params: DESC });
     await sleep(120);
     var tabWs = tabAt(1);
     if (tabWs) { tabWs.click(); await sleep(80); }
-    ck('联网工具：接入方式回显 mcp', val('websearch.mode') === 'mcp', val('websearch.mode'));
-    ck('联网工具：接口地址回显真值',
-       val('websearch.url') === 'https://api.anysearch.com/mcp', val('websearch.url'));
-    ck('联网工具：认证方式回显', val('websearch.auth') === 'x-api-key', val('websearch.auth'));
-    var rowsMcp = visibleRows();
-    ck('MCP 模式下不显示 REST 专属字段',
-       rowsMcp.indexOf('websearch.rail_list') < 0 && rowsMcp.indexOf('websearch.query_field') < 0,
-       rowsMcp.join(','));
-    ck('MCP 模式的常用 4 项直接可见',
-       ['websearch.mode','websearch.url','websearch.key','websearch.auth']
-         .every(function(x){ return rowsMcp.indexOf(x) >= 0; }), rowsMcp.join(','));
+    ck('联网工具：搜索接口地址回显真值',
+       val('websearch.url_search') === 'https://api.deepseek.com/v1/tools/search',
+       val('websearch.url_search'));
+    ck('联网工具：抓取接口地址回显真值',
+       val('websearch.url_fetch') === 'https://api.deepseek.com/v1/tools/fetch',
+       val('websearch.url_fetch'));
+    ck('联网工具：认证方式回显', val('websearch.auth') === 'bearer', val('websearch.auth'));
+    var rowsWs = visibleRows();
+    ck('常用 4 项直接可见（两个地址 + 密钥 + 认证）',
+       ['websearch.url_search','websearch.key','websearch.auth','websearch.url_fetch']
+         .every(function(x){ return rowsWs.indexOf(x) >= 0; }), rowsWs.join(','));
+    var rowsAdvOff = advRows();
+    ck('高级字段收在折叠区里（不在常用区）',
+       ['websearch.url_search','websearch.key','websearch.auth','websearch.url_fetch']
+         .every(function(x){ return rowsAdvOff.indexOf(x) < 0; })
+       && ['websearch.rail_list','websearch.extra_params','websearch.args_search']
+         .every(function(x){ return rowsAdvOff.indexOf(x) >= 0; }), rowsAdvOff.join(','));
     ck('高级区默认收起', advOpen() === 'false', advOpen());
 
     // 展开高级
@@ -172,49 +184,65 @@ const TEST = String.raw`
     await sleep(80);
     ck('点「高级设置」后展开', advOpen() === 'true', advOpen());
     var rowsAdv = visibleRows();
-    ck('展开后工具名等字段出现',
-       rowsAdv.indexOf('websearch.tool') >= 0 && rowsAdv.indexOf('websearch.query_params') >= 0,
-       rowsAdv.join(','));
-    ck('展开后工具名回显真值', val('websearch.tool') === 'search', val('websearch.tool'));
-    ck('展开后查询参数字段回显', val('websearch.query_params') === 'query',
-       val('websearch.query_params'));
+    ck('展开后解析/扩展字段出现',
+       ['websearch.query_field','websearch.rail_desc','websearch.args_search',
+        'websearch.url_field','websearch.rail_fetch_content','websearch.extra_params']
+         .every(function(x){ return rowsAdv.indexOf(x) >= 0; }), rowsAdv.join(','));
+    ck('展开后标题字段回显真值', val('websearch.rail_title') === 'title',
+       val('websearch.rail_title'));
 
-    // 切到 http
+    // 搜索的 rail_desc 走「合并成 rail 对象 + 逗号拆数组」
     window.__sent.length = 0;
-    var sel = document.querySelector('[data-id="websearch.mode"] select');
-    sel.value = 'http';
-    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    var dInp = document.querySelector('[data-id="websearch.rail_desc"] input');
+    dInp.value = 'snippet, summary';
+    dInp.dispatchEvent(new Event('change', { bubbles: true }));
     await sleep(60);
-    var sentMode = (window.__sent||[]).filter(function(x){ return x.type === 'configSet'; });
-    ck('切接入方式发 configSet', sentMode.length === 1, 'got=' + sentMode.length);
-    ck('载荷只有 mode 一项',
-       sentMode[0] && JSON.stringify(sentMode[0].params) === '{"key":"websearch","value":{"mode":"http"}}',
-       sentMode[0] ? JSON.stringify(sentMode[0].params) : '-');
+    var sentRail = (window.__sent||[]).filter(function(x){ return x.type === 'configSet'; });
+    ck('改搜索描述字段发 configSet', sentRail.length === 1, 'got=' + sentRail.length);
+    ck('载荷是 rail.desc 数组',
+       sentRail[0] && JSON.stringify(sentRail[0].params.value) === '{"rail":{"desc":["snippet","summary"]}}',
+       sentRail[0] ? JSON.stringify(sentRail[0].params) : '-');
 
-    // 后端切成功，重新 describe 成 http 模式
-    var DESC2 = JSON.parse(JSON.stringify(DESC));
-    DESC2.items.forEach(function(it){
-      if (it.id === 'websearch.mode') it.value = 'http';
-      if (it.id === 'websearch.url') it.value = 'https://api.example.com/search';
-    });
-    emit({ type: 'config/result', params: { ok: true, needRestart: true } });
-    await sleep(50);
-    emit({ type: 'config/describe', params: DESC2 });
-    await sleep(150);
-    var rowsHttp = visibleRows();
-    ck('REST 模式下不显示 MCP 专属字段',
-       rowsHttp.indexOf('websearch.tool') < 0 && rowsHttp.indexOf('websearch.query_params') < 0,
-       rowsHttp.join(','));
-    ck('REST 模式下地址回显新值',
-       val('websearch.url') === 'https://api.example.com/search', val('websearch.url'));
+    // 抓取的 rail 字段走单键提交（后端按路径落到 fetch.rail.*）
+    window.__sent.length = 0;
+    var cInp = document.querySelector('[data-id="websearch.rail_fetch_content"] input');
+    cInp.value = 'content, markdown';
+    cInp.dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(60);
+    var sentFetch = (window.__sent||[]).filter(function(x){ return x.type === 'configSet'; });
+    ck('改抓取正文字段发 configSet', sentFetch.length === 1, 'got=' + sentFetch.length);
+    ck('载荷是单键 rail_fetch_content 数组',
+       sentFetch[0] && JSON.stringify(sentFetch[0].params.value)
+         === '{"rail_fetch_content":["content","markdown"]}',
+       sentFetch[0] ? JSON.stringify(sentFetch[0].params) : '-');
 
-    // 切回 mcp，MCP 的值必须还在（不能被 http 冲掉）
-    var DESC3 = JSON.parse(JSON.stringify(DESC));
-    emit({ type: 'config/describe', params: DESC3 });
-    await sleep(150);
-    ck('切回 mcp 后地址仍是 anysearch',
-       val('websearch.url') === 'https://api.anysearch.com/mcp', val('websearch.url'));
-    ck('切回 mcp 后工具名仍是 search', val('websearch.tool') === 'search', val('websearch.tool'));
+    // extra_params：坏 JSON 必须挡在前端，不能发出去
+    window.__sent.length = 0;
+    var eInp = document.querySelector('[data-id="websearch.extra_params"] input');
+    eInp.value = '{broken';
+    eInp.dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(60);
+    ck('扩展参数坏 JSON 不发送',
+       (window.__sent||[]).filter(function(x){ return x.type === 'configSet'; }).length === 0,
+       JSON.stringify(window.__sent));
+    var errMsgs = [].slice.call(document.querySelectorAll('.set-msg[data-kind]'));
+    var errMsg = errMsgs.length ? errMsgs[errMsgs.length - 1] : null;
+    ck('扩展参数坏 JSON 有明确提示',
+       errMsg && errMsg.textContent.indexOf('必须是合法 JSON') >= 0,
+       errMsg ? errMsg.textContent : '(无提示)');
+
+    // extra_params：合法 JSON 作为对象提交
+    window.__sent.length = 0;
+    eInp = document.querySelector('[data-id="websearch.extra_params"] input');
+    eInp.value = '{"domains":{"type":"array","field":"include_domains"}}';
+    eInp.dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(60);
+    var sentEp = (window.__sent||[]).filter(function(x){ return x.type === 'configSet'; });
+    ck('扩展参数合法 JSON 发 configSet', sentEp.length === 1, 'got=' + sentEp.length);
+    ck('载荷是 extra_params 对象',
+       sentEp[0] && JSON.stringify(sentEp[0].params.value)
+         === '{"extra_params":{"domains":{"type":"array","field":"include_domains"}}}',
+       sentEp[0] ? JSON.stringify(sentEp[0].params) : '-');
 
     out.push('SUMMARY total=' + (out.length) + ' fail=' + fails);
     var p = document.createElement('pre');

@@ -46,7 +46,7 @@ AgentByNarnat/
 | 位置 | 字段 | 填什么 |
 |------|------|--------|
 | 第 3 行 | `"接口密钥"` | 你自己的模型 API 密钥。默认接口为 DeepSeek（`https://api.deepseek.com/anthropic`），密钥在 DeepSeek 开放平台（platform.deepseek.com）申请 |
-| 「联网搜索」段 | `"key"` | 联网搜索工具（AnySearch）的密钥，可在 <https://anysearch.com/console/api-keys> 免费申请；不使用联网搜索时可留空，不影响其他功能 |
+| 「联网搜索」段 | `"key"` | 联网搜索工具的密钥：即 `http.search`（搜索）/ `http.fetch`（抓取）两个 REST 接口的密钥；不使用联网搜索时可留空，不影响其他功能 |
 
 其余字段保持默认。保存时不要修改文件名，也不要用另存副本。如需更换模型服务商，修改 `"接口地址"`、`"模型"`、`"协议"` 三项即可，详见下文「配置」。
 
@@ -319,19 +319,34 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
     "货币路径": "balance_infos.0.currency"
   },
 
-  // ── 联网搜索（WebSearch 接入：MCP 搜索服务器 / DeepSeek 官方 Search）──
-  // provider 选择形态（"mcp" / "deepseek"），两种形态的完整示例见下方「联网搜索的两种形态」。
-  // 本段为 mcp 形态：WebSearch 可接任意 MCP 搜索服务器；工具名/参数名各服务器不同，按目标服务器实际填写（不猜）。
-  // 除 provider / key / args 外均为必填，缺项会报错并列出缺失字段名（旧字段名不再兼容）
+  // ── 联网搜索（WebSearch = REST 双接口：search 搜索 / fetch 抓取）──
+  // 只剩 REST：厂商差异全部由本段表达，换服务商只改 json 不改代码。
+  // 要接 MCP 联网服务器请用 MCP 工具（connect 后工具名 mcp__<服务器>__<工具>）。
+  // 两个接口地址至少填一个：缺哪个就只是那个 action 报「未配置」，另一个照常可用。
   "联网搜索": {
-    "provider": "mcp",                          // 默认 mcp（省掉该键等价）；"mcp" | "deepseek"
-    "key": "",                                  // API key；留空 = 无鉴权服务器也可用
-    "url": "https://api.anysearch.com/mcp",     // MCP 端点 URL
-    "auth": "x-api-key",                        // 认证方式：x-api-key / bearer / 自定义头名
-    "tool": "search",                           // 搜索工具名；空 = 连接后报错列出服务器工具表
-    "query_params": ["query"],                  // 查询词填入的参数名（可多个）
-    "count_param": "max_results",               // 结果数量参数名；"" = 不传
-    "args": {}                                  // 可选，附加固定参数；仅当目标工具参数表声明该键时传入，未声明的键被忽略
+    "key": "",                                  // API key；留空 = 接口无需鉴权
+    "auth": "bearer",                           // 空=不认证 / bearer / x-api-key / 自定义头名
+    "http": {
+      "search": {
+        "url": "https://api.deepseek.com/v1/tools/search",
+        "query_field": "query",                 // 请求体里查询词的字段名
+        "count_field": "count",                 // 条数字段名；"" = 不传
+        "args": {},                             // 固定附加参数（原样并入请求体）
+        "rail": {                               // 响应解析规则
+          "list": "results",                    // 结果数组路径（"data.items"；"" = 响应本身是数组）
+          "title": "title",
+          "url": "url",
+          "desc": ["snippet", "summary", "content"]   // 按顺序取第一个非空
+        },
+        "extra_params": {}                      // 让 AI 能填的厂商扩展参数，见下方说明
+      },
+      "fetch": {
+        "url": "https://api.deepseek.com/v1/tools/fetch",
+        "url_field": "url",                     // 请求体里目标链接的字段名
+        "args": {},
+        "rail": { "title": "title", "content": "content" }
+      }
+    }
   },
 
   // ── 定价（用于费用统计，键为模型名；数值为示例且默认不预置——不填则费用显示 0）──
@@ -409,42 +424,59 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
 
 `"界面"` 采用「色板 + 角色引用」两级结构：`"颜色"` 定义具名色值，其余分组引用色名或十六进制色值，配方支持空格分隔组合（如 `"bold 蓝"`、`"italic dim 次文字"`）。分组名支持中文别名（标注/标记、差异/对比、框架）。仅支持此格式，旧版扁平格式（`"用户输入色"`、`"AI输出色"` 等键）不再兼容。
 
-#### 联网搜索的两种形态
+#### 联网搜索（REST 双接口）
 
-`联网搜索.provider` 决定 WebSearch 走哪条通道：`"mcp"`（默认，省略该键等价）接 MCP 搜索服务器，`"deepseek"` 接 DeepSeek 官方 Search REST。两形态共用同一套结果解析与排版（相关性排序、条数控制、`[无搜索结果]` / `[错误: 搜索失败: …]` 文案），换形态不影响 AI 侧的调用方式。
+WebSearch **只剩 REST**：`http.search`（搜索）与 `http.fetch`（抓取）两段子配置，厂商差异全部由配置表达，换服务商只改 json 不改代码。**本工具不带 MCP 接入**——需要 MCP 联网服务器（AnySearch、Brave、Exa…）时用 `MCP` 工具 connect，其工具以 `mcp__<服务器>__<工具>` 注册、schema 原样来自服务器。
 
-**形态一 · `provider: "mcp"`（默认）**：MCP 握手 → 列工具 → 按配置解析工具名与参数名 → 调用。工具名/参数名各服务器不同，一律按目标服务器实际填写（不猜），参数类型（标量/数组）查工具的参数表决定。
+AI 侧只有 `WebSearch` 一个工具，用 `action` 判别：
 
-```jsonc
-"联网搜索": {
-  "provider": "mcp",                          // 可省略（默认即此）
-  "key": "",                                  // API key；留空 = 无鉴权服务器也可用
-  "url": "https://api.anysearch.com/mcp",     // MCP 端点 URL
-  "auth": "x-api-key",                        // 认证方式：x-api-key / bearer / 自定义头名
-  "tool": "search",                           // 搜索工具名；空 = 连接后报错列出服务器工具表
-  "query_params": ["query"],                  // 查询词填入的参数名（可多个；数组型参数自动包成 ["查询词"]）
-  "count_param": "max_results",               // 结果数量参数名；"" = 不传
-  "args": {}                                  // 可选，附加固定参数；仅工具参数表声明的键才传入
-}
-```
+| action | 入参 | 行为 |
+|--------|------|------|
+| `search` | `query`（必填）、`num`（默认 10，上限 20） | POST `http.search.url` → 按 `rail` 解析成编号列表（标题 / URL / 摘要），按查询词相关性排序 |
+| `fetch` | `url`（必填，http/https） | POST `http.fetch.url` → 取 `rail.title` / `rail.content`，输出「标题 + URL + Markdown 正文」 |
 
-**形态二 · `provider: "deepseek"`**：`POST https://api.deepseek.com/v1/tools/search`，`Authorization: Bearer <key>` 鉴权，`count` 取值 1~50（超出按边界钳制）。该形态下 `auth` / `tool` / `query_params` 不参与（DeepSeek 只支持 Bearer、请求体字段固定）；`need_content` / `ori_question` / `localization` 一律从 `args` 传，响应里的 `results` 被转成与 MCP 路径同构的「标题 + URL + 描述」。
+两个接口地址至少填一个：缺哪个就只是那个 action 报「未配置」，另一个照常可用。`fetch` 的正文**不自行截断**，体积由「工具输出上限KB」的全局截断控制（保留首尾并提示）。
 
 ```jsonc
 "联网搜索": {
-  "provider": "deepseek",                     // 选 DeepSeek 官方 Search
-  "key": "sk-xxxxxxxx",                       // 必填，空则报错；可直接复用「智能体」段的接口密钥
-  "url": "https://api.deepseek.com/v1/tools/search",  // 可省略，默认即此地址
-  "count_param": "count",                     // 可省略，请求体里的数量字段名，默认 count；"" = 不传
-  "args": {                                   // 可选，以下三项都在 args 里
-    "need_content": false,                    // 是否取回正文 content，默认 false
-    "ori_question": "",                       // 原始提问，非空才下发
-    "localization": "1.2.3.4"                 // 搜索地域：必须是合法 IP 地址，不填则不下发
+  "key": "sk-xxxxxxxx",                       // 两个接口共用；留空 = 接口无需鉴权
+  "auth": "bearer",                           // 空=不认证 / bearer / x-api-key / 自定义头名
+  "http": {
+    "search": {
+      "url": "https://api.deepseek.com/v1/tools/search",
+      "query_field": "query",                 // 请求体里查询词的字段名
+      "count_field": "count",                 // 条数字段名；"" = 不传
+      "args": {},                             // 固定附加参数（原样并入请求体）
+      "rail": {                               // 响应解析：数组路径 + 三个字段名
+        "list": "results",                    // "data.items" 这类点号路径；"" = 响应本身是数组
+        "title": "title",
+        "url": "url",
+        "desc": ["snippet", "summary", "content"]   // 可写列表，按顺序取第一个非空
+      },
+      "extra_params": {}                      // 让 AI 能填的厂商扩展参数，见下
+    },
+    "fetch": {
+      "url": "https://api.deepseek.com/v1/tools/fetch",
+      "url_field": "url",                     // 请求体里目标链接的字段名
+      "args": {},
+      "rail": { "title": "title", "content": "content" }
+    }
   }
 }
 ```
 
-> `args.localization` 要填**合法 IP 地址**（如 `"1.2.3.4"`）：实测传 `"zh"` 这类地域码会被服务端以 HTTP 400 拒绝；不写该键则请求体里不带 `localization`。
+**`rail`**：响应解析规则——`list` 是结果数组在响应 JSON 里的路径（空 = 响应本身是数组），`title` / `url` / `desc` 是各字段名（可写成列表，按顺序取第一个非空）。服务端返回 `{"error": {...}}` 时按失败处理，不会被当成结果或正文。
+
+**`extra_params`**：声明「AI 可填的厂商扩展参数」，键是工具参数名，值是一段 JSON Schema 加一个 `field`（落库字段名）：
+
+```jsonc
+"extra_params": {
+  "domains": { "type": "array", "items": {"type": "string"},
+               "description": "域名过滤", "field": "include_domains" }
+}
+```
+
+模块加载时把去掉 `field` 的副本并入工具定义的 properties（与 `action` / `query` / `url` / `num` 冲突的条目被跳过，`required` 不变），运行时把 AI 填的值按 `参数名 → field` 翻译进请求体（不会覆盖查询词与条数字段）。改完需重启后端生效（工具定义在加载时构建）。
 
 #### thinking 参数自动适配
 
@@ -560,7 +592,7 @@ narnat_agent/
 | Terminal | 多终端持久 SSH（最多 5 个），支持远程命令执行、设备间文件传输 |
 | Serial | 多终端持久串口（最多 5 个），扫描/连接/交互 |
 | MCP | MCP 服务器管理：按需连接外部 MCP 服务（connect 连接 / disconnect 断开，详见「MCP 服务器」） |
-| WebSearch | 联网搜索（MCP 搜索服务器 / DeepSeek 官方 Search，由 `联网搜索.provider` 选择；MCP 形态下工具名/参数名在 `联网搜索` 段按服务器配置） |
+| WebSearch | 联网搜索与网页抓取（REST 双接口，search/fetch 由 narnat.json 配置；MCP 联网请用 MCP 工具） |
 | TodoWrite | 任务列表管理（多步任务的计划建立与进度勾选） |
 | GoalComplete | 声明任务完成并提交结构化完成清单（要求→证据→状态），触发独立验证器复核（仅 `/goal` 目标模式开启时注入给 AI） |
 | mcp__… | MCP 服务器工具（由 `MCP` 工具 connect 时动态注册，命名 `mcp__<服务器名>__<工具名>`，详见「MCP 服务器」） |
