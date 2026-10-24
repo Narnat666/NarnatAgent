@@ -84,6 +84,9 @@ class Agent:
 
                 # 2. 轮次计数（余额查询周期用）+ 余额查询
                 self._round += 1
+                # 瞬时标记清零必须在 fetch_balance 之前：没查的轮次
+                # 不该沿用上一轮的"刚查到"状态
+                self._stats.begin_round()
                 api_key = getattr(self._config.ai, 'api_key', None)
                 self._stats.fetch_balance(api_key, self._round)
 

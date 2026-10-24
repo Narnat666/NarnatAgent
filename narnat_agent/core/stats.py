@@ -96,6 +96,18 @@ class StatsTracker:
         self._total_cost = 0.0
         self._balance_to_show = 0.0
         self._balance_known = False   # 是否曾经成功查到过余额（持久，见 fetch_balance）
+        # 本轮是否**刚刚**查到新余额（瞬时，每轮开始时由 begin_round 清零）。
+        # 与上面的持久标记分工不同：终端统计栏只在"这一轮真的查了"时显示余额，
+        # 否则同一条旧余额会连续出现在 10 个统计栏里，看着像在重复报告。
+        self._balance_fresh = False
+
+    def begin_round(self) -> None:
+        """新的一轮开始：清掉"本轮刚查到余额"的瞬时标记。
+
+        必须在每轮 fetch_balance 之前调用（agent.py 的轮次计数处），
+        否则上一轮的 True 会残留到本轮，让没查的轮次也显示余额。
+        """
+        self._balance_fresh = False
 
     def update(self, usage: dict) -> None:
         """更新token统计（每轮LLM返回后调用）
@@ -269,6 +281,7 @@ class StatsTracker:
         if bal:
             self._balance_to_show = bal["total"]
             self._balance_known = True
+            self._balance_fresh = True
 
     @property
     def input_tokens(self) -> int:
@@ -297,6 +310,16 @@ class StatsTracker:
         还是账户真的为 0（该如实显示 ¥0.00 并提示充值）。
         """
         return self._balance_known
+
+    @property
+    def balance_fresh(self) -> bool:
+        """本轮是否刚刚查到新余额（瞬时标记）。
+
+        终端统计栏用它决定"这一栏要不要显示余额"：余额只在每 10 轮查一次，
+        没查的轮次还显示同一个旧数字，会让用户以为它在反复报告同一件事，
+        也看不出这个数是多久以前的。插件是常驻状态栏，不读这个标记。
+        """
+        return self._balance_fresh
 
     @property
     def balance(self) -> float:

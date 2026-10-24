@@ -321,6 +321,7 @@ class AgentLoop:
                             cost=self._stats.cost,
                             balance=self._stats.balance,
                             thinking_effort=self._thinking_label,
+                            balance_fresh=self._stats.balance_fresh,
                         )
                         return
 
@@ -339,6 +340,7 @@ class AgentLoop:
                         cost=self._stats.cost,
                         balance=self._stats.balance,
                         thinking_effort=self._thinking_label,
+                            balance_fresh=self._stats.balance_fresh,
                     )
                     return
                 overflow_compacted = True
@@ -360,6 +362,7 @@ class AgentLoop:
                     cost=self._stats.cost,
                     balance=self._stats.balance,
                     thinking_effort=self._thinking_label,
+                            balance_fresh=self._stats.balance_fresh,
                 )
                 return
 
@@ -396,6 +399,7 @@ class AgentLoop:
                         cost=self._stats.cost,
                         balance=self._stats.balance,
                         thinking_effort=self._thinking_label,
+                            balance_fresh=self._stats.balance_fresh,
                     )
                     return
                 content_folds += 1
@@ -548,6 +552,7 @@ class AgentLoop:
                     cost=self._stats.cost,
                     balance=self._stats.balance,
                     thinking_effort=self._thinking_label,
+                            balance_fresh=self._stats.balance_fresh,
                 )
                 return
 
@@ -583,6 +588,7 @@ class AgentLoop:
                     cost=self._stats.cost,
                     balance=self._stats.balance,
                     thinking_effort=self._thinking_label,
+                            balance_fresh=self._stats.balance_fresh,
                 )
                 return
 
@@ -743,6 +749,7 @@ class AgentLoop:
                 cost=self._stats.cost,
                 balance=self._stats.balance,
                 thinking_effort=self._thinking_label,
+                            balance_fresh=self._stats.balance_fresh,
                 with_stats=show_stats,
             )
             break
@@ -775,6 +782,7 @@ class AgentLoop:
             cost=self._stats.cost,
             balance=self._stats.balance,
             thinking_effort=self._thinking_label,
+                            balance_fresh=self._stats.balance_fresh,
             with_stats=False,
         )
 

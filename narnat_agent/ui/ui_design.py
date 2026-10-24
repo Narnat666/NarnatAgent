@@ -253,7 +253,14 @@ def show_interrupted() -> None:
 def show_stats(input_tokens: int, output_tokens: int,
                cache_ratio: float = 0.0, cost: float = 0.0,
                balance: float = 0.0,
-               thinking_effort: str = "高") -> None:
+               thinking_effort: str = "高",
+               balance_fresh: bool = True) -> None:
+    """终端统计栏。
+
+    balance_fresh: 本轮是否刚刚查到余额。余额每 10 轮才查一次，没查的轮次
+    再打一遍同一个旧数字，会让人以为在反复报告同一件事，也看不出这个数
+    有多旧。默认 True 是为了让不关心这个语义的调用方（测试、旧路径）行为不变。
+    """
     # 动态从 output 模块读取，确保 apply_style 修改后生效
     from .. import output as _output
     _show_cost = _output.DisplayState.show_cost
@@ -271,7 +278,8 @@ def show_stats(input_tokens: int, output_tokens: int,
     if cache_ratio > 0:
         cs = f"  缓存:{min(100.0, cache_ratio * 100):.1f}%"
     co = f"  费用:¥{cost:.4f}" if _show_cost else ""
-    ba = f"  余额:¥{balance:.2f}" if _show_balance and balance > 0 else ""
+    ba = (f"  余额:¥{balance:.2f}"
+          if _show_balance and balance > 0 and balance_fresh else "")
     rt = ""
     if _show_ratio:
         if _context_window > 0 and input_tokens > 0:
@@ -415,14 +423,16 @@ class UIStreamSession:
     def finish(self, input_tokens: int = 0, output_tokens: int = 0,
                cache_ratio: float = 0.0, cost: float = 0.0,
                balance: float = 0.0, thinking_effort: str = "高",
-               with_stats: bool = True) -> None:
+               with_stats: bool = True,
+               balance_fresh: bool = True) -> None:
         with self._spinner_lock:
             self._finished = True  # 先行置终结位：此后任何 resume/begin 都不得再启动spinner
         _interrupt_ctrl.enter_input_mode()  # 立即停止ESC轮询，防止误触发
         self._stop_spinner()
         self._renderer.flush(final=True)
         if with_stats:
-            show_stats(input_tokens, output_tokens, cache_ratio, cost, balance, thinking_effort)
+            show_stats(input_tokens, output_tokens, cache_ratio, cost, balance,
+                       thinking_effort, balance_fresh)
 
     def abort(self, message: Optional[str] = None) -> None:
         """中止输出。message 非空时显示自定义提示（如程序异常），

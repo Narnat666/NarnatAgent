@@ -172,13 +172,18 @@ class RpcStream:
     def finish(self, input_tokens: int = 0, output_tokens: int = 0,
                cache_ratio: float = 0.0, cost: float = 0.0,
                balance: float = 0.0, thinking_effort: str = "",
-               with_stats: bool = True) -> None:
+               with_stats: bool = True,
+               balance_fresh: bool = True) -> None:
         """RPC 形态：stats 每次都发（协议 4.10「每轮结束时下发」）。
 
         with_stats 是终端"是否打印统计栏"的语义，RPC 侧照发不误；turn/end 只在
         with_stats=True 时当场下发，否则留给 RpcUI 在轮次边界收口——core 里
         with_stats=False 有两类调用：目标模式中间轮（本轮确实结束）与工具确认流程
         （本轮未结束，稍后另建新流），只有轮次边界能区分两者。
+
+        balance_fresh: 接收但**不使用**。终端统计栏只在"本轮真的查了余额"时
+        显示余额（余额每 10 轮才查一次，重复显示同一个旧数字没有意义）；
+        插件是常驻状态栏，余额一直挂着才对，所以这里照发最后一次查到的值。
 
         标过 mark_failed 的流是**失败收尾**：无条件按 error 收口（错误发生时这一轮
         就是结束了，不存在"中间轮"），并先下发一条 error 通知。

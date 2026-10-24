@@ -123,24 +123,30 @@ def _style_file_path(name: str, arguments: dict) -> str:
     dev = _dev_display(dev_raw) if dev_raw else ""
     if dev == _local_hostname():
         dev = ""
-    fp = _shorten_path(str(arguments.get("file_path", "") or ""))
+    fp = str(arguments.get("file_path", "") or "")
     return f"{dev}:{fp}" if dev else fp
 
 
-# 工具行里路径的显示上限（字符）。宽面板一行能放下 60 个左右的等宽字符，
-# 再多就把行头的「名称 / 耗时 / 状态」全挤出去了。
-_PATH_SHOW_MAX = 46
+# 工具行里路径的显示上限（字符）。
+#
+# 曾经是 46，超长路径缩成「…\上级目录\文件名」。改回完整显示的理由：
+# 文件类工具和 Shell 是同一类东西——用户得能对照自己给的路径确认
+# 「它读/改的正是我指定的那个文件」。折叠后 138 字符的微信临时路径只剩
+# `…\6088c8ae\c180d0….jpg`，用户无法与自己输入的那串对上（实测反馈）。
+# 行头拥挤的代价由终端软换行承担，比"看不出是哪个文件"轻。
+_PATH_SHOW_MAX = 0
 
 
 def _shorten_path(fp: str) -> str:
     """把过长的路径缩成「上级目录\文件名」，中间省略。
 
-    为什么不能简单截尾：两个不同文件可能在行头显示成同一个字符串——
-    `E:\\…\\sandbox\\rect_area.py` 与 `E:\\…\\sandbox\\rect_perimeter.py`
-    截尾后都是 `…\\rect_…`，用户看不出改的是哪一个，必须逐个展开核对（实测）。
-    Windows 路径分隔符两种都认（模型有时给正斜杠）。
+    仅在 _PATH_SHOW_MAX > 0 时生效（当前为 0 = 不折叠，原样返回）。
+
+    保留这个函数是为了保留那条踩过的坑：如果将来要恢复折叠，不能简单截尾——
+    两个不同文件可能在行头显示成同一个字符串（`rect_area.py` 与
+    `rect_perimeter.py` 截尾后都是 `…\rect_…`），必须保留「上级目录\文件名」。
     """
-    if not fp or len(fp) <= _PATH_SHOW_MAX:
+    if not _PATH_SHOW_MAX or not fp or len(fp) <= _PATH_SHOW_MAX:
         return fp
     # 两种分隔符都要认：模型给的路径可能混用（`E:\a/b\c.py`）。
     # 只用第一个出现的分隔符 split 会漏掉另一种，导致拼出来的 tail 丢字符。
