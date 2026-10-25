@@ -15,7 +15,6 @@ import os
 import re
 
 from ..terminal import _normalize_device_for_tools, _file_tool_device_hint
-from ..token_estimate import estimate_text_tokens
 from ...core import attachment as _attachment
 
 
@@ -54,8 +53,11 @@ def _apply_global_cap(text: str, _tool_context, total_lines: int = None) -> str:
 
     注册表的全局截断策略(保留首尾)面向Shell类输出——尾部含提示符，
     对Read不适用：中间截断丢失行号连续性，AI无法判断从哪行续读。
-    此处按行截断并明确告知续读offset（有总行数时同时给出剩余行数，
-    让AI从"盲续"变"可规划"）。
+    此处按行截断并明确告知续读offset。
+
+    提示只报事实：已显示到第几行（行号来自正文，可验证）、文件共几行。
+    不写 token 估算（那是指数级近似，不是事实）、不写剩余行数（总行数减去
+    已显示行号即可得出，重复）。
     """
     max_chars = getattr(_tool_context, "max_tool_output_chars", 0) if _tool_context else 0
     if max_chars <= 0 or len(text) <= max_chars:
@@ -72,25 +74,27 @@ def _apply_global_cap(text: str, _tool_context, total_lines: int = None) -> str:
         kept.append(ln)
         used += cost
 
-    # 定位最后显示的完整行号（行号格式 "  N→..."），给出精确续读offset
-    last_num = None
+    # 定位正文首/末行的行号（格式 "  N→..."），给出准确区间与续读 offset
+    first_num = last_num = None
+    for ln in kept:
+        m = re.match(r"^\s*(\d+)→", ln)
+        if m:
+            first_num = int(m.group(1))
+            break
     for ln in reversed(kept):
         m = re.match(r"^\s*(\d+)→", ln)
         if m:
             last_num = int(m.group(1))
             break
     if last_num is not None:
-        est = estimate_text_tokens(text)  # ≈token（AI预算单位，混合密度估算）
+        # 区间起点取自正文，不写死 1：offset=500 时正文从 500 行起，
+        # 写「1-535」会报错的区间，AI 据此续读会漏掉 500-534。
+        head = f"已显示 {first_num}-{last_num} 行"
         if total_lines is not None:
-            remain = f"，剩余{total_lines - last_num}行"
-            hint = (f"... [已达全局输出上限({max_chars}字符≈{est}token)，仅显示前{len(kept)}行。"
-                    f"文件共{total_lines}行{remain}。"
-                    f"使用 offset={last_num + 1} 继续读取其余部分]")
-        else:
-            hint = (f"... [已达全局输出上限({max_chars}字符≈{est}token)，仅显示前{len(kept)}行。"
-                    f"使用 offset={last_num + 1} 继续读取其余部分]")
+            head += f"，文件共 {total_lines} 行"
+        hint = f"... [{head}。用 offset={last_num + 1} 继续]"
     else:
-        hint = f"... [已达全局输出上限({max_chars}字符)，使用 offset 参数继续读取其余部分]"
+        hint = "... [已达输出上限。用 offset 继续]"
     return "\n".join(kept) + "\n" + hint
 
 DEFINITION = {
@@ -98,20 +102,20 @@ DEFINITION = {
     "function": {
         "name": "Read",
         "description": (
-            "读取文件内容。文本文件返还带行号的内容（由1开始）；"
-            "支持图片文件读取（png/jpg/jpeg/webp/gif）。"
-            "offset/limit 参数仅对文本文件有效。"
+            "读取UTF-8文本文件，返回带行号的内容。"
+            "支持读取图片（png/jpg/jpeg/webp/gif）。"
             "支持本地或远程读取文件。"
+            "offset/limit 仅对文本有效。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "文件路径"},
-                "offset": {"type": "integer", "description": "起始行（默认1，含本行）"},
-                "limit": {"type": "integer", "description": "读取行数（正整数，默认2000）"},
+                "file_path": {"type": "string", "description": "文件路径。"},
+                "offset": {"type": "integer", "description": "起始行，从1开始。默认1。"},
+                "limit": {"type": "integer", "description": "最多返回的行数。默认2000。"},
                 "device": {
                     "type": "string",
-                    "description": "设备dev编号：默认dev0即读取本地指定文件，设置dev1..devn则读取指定远程设备文件",
+                    "description": "设备编号。默认dev0读取指定的本地文件，设置dev1..devn则读取指定的远程设备文件。",
                 },
             },
             "required": ["file_path"],
@@ -141,32 +145,39 @@ def _sniff_bom_encoding(head: bytes):
 
 
 def _detect_text_encoding(head: bytes) -> str:
-    """先嗅探BOM（命中 → utf-16）；否则 utf-8 严格解码成功 → utf-8-sig，失败 → gb18030。
+    """先嗅探BOM（命中 → utf-16）；否则 utf-8 严格解码成功 → utf-8-sig，失败 → None。
 
-    中文Windows环境GBK文件常见（旧日志/导出文件）。此前固定utf-8+replace解码
-    会把GBK内容变成大片U+FFFD乱码，AI读到的是坏数据。此处用首块字节判定编码。
+    只认能百分百确定的两种：BOM 声明的 UTF-16、严格解码通过的 UTF-8。
+    其余一律返回 None，由调用方报「不是 UTF-8」。
 
-    fallback 用 gb18030 而非 gbk：GB18030 是 GBK 的超集（同一字符的两字节编码
-    完全相同），而 gbk 编解码器解不了国标四字节序列（CJK 扩展 B 区生僻字，如
-    b"\\x95\\x32\\x82\\x36"）——用 gbk 会把它们读成 U+FFFD，回写即永久丢失原文。
+    不再回退 gb18030：GB18030 是 GBK 的超集，几乎任何字节序列都能解出字符
+    （连随机二进制都能解成一串合法汉字），因此「解得出」不构成「是这个编码」的
+    证据。实测同一串字节（UTF-16LE「中文内容测试」与 GBK「-N噀匭筟Km諎」）
+    两种读法都能严格通过 —— 判据根本不存在。把猜测当结论输出，AI 会拿错字
+    当原文回写，比读不出来严重得多。
 
     尾部窗口重试: 首块8KB可能恰好多字节序列边界截断，utf-8严格解码在截断处
-    抛错会误判为GBK。UnicodeDecodeError.start位于末尾3字节内时切除重试。
+    抛错会误判。**仅当首块读满 8KB**（确认是被窗口切开而非文件本身如此）时，
+    才在 UnicodeDecodeError.start 位于末尾 3 字节内切除重试。不加这个前置条件
+    会误判短文件：实测 4 字节的 UTF-16LE「中文」= 2D 4E 87 65，e.start=2 落在
+    末尾 3 字节内 → 切成「-N」解码成功 → 整个文件被当成 UTF-8，读出来是
+    「-N\uFFFD e」这种半截乱码。
     """
     encoding = _sniff_bom_encoding(head)
     if encoding:
         return encoding
     trial = head
+    full_window = len(head) >= _HEAD_SNIFF_BYTES
     for _ in range(3):
         try:
             trial.decode("utf-8")
             return "utf-8-sig"
         except UnicodeDecodeError as e:
-            if e.start >= len(trial) - 3:
-                trial = head[: e.start]  # 疑似边界截断 → 切掉错误起点后重试
+            if full_window and e.start >= len(trial) - 3:
+                trial = head[: e.start]  # 边界截断 → 切掉错误起点后重试
                 continue
             break
-    return "gb18030"
+    return None
 
 
 def _write_encoding_for(head: bytes, encoding: str) -> tuple:
@@ -184,55 +195,31 @@ def _write_encoding_for(head: bytes, encoding: str) -> tuple:
     return encoding, ""
 
 
-def _first_undecodable_offset(head: bytes, encoding: str) -> int:
-    """首块按 encoding 严格解码，返回第一个无法解码字节的偏移；-1 = 全部可解码。
-
-    连探测出的编码也解不了的字节此前被静默替换成 U+FFFD（AI 拿到的是坏数据还
-    以为读到了原文）。末尾被 8KB 窗口切开的多字节序列不算无法解码：与
-    _detect_text_encoding 的尾部边界截断重试同一判据（逐次切除尾部 1~3 字节）。
-    """
-    for cut in (0, 1, 2, 3):
-        trial = head[: len(head) - cut] if cut else head
-        if not trial:
-            return -1
-        try:
-            trial.decode(encoding)
-            return -1
-        except UnicodeDecodeError as e:
-            if e.start < len(trial) - 3:
-                return e.start
-    return -1
-
-
-# Windows 传统路径长度上限（MAX_PATH）：超过后普通 API 一律报"找不到路径"，
-# 无法与"确实不存在"区分，需按长度识别并给出可执行的提示。
-_MAX_LEGACY_PATH_LEN = 260
+# 首块嗅探字节数：二进制判定、编码探测、BOM 嗅探共用这一个窗口（唯一真源）
+_HEAD_SNIFF_BYTES = 8192
 
 
 def _isfile_miss_reason(file_path: str) -> str:
-    """os.path.isfile 为 False 时细分真实原因（Read/Edit 共用）。
+    """os.path.isfile 为 False 时细化真实原因（Read/Edit 共用）。
 
     返回 ""=确实不存在（调用方保持原文案）；非空=替代错误文案。
-    isdir/isfile 内部的 stat 异常被吞成 False，系统保护文件（权限不足）、
-    超长路径都会误报"文件不存在"；此处用 os.stat 探测按异常分类区分。
+    isdir/isfile 内部的 stat 异常被吞成 False，系统保护文件（权限不足）
+    会误报"文件不存在"；此处用 os.stat 探测按异常分类区分。
+
+    ENOENT/ENOTDIR 一律返回 ""：这两个 errno 无法区分"不存在"与"路径过长"，
+    断言任一种都会误导 AI。原来按长度 >=260 判"路径过长"是推断（文件真的
+    不存在、路径恰好也长会走同一分支），且实测本环境 259 字符路径可正常
+    读写，该分支本身可能永不触发 —— 已删除，改由调用方报「文件不存在」，
+    那是 errno 的直译，属可确定的事实。
     """
     try:
         os.stat(file_path)
     except PermissionError as e:
-        return f"[错误: 权限不足或路径无法访问: {file_path}（{e}）]"
+        return f"[错误: 权限不足: {file_path}（{e}）]"
     except OSError as e:
         if getattr(e, "errno", None) in (errno.ENOENT, errno.ENOTDIR):
-            try:
-                over_len = (os.name == "nt"
-                            and len(os.path.abspath(file_path)) >= _MAX_LEGACY_PATH_LEN)
-            except (OSError, ValueError):
-                over_len = False
-            if over_len:
-                return (f"[错误: 路径过长无法访问: {file_path}"
-                        f"（绝对路径达到 Windows {_MAX_LEGACY_PATH_LEN} 字符传统上限，"
-                        f"可缩短路径，或用 Shell 以 \\\\?\\ 前缀访问）]")
             return ""
-        return f"[错误: 权限不足或路径无法访问: {file_path}（{e}）]"
+        return f"[错误: 权限不足: {file_path}（{e}）]"
     except ValueError:
         return ""
     return ""
@@ -247,13 +234,15 @@ def _format_size(n: int) -> str:
     return "%dB" % n
 
 
-def _image_handle_text(file_path: str, ref: dict, root: str, token_est: int,
+def _image_handle_text(file_path: str, ref: dict, root: str,
                        device: str = "") -> str:
     """图片句柄文本 —— 模型看到的"这张图是什么"的唯一依据。
 
     这段文本会永久留在会话 history 的 content 里（图片字节只在发送时挂到
-    images 字段），所以它必须自包含：文件名、格式、尺寸、体积、指纹、副本路径。
+    images 字段），所以它必须自包含：文件名、格式、尺寸、指纹、副本路径。
     模型据此知道：看的是缩放版还是原图、原图多大、想重新读该读哪里。
+
+    不写 token 估算：那是指数级近似（见 core/vision_tokens.py），不是事实。
 
     device: 远程设备编号。远程图片的"源文件"在远端，本地只有归一化副本，
     必须标出来，否则模型会以为源路径在本机。
@@ -263,12 +252,11 @@ def _image_handle_text(file_path: str, ref: dict, root: str, token_est: int,
     sw, sh = ref.get("source_width"), ref.get("source_height")
 
     lines = [
-        "[图片] %s — %s %dx%d，约 %s token" % (
-            name, ref.get("media_type") or "未知格式", w, h, token_est),
+        "[图片] %s — %s %dx%d" % (
+            name, ref.get("media_type") or "未知格式", w, h),
     ]
     if sw and sh:
-        lines.append("原图 %dx%d，已缩放至长边 %d 发送（细节以副本为准）" % (
-            sw, sh, max(w, h)))
+        lines.append("原图 %dx%d，已缩放至长边 %d" % (sw, sh, max(w, h)))
     if device:
         lines.append("来源: 远程设备 %s" % device)
     lines.append("附件 %s" % ref["id"])
@@ -288,8 +276,7 @@ def _read_image(file_path: str, _tool_context, device: str = "") -> str:
     AI 拿到的是一条可读的失败原因，对话继续。
     """
     if not _attachment.pil_available():
-        return ("[错误: 当前环境缺少 Pillow，无法读取图片。"
-                "请安装 Pillow，或改用 Shell 调用外部工具处理此文件]")
+        return "[错误: 缺少 Pillow，无法读取图片]"
 
     data_dir = getattr(_tool_context, "data_dir", "") if _tool_context else ""
     if not data_dir:
@@ -310,22 +297,20 @@ def _read_image(file_path: str, _tool_context, device: str = "") -> str:
         except OSError as e:
             return "[错误: 读取失败: %s" % e + "]"
         if len(source) > _attachment.MAX_SOURCE_BYTES:
-            return ("[错误: 图片文件超过 %s 上限，无法读取。"
-                    "请先用 Shell 缩小后再读]"
-                    % _format_size(_attachment.MAX_SOURCE_BYTES))
+            return ("[错误: 图片 %s，超过 %s 上限: %s]"
+                    % (_format_size(len(source)),
+                       _format_size(_attachment.MAX_SOURCE_BYTES), file_path))
 
     ref = _attachment.store(root, source)
     if ref is None:
-        return ("[错误: 无法解码图片（文件损坏、格式不支持或尺寸过大）。"
-                "支持 PNG/JPEG/WebP/GIF；若确为图片请用 Shell 检查]")
+        # store 返回 None 的原因有五种（PIL 不可用 / 空或超字节上限 / 超像素上限 /
+        # 格式不在 SUPPORTED_FORMATS / 解码异常），代码里无法区分是哪一种。
+        # 只报可确定的事实：这个文件没解出图。罗列原因等于猜测。
+        return f"[错误: 无法解码图片: {file_path}]"
 
     ref["name"] = os.path.basename(file_path)
 
-    # token 估价（DeepSeek 视觉网格口径，见 core/vision_tokens.py）
-    from ..vision_tokens import estimate_image_tokens
-    token_est = estimate_image_tokens(ref.get("width") or 0, ref.get("height") or 0)
-
-    text = _image_handle_text(file_path, ref, root, token_est, device)
+    text = _image_handle_text(file_path, ref, root, device)
     return ImageBearingStr(text, [ref])
 
 
@@ -380,10 +365,10 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
         return _apply_global_cap(result, _tool_context)
 
     if os.path.isdir(file_path):
-        return f"[错误: {file_path} 是目录，请用 Glob 匹配或 Shell 查看目录内容]"
+        return f"[错误: {file_path} 是目录]"
 
     if not os.path.isfile(file_path):
-        # 先细分真实原因：权限不足/超长路径会被 isfile 吞成 False 误报"不存在"
+        # 先细分真实原因：权限不足会被 isfile 吞成 False 误报"不存在"
         miss_reason = _isfile_miss_reason(file_path)
         if miss_reason:
             return miss_reason
@@ -393,7 +378,7 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
     try:
         # 二进制检测：首块含NUL字节即视为二进制文件（与Grep检测策略一致）
         with open(file_path, "rb") as fb:
-            head_bytes = fb.read(8192)
+            head_bytes = fb.read(_HEAD_SNIFF_BYTES)
     except PermissionError:
         return f"[错误: 权限不足: {file_path}]"
     except OSError as e:
@@ -404,20 +389,12 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
     encoding = _sniff_bom_encoding(head_bytes)
     if encoding is None:
         if b"\x00" in head_bytes:
-            return "[错误: 检测到二进制文件（含NUL字节），Read仅支持纯文本。请使用Shell工具处理]"
-        # 编码探测（GB18030回退，避免中文Windows下GBK/GB18030文件读成U+FFFD乱码）
+            return f"[错误: 二进制文件: {file_path}]"
         encoding = _detect_text_encoding(head_bytes)
-
-    # 编码探测本身也可能解不了某些字节：此时下方 errors="replace" 会静默填 U+FFFD，
-    # AI 拿到坏数据却以为读到了原文（回写即永久丢失），必须先给出可读提示
-    decode_hint = ""
-    bad_at = _first_undecodable_offset(head_bytes, encoding)
-    if bad_at >= 0:
-        decode_hint = (
-            f"[提示: 文件编码无法完全识别——第{bad_at}字节起无法按 {encoding} 解码，"
-            f"无法解码的部分以 \ufffd 显示，内容可能不完整；"
-            f"如需原样处理请用 Shell 工具]\n"
-        )
+        if encoding is None:
+            # 探测不出、且严格 UTF-8 解码失败：只报这个确定的事实。
+            # 不猜是哪一种编码（判据不存在，见 _detect_text_encoding）。
+            return f"[错误: 不是 UTF-8: {file_path}]"
 
     try:
         with open(file_path, "r", encoding=encoding, errors="replace") as f:
@@ -482,17 +459,17 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
             return f"[无内容: offset={offset} 已超出文件末尾（文件共{skipped}行）]"
         return "[文件为空]"
 
-    # 截断提示（含总行数：AI 可算剩余页数，从"盲续"变"可规划"）
+    # 截断提示（只报事实：显示到第几行、文件共几行；剩余行数可算，不写）
     if truncated_by_limit:
+        end_line = skipped + limit
         if total_lines is not None:
-            remain = total_lines - (skipped + limit)
             result.append(
-                f"  ... [截断: 已显示 {limit} 行。文件共{total_lines}行，剩余{remain}行。"
-                f"使用 offset={skipped + limit + 1} 参数可读取其余部分]"
+                f"  ... [已显示 {skipped + 1}-{end_line} 行，文件共 {total_lines} 行。"
+                f"用 offset={end_line + 1} 继续]"
             )
         else:
             result.append(
-                f"  ... [截断: 已显示 {limit} 行。使用 offset={skipped + limit + 1} 参数可读取其余部分]"
+                f"  ... [已显示 {skipped + 1}-{end_line} 行。用 offset={end_line + 1} 继续]"
             )
 
-    return _apply_global_cap(decode_hint + "\n".join(result), _tool_context, total_lines)
+    return _apply_global_cap("\n".join(result), _tool_context, total_lines)

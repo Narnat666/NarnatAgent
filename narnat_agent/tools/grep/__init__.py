@@ -534,7 +534,10 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget, gate=None)
             # BOM 嗅探优先于二进制判定：UTF-16 文本含 NUL，不能被误判为二进制
             if _check_binary_first_chunk(first_chunk):
                 return "skip_binary"
-            encoding = _detect_text_encoding(first_chunk)
+            # 探测不出编码（非 UTF-8 且无 BOM，如 GBK/Shift-JIS）：按 utf-8+replace
+            # 扫描。Grep 只输出匹配行，AI 能看到具体内容自行判断；直接跳过文件
+            # 会让"文件里有这个词却搜不到"变成更难查的假阴性。
+            encoding = _detect_text_encoding(first_chunk) or "utf-8"
     except (PermissionError, OSError):
         return "skip_unreadable"
     finally:

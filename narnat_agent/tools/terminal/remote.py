@@ -130,11 +130,13 @@ def remote_read(file_path: str, offset: int = 0, limit: int = 2000,
             # 二进制检测: 仅读首块8KB（与本地Read检测策略一致）
             head = f.read(8192)
             if b"\x00" in head:
-                return "[错误: 检测到二进制文件（含NUL字节），Read仅支持纯文本。请用 Terminal exec 处理]"
+                return f"[错误: 二进制文件: {file_path}]"
 
-            # 编码探测（与本地Read一致）：GBK文件按utf-8+replace读是乱码
-            from ..read import _detect_text_encoding
-            encoding = _detect_text_encoding(head)
+            # 编码探测（与本地Read一致）：只认 BOM 声明的 UTF-16 与严格 UTF-8
+            from ..read import _detect_text_encoding, _sniff_bom_encoding
+            encoding = _sniff_bom_encoding(head) or _detect_text_encoding(head)
+            if encoding is None:
+                return f"[错误: 不是 UTF-8: {file_path}]"
 
             f.seek(0)
             start = max(offset - 1, 0) if offset > 0 else 0

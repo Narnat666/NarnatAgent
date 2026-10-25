@@ -60,14 +60,14 @@ CAPABILITY = {
 def _read_for_edit(file_path: str) -> tuple:
     """读取文件内容用于编辑，返回 (content, 写回编码)。
 
-    编码策略与 Read 一致（BOM 嗅探优先 → utf-16；未命中再探测 utf-8-sig /
-    gb18030），但必须严格解码：Edit 会把内容写回文件，errors="replace" 会以
-    U+FFFD 永久替换原字节，造成静默数据损坏。探测结果无法严格解码时抛
-    UnicodeDecodeError，由调用方拒绝编辑（对齐远程 Edit 行为）。
+    编码策略与 Read 一致（BOM 嗅探优先 → utf-16；未命中再探测严格 UTF-8），
+    但必须严格解码：Edit 会把内容写回文件，errors="replace" 会以 U+FFFD
+    永久替换原字节，造成静默数据损坏。探测不出编码时抛 UnicodeDecodeError，
+    由调用方拒绝编辑（对齐远程 Edit 行为）。
 
     Raises:
         ValueError: 二进制文件（含NUL字节；BOM 未命中时才判）
-        UnicodeDecodeError: 无法按 UTF-8/GB18030/UTF-16(BOM) 严格解码
+        UnicodeDecodeError: 无法按 UTF-8 / UTF-16(BOM) 严格解码
     """
     from ..read import _detect_text_encoding, _sniff_bom_encoding, _write_encoding_for
     with open(file_path, "rb") as fb:
@@ -80,6 +80,10 @@ def _read_for_edit(file_path: str) -> tuple:
         if b"\x00" in head:
             raise ValueError("binary")
         encoding = _detect_text_encoding(head)
+        if encoding is None:
+            # 探测不出编码就必须拒绝：猜一种（如 GB18030）会把错字写回文件，
+            # 原字节永久丢失。抛 UnicodeDecodeError 让调用方走"拒绝编辑"分支。
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "encoding not determined")
     with open(file_path, "r", encoding=encoding, newline="") as f:
         content = f.read()
     # 写回编码保持原文件形态：UTF-16 保持原字节序+BOM，UTF-8 有 BOM 保留 BOM、
@@ -151,10 +155,9 @@ def execute(file_path: str, old_string: str = "", new_string: Optional[str] = No
     except OSError as e:
         return (f"[错误: 读取失败: {e}]", "")
     except UnicodeDecodeError:
-        return ((f"[错误: 文件非UTF-8/GB18030/UTF-16(BOM)编码，为防止内容损坏已拒绝编辑: {file_path}。"
-                 f"请用Shell工具处理（如转码为UTF-8后再编辑）]"), "")
+        return (f"[错误: 不是 UTF-8: {file_path}]", "")
     except ValueError:
-        return ("[错误: 检测到二进制文件（含NUL字节），Edit仅支持文本文件。请使用Shell工具处理]", "")
+        return (f"[错误: 二进制文件: {file_path}]", "")
 
     return _edit_by_string(content, old_string, new_string, replace_all, file_path,
                            write_encoding)

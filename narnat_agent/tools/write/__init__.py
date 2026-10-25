@@ -209,7 +209,12 @@ def execute(file_path: str, content: str,
                     fb.seek(0)
                     old_bytes = fb.read()
             if old_bytes is not None:
+                # None = 探测不出编码（非 UTF-8 且无 BOM）。这里只用于生成 diff，
+                # 用 utf-8+replace 尽力展示即可：写回编码由 _write_encoding_for 决，
+                # 探测不出时它返回 utf-8，与新写内容一致。
                 old_encoding = _sniff_bom_encoding(head) or _detect_text_encoding(head)
+                if old_encoding is None:
+                    old_encoding = "utf-8"
                 # 写回保持原文件编码：固定按 UTF-8 写会把 UTF-16/BOM/GBK 文件静默
                 # 改写编码形态（下游按原编码读取的工具链拿到坏数据，且无任何提示）
                 write_encoding, write_bom_prefix = _write_encoding_for(head, old_encoding)
