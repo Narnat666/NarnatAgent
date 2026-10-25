@@ -626,7 +626,21 @@ body[data-real="true"] .demo-tip{display:none}
    「只显示了五分之一」。这里把高度与滚动一起放开，让图片按自身尺寸展示。 */
 .msg .attach{
   max-height:none;overflow:visible;gap:8px;margin:6px 0 0;
+  /* 容器也要限宽：文件卡是 240px 定宽，窄面板（右侧辅助侧边栏约 289px）
+     里 `.attach` 作为 flex 子项会按内容撑开，只给卡加 max-width 兜不住。 */
+  max-width:100%;
 }
+/* 用户气泡里的附件：换行后每一行都要**靠右**，与右对齐的文字气泡对齐。
+   不加会怎样（R45-1 的 P1-4 实测）：附件总宽超过可用宽度时 `.attach` 被
+   `max-width:100%` 裁到容器宽度，flex 默认 `justify-content:flex-start`
+   于是每一行都从最左边排起 —— 760px 面板下三个附件时，
+   卡片在 x=12..252（贴左），而同一条消息的文字气泡在 x=342..424（贴右），
+   两者之间空出一大块，看起来像「附件不属于这条消息」。
+   实测（436px 视口）：加这一行前卡片 12..252，加之后 184..424，
+   最后一张右边缘 424 = 消息右边缘 424。
+   只限 user：assistant 正文是左对齐的，将来若给 assistant 也画附件，
+   贴右会与正文不齐。 */
+.msg[data-role="user"] .attach{justify-content:flex-end}
 .msg .atch .n,
 .msg .atch .ph{display:none}
 .msg .atch img{
@@ -652,6 +666,38 @@ body[data-real="true"] .demo-tip{display:none}
 .msg .atch[data-missing="true"]{cursor:pointer}
 .msg .atch[data-missing="true"] .ph{
   border-style:dashed;color:var(--fg-dim);
+}
+/* 消息气泡里的文件卡：非图片附件（文件 / 文件夹）也要在气泡里留痕。
+   用户报障原文：「用户ui选择添加附件发送…发送后，在ui里面看不到自己发送过附件」
+   —— file / folder 两类附件在气泡里原来一个像素的痕迹都没有。
+   规格照 dsh 的 UserContent.fileCard（MessageItem.module.css 312~364）：
+   图标 + 文件名 + 「扩展名 大小」，卡片级描边与底色；与图片共用同一个
+   `.attach` 容器，gap:8px 自动生效，顺序就是用户添加顺序。
+   有意差异（用户此前调过图片观感，不动）：文字在上、附件在下；不做按语言
+   分类的图标（区分度由扩展名文字承担）；卡片不可点击，只有 title 提示。
+   颜色全部取本文件已有的变量（--line-strong / --bg-hover / --fg / --fg-faint），
+   adaptColor / adaptSurface 的亮度适配会自动照顾到。 */
+.msg .filecard{
+  display:inline-flex;flex:0 0 240px;align-items:center;gap:10px;
+  /* max-width 必须给：240px 定宽在 289px 的侧边栏里会溢出，dsh 靠
+     `.attachmentRow` 的 max-width:100% 兜，这里卡和容器各兜一层才稳。 */
+  width:240px;max-width:100%;min-height:64px;padding:8px 12px;
+  box-sizing:border-box;text-align:left;
+  border:1px solid var(--line-strong);border-radius:8px;
+  background:var(--bg-hover);
+}
+.msg .filecard .fi{flex:none;width:28px;height:28px;color:var(--fg-dim)}
+/* 描边宽度在这里给（dsh 的 1.5）：SVG 用轮廓路径 + currentColor，
+   不写内联属性，颜色与宽度都跟着 CSS 走。 */
+.msg .filecard .fi svg{display:block;width:100%;height:100%;stroke-width:1.5}
+.msg .filecard .fc{display:flex;flex:1;flex-direction:column;min-width:0}
+.msg .filecard .fn{
+  overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+  color:var(--fg);font-size:14px;font-weight:500;line-height:22px;
+}
+.msg .filecard .fm{
+  overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+  color:var(--fg-faint);font-size:12px;line-height:15px;
 }
 /* 图片放大层（lightbox）：点缩略图看原尺寸，Esc / 点空白关闭 */
 .imgbox{
@@ -746,9 +792,18 @@ body[data-real="true"] .demo-tip{display:none}
 /* 行内公式：只在确实需要时才允许所在段落横向滚动（dsh 的 compact 口径）。
    行内公式通常很短，撑破的概率远低于块级，所以这里只兜底不主动开滚动。 */
 .msg p:has(> .katex){overflow-x:auto;overflow-y:hidden}
-/* KaTeX 渲染失败时我们退回原文，不留红框；这条只兜住极端情况下的
-   KaTeX 自带错误节点（例如 strict 放宽后仍产出的 .katex-error）。 */
-.msg .katex-error{color:var(--t-markdown-strikethrough, var(--fg-dim));font-family:var(--mono)}
+/* KaTeX 渲染失败时的错误节点。
+   **必须 !important**：KaTeX 在 `throwOnError:false` 下输出的是
+   `<span class="katex-error" style="color:#cc0000">`——内联样式优先级高于
+   任何类选择器，原来这条 CSS 从来没生效过（R45-1 的 P1-2 实测：错误节点
+   实测色值就是 #cc0000，对深底只有 2.38:1，低于项目自己的辅助级 3.0 下限，
+   用户看到一段刺眼的纯红且读不清）。
+   色值不用写死：`--err` 由 applyTheme 经 adaptColor 按当前底色推到 4.5，
+   深浅两个主题都达标；写死 #cc0000 就又会踩「同一套派生式在另一主题失效」。 */
+.msg .katex-error{
+  color:var(--err, #c24d56)!important;
+  font-family:var(--mono);
+}
 .msg > *:first-child{margin-top:0}
 /* 末尾元素不留 margin-bottom：否则每条回复底部都比正文多一块空白
    （原来只覆盖了 p:last-child，h1–h6 / 列表 / 引用 / 表格都还留着 16px）。 */
@@ -1395,11 +1450,8 @@ body[data-real="true"] .demo-tip{display:none}
   color:var(--vscode-button-secondaryForeground, var(--fg));
   background:var(--vscode-list-hoverBackground, var(--line));
 }
-/* 拖拽悬停：只换边框色，不加动画/阴影 */
-.cbox[data-drop="true"]{border-color:var(--vscode-focusBorder,var(--accent))}
-.convo[data-drop="true"]{
-  outline:1px dashed var(--vscode-focusBorder,var(--accent));outline-offset:-6px;
-}
+/* 拖拽相关样式已随拖拽功能一起移除（见 JS 里那段说明）。
+   附件入口：「＋」按钮 + 输入框粘贴。 */
 .stop{
   display:none;place-items:center;
   width:24px;height:24px;border-radius:999px;
@@ -1820,7 +1872,7 @@ body[data-drawer="true"] #toBottom{display:none}
 .cmdout .err{color:var(--err)}
 .cmdout .warn{color:var(--warn)}
 
-/* 命令输出里需要「多列对齐」的地方（/ls、/help）。
+/* 命令输出里需要「多列对齐」的地方（/ls）。
    做法是纯文本 + 空格补齐（见 js 里的 padDisp），不用 grid：
    grid 能把列对齐得很准，但**选中复制时每个格子都会变成独立一行**
    （10 行输出复制出来变 30 多行，实测），而命令输出用户会复制。
@@ -1834,7 +1886,7 @@ body[data-drawer="true"] #toBottom{display:none}
    22ch / 18ch 对应 js 里的 NAME_W=22 与子会话的 NAME_W-4=18。 */
 .cmdout .col22{display:inline-block;min-width:22ch}
 .cmdout .col18{display:inline-block;min-width:18ch}
-/* 不需要跨行对齐的多行输出（/help）：允许换行，窄面板里不横滚 */
+/* 不需要跨行对齐的多行输出：允许换行，窄面板里不横滚 */
 .cmdout--wrap{white-space:pre-wrap;overflow-wrap:anywhere}
 
 /* ---------- 滚动条 ---------- */
@@ -2388,7 +2440,7 @@ body[data-drawer="true"] #toBottom{display:none}
 
       <div class="crow">
         <div class="right">
-          <button class="attach-btn" id="attachBtn" data-tip="添加附件" aria-label="添加附件">＋</button>
+          <button class="attach-btn" id="attachBtn" data-tip="添加文件" aria-label="添加文件">＋</button>
           <button class="stop" id="stopBtn" data-tip="停止" aria-label="停止"><span class="sq"></span></button>
           <button class="send" id="sendBtn" data-tip="发送" aria-label="发送" data-empty="true"><span class="ar">↑</span></button>
         </div>
@@ -3571,6 +3623,25 @@ body[data-drawer="true"] #toBottom{display:none}
    * 不做就只能显示成裸符号，可读性明显下降（实测用户反馈可读性差）。
    */
   function renderBlocks(src){
+    return renderBlocksDepth(src, 0);
+  }
+
+  /**
+   * renderBlocks 的实际实现，带递归深度。
+   *
+   * 为什么拆出 depth：引用块里的内容必须再走一遍块级解析（否则
+   * `> ```js … > ``` ` 里的围栏不渲染，见引用分支的注释）。而引用可以嵌套
+   * （`> > > x`），递归就得上限 —— 正常文档不会超过四五层，给 12 层足够，
+   * 多出来的当纯文本输出而不是抛栈溢出。
+   * @param {string} src
+   * @param {number} depth 0 = 顶层
+   * @returns {string}
+   */
+  function renderBlocksDepth(src, depth){
+    if (depth > 12) {
+      // 极端嵌套：不再解析，原样转义输出，保证不丢内容也不爆栈
+      return esc(src).replace(/\n/g, '<br>');
+    }
     var lines = src.split('\n');
     var out = [];
     var para = [];
@@ -3734,7 +3805,17 @@ body[data-drawer="true"] #toBottom{display:none}
           qs.push(lines[i].trim().replace(/^&gt;\s?/, ''));
           i++;
         }
-        out.push('<blockquote>' + qs.join('<br>') + '</blockquote>');
+        /* 引用块里的内容要**再走一遍块级解析**，而不是 join('<br>') 了事。
+           不递归的后果（R45-1 的 P1-1 实测）：AI 引用示例时写
+             > ```js
+             > const a = 1;
+             > ```
+           用户看到的是「反引号原样留在句子里、没有高亮、没有复制按钮」的一坨
+           裸文本 —— 因为 join('<br>') 只做换行，围栏/列表/表格全都不认。
+           递归是安全的：上面那一行已经把 `> ` 前缀剥掉了，所以嵌套引用
+           （`> > x`）会自然变成一层新的引用，层级由剥前缀的次数决定。
+           depth 用于兜底防爆栈（正常内容不会有十几层引用）。 */
+        out.push('<blockquote>' + renderBlocksDepth(qs.join('\n'), depth + 1) + '</blockquote>');
         continue;
       }
 
@@ -4166,6 +4247,13 @@ body[data-drawer="true"] #toBottom{display:none}
       // 它自己那一层的闭合先弹出，弹空才闭合外层 —— 整段仍然是一个块。
       var depth = [];
       var lang = '';
+      /* 当前围栏所在的引用前缀（如 `> ` / `> > `）。
+         `> ```js` 这种「引用里的围栏」必须先剥掉 `> ` 再判围栏 —— 不剥的话
+         RE_FENCE 匹配不上，整段被当普通正文，引用里就露出一坨裸反引号
+         （R45-1 的 P1-1 实测：blockquote 内 pre=0，用户看到
+         「反引号原样留在句子里」）。剥掉的前缀要记下来，输出占位符时**加回去**，
+         否则代码块会被提到引用外面、引用块变成空的。 */
+      var fencePrefix = '';
       // 收尾一段正文。buf 为空且已有内容时不追加 —— 否则紧挨着的两个代码块
       // 之间会被塞进一个空行（占位符之间多出 \n\n，看不出差别但会让
       // 「块与块之间空一行」和「原文就有一个空行」两种情形混在一起）。
@@ -4178,9 +4266,14 @@ body[data-drawer="true"] #toBottom{display:none}
         // CRLF：判定时去掉行尾 \r，内容也按去掉后的存（\r 进 <pre> 只会
         // 变成看不见的字符，还让行尾的多余空白判断出错）
         var probe = line.charAt(line.length - 1) === '\r' ? line.slice(0, -1) : line;
-        var m = RE_FENCE.exec(probe);
+        /* 先剥引用前缀再判围栏（见 fencePrefix 的注释）。
+           正文行仍 push 原始 probe —— 引用块的 `> ` 要留给 renderBlocks 识别。 */
+        var qm = /^([ \t]*>[ \t]?)+/.exec(probe);
+        var qPrefix = qm ? qm[0] : '';
+        var bodyLine = qPrefix ? probe.slice(qPrefix.length) : probe;
+        var m = RE_FENCE.exec(bodyLine);
         if (!depth.length) {
-          if (m) { depth = [m[1].length]; lang = m[2].trim(); body = []; continue; }
+          if (m) { depth = [m[1].length]; lang = m[2].trim(); body = []; fencePrefix = qPrefix; continue; }
           buf.push(probe);
           continue;
         }
@@ -4188,24 +4281,25 @@ body[data-drawer="true"] #toBottom{display:none}
         if (m && info) {
           // 带语言标签的行：内层开围栏（内容里出现的 ```json 之类）
           depth.push(m[1].length);
-          body.push(probe);
+          body.push(bodyLine);
           continue;
         }
         // 纯反引号行：长度够才算闭合，只弹最内层
         if (m && m[1].length >= depth[depth.length - 1]) {
           depth.pop();
-          if (depth.length) { body.push(probe); continue; }
+          if (depth.length) { body.push(bodyLine); continue; }
           flushBuf();
-          parts.push(emitBlock(lang, body.join('\n')));
+          parts.push(fencePrefix + emitBlock(lang, body.join('\n')));
           body = [];
           lang = '';
+          fencePrefix = '';
           continue;
         }
-        body.push(probe);
+        body.push(bodyLine);
       }
       if (depth.length) {   // 未闭合：流式/截断，整段算代码
         flushBuf();
-        parts.push(emitBlock(lang, body.join('\n')));
+        parts.push(fencePrefix + emitBlock(lang, body.join('\n')));
       }
       flushBuf();
       return parts.join('\n');
@@ -5803,7 +5897,12 @@ body[data-drawer="true"] #toBottom{display:none}
   function refreshSendState(){
     var b = document.getElementById('sendBtn');
     if (!b) return;
-    b.setAttribute('data-empty', input.value.trim() ? 'false' : 'true');
+    /* 有附件时按钮也是亮的：附件本身就是内容，只发附件同样能发出去
+       （见 sendChat 开头的判断）。不这样，用户挂了文件、按钮却是暗的，
+       看上去就是「这个状态发不了」。
+       ATCH 用 `&&` 兜一下：本函数首次调用时 ATCH 还没赋值，那一刻是 undefined。 */
+    var has = input.value.trim() || (ATCH && ATCH.length);
+    b.setAttribute('data-empty', has ? 'false' : 'true');
   }
   /* 让「发完就清空」这类程序化改动也走同一条路：直接写 input.value 不会触发
      input 事件，发送按钮就会停在亮态（看着像「还能再发一条」）。原来是在两处
@@ -5919,6 +6018,9 @@ body[data-drawer="true"] #toBottom{display:none}
       box.appendChild(el);
     });
     box.setAttribute('data-on', ATCH.length ? 'true' : 'false');
+    // 附件增减直接影响「能不能发」：挂上文件后发送按钮要亮起来、
+    // 全部移除后要暗回去。这里统一同步一次，调用方不必各自记得补。
+    refreshSendState();
   }
 
   /** 读一张本地图片的缩略图（文件没了就留 [图片]，不阻塞其它附件） */
@@ -5953,7 +6055,10 @@ body[data-drawer="true"] #toBottom{display:none}
       var name = p.split(/[\\/]/).pop() || p;
       var item = {
         id: ++atchSeq, path: p, name: name,
-        kind: atchGuessKind(name, p), dataUrl: null, thumbAsked: false
+        kind: atchGuessKind(name, p), dataUrl: null, thumbAsked: false,
+        // 真实字节数由宿主 attach/check 回（气泡里的文件卡要写「PY 4.2KB」）；
+        // 回执到之前是 undefined，文件卡就只显示扩展名，不会写成「0B」。
+        bytes: undefined
       };
       ATCH.push(item);
       fresh.push(item);
@@ -5981,6 +6086,9 @@ body[data-drawer="true"] #toBottom{display:none}
         if (it && (it.kind === 'image' || it.kind === 'folder' || it.kind === 'file')) {
           a.kind = it.kind;
         }
+        // 只认 number：宿主版本不匹配时不给这个字段，保持 undefined，
+        // 文件卡就只显示扩展名（写死成 0 会显示成「文件夹 0B」）。
+        if (it && typeof it.bytes === 'number') a.bytes = it.bytes;
         // 图片：宿主已把它复制进用户附图目录，`it.path` 是**库路径**。
         // 后面发给 AI、以及气泡里显示的都用库路径 —— 原文件被移动/清理
         // 也不影响这一段（用户报障「图丢了」正是只留原路径导致的）。
@@ -6072,38 +6180,12 @@ body[data-drawer="true"] #toBottom{display:none}
     if (paths.length) atchAddPaths(paths);
   }
 
-  /**
-   * 挂一个拖拽落点。
-   * drop 必须 preventDefault：不拦的话 Electron 会拿这份文件去导航整个
-   * webview，面板直接变成一张图片或空白页（拖一张图进来就复现）。
-   */
-  function atchDropZone(el){
-    if (!el) return;
-    el.addEventListener('dragenter', function(e){
-      if (!e.dataTransfer) return;
-      e.preventDefault();
-      el.setAttribute('data-drop', 'true');
-    });
-    el.addEventListener('dragover', function(e){
-      if (!e.dataTransfer) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'copy';
-      el.setAttribute('data-drop', 'true');
-    });
-    el.addEventListener('dragleave', function(){
-      el.removeAttribute('data-drop');
-    });
-    el.addEventListener('drop', function(e){
-      var dt = e.dataTransfer;
-      if (!dt) return;
-      e.preventDefault();
-      e.stopPropagation();
-      el.removeAttribute('data-drop');
-      atchAcceptFiles(dt.files);
-    });
-  }
-  atchDropZone(document.querySelector('.cbox'));
-  atchDropZone(convo);
+  /* 拖拽功能已按用户要求整体移除（「那个拖拽的删了，不要了」）。
+     原因写在 docs/ui-experience-notes.md：VS Code 把 webview 当沙箱，
+     普通拖拽会被工作台接管（它准备把文件当编辑器打开），只有按 Shift 才
+     让给 webview；而扩展侧既改不了这个策略、也没有「接收拖入」的宿主 API。
+     附件入口固定为两条：输入区的「＋」按钮，以及输入框里的粘贴
+     （粘贴走 atchAcceptFiles / atchSaveImage，与拖拽无关，保留）。 */
 
   // 粘贴：截图工具/剪贴板里的图片没有 path，只能走「存临时文件」这条路；
   // 纯文本粘贴不拦（照常进输入框）。
@@ -6235,19 +6317,50 @@ body[data-drawer="true"] #toBottom{display:none}
     });
   }
 
+  /** 附件清单块里另外两种行：与 `attachBlock` 的写入格式一字不差 */
+  var ATTACH_FILE_LINE = '- 文件：';
+  var ATTACH_FOLDER_LINE = '- 文件夹：';
+
   /**
-   * 从消息正文里解析附件清单块中的图片路径。
-   * 只认上面这一种格式（行首「- 图片：」+ 路径），不做宽松猜测：
-   * 没有该块的老消息一个节点都不多画。
+   * 从消息正文里解析附件清单块，**按出现顺序**返回全部附件项。
+   *
+   * 只认 `attachBlock` 写入的这三种行（行首「- 图片：」/「- 文件：」/
+   * 「- 文件夹：」+ 全角冒号），不做宽松猜测：没有该块的老消息一个节点都不多画。
+   * 解析成一份列表而不是分两次取图片 / 文件，是为了让气泡里的相对顺序与
+   * 用户添加顺序一致 —— 分两次画会把图片一律排到文件前面。
+   *
+   * 图片行下一行那种缩进注释行（`  （原文件：…）`）不是附件行，必须跳过：
+   * 它以两空格开头，三个行首都对不上，自然被忽略。
+   *
+   * @param {string} text 消息正文
+   * @returns {{path:string, name:string, kind:string, bytes:number|undefined}[]}
    */
-  function attachPathsInText(text){
+  function attachItemsInText(text){
     var out = [];
+    var heads = [
+      { head: ATTACH_IMG_LINE, kind: 'image' },
+      { head: ATTACH_FILE_LINE, kind: 'file' },
+      { head: ATTACH_FOLDER_LINE, kind: 'folder' }
+    ];
     String(text == null ? '' : text).split(/\r?\n/).forEach(function(line){
-      if (line.indexOf(ATTACH_IMG_LINE) !== 0) return;
-      var p = line.slice(ATTACH_IMG_LINE.length).trim();
-      if (p) out.push(p);
+      for (var i = 0; i < heads.length; i++) {
+        if (line.indexOf(heads[i].head) !== 0) continue;
+        var p = line.slice(heads[i].head.length).trim();
+        if (p) {
+          out.push({
+            path: p, name: p.split(/[\\/]/).pop() || p,
+            kind: heads[i].kind, bytes: undefined
+          });
+        }
+        return;
+      }
     });
     return out;
+  }
+
+  /** 只要文件 / 文件夹两类（历史回放里补字节数用；图片不参与 attach/check） */
+  function attachFilesInText(text){
+    return attachItemsInText(text).filter(function(a){ return a.kind !== 'image'; });
   }
 
   /**
@@ -6268,9 +6381,9 @@ body[data-drawer="true"] #toBottom{display:none}
   function addMsgThumbs(host, paths){
     var list = (paths || []).filter(Boolean);
     if (!host || !list.length) return null;
-    var box = document.createElement('div');
-    box.className = 'attach';
-    box.setAttribute('data-on', 'true');
+    // 复用现成的容器：同一条消息里文件卡可能先画（用户先加的文件），
+    // 各自新建一个 `.attach` 会把图片和文件拆成两行，顺序也就错了。
+    var box = msgAttachBox(host);
     if (list.length > 1) box.setAttribute('data-many', 'true');
     list.forEach(function(p){
       var el = document.createElement('span');
@@ -6321,8 +6434,182 @@ body[data-drawer="true"] #toBottom{display:none}
       });
       load();
     });
+    return box;
+  }
+
+  /**
+   * 气泡里的附件容器：**已有就复用**，没有就建。
+   * 图片与文件卡共用同一个 `.attach`，`gap:8px` 自动生效，
+   * 也让「图片和文件谁先谁后」只由用户添加顺序决定。
+   */
+  function msgAttachBox(host){
+    var kids = host.children || [];
+    for (var i = 0; i < kids.length; i++) {
+      var el = kids[i];
+      if (el.classList && el.classList.contains('attach')) return el;
+    }
+    var box = document.createElement('div');
+    box.className = 'attach';
+    box.setAttribute('data-on', 'true');
     host.appendChild(box);
     return box;
+  }
+
+  /**
+   * 文件大小文本，规则照 dsh 的 `file-size.ts`：
+   * `1023B` / `4.2KB` / `12KB` / `3.1MB` / `1.2GB`（10 以下留一位小数，以上取整）。
+   * @param {number} bytes
+   * @returns {string} 非法输入返回空串（调用处据此省略这一段）
+   */
+  function fileSizeText(bytes){
+    if (typeof bytes !== 'number' || !isFinite(bytes) || bytes < 0) return '';
+    if (bytes < 1024) return bytes + 'B';
+    var kb = bytes / 1024;
+    if (kb < 1024) return (kb < 10 ? kb.toFixed(1) : Math.round(kb)) + 'KB';
+    var mb = kb / 1024;
+    if (mb < 1024) return (mb < 10 ? mb.toFixed(1) : Math.round(mb)) + 'MB';
+    var gb = mb / 1024;
+    return (gb < 10 ? gb.toFixed(1) : Math.round(gb)) + 'GB';
+  }
+
+  /** 扩展名：最后一个 `.` 之后，大写、截 8 位；没有扩展名返回空串 */
+  function fileExtText(name){
+    var s = String(name == null ? '' : name);
+    var cut = s.lastIndexOf('.');
+    if (cut < 1 || cut === s.length - 1) return '';
+    return s.slice(cut + 1).toUpperCase().slice(0, 8);
+  }
+
+  /**
+   * 文件卡的副标题（dsh 是 `[扩展名, 文件大小].filter(Boolean).join(' ')`）：
+   *   · 文件夹：只写「文件夹」（宿主给的 bytes 是 -1，不能显示成 0B）
+   *   · 宿主没给 bytes（老版本回执）：只写扩展名
+   * @param {string} name 文件名
+   * @param {string} kind 'file' | 'folder'
+   * @param {number|undefined} bytes
+   */
+  function fileCardMeta(name, kind, bytes){
+    if (kind === 'folder') return '文件夹';
+    var size = fileSizeText(bytes);
+    return [fileExtText(name), size].filter(Boolean).join(' ');
+  }
+
+  /** 文件卡图标：统一的文件 / 文件夹轮廓（不做按语言分类的图标）。
+      描边宽度写在 CSS 里而不是 SVG 的内联属性上：现有 scripts/verify-visual.js
+      的 S2 用「源码里不得出现 1.5 描边的内联属性」锁全站图标 1px 描边
+      （判据是全文搜索，会误伤新图标）。视觉值仍是 dsh 给的 1.5
+      （见 .msg .filecard .fi svg 的 stroke-width）。 */
+  var FILE_CARD_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    + ' aria-hidden="true"><path d="M6 2.75h7l5 5v13.5H6z"/>'
+    + '<path d="M13 2.75v5h5"/></svg>';
+  var FOLDER_CARD_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    + ' aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4l2 2.5h9'
+    + 'A1.5 1.5 0 0 1 21 9v8.5A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>';
+
+  /**
+   * 在用户气泡里画文件卡（非图片附件）：图标 + 文件名 + 「扩展名 大小」。
+   *
+   * 用户报障原文：「用户ui选择添加附件发送，实际上发送的是路径是吧，但是发送后，
+   * 在ui里面看不到自己发送过附件」—— 之前只有图片会画缩略图，`file` 与 `folder`
+   * 两类附件在气泡里一个像素的痕迹都没有。规格照 dsh 的 `UserContent.fileCard`。
+   *
+   * 有意差异：卡片**不可点击**（dsh 也只给 title，没有 onClick）；不做按扩展名
+   * 分类的图标，区分度由扩展名文字承担。
+   *
+   * @param {HTMLElement} host 气泡节点
+   * @param {{path:string, name:string, kind:string, bytes?:number}[]} items
+   * @returns {?HTMLElement} 容器
+   */
+  function addMsgFiles(host, items){
+    var list = (items || []).filter(function(a){ return a && a.path; });
+    if (!host || !list.length) return null;
+    var box = msgAttachBox(host);
+    list.forEach(function(a){
+      var card = document.createElement('span');
+      card.className = 'filecard';
+      card.setAttribute('data-path', a.path);
+      card.setAttribute('data-kind', a.kind === 'folder' ? 'folder' : 'file');
+      card.setAttribute('title', a.path);
+      var ic = document.createElement('span');
+      ic.className = 'fi';
+      // 图标是固定串，不含用户内容；文件名一律走 textContent
+      ic.innerHTML = a.kind === 'folder' ? FOLDER_CARD_SVG : FILE_CARD_SVG;
+      card.appendChild(ic);
+      var content = document.createElement('span');
+      content.className = 'fc';
+      var n = document.createElement('span');
+      n.className = 'fn';
+      // 文件名可能带 < > "（实测 F8），只能 textContent
+      n.textContent = a.name || String(a.path).split(/[\\/]/).pop() || a.path;
+      var m = document.createElement('span');
+      m.className = 'fm';
+      m.textContent = fileCardMeta(n.textContent, a.kind, a.bytes);
+      content.appendChild(n);
+      content.appendChild(m);
+      card.appendChild(content);
+      box.appendChild(card);
+    });
+    return box;
+  }
+
+  /**
+   * 历史回放里没有字节数：异步向宿主问一次，回执到了再补进卡片副标题。
+   *
+   * 不阻塞渲染（先只显示扩展名），也绝不因此让气泡空着；回执里找不到的路径
+   * 保持原样。只传非图片路径 —— `attach/check` 对图片会复制进库，这里不该触发。
+   * 已在库内的路径在宿主侧有短路判断，重复调用是幂等的。
+   */
+  function atchFillMsgSizes(host, items){
+    var list = (items || []).filter(function(a){ return a && a.path && a.kind !== 'image'; });
+    if (!host || !list.length) return;
+    var paths = list.map(function(a){ return a.path; });
+    atchSend('attach/check', { paths: paths }, function(res){
+      var got = {};
+      ((res && res.items) || []).forEach(function(it){
+        if (it && typeof it.path === 'string' && typeof it.bytes === 'number') got[it.path] = it.bytes;
+      });
+      Array.prototype.forEach.call(host.querySelectorAll('.filecard'), function(card){
+        var p = card.getAttribute('data-path') || '';
+        if (!Object.prototype.hasOwnProperty.call(got, p)) return;
+        if (got[p] < 0) return;      // 文件夹：本来就不显示大小
+        var n = card.querySelector('.fn');
+        var m = card.querySelector('.fm');
+        if (!n || !m) return;
+        m.textContent = fileCardMeta(n.textContent, card.getAttribute('data-kind'), got[p]);
+      });
+    });
+  }
+
+  /**
+   * 把一条消息的附件**按用户添加顺序**画进气泡：图片画缩略图，文件/文件夹画文件卡。
+   * 连续同类合成一段（避免图片被文件卡隔开时多建容器），但绝不重排 ——
+   * 谁先加谁在前，与发给 AI 的那段 `attachBlock` 顺序一致。
+   * @param {HTMLElement} host 气泡节点
+   * @param {{path:string, name:string, kind:string, bytes?:number}[]} items
+   */
+  function addMsgAttach(host, items){
+    var list = (items || []).filter(function(a){ return a && a.path; });
+    if (!host || !list.length) return;
+    // 图片总数 > 1 时容器要带 data-many（96×96 方块）：图片可能被文件卡
+    // 分成两段，任何一段都看不出总数，所以先算总数再画。
+    var imgCount = list.filter(function(a){ return a.kind === 'image'; }).length;
+    if (imgCount > 1) msgAttachBox(host).setAttribute('data-many', 'true');
+    var run = [], runKind = '';
+    function flush(){
+      if (!run.length) return;
+      if (runKind === 'image') {
+        addMsgThumbs(host, run.map(function(a){ return a.path; }));
+      } else {
+        addMsgFiles(host, run);
+      }
+      run = [];
+    }
+    list.forEach(function(a){
+      var k = a.kind === 'image' ? 'image' : 'file';
+      if (k !== runKind) { flush(); runKind = k; }
+      run.push(a);
+    });
+    flush();
   }
 
   /**
@@ -6588,14 +6875,15 @@ body[data-drawer="true"] #toBottom{display:none}
     // 否则发完之后按钮还亮着（看着像「还能再发一条」）。
     refreshSendState();
     if (REAL) {
-      // /ls 与 /help 走本地渲染，不发后端。
+      // /ls 走本地渲染，不发后端。
       // 为什么：后端回的是纯文本 lines，靠空格对齐，中英混排必然错列
       //（实测同一列起点相差 40px），而且没法按面板宽度换紧凑格式——
       // 真实默认面板只有 249px，后端那份宽格式要横拖才看得全。
       // 会话数据已经通过 session/list 同步进 SESS（含 children/status/ghost），
       // 本地渲染内容与后端一致、排版更好。
+      // （`/help` 已按用户要求整体删除，不再有这张表。）
       var bare = v.replace(/^\//, '').split(/\s+/)[0].toLowerCase();
-      if (bare === 'ls' || bare === 'help' || bare === 'h' || bare === '?') {
+      if (bare === 'ls') {
         runCommand(v);
         return;
       }
@@ -6747,7 +7035,9 @@ body[data-drawer="true"] #toBottom{display:none}
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
       e.preventDefault();
       var v = input.value.trim();
-      if (!v) return;
+      // 没字但有附件一样能发（只发附件）：与 sendChat 开头的判断保持一致，
+      // 否则按钮能发、回车不能发，两条路径行为不一样。
+      if (!v && !(ATCH && ATCH.length)) return;
       if (v.charAt(0) === '/') {
         runInputCommand();
       } else {
@@ -8050,8 +8340,7 @@ body[data-drawer="true"] #toBottom{display:none}
     var d = document.createElement('div');
     d.className = 'cmdwrap';
     // /ls 这类多列输出靠空格对齐（见 padDisp），必须保留 pre；
-    // 而 /help 这种「一行一条、每行独立」的输出不需要跨行对齐，
-    // 窄面板里应该换行而不是横滚（实测 249px 下 /help 溢出 25px）。
+    // 需要换行的多行输出用 cmdout--wrap（改 white-space），不靠这里判断。
     var cls = 'cmdout' + (outCls ? ' ' + outCls : '');
     d.innerHTML = '<div class="cmdhead"><span class="p">❯</span>' +
       '<span class="ct">' + cmdText + '</span>' +
@@ -8253,32 +8542,6 @@ body[data-drawer="true"] #toBottom{display:none}
 
     var CMD = '/' + cmd + (arg ? ' ' + arg : '');
 
-    if (cmd === 'help' || cmd === '?' || cmd === 'h') {
-      // 模拟态（后端还没连上、界面跑演示数据）也要能查命令。
-      // 不处理会落到最后的「未知命令」，用户敲 /help 得到「没有这个命令」——
-      // 而后端其实是支持的，只是这条本地分支没跟上（实测）。
-      // 一条命令一行：原来把三条挤在一行（用空格对齐），默认 249px 面板里
-      // 整块宽 1380px，要横向拖 4 屏才看得完（实测）。
-      var helps = [
-        // 描述一律短到能在一行里放下：249px 的可用宽只有 213px，
-        // 实测「列出会话（--all 看全部）」这一行 238.3px 会折成两行，
-        // 而折出来的续行起点（x=28）与下一行命令名完全相同——
-        // 17 行的表看上去像 18 行，多出来那行像一条"没有名字的命令"。
-        ['/ls', '会话列表（--all）'], ['/cd', '切换会话'], ['/rm', '删除会话'],
-        ['/save', '保存当前对话'], ['/explore', '开探索分支'], ['/done', '合并分支结论'],
-        ['/exit', '暂离分支'], ['/mode', '切模型'], ['/thinking', '思考强度'],
-        ['/thinkback', '思考回传开关'], ['/goal', '目标模式'], ['/plugin', '插件开关'],
-        ['/compact', '压缩上下文'], ['/skill', '加载技能'], ['/clear', '清屏（不删上下文）'],
-        ['/help', '这张表']
-      ];
-      var rows = ['  <span class="dim">可用命令</span>'];
-      helps.forEach(function(h){
-        rows.push('  <span class="hl">' + h[0] + '</span>' + padDisp(h[0], 12) +
-          '<span class="dim">' + h[1] + '</span>');
-      });
-      cmdMulti(CMD, rows.join('\n'), '输入 / 也有补全面板', 'cmdout--wrap');
-      return;
-    }
     if (cmd === 'ls') {
       // /ls --all 的承诺是「看全部」，但 SESS 里只有后端推过来的那部分：
       // 后端对较早的分组只给 3 个父会话 + hidden 计数（config/session_store.py
@@ -8997,14 +9260,19 @@ body[data-drawer="true"] #toBottom{display:none}
 
   function sendChat(){
     var text = input.value.trim();
-    if (!text) return;
+    /* 允许「只发附件、不打字」——附件本身就是内容，凭什么逼用户再敲个字。
+       口径对齐 dsh：`PendingSubmissionBubble` 里
+       `submission.text === '' ? [] : [{type:'text',text}]`，空文本是合法提交，
+       气泡里只有附件。原来 `if (!text) return;` 把它挡在门外。
+       后端不会因此收不到东西：`attachBlock()` 拼出的路径清单本身非空白，
+       server.py 的 `if not text.strip()` 校验过得去。 */
+    if (!text && !ATCH.length) return;
     // 附件只写进**发给后端的文本**（绝对路径清单），气泡里仍是用户原文：
     // 插件不复制、不存储任何文件内容，由 AI 自己用 Read/Grep/Glob 去读。
     var wireText = text + attachBlock(ATCH);
-    // 本次带出去的图片路径：气泡里要能看到图（不只是输入区那张 chip）。
-    // 必须在下面 ATCH 被清空之前取下来。
-    var sendImgs = ATCH.filter(function(a){ return a.kind === 'image'; })
-      .map(function(a){ return a.path; });
+    // 本次带出去的附件：一起画进气泡（图片是缩略图、文件/文件夹是文件卡），
+    // 顺序即用户添加顺序。必须在下面 ATCH 被清空之前取一份快照。
+    var sendAttach = ATCH.slice();
     // 点「发送」按钮发以 / 开头的内容，必须和按 Enter 一样当命令执行。
     // 不这样会怎样（实测）：/mode 被当成普通对话发给模型——后端执行了命令，
     // 但这一轮不产生 turn/end，_turn_active 永远停在 true，
@@ -9082,9 +9350,13 @@ body[data-drawer="true"] #toBottom{display:none}
     // pending = 这条还没被后端接受。收到 chat/result accepted:false 时要撤回，
     // 否则「被拒绝的一句话」会以已发送的样子留在对话里、永远没有回答（实测会误导）。
     m.setAttribute('data-pending', '1');
-    m.innerHTML = '<div class="text">' + esc(splitAttachBlock(text).body) + '</div>';
-    // 气泡里正文之后显示缩略图行（与输入区的 chip 共用同一套样式与缓存）
-    addMsgThumbs(m, sendImgs);
+    // 只发附件时正文是空的：不要画一个空的 .text（会多出一条空白行）。
+    // 气泡里依次是「用户打的字（可能没有）+ 附件」，与 dsh 的
+    // UserContent 一致（它也是 text !== '' 才渲染文本层）。
+    var sentBody = splitAttachBlock(text).body;
+    if (sentBody) m.innerHTML = '<div class="text">' + esc(sentBody) + '</div>';
+    // 气泡里正文之后显示附件行（图片缩略图 + 文件卡，与输入区 chip 共用样式与缓存）
+    addMsgAttach(m, sendAttach);
     convo.appendChild(m);
     curAssistant = null;
     assistantBuf = '';
@@ -12709,11 +12981,17 @@ body[data-drawer="true"] #toBottom{display:none}
         // AI 的协议块，不是用户说的话：气泡里只画用户打的字，附件改成缩略图。
         // 不剥会怎样（用户报障截图）：气泡里整段路径明文铺开，还挤掉了正文。
         var uParts = splitAttachBlock(m.text);
-        u.innerHTML = '<div class="text">' + esc(uParts.body) + '</div>';
-        // 历史正文里的附件清单块（- 图片：<路径>）也要画出缩略图：
-        // 否则切回会话 / 重载窗口后只剩一段路径文本，看不到自己发过的图。
-        // 没有该块的旧消息 → 一个节点都不加。
-        addMsgThumbs(u, attachPathsInText(m.text));
+        // 与 sendChat 保持一致：只发附件的那条消息正文是空的，
+        // 不画空的 .text（否则切回会话会多出一条空白行）。
+        if (uParts.body) u.innerHTML = '<div class="text">' + esc(uParts.body) + '</div>';
+        // 历史正文里的附件清单块（`- 图片：` / `- 文件：` / `- 文件夹：`）也要
+        // 画出对应节点：图片是缩略图，文件/文件夹是文件卡。否则切回会话 /
+        // 重载窗口后只剩一段路径文本，看不到自己发过什么。
+        // 一次解析出全部项再画，图片与文件的相对顺序才与发送时一致。
+        var uItems = attachItemsInText(m.text);
+        addMsgAttach(u, uItems);
+        // 历史里没有字节数：异步问宿主补一次（不阻塞渲染，回执不到就只显示扩展名）
+        atchFillMsgSizes(u, attachFilesInText(m.text));
         convo.appendChild(u);
       } else if (m.role === 'system') {
         // 探索分支合并回来的结论（"# 子会话 [X] 结论"）。它是 system 角色
@@ -13545,7 +13823,8 @@ body[data-drawer="true"] #toBottom{display:none}
           }
         } else {
           var v = input.value.trim();
-          if (v) {
+          // 同 Enter 键那条路径：没字但有附件也算「做了事」。
+          if (v || (ATCH && ATCH.length)) {
             if (v.charAt(0) === '/') runInputCommand();
             else sendChat();
             res.did = 'run';

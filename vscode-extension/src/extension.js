@@ -31,8 +31,17 @@ const MESSAGE_METHODS = {
      没登记 = 消息被静默丢弃，界面永远等不到回执、按钮卡在「加载中…」。 */
   sessionHistory: 'session/history',
   /* /skill 的参数补全候选（后端 skill/list）。同 sessionHistory：不登记
-     就是被 dispatch 静默丢弃，面板永远等不到候选、敲完 /skill 空格没反应。 */
+     就是被 dispatch 静默丢弃，面板永远等不到候选、敲完 /skill 空格没反应。
+
+     ⚠ 两个键都要留，别删任何一个：这张表的键是 **webview 发的 msg.type**，
+     而前端历史上发的是 `skill/list`（斜杠），这张表里写的是 `skillList`
+     （驼峰）。键名对不上 → `MESSAGE_METHODS[msg.type]` 取不到 → dispatch
+     静默 return，`/skill` 补全从此永远为空（R45-3 的 P1-1 实测复现）。
+     两个键都指同一个 RPC 方法，任一侧改名都不会再断；
+     `scripts/verify-rpc-contract.js` 会把「前端所有 post 类型都能在
+     这张表里命中」钉成断言，防止第三次分叉。 */
   skillList: 'skill/list',
+  'skill/list': 'skill/list',
   configSet: 'config/set',
   /* 设置面板用的三条。不需要配置面板的人也会走到这里 —— 未注册的类型
      会落到 dispatch 的 catch 里，所以必须一起登记，否则报「未知类型」。
@@ -47,6 +56,21 @@ const MESSAGE_METHODS = {
 const EVENT_PREFIXES = ['turn/', 'stream/', 'thinking/', 'tool/', 'todo/', 'verify/', 'compress/', 'bg/', 'confirm/'];
 /** 原样转发给 webview 的完整通知方法名 */
 const EVENT_METHODS = ['stats', 'error', 'session/list', 'session/saved', 'notice'];
+
+/**
+ * 这条 webview 消息是不是「要 /skill 候选」。
+ *
+ * 为什么需要函数而不是一个字符串比较：前端历史上发过 `skill/list`（斜杠）
+ * 与 `skillList`（驼峰）两种拼写，而这里有两处独立的判定（失败回执 / 成功回执）。
+ * 只在 MESSAGE_METHODS 里兼容一种、判定处认另一种，请求就发得出去但回执回不来
+ * —— 界面上表现为「敲 /skill 空格，面板闪一下什么都没有」，比完全不发更难查。
+ * 所有判定都走这个函数，就不会再出现「一处兼容一处没兼容」。
+ * @param {unknown} type
+ * @returns {boolean}
+ */
+function isSkillListType(type) {
+  return type === 'skillList' || type === 'skill/list';
+}
 
 /** @type {vscode.WebviewView | undefined} 辅助侧边栏里的对话视图 */
 let chatView;
@@ -205,7 +229,12 @@ const RECEIPT_TYPES = {
   sessionNew: 1, sessionSwitch: 1, sessionDelete: 1,
   sessionRename: 1, sessionExplore: 1, sessionDone: 1,
   sessionHistory: 1,
+  // 两种拼写都登记：这张表的键是 webview 发的 msg.type，
+  // 前端历史上发过 skill/list 与 skillList 两种（同 MESSAGE_METHODS 的说明）。
+  // 漏登记会怎样：失败时走不到 failReceipt 的专门分支，退回通用 notice ——
+  // 而通用 notice 是「发生了一件别的事」的语义，用户会以为出了两个问题。
   skillList: 1,
+  'skill/list': 1,
   command: 1, configSet: 1, confirmReply: 1,
   // 这三条也走专用回执（见 failReceipt 里各自的 branch）。
   // 不登记会怎样（第五轮 R42 实测）：失败时专用回执 + 通用 notice 双报，
@@ -517,8 +546,18 @@ function attachThumb(p) {
 }
 
 /**
- * 「＋附件」按钮：用 VS Code 原生选择框，文件和文件夹都要能选
- * （webview 没有文件系统权限，canSelectFolders 只有宿主能开）。
+ * 「＋」按钮：用 VS Code 原生选择框添加**文件**（不支持目录）。
+ *
+ * ## 为什么 canSelectFolders 必须是 false（用户报障）
+ * 原来写的是 `canSelectFiles: true, canSelectFolders: true` —— 在 Windows
+ * 和 Linux 上**这是无效组合**。VS Code 官方文档（OpenDialogOptions）写得很明确：
+ *
+ *   > On Windows and Linux, a file dialog cannot be both a file selector and a
+ *   > folder selector, so if you set both canSelectFiles and canSelectFolders
+ *   > to true on Windows or Linux, an error will be thrown.
+ *
+ * 实测表现是**文件夹选择器生效**：对话框只能选目录，文本/代码文件根本选不中
+ * —— 用户报的「只能传文件夹、不能传文本文件」就是这个。
  * @param {{id?: number}} p
  */
 async function pickAttachments(p) {
@@ -527,10 +566,11 @@ async function pickAttachments(p) {
   let cancelled = false;
   try {
     const picked = await vscode.window.showOpenDialog({
-      title: '选择要发给 AI 的文件或文件夹',
-      openLabel: '添加附件',
+      title: '选择要发给 AI 的文件',
+      openLabel: '添加文件',
       canSelectFiles: true,
-      canSelectFolders: true,
+      // 必须 false：同时为 true 时文件夹会胜出，文本/代码文件一个都选不中。
+      canSelectFolders: false,
       canSelectMany: true
     });
     if (!picked || !picked.length) {
@@ -1685,7 +1725,7 @@ function failReceipt(type, message, params, errData) {
     // 失败也必须回执：不回的话界面那个「加载中…」按钮永远不还原，
     // 用户反复点也没用（锁只在回执到达时解开，见 ui-full.html 的 OFFLINE_BLOCKED/回执复位）。
     broadcast({ type: 'history/result', params: { ok: false, error: message } });
-  } else if (type === 'skillList') {
+  } else if (isSkillListType(type)) {
     // 技能目录读不到/扫不动时也要回执：界面在等这一份候选，
     // 不回就永远停在「没有技能」——和「没有技能」看起来一样，但原因完全不同。
     broadcast({ type: 'skill/result', params: { items: [], error: message } });
@@ -1889,10 +1929,11 @@ async function dispatch(type, method, params) {
       broadcast({ type: 'narnatmd/saved', params: result });
       return;
     }
-    if (type === 'skillList') {
+    if (isSkillListType(type)) {
       // /skill 的参数补全候选（后端 skill/list）。回执类型独立一条：
       // 混进任何既有 result 都会被那套渲染路径接管（比如 config/result
-      // 会去刷新下拉框）。
+      // 会去刷新下拉框）。判定用 isSkillListType —— 前端两种拼写都发过，
+      // 只认一种就会在这一步把回执丢掉（R45-3 P1-1 的第二个断点）。
       broadcast({ type: 'skill/result', params: result });
       return;
     }

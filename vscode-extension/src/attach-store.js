@@ -103,16 +103,20 @@ function isInUserImageDir(p, dir) {
 }
 
 /**
- * 核对一批路径：存在性、类型；**图片会被复制进库**。
+ * 核对一批路径：存在性、类型、字节数；**图片会被复制进库**。
  *
  * 图片返回库路径（`path`），原路径放在 `source` 里只作说明。复制失败
  * （超大 / 读不了 / 磁盘满）时保留原路径 —— 功能降级，但附件仍可用。
+ *
+ * `bytes` 是给界面显示用的（用户消息气泡里的文件卡写「PY 4.2KB」，
+ * 与 dsh 的 `UserContent` 一致）。文件夹给 `-1`：目录没有有意义的字节数，
+ * 界面据此显示「文件夹」而不是「0B」。
  * @param {string[]} paths
  * @param {object} opts
  * @param {string} opts.dir 用户附图目录
  * @param {number} opts.maxBytes 单张图片复制上限
  * @param {(msg: string) => void} [opts.onWarn]
- * @returns {{path: string, source?: string, exists: boolean, kind: string}[]}
+ * @returns {{path: string, source?: string, exists: boolean, kind: string, bytes: number}[]}
  */
 function checkPaths(paths, opts) {
   const dir = opts && opts.dir;
@@ -126,34 +130,42 @@ function checkPaths(paths, opts) {
 
     let exists = false;
     let isDir = false;
+    let size = 0;
     try {
       exists = fs.existsSync(p);
-      if (exists) isDir = fs.statSync(p).isDirectory();
+      if (exists) {
+        const st = fs.statSync(p);
+        isDir = st.isDirectory();
+        // 目录的 st.size 是目录项本身的大小（Windows 通常 0），拿它做展示
+        // 会显示成「文件夹 0B」；用 -1 明确表达「这个类型没有字节数」。
+        size = isDir ? -1 : st.size;
+      }
     } catch (err) {
       exists = false;
     }
     const kind = !exists ? '' : (isDir ? 'folder' : (imageExt(p) ? 'image' : 'file'));
+    const bytes = exists ? size : 0;
 
     if (!exists || kind !== 'image') {
-      items.push({ path: p, exists, kind });
+      items.push({ path: p, exists, kind, bytes });
       continue;
     }
     if (!dir || isInUserImageDir(p, dir)) {
       // 已经在库里（粘贴截图走的就是这条路），不重复复制
-      items.push({ path: p, source: p, exists: true, kind });
+      items.push({ path: p, source: p, exists: true, kind, bytes });
       continue;
     }
     try {
       const buf = fs.readFileSync(p);
       if (buf.length > maxBytes) {
-        items.push({ path: p, source: p, exists: true, kind });
+        items.push({ path: p, source: p, exists: true, kind, bytes });
         continue;
       }
       const stored = storeUserImage(dir, buf, p);
-      items.push({ path: stored, source: p, exists: true, kind });
+      items.push({ path: stored, source: p, exists: true, kind, bytes });
     } catch (err) {
       onWarn('图片入库失败，保留原路径：' + (err && err.message ? err.message : String(err)));
-      items.push({ path: p, source: p, exists: true, kind });
+      items.push({ path: p, source: p, exists: true, kind, bytes });
     }
   }
   return items;

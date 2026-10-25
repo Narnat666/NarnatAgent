@@ -619,7 +619,21 @@ body[data-real="true"] .demo-tip{display:none}
    「只显示了五分之一」。这里把高度与滚动一起放开，让图片按自身尺寸展示。 */
 .msg .attach{
   max-height:none;overflow:visible;gap:8px;margin:6px 0 0;
+  /* 容器也要限宽：文件卡是 240px 定宽，窄面板（右侧辅助侧边栏约 289px）
+     里 `.attach` 作为 flex 子项会按内容撑开，只给卡加 max-width 兜不住。 */
+  max-width:100%;
 }
+/* 用户气泡里的附件：换行后每一行都要**靠右**，与右对齐的文字气泡对齐。
+   不加会怎样（R45-1 的 P1-4 实测）：附件总宽超过可用宽度时 `.attach` 被
+   `max-width:100%` 裁到容器宽度，flex 默认 `justify-content:flex-start`
+   于是每一行都从最左边排起 —— 760px 面板下三个附件时，
+   卡片在 x=12..252（贴左），而同一条消息的文字气泡在 x=342..424（贴右），
+   两者之间空出一大块，看起来像「附件不属于这条消息」。
+   实测（436px 视口）：加这一行前卡片 12..252，加之后 184..424，
+   最后一张右边缘 424 = 消息右边缘 424。
+   只限 user：assistant 正文是左对齐的，将来若给 assistant 也画附件，
+   贴右会与正文不齐。 */
+.msg[data-role="user"] .attach{justify-content:flex-end}
 .msg .atch .n,
 .msg .atch .ph{display:none}
 .msg .atch img{
@@ -645,6 +659,38 @@ body[data-real="true"] .demo-tip{display:none}
 .msg .atch[data-missing="true"]{cursor:pointer}
 .msg .atch[data-missing="true"] .ph{
   border-style:dashed;color:var(--fg-dim);
+}
+/* 消息气泡里的文件卡：非图片附件（文件 / 文件夹）也要在气泡里留痕。
+   用户报障原文：「用户ui选择添加附件发送…发送后，在ui里面看不到自己发送过附件」
+   —— file / folder 两类附件在气泡里原来一个像素的痕迹都没有。
+   规格照 dsh 的 UserContent.fileCard（MessageItem.module.css 312~364）：
+   图标 + 文件名 + 「扩展名 大小」，卡片级描边与底色；与图片共用同一个
+   `.attach` 容器，gap:8px 自动生效，顺序就是用户添加顺序。
+   有意差异（用户此前调过图片观感，不动）：文字在上、附件在下；不做按语言
+   分类的图标（区分度由扩展名文字承担）；卡片不可点击，只有 title 提示。
+   颜色全部取本文件已有的变量（--line-strong / --bg-hover / --fg / --fg-faint），
+   adaptColor / adaptSurface 的亮度适配会自动照顾到。 */
+.msg .filecard{
+  display:inline-flex;flex:0 0 240px;align-items:center;gap:10px;
+  /* max-width 必须给：240px 定宽在 289px 的侧边栏里会溢出，dsh 靠
+     `.attachmentRow` 的 max-width:100% 兜，这里卡和容器各兜一层才稳。 */
+  width:240px;max-width:100%;min-height:64px;padding:8px 12px;
+  box-sizing:border-box;text-align:left;
+  border:1px solid var(--line-strong);border-radius:8px;
+  background:var(--bg-hover);
+}
+.msg .filecard .fi{flex:none;width:28px;height:28px;color:var(--fg-dim)}
+/* 描边宽度在这里给（dsh 的 1.5）：SVG 用轮廓路径 + currentColor，
+   不写内联属性，颜色与宽度都跟着 CSS 走。 */
+.msg .filecard .fi svg{display:block;width:100%;height:100%;stroke-width:1.5}
+.msg .filecard .fc{display:flex;flex:1;flex-direction:column;min-width:0}
+.msg .filecard .fn{
+  overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+  color:var(--fg);font-size:14px;font-weight:500;line-height:22px;
+}
+.msg .filecard .fm{
+  overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+  color:var(--fg-faint);font-size:12px;line-height:15px;
 }
 /* 图片放大层（lightbox）：点缩略图看原尺寸，Esc / 点空白关闭 */
 .imgbox{
@@ -739,9 +785,18 @@ body[data-real="true"] .demo-tip{display:none}
 /* 行内公式：只在确实需要时才允许所在段落横向滚动（dsh 的 compact 口径）。
    行内公式通常很短，撑破的概率远低于块级，所以这里只兜底不主动开滚动。 */
 .msg p:has(> .katex){overflow-x:auto;overflow-y:hidden}
-/* KaTeX 渲染失败时我们退回原文，不留红框；这条只兜住极端情况下的
-   KaTeX 自带错误节点（例如 strict 放宽后仍产出的 .katex-error）。 */
-.msg .katex-error{color:var(--t-markdown-strikethrough, var(--fg-dim));font-family:var(--mono)}
+/* KaTeX 渲染失败时的错误节点。
+   **必须 !important**：KaTeX 在 `throwOnError:false` 下输出的是
+   `<span class="katex-error" style="color:#cc0000">`——内联样式优先级高于
+   任何类选择器，原来这条 CSS 从来没生效过（R45-1 的 P1-2 实测：错误节点
+   实测色值就是 #cc0000，对深底只有 2.38:1，低于项目自己的辅助级 3.0 下限，
+   用户看到一段刺眼的纯红且读不清）。
+   色值不用写死：`--err` 由 applyTheme 经 adaptColor 按当前底色推到 4.5，
+   深浅两个主题都达标；写死 #cc0000 就又会踩「同一套派生式在另一主题失效」。 */
+.msg .katex-error{
+  color:var(--err, #c24d56)!important;
+  font-family:var(--mono);
+}
 .msg > *:first-child{margin-top:0}
 /* 末尾元素不留 margin-bottom：否则每条回复底部都比正文多一块空白
    （原来只覆盖了 p:last-child，h1–h6 / 列表 / 引用 / 表格都还留着 16px）。 */
@@ -1388,11 +1443,8 @@ body[data-real="true"] .demo-tip{display:none}
   color:var(--vscode-button-secondaryForeground, var(--fg));
   background:var(--vscode-list-hoverBackground, var(--line));
 }
-/* 拖拽悬停：只换边框色，不加动画/阴影 */
-.cbox[data-drop="true"]{border-color:var(--vscode-focusBorder,var(--accent))}
-.convo[data-drop="true"]{
-  outline:1px dashed var(--vscode-focusBorder,var(--accent));outline-offset:-6px;
-}
+/* 拖拽相关样式已随拖拽功能一起移除（见 JS 里那段说明）。
+   附件入口：「＋」按钮 + 输入框粘贴。 */
 .stop{
   display:none;place-items:center;
   width:24px;height:24px;border-radius:999px;
@@ -1813,7 +1865,7 @@ body[data-drawer="true"] #toBottom{display:none}
 .cmdout .err{color:var(--err)}
 .cmdout .warn{color:var(--warn)}
 
-/* 命令输出里需要「多列对齐」的地方（/ls、/help）。
+/* 命令输出里需要「多列对齐」的地方（/ls）。
    做法是纯文本 + 空格补齐（见 js 里的 padDisp），不用 grid：
    grid 能把列对齐得很准，但**选中复制时每个格子都会变成独立一行**
    （10 行输出复制出来变 30 多行，实测），而命令输出用户会复制。
@@ -1827,7 +1879,7 @@ body[data-drawer="true"] #toBottom{display:none}
    22ch / 18ch 对应 js 里的 NAME_W=22 与子会话的 NAME_W-4=18。 */
 .cmdout .col22{display:inline-block;min-width:22ch}
 .cmdout .col18{display:inline-block;min-width:18ch}
-/* 不需要跨行对齐的多行输出（/help）：允许换行，窄面板里不横滚 */
+/* 不需要跨行对齐的多行输出：允许换行，窄面板里不横滚 */
 .cmdout--wrap{white-space:pre-wrap;overflow-wrap:anywhere}
 
 /* ---------- 滚动条 ---------- */

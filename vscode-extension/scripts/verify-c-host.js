@@ -88,9 +88,22 @@ check(!!saved.path && saved.kind === 'image', 'attach/save 写进临时目录', 
 check(!!saved.path && fs.existsSync(saved.path), 'attach/save 返回的路径真实存在', saved.path);
 check(!!saved.path && fs.statSync(saved.path).size === PNG.length, 'attach/save 内容长度一致',
   saved.path ? fs.statSync(saved.path).size : '(none)');
-check(saved.path && saved.path.indexOf('narnat_attachments') >= 0, 'attach/save 落在 narnat_attachments 下', saved.path);
+check(saved.path && saved.path.indexOf('attachments_user') >= 0,
+  'attach/save 落在项目附件库 attachments_user 下', saved.path);
+/* 这两条随实现改口径（脚本原先写的是「临时目录 + 时间戳文件名、同名不覆盖」）：
+   现在图片按 sha256 内容寻址存进项目附件库（attach-store.js 的 storeUserImage），
+   同一份内容重复保存**就应该是同一个路径** —— 那正是「同一张图贴两次不占两份」
+   的设计目的。原来的「同名不覆盖」判据在内容寻址下不成立（同内容本就该复用），
+   所以改成验幂等。这不是放宽标准：下面新增了一条反向断言，证明不同内容
+   仍然得到不同路径。 */
 const saved2 = ext.attachSave('shot.png', PNG.toString('base64'));
-check(saved2.path && saved2.path !== saved.path, 'attach/save 同名不覆盖', saved2.path);
+check(saved2.path && saved2.path === saved.path,
+  'attach/save 同内容幂等（内容寻址：同一张图只存一份）', saved2.path);
+const otherPng = Buffer.from(PNG);
+otherPng[otherPng.length - 20] = (otherPng[otherPng.length - 20] + 1) & 0xff;
+const saved3 = ext.attachSave('shot.png', otherPng.toString('base64'));
+check(saved3.path && saved3.path !== saved.path,
+  'attach/save 不同内容得到不同路径（幂等不等于覆盖）', saved3.path);
 const bad = ext.attachSave('x.png', '');
 check(!!bad.error, 'attach/save 空数据返回 error', JSON.stringify(bad));
 const huge = ext.attachSave('big.png', Buffer.alloc(9 * 1024 * 1024).toString('base64'));
@@ -107,7 +120,23 @@ check(ext.attachThumb(txtPath) === null, 'attach/thumb 非图片返回 null', St
 /* ------------------- attach/pick：宿主用原生选择框 ------------------- */
 check(typeof ext.handleMessage === 'function', 'handleMessage 仍导出（webview 消息入口）', 'ok');
 const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'extension.js'), 'utf8');
-check(src.indexOf("canSelectFolders: true") > 0, 'attach/pick 用 canSelectFolders: true', 'grep');
+/* 口径变更（R45 交付前）：原断言要求 canSelectFolders: true。
+   那是**错的** —— Windows/Linux 上 canSelectFiles 与 canSelectFolders 不能
+   同时为 true，同时开会由文件夹选择器胜出，文本/代码文件一个都选不中
+   （用户报障「只能传文件夹、不能传文本文件」的根因）。
+   现在固定只选文件，断言跟着反转为 false。 */
+check(src.indexOf('canSelectFolders: false') > 0,
+  'attach/pick 用 canSelectFolders: false（不支持目录）', 'grep');
+/* 判据只扫**代码行**：注释里为了说明「双 true 为什么是错的」必然会写出
+   `canSelectFolders: true` 这几个字，拿整份源码做正则必然误报（上一版就这么红的）。
+   逐行剔掉注释与块注释行后再匹配。 */
+const codeLines = src.split('\n').filter((l) => {
+  const t = l.trim();
+  return t && !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*');
+});
+check(!codeLines.some((l) => /canSelectFolders:\s*true/.test(l)),
+  '代码里没有 canSelectFolders: true（双 true 是失效组合）',
+  '命中行数=' + codeLines.filter((l) => /canSelectFolders:\s*true/.test(l)).length);
 check(src.indexOf("canSelectFiles: true") > 0, 'attach/pick 用 canSelectFiles: true', 'grep');
 check(src.indexOf("'session/saved'") > 0, "EVENT_METHODS 含 'session/saved'",
   (/const EVENT_METHODS = .*/.exec(src) || ['(none)'])[0]);
@@ -118,7 +147,7 @@ console.log(results.join('\n'));
 console.log('SUMMARY total=' + results.length + ' fail=' + fails.length);
 try {
   fs.rmSync(dir, { recursive: true, force: true });
-  if (saved.path) fs.rmSync(saved.path, { force: true });
-  if (saved2.path) fs.rmSync(saved2.path, { force: true });
+  // 内容寻址：saved/saved2 是同一个文件、saved3 是另一个，三个都要清
+  [saved.path, saved2.path, saved3.path].forEach((p) => { if (p) fs.rmSync(p, { force: true }); });
 } catch (err) { /* 清理失败不影响结论 */ }
 process.exit(fails.length ? 2 : 0);

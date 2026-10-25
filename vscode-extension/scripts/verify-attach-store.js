@@ -131,6 +131,21 @@ const fakeItem = store.checkPaths([fake], { dir: libDir, maxBytes: 1024 * 1024 }
 ck('N1 非图片扩展名不复制', fakeItem.path === fake && fakeItem.kind === 'file',
   fakeItem.kind);
 
+/* ---- 10. bytes：界面文件卡要显示「PY 4.2KB」的数值来源 ----
+   口径对齐 dsh 的 `UserContent`（`fileSizeText(file.bytes)`）。
+   文件夹必须给 -1 而不是 0：目录的 st.size 在 Windows 上通常是 0，
+   照抄会显示成「文件夹 0B」，读起来像空目录。 */
+const sized = store.checkPaths(
+  [fake, path.join(srcDir, 'note.txt'), srcDir],
+  { dir: libDir, maxBytes: 1024 * 1024 });
+ck('B1 普通文件返回真实字节数',
+  sized[0].bytes === PNG_A.length, JSON.stringify(sized[0].bytes));
+ck('B2 文本文件的字节数等于写入长度', sized[1].bytes === 5, String(sized[1].bytes));
+ck('B3 文件夹给 -1（不是 0，避免显示「文件夹 0B」）',
+  sized[2].kind === 'folder' && sized[2].bytes === -1, JSON.stringify(sized[2]));
+ck('B4 不存在的路径 bytes 为 0（不会被当成空文件显示大小）',
+  items[2].bytes === 0, String(items[2].bytes));
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log('\nSUMMARY fail=' + fails.length);
 process.exit(fails.length ? 1 : 0);
