@@ -2150,6 +2150,12 @@ body[data-drawer="true"] #toBottom{display:none}
   .status[data-open="true"] .st-toggle{margin-left:auto}
 }
 
+/* 运行中：配置项只读。这一轮已经带着切换前的模型/思考/目标/插件参数在跑，
+   半途改设置只影响下一轮，用户会以为当场生效（实测反馈：以为切了模型，其实还在旧模型上花钱）。 */
+body[data-run="true"] :is(#btnModel,#btnThink,#btnGoal,#btnPlugin){opacity:.45;cursor:default}
+body[data-run="true"] :is(#popModel,#popThink,#popGoal,#popPlugin) .pi{opacity:.45;cursor:default}
+body[data-run="true"] #goalRounds{opacity:.45}
+
 /* 520px：收内边距 */
 @container (max-width:520px){
   .composer{padding:8px 12px}
@@ -2667,6 +2673,25 @@ body[data-drawer="true"] #toBottom{display:none}
   function turnRunning(){
     return body.getAttribute('data-run') === 'true';
   }
+
+  /**
+   * 运行中把目标下拉里的「轮数上限」输入框锁成只读（只读暗示交给 CSS）。
+   *
+   * 为什么用 MutationObserver 而不是在每个 `data-run` 赋值点插一句：
+   * 赋值点有 20 多处（turn/begin、turn/end、cancel、离线、切会话…），
+   * 漏一处就会永久锁死（或永久不锁），而且新增一处赋值时没人会记得同步。
+   * 属性观察者只有一处真源，`data-run` 一变就跟着变。
+   */
+  function syncRunLock(){
+    var r = document.getElementById('goalRounds');
+    if (r) r.disabled = turnRunning();
+  }
+  try {
+    new MutationObserver(syncRunLock).observe(body, {
+      attributes: true, attributeFilter: ['data-run']
+    });
+  } catch (err) { /* 没有 MutationObserver 就退回只在初始化时同步一次 */ }
+  syncRunLock();
 
   /* ---------- 「这一轮是不是刚被打断」的跨事件记忆 ----------
      为什么不能只看 `data-run === 'true'`：后端在换会话前会先 cancel 当前轮，
@@ -6817,6 +6842,15 @@ body[data-drawer="true"] #toBottom{display:none}
   }
 
   /**
+   * 把光标放到输入框的一端：dir < 0 放开头，dir > 0 放末尾（并取消选区）。
+   * 历史翻页后调它，保证「再按同方向的键」立刻能继续翻。
+   */
+  function setCaretToEdge(dir){
+    var at = dir < 0 ? 0 : input.value.length;
+    try { input.setSelectionRange(at, at); } catch (e) {}
+  }
+
+  /**
    * 在历史里前后移动。返回 true 表示已处理（调用方要 preventDefault）。
    * 到顶/到底时仍返回 true 并停住，避免按键漏到别处。
    */
@@ -6839,6 +6873,7 @@ body[data-drawer="true"] #toBottom{display:none}
         histIdx = -1;
         input.value = histDraft;
         autoGrowInput();
+        setCaretToEdge(1);
         // 回到草稿说明用户放弃浏览历史了，补全面板必须跟着关。
         // 不关会怎样（实测）：↑ 调出 /cd s1（面板自动打开）→ ↓ 回到草稿
         // 「帮我看下这个报错」→ 面板还开着、列的还是 s1 的候选 →
@@ -6850,8 +6885,10 @@ body[data-drawer="true"] #toBottom{display:none}
     }
     input.value = HIST[histIdx];
     autoGrowInput();
-    // 光标放到末尾，方便直接改
-    try { input.setSelectionRange(input.value.length, input.value.length); } catch (e) {}
+    // 光标落在「再按同一个方向还能继续翻」的那一端：↑ 翻出来的放开头，
+    // ↓ 翻出来的放末尾。放反了什么后果（实测）：放末尾后，再按 ↑ 会先被
+    // 用来挪光标（守卫要求光标先到头），用户以为历史卡住了翻不动。
+    setCaretToEdge(dir);
     // 调出的若是命令，顺带把补全面板打开
     refreshPalette();
     return true;
@@ -6861,6 +6898,10 @@ body[data-drawer="true"] #toBottom{display:none}
 
   /** 把输入框里的内容当命令执行（与 sendChat 对称），执行后清空 */
   function runInputCommand(){
+    // 运行中不执行命令：后端此刻 busy，命令要么被拒、要么把这一轮的上下文换掉。
+    // 与 sendChat 的 data-run 守卫同口径——静默拦住（输入框内容保留、不写系统行），
+    // 用户看到停止按钮还在，就知道要等这一轮结束。
+    if (turnRunning()) return;
     var v = input.value.trim();
     if (!v) return;
     // 已经掉线时敲命令：不能把输入框清空，命令根本发不出去，
@@ -7025,7 +7066,10 @@ body[data-drawer="true"] #toBottom{display:none}
       openPalette(false);
       return;
     }
-    // 上下键调出输入历史（像终端那样）。多行输入时让给光标移动。
+    // 上下键调出输入历史（像终端那样），但**光标先走**：只有光标已经在文本
+    // 最开头（↑）/ 最末尾（↓）时，按键才归历史。理由：用户想编辑自己刚打的
+    // 多行内容时按 ↑↓ 只是想挪光标，一按就把正在编辑的内容换成旧提问，等于
+    // 吃掉草稿（实测报障）。「先挪到头，再按才跳」两件事都不丢。
     // 输入以 / 开头时不翻历史：那是命令补全的地盘（上面那条分支处理有候选的
     // 情形），连一个候选都没有时（比如只敲了 "/" 又删掉字符）翻历史会把
     // 「/」直接换成一条旧提问，用户以为自己的输入被吃了（实测）。
@@ -7035,9 +7079,25 @@ body[data-drawer="true"] #toBottom{display:none}
     // 用户就再也翻不到更早的输入了 —— 按多少次 ↑ 都停在同一条（实测）。
     // 两种情况要分开：`histIdx === -1` 才是「用户正在打新内容」，
     // `histIdx >= 0` 是「输入框里的字是我刚给他翻出来的」，不是命令补全的场景。
+    //
+    // 浏览态同样要守「光标先走」：历史翻出来后光标停在靠按键方向的那一端
+    // （见 historyStep 里的 setCaretToEdge），所以连按同方向能一路翻下去；
+    // 一旦用户挪光标去改内容，下一按就先挪光标、真到边界才继续翻。
+    // 少这条守卫会怎样：翻出来的多行历史把光标一挪就再翻不动（实测），
+    // 而反过来「多行就不许翻历史」又把更早的提问锁死、↓ 回草稿也一起失效。
     var browsingHist = histIdx >= 0;
+    var caretStart = -1;
+    var caretFlat = false;
+    try {
+      // 有选区时方向键该做的是取消选择，不是翻历史
+      caretFlat = input.selectionStart === input.selectionEnd;
+      caretStart = input.selectionStart;
+    } catch (e2) {}
+    var caretAtEdge = caretFlat && (e.key === 'ArrowUp'
+      ? caretStart === 0
+      : caretStart === input.value.length);
     if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
-        input.value.indexOf('\n') < 0 &&
+        caretAtEdge &&
         (browsingHist || input.value.trim().charAt(0) !== '/')) {
       if (historyStep(e.key === 'ArrowUp' ? -1 : 1)) {
         e.preventDefault();
@@ -7900,6 +7960,7 @@ body[data-drawer="true"] #toBottom{display:none}
   }
 
   document.getElementById('popModel').addEventListener('click', function(e){
+    if (turnRunning()) return;
     var pi = e.target.closest('.pi');
     if (!pi) return;
     var v = pi.getAttribute('data-v');
@@ -7910,6 +7971,7 @@ body[data-drawer="true"] #toBottom{display:none}
   });
 
   document.getElementById('popThink').addEventListener('click', function(e){
+    if (turnRunning()) return;
     var pi = e.target.closest('.pi');
     if (!pi) return;
     var v = pi.getAttribute('data-v');
@@ -7920,6 +7982,7 @@ body[data-drawer="true"] #toBottom{display:none}
   });
 
   document.getElementById('popGoal').addEventListener('click', function(e){
+    if (turnRunning()) return;
     var pi = e.target.closest('.pi');
     if (!pi) return;
     var v = pi.getAttribute('data-v');
@@ -7938,6 +8001,7 @@ body[data-drawer="true"] #toBottom{display:none}
   // 于是目标已开的情况下把 10 改成 3：不发请求、按钮还写 0/10、输入框却
   // 留着 3 —— 用户以为上限改了，实际后端还是 10（实测，纯假反馈）。
   document.getElementById('goalRounds').addEventListener('change', function(){
+    if (turnRunning()) return;
     var n = Math.floor(Number(this.value));
     if (!isFinite(n) || n < 1) {
       // 非法输入退回界面上的真值，不留一个不会生效的数字
@@ -7957,6 +8021,7 @@ body[data-drawer="true"] #toBottom{display:none}
   });
 
   document.getElementById('popPlugin').addEventListener('click', function(e){
+    if (turnRunning()) return;
     var pi = e.target.closest('.pi');
     if (!pi) return;
     var sw = pi.querySelector('.sw');

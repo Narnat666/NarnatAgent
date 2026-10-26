@@ -14,7 +14,6 @@ from .defaults import (
     BASE_PROMPT_TEMPLATE, COMPRESS_PROMPT,
     NARNAT_DIR, NARNAT_JSON, NARNAT_MD,
     CONFIG_SUBDIR, DATA_SUBDIR, LOGS_SUBDIR,
-    DEFAULT_IGNORE_DIRS,
     DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL,
     DEFAULT_PROTOCOL, DEFAULT_THINKING_ENABLED, DEFAULT_THINKING_EFFORT,
     DEFAULT_THINKING_PASSBACK,
@@ -633,8 +632,8 @@ def _sanitize_sections(data: dict) -> None:
             data[name] = {}
     if "忽略目录" in data:
         # 已废弃：Grep/Glob 改由各目录 .gitignore 决定，技能发现固定用
-        # DEFAULT_IGNORE_DIRS。保留这个键只为不破坏老配置文件 —— 存在即提示，
-        # 静默忽略会让用户以为自己设的目录还在生效。
+        # defaults.DEFAULT_IGNORE_DIRS。保留这个键只为不破坏老配置文件 ——
+        # 存在即提示，静默忽略会让用户以为自己设的目录还在生效。
         _warn("「忽略目录」已废弃（Grep/Glob 改由 .gitignore 决定），此键将被忽略")
         data.pop("忽略目录", None)
 

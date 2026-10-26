@@ -1228,6 +1228,9 @@ class SessionManager:
         self._logger = logger
         self._config_dir = config_dir
         self._context_reset = context_reset_func
+        # 后追加的会话复位回调（见 add_context_reset）。单独存一个列表而不是拼
+        # 成一个闭包：构造时注入那个必须原样保留在首位，追加方无权替换它。
+        self._context_resets = []
         self._get_thinking_effort = thinking_effort_getter
         self._set_thinking_effort = thinking_effort_setter
         self._thinking_options = thinking_options or {"high": "高", "max": "全开"}
@@ -1306,6 +1309,18 @@ class SessionManager:
         """返回 MessageList 引用（供 Agent 直接调用 LLM 等场景）"""
         return self._messages
 
+    def add_context_reset(self, func: Callable[[], None]) -> None:
+        """追加一个「会话上下文已更换」回调，排在构造时注入的那个之后。
+
+        为什么只能在 replace_messages 这一条链上追加：新建/切换//cd//explore/
+        /done/删除当前会话/headless 任务复位全在这里汇合，去 rpc/server.py 的
+        各个 _m_session_* 里分别补一遍只会「补一处漏一处」。
+
+        为什么必须追加而不能替换 _context_reset：那里挂着压缩协调器的占比与
+        告警复位，被顶掉后新加载的会话会被上一段的残留占比直接判成该压缩。
+        """
+        self._context_resets.append(func)
+
     def replace_messages(self, new_msgs: List[Dict[str, Any]]):
         # 切换/载入会话：归档属于上一段会话，必须先清空，否则完整历史会把两个
         # 会话的内容拼在一起。
@@ -1339,6 +1354,8 @@ class SessionManager:
         # 占比误触发压缩、首次告警不再提示（coordinator 经 assembly 注入复位回调）
         if self._context_reset is not None:
             self._context_reset()
+        for reset in self._context_resets:
+            reset()
 
     def switch_state(self, new_state: SessionState):
         self._state = new_state

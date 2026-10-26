@@ -758,12 +758,14 @@ def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=N
 
     if not merged:
         hint = _hidden_files_hint(skip_hidden_files)
+        # 报「搜索目录: {root}」而不是「当前目录: {cwd}」：Glob 的相对 pattern
+        # 是按 path 参数（root）解析的，不是进程 cwd（实测：path=临时目录时
+        # pattern "ghost.py" 解析到临时目录，报 cwd 会把 AI 引到完全无关的位置）。
+        # Read/Edit 用 cwd 是对的——它们本来就按 cwd 解析相对路径。
         if missing_paths:
-            # 优先报「不存在」：这是 AI 需要的第一手事实（与 Read/Edit 一致）
-            return f"[错误: 文件不存在: {missing_paths[0]}（当前目录: {os.getcwd()}）]"
+            return f"[错误: 文件不存在: {missing_paths[0]}（搜索目录: {root}）]"
         if missing_dirs:
-            return f"[错误: 目录不存在: {missing_dirs[0]}（当前目录: {os.getcwd()}）]"
-        # 带上实际搜索目录，帮 AI 一次定位（Shell cd 会改变当前目录，无匹配常因目录不对）
+            return f"[错误: 目录不存在: {missing_dirs[0]}（搜索目录: {root}）]"
         # 附隐藏文件提示：让静默的坑变成可见路标，AI 无需背规则
         return f"[无匹配（搜索目录: {root}）]{hint}"
 

@@ -243,22 +243,35 @@ function main() {
 
   // ── 3. .vscodeignore（排除测试与设计源，控制体积）──
   const ignorePath = path.join(ROOT, '.vscodeignore');
+  // 用户配置目录的排除规则必须是 **/.narnat/**（见 NARNAT_RULE）。
+  // 只写 `.narnat/**` 只排除扩展根那一层，后端在 bin/ 旁边自动生成的
+  // bin/.narnat/config/ 会漏进包里（里面是用户自己的接口地址/模型名）。
+  // 这条被漏过两次，所以在这里**强制纠正**：发现旧写法就替换掉，
+  // 而不是像下面那样只追加 —— 追加不删旧行，旧写法照样生效。
+  const NARNAT_RULE = '**/.narnat/**';
   const wantIgnore = [
     '.vscode-test/**', 'node_modules/**', 'test/**', 'design/**',
     'scripts/**', 'shots/**', '.playwright-mcp/**', '**/*.map'
   ];
   let cur = '';
   try { cur = fs.readFileSync(ignorePath, 'utf8'); } catch (e) { /* 新建 */ }
-  const lines = cur.split('\n').map((s) => s.trim()).filter(Boolean);
+  let lines = cur.split('\n').map((s) => s.trim()).filter(Boolean);
   let changed = false;
-  for (const w of wantIgnore) {
+  const stale = lines.indexOf('.narnat/**');
+  if (stale >= 0 && lines.indexOf(NARNAT_RULE) < 0) {
+    lines[stale] = NARNAT_RULE;
+    changed = true;
+  }
+  for (const w of wantIgnore.concat([NARNAT_RULE])) {
     if (lines.indexOf(w) < 0) { lines.push(w); changed = true; }
   }
   if (changed) {
     fs.writeFileSync(ignorePath, lines.join('\n') + '\n', 'utf8');
   }
-  ck('.vscodeignore 已就绪', lines.length >= wantIgnore.length,
+  ck('.vscodeignore 已就绪', lines.length >= wantIgnore.length + 1,
     lines.length + ' 条规则');
+  ck('.vscodeignore 排除所有层级的 .narnat', lines.indexOf(NARNAT_RULE) >= 0,
+    lines.indexOf('.narnat/**') >= 0 ? '仍是旧写法 .narnat/**' : NARNAT_RULE);
 
   // ── 4. 打包 ──
   if (NO_PACKAGE) {

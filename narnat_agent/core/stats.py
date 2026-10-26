@@ -109,6 +109,25 @@ class StatsTracker:
         """
         self._balance_fresh = False
 
+    def reset_session(self) -> None:
+        """会话级统计清零（换会话时由 SessionManager 的 context reset 链调用）。
+
+        这些累计量原本从后端进程启动起一直累加，而换会话只换消息列表：不清零，
+        新会话第一条消息就会顶着上一段会话的费用/缓存命中率上报（实测「新建对话
+        发个你好，费用显示 ¥3.7033」，就是上一段的钱）。
+
+        只清会话级：余额是账户属性（_balance_to_show/_balance_known/
+        _balance_fresh），以及被 WPS/Excel 挡住后待补写的费用日志行，都保留。
+
+        有意差异：费用日志 CSV 最后一列「累计费用」随之变成「本会话累计」，
+        不再贯穿进程生命周期。列名未改，按进程总量核对历史数据需跨会话自行求和。
+        """
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
+        self._total_prompt_tokens = 0
+        self._total_cache_tokens = 0
+        self._total_cost = 0.0
+
     def update(self, usage: dict) -> None:
         """更新token统计（每轮LLM返回后调用）
 

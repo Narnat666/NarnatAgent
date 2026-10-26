@@ -201,9 +201,18 @@ class Assembly:
             config.cost_log,
         )
 
+        # 会话切换即复位会话级统计：StatsTracker 是进程级累计器，换会话只换消息
+        # 列表的话，新会话第一条消息会把上一段的费用/缓存率顶上来（实测「新建
+        # 对话发个你好，费用显示 ¥3.7033」）。挂到 context reset 链上——新建/
+        # 切换//cd//explore//done/删除当前会话/headless 复位全在那一处汇合。
+        session_mgr.add_context_reset(stats.reset_session)
+
         # RpcUI 需要 stats（stats 字段的缺省来源），它在第 11 步先于 stats 构造 → 此处回注
         if rpc:
             ui.attach_stats(stats)
+            # 去重键记的是「上次下发的内容」：复位后的第一条 stats 可能与切换前
+            # 最后一条完全相同，不丢键就会被吞掉，界面收不到本会话的真实值。
+            session_mgr.add_context_reset(ui.drop_stats_dedup)
             from .rpc.ui import install_verify_result_hook
             install_verify_result_hook(ui)
 

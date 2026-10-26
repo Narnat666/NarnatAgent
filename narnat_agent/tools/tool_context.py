@@ -8,7 +8,7 @@ import json
 import os
 import threading
 from dataclasses import MISSING, dataclass, field, fields
-from typing import Optional, Callable, Any, Dict, List
+from typing import Optional, Callable, Any, Dict
 
 
 # 删除确认标记：bash/terminal检测到删除命令时返回此值，由agent主循环拦截处理

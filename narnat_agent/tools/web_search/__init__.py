@@ -154,48 +154,27 @@ _apply_extra_params()
 
 # ── 工具函数 ──
 
-def _extract_query_words(query: str) -> set:
-    """提取查询词用于相关性排序"""
-    words = set()
-    for w in re.findall(r"[a-zA-Z0-9]{2,}", query):
-        words.add(w.lower())
-    cn_chars = re.findall(r"[\u4e00-\u9fff]+", query)
-    for seg in cn_chars:
-        for i in range(len(seg) - 1):
-            words.add(seg[i:i + 2])
-        if len(seg) == 1:
-            words.add(seg)
-    return words
-
-
-def _relevance_score(result: Dict, query: str) -> float:
-    """按标题和摘要中的查询词命中数打分"""
-    title = result.get("title", "").lower()
-    desc = result.get("description", "").lower()
-    q_words = _extract_query_words(query)
-    if not q_words:
-        return 0.5
-    title_hits = sum(1 for w in q_words if w in title)
-    desc_hits = sum(1 for w in q_words if w in desc)
-    return (title_hits * 3 + desc_hits) / (len(q_words) * 4)
-
-
 def _format_results(results: List[Dict]) -> str:
-    """格式化搜索结果为可读文本（描述压缩空白并截断，避免大段噪音灌给LLM）"""
+    """格式化搜索结果为可读文本：只做排版，不排序、不截断。
+
+    不排序：服务商返回的顺序就是它自己的相关性判断，我们手上没有比它更准的
+    依据。曾经在这里用「中文二元切词 + 命中计数」重排过，实测「南京天气」
+    会切出跨词边界的「京天」，让「北京天气预报」也拿到 0.500 分——用一套更
+    粗的猜测去覆盖服务商的排序，AI 拿到的是一个看不出被改过的假事实。
+
+    不截断：标题和摘要原样返回。截断由全局输出上限统一负责（超限会落盘并
+    给出路径），这里再切一刀只会让 AI 看不到摘要的后半句而不知道有东西被丢。
+    """
     lines = []
     for i, r in enumerate(results, 1):
         title = r.get("title", "") or ""
-        if len(title) > 120:
-            title = title[:120] + "…"
         lines.append(f"{i}. {title}")
         lines.append(f"   URL: {r['url']}")
         desc = r.get("description", "")
         if desc:
-            # 压缩换行/连续空白为单空格，截断到300字符
-            desc = re.sub(r"\s+", " ", desc).strip()
-            if len(desc) > 300:
-                desc = desc[:300] + "…"
-            lines.append(f"   {desc}")
+            # 仅压缩换行/连续空白为单空格：这是排版（多行摘要会破坏列表结构），
+            # 不是内容裁剪
+            lines.append(f"   {re.sub(r'\s+', ' ', desc).strip()}")
     return "\n".join(lines)
 
 
@@ -230,7 +209,7 @@ def _do_fetch(cfg: rest.Config, url: str) -> str:
 
 
 def _do_search(cfg: rest.Config, query: str, num: Any, extra_values: Dict) -> str:
-    """action=search：搜索 → 相关性排序 → 编号列表"""
+    """action=search：搜索 → 编号列表（保持服务商顺序，不重排）"""
     q = str(query or "").strip()
     if not q:
         return "[错误: action=search 需要 query]"
@@ -241,7 +220,8 @@ def _do_search(cfg: rest.Config, query: str, num: Any, extra_values: Dict) -> st
         return "[错误: num需为正整数]"
     if num <= 0:
         return "[错误: num需为正整数]"
-    # 上限20：结果逐条灌给LLM，超大num既拖慢响应又浪费配额，且全局截断会砍掉尾部
+    # 上限20：结果逐条灌给LLM，超大 num 既拖慢响应又浪费配额。
+    # 这是我们主动收缩请求条数（发请求时就带这个值），不是拿到后再裁剪。
     num = min(num, 20)
     if cfg.search is None:
         return "[错误: 未配置搜索接口（narnat.json「联网搜索」→ http.search.url）]"
@@ -253,8 +233,8 @@ def _do_search(cfg: rest.Config, query: str, num: Any, extra_values: Dict) -> st
         return f"[错误: 搜索失败: {e}]"
     if not results:
         return "[无搜索结果]"
-    results.sort(key=lambda r: _relevance_score(r, q), reverse=True)
-    return _format_results(results[:num])
+    # 按服务商返回顺序原样输出，不重排（理由见 _format_results）
+    return _format_results(results)
 
 
 # ── 主入口 ──

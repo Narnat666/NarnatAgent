@@ -611,6 +611,16 @@ class RpcUI:
 
     # ── 统计 ──
 
+    def drop_stats_dedup(self) -> None:
+        """丢掉 stats 去重键（会话切换时与统计复位一起由 context reset 链调用）。
+
+        键记的是「上次下发的内容」，跨会话没有意义：换会话后第一轮的 cost/
+        cacheRatio 可能恰好与切换前最后一条一字不差，去重就会把复位后的值当成
+        重复吞掉，界面永远收不到新会话的真实统计（故障：新会话顶着上一段的费用）。
+        """
+        with self._stats_lock:
+            self._last_stats_key = None
+
     def emit_stats(self, values: Dict[str, Any]) -> None:
         """下发一条 stats 通知，**内容与上次完全相同则跳过**。
 
