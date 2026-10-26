@@ -280,8 +280,17 @@ function main() {
     const out = path.join(ROOT, 'narnat-vscode.vsix');
     try {
       fs.rmSync(out, { force: true });
-      execFileSync('npx', ['--yes', '@vscode/vsce', 'package', '--no-dependencies',
-        '--allow-missing-repository', '-o', out], {
+      /* --target win32-x64：bin/narnat.exe 是 Windows 二进制，必须声明平台。
+         不加会怎样：扩展在 Mac/Linux 上也能「安装成功」，但后端起不来，
+         用户只会看到面板一直连不上，最后给个差评。
+         主流扩展都这么标（ms-python.python、ms-vscode.cpptools、
+         openai.chatgpt 的安装目录全带 -win32-x64 后缀）。
+         代价：vsixmanifest 里 TargetPlatform="win32-x64"，安装目录名变成
+         narnat.narnat-vscode-<ver>-win32-x64（install-vsix.js 用 startsWith
+         匹配，不受影响）。 */
+      const pkgArgs = ['--yes', '@vscode/vsce', 'package', '--no-dependencies',
+        '--target', 'win32-x64', '-o', out];
+      execFileSync('npx', pkgArgs, {
         cwd: ROOT, stdio: 'inherit', timeout: 600000, shell: true
       });
     } catch (e) {

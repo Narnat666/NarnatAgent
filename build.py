@@ -321,16 +321,26 @@ def main():
         "--lto=yes",
         "--python-flag=no_docstrings",
         "--include-module=openai",
-        # Pillow：Read 工具的识图能力依赖它。Nuitka 按 import 图静态收集，
-        # PIL 是可选导入（缺失时识图静默关闭），静态分析容易漏掉，
-        # 必须显式声明模块与包数据，否则发布版识图功能直接不可用。
-        "--include-module=PIL",
-        "--include-module=PIL.Image",
-        "--include-module=PIL.ImageOps",
+        # Pillow：Read 工具的识图能力依赖它。两个坑叠在一起，所以用整个包：
+        #   ① PIL 是 try/except 可选导入（缺失时识图静默关闭），Nuitka 的
+        #      import 图静态分析容易把它当成"没用到"而漏掉。
+        #   ② 光声明 PIL / PIL.Image / PIL.ImageOps 还**不够**：Image.open() 与
+        #      save() 依赖的格式插件是由 Image.init() 用
+        #      `__import__(f"{__spec__.parent}.{plugin}")` 动态导入的，字符串拼接
+        #      形式 Nuitka 追不到。实测只声明那 3 个模块时，产物里一个 *Plugin.py
+        #      都没有，PNG/JPEG/WEBP/GIF 全部打不开，而 attachment.py 的
+        #      except 会把异常吞掉返回 None —— 用户只会看到"图片识别没反应"。
+        #      整包声明可把 47 个插件全部收进去（纯 Python 合计约 1.2MB）。
+        "--include-package=PIL",
         "--include-package-data=PIL",
-        # pathspec：Grep/Glob 的 .gitignore 过滤依赖它。纯 Python 包，
-        # 静态分析能跟上 import，但显式声明可避免将来改成延迟导入时漏掉。
-        "--include-module=pathspec",
+        # certifi：HTTPS 信任根。cacert.pem 是**数据文件**，模块会被 httpx
+        # 静态拉进来，但 pem 不带的话 certifi.where() 指向不存在的文件，
+        # llm.py 里 load_verify_locations 抛异常后被吞，静默退回系统证书。
+        "--include-package-data=certifi",
+        # pathspec：Grep/Glob 的 .gitignore 过滤依赖它。顶层 __init__ 静态
+        # import 全部子包（patterns / _backends），用包级声明保证子包一起进去，
+        # 免得将来改成延迟导入时只进来了顶层模块。
+        "--include-package=pathspec",
     ]
     for name in NOFOLLOW_IMPORTS:
         cmd.append("--nofollow-import-to=%s" % name)

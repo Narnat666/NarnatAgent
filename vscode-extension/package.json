@@ -1,16 +1,39 @@
 {
   "name": "narnat-vscode",
   "displayName": "Narnat",
-  "description": "Narnat Agent 的 VSCode 扩展界面：对话面板停靠在辅助侧边栏（与 Copilot Edits 同形态）。",
+  "description": "AI 编程智能体：在侧边栏对话，自主读写代码、执行命令、SSH/串口调试、联网搜索。内置后端，装完填 API Key 即可用。",
   "version": "0.0.1",
   "publisher": "narnat",
-  "private": true,
   "license": "MIT",
   "icon": "media/icon.png",
+  "keywords": [
+    "ai",
+    "agent",
+    "chat",
+    "assistant",
+    "copilot",
+    "llm",
+    "deepseek",
+    "claude",
+    "gpt",
+    "chatbot",
+    "code generation",
+    "terminal",
+    "ssh",
+    "serial",
+    "web search"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://gitcode.com/xyint/NarnatAgent"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
   "categories": [
+    "AI",
+    "Chat",
+    "Programming Languages",
     "Other"
   ],
   "main": "./src/extension.js",
