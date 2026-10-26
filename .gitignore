@@ -57,6 +57,17 @@ vscode-extension/bin/
 vscode-extension/*.vsix
 vscode-extension/package-lock.json
 
+# ═══ 插件前端产物（单一真源 → 生成物，不入库）═══
+# 真源是 vscode-extension/design/ui-full.html（CSS + BODY + JS 全塞在里面），
+# 下面 4 个文件由 scripts/sync-ui.js 生成。提交生成物会怎样（实测）：
+# 有人直接改 media/ 下的产物（改起来更直观），下次跑 sync-ui 就被覆盖，
+# 而且 git diff 看不出来「改的是会被丢掉的那一份」。
+# package-vsix.js 在打包前会自动跑一次 sync-ui，所以冷克隆后一样能打包。
+vscode-extension/media/narnat.css
+vscode-extension/media/narnat.js
+vscode-extension/media/narnat.body.js
+vscode-extension/media/narnat.demo.js
+
 # ═══ 宿主测试期间写入的工作区配置（测试会自行还原，兜底忽略）═══
 vscode-extension/test/fixtures/workspace/.vscode/
 .vscode-test

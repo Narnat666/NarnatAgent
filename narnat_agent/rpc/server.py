@@ -144,6 +144,11 @@ class RpcServer:
         self._transport = get_transport()
         self._turn_lock = threading.RLock()
         self._turn_active = False
+        # 手动压缩（/compact）跑在独立线程里，这两个字段管「已派发」与「防重入」。
+        # 不用 ui._compressing 代替：线程起来到 begin_compressing 之间有一个窗口，
+        # 那个窗口里连点两次 /compact 会起两条压缩线程，同时替换同一条消息列表。
+        self._compact_lock = threading.Lock()
+        self._compacting = False
         self._shutdown = threading.Event()
         self._version = ""
         self._watchdog: "Optional[_ParentWatchdog]" = None
@@ -671,6 +676,15 @@ class RpcServer:
                                                  "输入 / 可查看全部命令，"
                                                  "或换个说法描述你的需求"],
                                        "stateChanged": []}}
+        with self._compact_lock:
+            compacting = self._compacting
+        if compacting:
+            # 压缩进行中不接受新对话：压缩会把消息列表整体替换（replace_all），
+            # 此刻追加的用户消息会被摘要覆盖掉——白丢一句话，而且压缩线程与
+            # 主循环会并发改写同一条列表。面板侧已经把输入框锁住（用户明确
+            # 要求「压缩期间干脆不让发，等结束再解锁」），这里兜住其它客户端
+            # （CLI、第三方）以及锁与请求之间的竞态窗口。
+            raise RpcError(-32000, "busy")
         with self._turn_lock:
             if self._turn_active:
                 raise RpcError(-32000, "busy")
@@ -720,6 +734,71 @@ class RpcServer:
                 emit("turn/end", {"reason": "cancelled"})
         return {"cancelled": cancelled, "bgCancelled": bg_cancelled}
 
+    def _m_compact_async(self, args: str) -> Dict[str, Any]:
+        """手动压缩（/compact）异步入口：立即回执，压缩跑独立线程。
+
+        为什么必须异步（用户报障截图）：压缩要调一次 LLM 摘要全部历史，
+        实测 36~47 秒，而客户端请求超时是 30 秒。同步执行时三件事同时发生：
+          · 客户端先报「请求超时（30000ms 无响应）」，屏幕上是一个红叉；
+          · 压缩其实还在跑，十几秒后真成功了，真实结论（已压缩 N 条）
+            随那条过期请求一起被丢弃 —— 用户看到的是「失败」；
+          · 这几十秒里 RPC 读循环被这次调用占死，用户点的「停止」和发的
+            消息全都排不进来。界面上就是「点了停止没反应、也不能再输入」。
+        异步化后读循环立刻空出来，取消与其它请求照常被受理。
+        """
+        if args.strip():
+            return {"handled": True, "ok": False, "noop": False,
+                    "lines": ["用法: /compact（无参数）"], "stateChanged": []}
+        with self._compact_lock:
+            if self._compacting:
+                return {"handled": True, "ok": False, "noop": False,
+                        "lines": ["压缩已在进行中"], "stateChanged": []}
+            self._compacting = True
+        threading.Thread(target=self._run_compact, daemon=True).start()
+        # async=True：这条回执只表示「已受理」，界面不能据此画任何回执行。
+        # 真实结论随后由 compress/result 下发。
+        return {"handled": True, "ok": True, "noop": False, "async": True,
+                "lines": [], "stateChanged": []}
+
+    def _run_compact(self) -> None:
+        """压缩线程主体：无论成败/取消，都要下发结论并把 _compacting 解锁。
+
+        不解锁的后果：此后所有 chat/send 都被 busy 拒，用户只能重载窗口
+        （与「命令被当对话跑完」是同一类致命故障）。
+        """
+        from .ui import emit
+
+        try:
+            result, lines = self._ui.exec_command("compact", "")
+            handled = int(result) != 0
+            ok = handled and int(result) != 3
+            payload = {
+                "command": "compact",
+                "args": "",
+                "text": "/compact",
+                "handled": True,
+                "ok": ok,
+                # noop：执行了但历史没变（无历史可压 / 用户取消）。
+                # 界面据此画中性行，不打绿勾——打勾会让用户以为真压缩了。
+                "noop": bool(handled and ok and _looks_noop(lines)),
+                "lines": lines,
+                "stateChanged": ["context"],
+            }
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            payload = {
+                "command": "compact", "args": "", "text": "/compact",
+                "handled": True, "ok": False, "noop": False,
+                "lines": [_humanize_internal_error(e)], "stateChanged": ["context"],
+            }
+        finally:
+            with self._compact_lock:
+                self._compacting = False
+        try:
+            emit("compress/result", payload)
+        except Exception:
+            pass
+
     def _m_confirm_reply(self, params: Dict[str, Any]) -> Dict[str, Any]:
         text = self._require_str(params, "text", "confirm/reply")
         # 与 chat/send 走同一条输入队列，但不做 busy 检查：
@@ -743,6 +822,18 @@ class RpcServer:
         if not isinstance(args, str):
             raise RpcError(-32602, "command/exec: params.args 必须是字符串")
         command = command.lstrip("/")
+
+        # 压缩期间不执行其它命令。/compact 的压缩跑在独立线程里，而
+        # RpcUI.exec_command 全程持有 _command_lock —— 这时进来的命令会一直
+        # 阻塞到压缩结束（36~47 秒），又撞上客户端 30 秒超时，用户看到的还是
+        # 那个假超时。直接拒绝比闷等更诚实，也让 /rm 这类不可逆命令不会在
+        # 压缩窗口里被执行。
+        if command != "compact":
+            with self._compact_lock:
+                compacting = self._compacting
+            if compacting:
+                return {"handled": True, "ok": False, "noop": False,
+                        "lines": ["压缩进行中，本次命令未执行"], "stateChanged": []}
 
         # /rm 在面板形态下必须立即删除。
         # 终端形态的 /rm 只是「标记删除、退出时生效」（终端里打错字撤不回来），
@@ -795,6 +886,16 @@ class RpcServer:
         # 实测：正在跑的那一轮正文会写进刚切过去的会话，原会话只剩一句提问。
         if command in ("cd", "explore", "done"):
             self._cancel_and_wait_turn()
+
+        # /compact 要调一次 LLM 摘要全部历史，实测 36~47 秒，远超客户端 30 秒的
+        # 请求超时。在这里同步执行会怎样（用户报障截图）：客户端 30 秒报
+        # 「请求超时（30000ms 无响应）」，而压缩仍在跑、十几秒后其实成功了，
+        # 真实结论（已压缩 N 条）随过期请求丢弃 —— 屏幕上只剩一个红叉。
+        # 更糟的是这几十秒里读循环被占死：用户点的「停止」、发的消息全都排不进来，
+        # 表现就是「不能中断、也不能再输入」。
+        # 改为异步：立即回执，压缩在独立线程里跑，结论由 compress/end 下发。
+        if command == "compact":
+            return self._m_compact_async(args)
 
         result, lines = self._ui.exec_command(command, args)
         handled = int(result) != 0
@@ -2331,27 +2432,43 @@ def _history_page_fields(messages: List[Dict[str, Any]],
 # 实时流不受这个限制（那是用户正在看的那一条，必须完整），只有历史回放截断。
 _HISTORY_TOOL_OUTPUT_MAX = 4000
 
+# 会写 `[exit code: N]` 的工具（唯一真源）。其余工具的输出不收这个判据 ——
+# 它们的返回值里可能是文件内容，恰好含这串文本不代表命令失败。
+_EXIT_CODE_TOOLS = frozenset({"Shell", "Terminal"})
 
-def _tool_failed_from_output(output: str) -> bool:
+# 编辑类工具：失败时返回 `[错误: …]`，需要据此把行标红。
+_EDIT_TOOLS = frozenset({"Write", "Edit"})
+
+
+def _tool_failed_from_output(output: str, name: str = "") -> bool:
     """从工具输出判断这次调用是否失败。
 
     存储里没有独立的 `failed` 字段，只能读 output 的固定标记。
-    目前只认 bash 工具写的 `[exit code: N]`：
-      · 只看这一种，不去猜其它文案 —— 猜错会把成功的行画成红色，
-        比不标失败更糟（用户会去查一个根本不存在的错误）。
-      · 编辑类工具失败时会回 `[编辑失败: …]` / `[写入失败: …]`，
+
+    **必须传 name**：`[exit code: N]` 只有 Shell/Terminal 会写，其它工具的
+    输出是**文件内容或命令回的字节**。不区分工具会怎样（实测）：
+    Write 写一份提到 `[exit code: 3]` 的文档（任务书/测试脚本里很常见），
+    diff 把这句话带进返回值 → 被当成退出码 3 → 行名标红，而文件其实
+    写得好好的。用户看到「写入成功但显示红色」。
+
+    两条判据：
+      · Shell / Terminal：取**最后一个** `[exit code: N]`，非 0 即失败。
+        多段命令逐段各标一个，整体结果由最后一段决定。
+      · 编辑类工具失败时会回 `[编辑失败: …]` / `[写入失败: …]`（开头），
         一并识别，否则失败行会显示成「完成」。
     """
     if not isinstance(output, str):
         return False
-    # 取**最后一个**退出码，与前端 narnat.js 及 exec_signal.parse_rc 口径一致：
-    # 多段命令逐段各标一个，整体结果由最后一段决定。取第一个会在
-    # 「前段失败、后段用 || 兜回」时错标失败。
-    found = re.findall(r"\[exit code:\s*(-?\d+)\]", output)
-    if found and int(found[-1]) != 0:
-        return True
     head = output.lstrip()[:20]
-    return head.startswith("[编辑失败") or head.startswith("[写入失败")
+    # 编辑类工具的失败：统一走 `[错误: …]` 前缀（旧版的 `[编辑失败`/`[写入失败`
+    # 两个前缀在文案统一时已不存在 —— 判据留着就是死代码，会漏判所有编辑失败）。
+    if name in _EDIT_TOOLS and head.startswith("[错误"):
+        return True
+    # 退出码只对命令类工具有意义
+    if name not in _EXIT_CODE_TOOLS:
+        return False
+    found = re.findall(r"\[exit code:\s*(-?\d+)\]", output)
+    return bool(found) and int(found[-1]) != 0
 
 
 def _rebuild_diff(name: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -2466,7 +2583,10 @@ def _tool_history_entry(tc: Dict[str, Any], results: Dict[str, Any]) -> Optional
     # 只有在**确实写成功了**才重建 —— 失败的编辑没改到磁盘，画出一堆
     # 红绿行会让用户以为改动已生效（比不显示更误导）。
     # 判据用工具给的输出文案（Write/Edit 成功时固定写「已写入 / 已编辑」）。
-    if not _tool_failed_from_output(output):
+    # 传 name：退出码判据只对 Shell/Terminal 生效，否则文档里出现的
+    # `[exit code: 3]` 会把成功的写入标成失败（实测）。
+    failed = _tool_failed_from_output(output, name)
+    if not failed:
         diff = _rebuild_diff(name, args)
         if diff is not None:
             entry["diff"] = diff
@@ -2474,7 +2594,7 @@ def _tool_history_entry(tc: Dict[str, Any], results: Dict[str, Any]) -> Optional
         entry["truncated"] = True
     # 失败判定统一走 _tool_failed_from_output（退出码 / 编辑失败前缀），
     # 不在这里再写一遍正则 —— 两份判据会漂移。
-    if _tool_failed_from_output(output):
+    if failed:
         entry["failed"] = True
     return entry
 
@@ -2491,7 +2611,9 @@ def _as_bool(value: Any) -> bool:
 # 单独标出来是因为界面拿 ok:true 会显示「✓ 已执行」——
 # 对着「没有可压缩的历史对话」打勾，用户会以为真压缩了什么。
 _NOOP_MARKERS = ("没有可压缩的历史对话", "没有新的讨论内容需要总结",
-                 "没有对话内容，无需保存", "当前没有运行中的任务")
+                 "没有对话内容，无需保存", "当前没有运行中的任务",
+                 # 压缩被用户取消：历史一条没变，打绿勾会让用户以为压缩成功
+                 "压缩已取消")
 
 
 def _looks_noop(lines) -> bool:

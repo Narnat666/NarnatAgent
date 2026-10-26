@@ -115,7 +115,7 @@
     }
   },
   "scripts": {
-    "check": "node --check src/extension.js && node --check src/webview.js && node --check src/attach-store.js && node --check media/narnat.js",
+    "check": "node scripts/sync-ui.js && node --check src/extension.js && node --check src/webview.js && node --check src/attach-store.js && node --check media/narnat.js",
     "test": "node test/runTest.js"
   },
   "devDependencies": {

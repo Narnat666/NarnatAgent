@@ -397,8 +397,13 @@ class SerialSession:
         # 发送
         try:
             payload = text + self.line_ending
-            self._ser.write(payload.encode(self.encoding, errors="replace"))
+            # 严格编码：设备收到的字节必须就是用户写的字符。errors="replace"
+            # 会把编不了的字符静默换成「?」，设备执行的是错指令而调用方以为成功。
+            self._ser.write(payload.encode(self.encoding, errors="strict"))
             self._ser.flush()
+        except UnicodeEncodeError as e:
+            return error_line(
+                f"命令无法按 {self.encoding} 编码（第 {e.start} 字符起），未发送: {e}")
         except serial.SerialException as e:
             self._dead = True
             return error_line(f"串口写入失败: {e}")
@@ -443,8 +448,12 @@ class SerialSession:
         if text:
             try:
                 payload = text + self.line_ending
-                self._ser.write(payload.encode(self.encoding, errors="replace"))
+                # 严格编码（与 exec 路径一致）：编不了的字符不能静默变「?」
+                self._ser.write(payload.encode(self.encoding, errors="strict"))
                 self._ser.flush()
+            except UnicodeEncodeError as e:
+                return error_line(
+                    f"命令无法按 {self.encoding} 编码（第 {e.start} 字符起），未发送: {e}")
             except serial.SerialException as e:
                 self._dead = True
                 return error_line(f"串口写入失败: {e}")

@@ -10,6 +10,7 @@
 """
 
 import fnmatch
+import io
 import os
 import queue
 import re
@@ -528,10 +529,12 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget, gate=None)
     finally:
         raw_f.close()
 
-    # 重新以文本模式打开（首块已判定非二进制；编码由首块探测得出，
-    # GBK 文件按正确编码解码，中文 pattern 才能命中）
+    # 重新以文本模式打开。解码**全程严格**：首块探测只决定「用什么编码」，
+    # 不覆盖「整份文件是否真的能解」—— 首块之后的坏字节若用 errors="replace"，
+    # 会静默变成 U+FFFD，匹配到的是坏数据（与 Read 同一条判据）。
     try:
-        f = open(file_path, "r", encoding=encoding, errors="replace", newline="")
+        f = io.TextIOWrapper(
+            open(file_path, "rb"), encoding=encoding, errors="strict", newline="")
     except (PermissionError, OSError):
         return "skip_unreadable"
 
@@ -645,6 +648,10 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget, gate=None)
         if pending is not None:
             blocks.append(pending)
             pending = None
+    except UnicodeDecodeError:
+        # 首块之后出现坏字节：这份文件不是 UTF-8。已收集的匹配全部作废并
+        # 归类为 skip_nonutf8 —— 保留它们会让 AI 以为搜到了可信内容。
+        return "skip_nonutf8"
     finally:
         f.close()
 

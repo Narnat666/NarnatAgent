@@ -1263,6 +1263,12 @@ body[data-real="true"] .demo-tip{display:none}
 .sys.warn .ico{color:var(--warn)}
 .sys.err .ico{color:var(--err)}
 .sys .tail{color:var(--fg-faint)}
+/* 进行中的系统行要动起来。原来压缩只画一个静态的 ◌：界面其余部分一动不动，
+   用户分不清「还在跑」还是「已经卡住」——实测压缩 46 秒全程就那一个字符。
+   用透明度脉冲而不是旋转：等宽字体下旋转一个字形会糊成一团，脉冲与停止按钮
+   的 data-pending 是同一套观感（见 sqpulse）。 */
+@keyframes syspulse{0%,100%{opacity:.35}50%{opacity:1}}
+.sys.busy .ico{animation:syspulse 1.2s ease-in-out infinite}
 
 /* ---------- 待确认命令 ---------- */
 .confirm{
@@ -1333,6 +1339,10 @@ body[data-real="true"] .demo-tip{display:none}
    #input 自己不再画边框、也不留聚焦 outline —— 两层描边叠在一起会显脏。
    这里只给 1px 上下内边距：光标不贴着 .cbox 的边框线。 */
 #input{padding:1px 0;outline:none}
+/* 压缩期间输入框被禁用（用户要求「干脆不让发，等结束再解锁」）。
+   不给视觉反馈会怎样：光标点不进去、字打不出来，看着像输入框坏了。
+   保持正文字色、只把不透明度压低一点，并靠 placeholder 说明原因。 */
+#input:disabled{opacity:.55;cursor:default}
 .cbox textarea::placeholder{color:var(--fg-faint)}
 .crow{display:flex;align-items:center;gap:6px;margin-top:5px;min-height:24px;user-select:none}
 /* 胶囊（形态同 dsh 的 Pill / PermissionSelect.trigger）：无边框、圆角=半高、
@@ -1465,6 +1475,12 @@ body[data-real="true"] .demo-tip{display:none}
 .stop .sq{width:7px;height:7px;background:currentColor;border-radius:1px}
 body[data-run="true"] .stop{display:grid}
 body[data-run="true"] .send{display:none}
+/* 压缩中：与「运行中」同一套按钮切换（发送→停止），但走独立属性。
+   为什么不复用 data-run：那个属性绑在 turn/begin↔turn/end 的轮次生命周期上，
+   压缩发生在轮次之外（/compact 不产生 turn），混用会让目标模式续跑、
+   中间收口那些判定跟着错。压缩中要的是「能停、不能发」。 */
+body[data-compact="true"] .stop{display:grid}
+body[data-compact="true"] .send{display:none}
 .send{
   display:grid;place-items:center;
   width:24px;height:24px;border-radius:999px;
@@ -2578,10 +2594,6 @@ body[data-drawer="true"] #toBottom{display:none}
   var assistantBuf = '';     // 当前助手消息正文缓冲（原始 Markdown）
   var authHintShown = false; // 本轮是否已提示过「去填 API Key」（避免重复刷）
   var lastSentText = '';     // 最后一条发出去的消息正文（回执里没有请求 id，靠它找回被拒的那条）
-  /* 运行中被拦下的发送：不能当场提示（写系统行会 closeAssistantSegment 把正在
-     流式的正文劈成两个气泡），所以记一笔，等这一轮收口时再补一行说明。
-     见 sendChat 里的守卫注释。 */
-  var blockedWhileRunning = false;
   // 离线/演示态下最后一次「发出去但没连上」的内容与时间：同一句话 1.5 秒内不重发
   var lastOfflineSend = { text: '', ts: 0 };
   // 「刚才那条可能已经被后端接受了」。回执是广播的、不带发起方 id，收到
@@ -9300,10 +9312,19 @@ body[data-drawer="true"] #toBottom{display:none}
        正在流式的这一段 —— 于是「拦住了发送」却把回答劈成了两个气泡，
        和修复前一样坏（第 15 轮独立验收实测：A 无插入=1 气泡 / B 插话=2 气泡，
        且前半截的下一个兄弟正是那行提示）。
-       改为「记一笔，等这一轮收口时再提示」：turn/end 之后正文已定稿，那时插入
-       系统行不会拆散任何东西，用户也能得到明确反馈（不是零反馈）。 */
+       改为静默拦住：输入框里的字还在、停止按钮亮着，屏幕上已经把「没发出去」
+       和「为什么」都说完了。早先在这里记一笔、等 turn/end 后再补一行
+       「刚才那条没有发出去（这一轮还在回答），内容仍在输入框」—— 那是在把
+       用户眼皮底下的事再念一遍（用户反馈：废话）。 */
     if (body.getAttribute('data-run') === 'true') {
-      blockedWhileRunning = true;
+      return;
+    }
+    // 压缩期间同样不发（用户要求「干脆不让发，等结束再解锁」）。
+    // 输入框此时是 disabled，正常打字根本进不来；这道守卫兜的是
+    //「压缩刚开始、disabled 还没生效」那一刻按下的 Enter。
+    // 与上面的 data-run 一样不写系统行：压缩行此刻正在屏幕上脉冲，
+    // 用户已经知道在等什么。
+    if (body.getAttribute('data-compact') === 'true') {
       return;
     }
     // 离线时不能先清空输入框：消息发不出去，用户打的字就凭空没了（实测
@@ -9486,13 +9507,8 @@ body[data-drawer="true"] #toBottom{display:none}
       if (sentText && !input.value.trim()) {
         input.value = sentText;
       }
-      // 去重：连抢两次时不再堆第二行一模一样的提示（实测会堆两行）。
-      var lastRow = convo.lastElementChild;
-      var dup = lastRow && lastRow.className.indexOf('sys') >= 0 &&
-        (lastRow.textContent || '').indexOf('上一轮还在运行') >= 0;
-      if (!dup) {
-        sysLine('·', '上一轮还在运行，本条未发送', '');
-      }
+      // 不写「上一轮还在运行，本条未发送」：字还在输入框里、这一轮还在跑，
+      // 都是屏幕上看得见的事（用户反馈：废话）。
       scrollBottom();
       rendered('chat/result', { accepted: false, error: msg, busy: true });
       return;
@@ -10460,6 +10476,9 @@ body[data-drawer="true"] #toBottom{display:none}
       input: inputText,
       sum: sumText,
       copyable: toolHasCopy(p.name),
+      // 工具名要留在 entry 上：finishTool 判退出码时得知道这是不是命令类工具，
+      // 否则 Write 的 diff 里出现 `[exit code: 3]` 会把成功写入标成失败（实测）。
+      name: String(p.name || ''),
       todo: isTodo ? wrap.querySelector('.todo') : null,
       extra: isTodo ? wrap.querySelector('.extra') : null
     };
@@ -10544,16 +10563,37 @@ body[data-drawer="true"] #toBottom{display:none}
     // 「完成」，与真正成功的那一行一模一样，只有折叠区第一行藏着
     // `[exit code: 4]`（实测，agent 每天都要跑测试）。
     // 退出码是客观事实，界面按它纠正显示，不动后端的判定。
-    var mExit = outText.match(/\[\s*exit code:\s*(\d+)\s*\]/i);
+    //
+    // **只对命令类工具生效**：`[exit code: N]` 只有 Shell/Terminal 会写。
+    // 其它工具的输出是文件内容 —— Write 写一份提到 `[exit code: 3]` 的文档
+    //（任务书/测试脚本里很常见），diff 把这句话带进 output，就会被当成
+    // 退出码 3 把行标红，而文件其实写得好好的（实测，用户报「写入成功但显示红色」）。
+    //
+    // 取**最后一个**退出码：多段命令（`a && b`）逐段各标一个，整体结果由
+    // 最后一段决定。取第一个会在「前段失败、后段用 || 兜回」时错标失败。
+    var isCmdTool = (entry.name === 'Shell' || entry.name === 'Terminal');
+    var exitCodes = isCmdTool
+      ? (outText.match(/\[\s*exit code:\s*(-?\d+)\s*\]/gi) || [])
+      : [];
+    var mExit = exitCodes.length
+      ? /\[\s*exit code:\s*(-?\d+)\s*\]/i.exec(exitCodes[exitCodes.length - 1])
+      : null;
     if (mExit && parseInt(mExit[1], 10) !== 0) ok = false;
     // 退出码 0 也可能不是真成功：命令里带管道时退出码取的是**末端**命令
     // （`pytest | more` 的退出码来自 more，恒为 0）。此时输出里明明写着
     // `1 failed` / `FAILED test_x.py::y`，行头却是绿色「完成」——
     // 用户只看行头就会以为测试全过（实测，AI 很常这么写命令）。
     // 无法从退出码判断时，至少把「输出里有失败信号」这件事说出来。
+    //
+    // 同理只对命令类工具生效：Read 读一个测试日志、Write 写一份含
+    // `1 failed` 的文档，都跟「这一轮命令是否真成功」无关。
+    //
+    // 注意 mExit 可能为 null：后端现在**不再为退出码 0 输出该行**，所以
+    // 「没有这行」= 退出码 0 = 成功。这里不能再要求 `!!mExit`，否则这条
+    // 警告永远不触发（原来的写法就是这样，后端改成「0 不输出」后成为死代码）。
     var exitSaysOk = !mExit || parseInt(mExit[1], 10) === 0;
     var outHasFail = /\b\d+\s+failed\b|\bFAILED\b|\bTraceback\b|\b\d+\s+errors?\b/i.test(outText);
-    var uncertain = ok && exitSaysOk && outHasFail && !!mExit;
+    var uncertain = isCmdTool && ok && exitSaysOk && outHasFail;
     var ms = (typeof p.durationMs === 'number') ? p.durationMs + 'ms' : '';
     var meta = entry.row.querySelector('.meta');
     // 判空与同函数上面的 awaiting 分支保持一致（那里是 if (meta)）。
@@ -10698,7 +10738,8 @@ body[data-drawer="true"] #toBottom{display:none}
   /* ---------- 复核 ---------- */
 
   function verifyStart(){
-    sysMap.verify = addSysLine('⟳', '独立复核…', '', '');
+    // busy：与压缩行同一套脉冲（静态 ⟳ 在窄面板里分不清是在跑还是卡住）
+    sysMap.verify = addSysLine('⟳', '独立复核…', '', 'busy');
     rendered('verify/start', {});
   }
 
@@ -10747,10 +10788,43 @@ body[data-drawer="true"] #toBottom{display:none}
 
   /* ---------- 上下文压缩 ---------- */
 
+  /**
+   * 压缩期间锁住输入区：用户明确要求「压缩期间干脆不让发，等结束再解锁」。
+   *
+   * 不让发的理由不只是体验：压缩会把消息列表整体替换（replace_all），
+   * 此刻追加进去的用户消息会被摘要覆盖掉——白丢一句话。
+   *
+   * 但**停止**必须留着：压缩是可中断的（后端 handle_compress 逐块查中断标），
+   * 所以在同一块位置把发送换成停止，点它就是取消本次压缩。
+   * 不用 data-run 管这件事的理由见 CSS 里那段注释。
+   */
+  var compactSavedPlaceholder = null;
+
+  function setCompactLock(on){
+    body.setAttribute('data-compact', on ? 'true' : 'false');
+    if (!input) return;
+    if (on) {
+      // placeholder 要存原文：压缩结束后必须逐字还原，不能自己编一个默认值
+      //（真实占位符由别处设置，写死会把它冲掉）。
+      compactSavedPlaceholder = input.getAttribute('placeholder');
+      input.setAttribute('placeholder', '正在压缩上下文，结束后即可继续输入');
+      input.disabled = true;
+    } else {
+      input.disabled = false;
+      if (compactSavedPlaceholder !== null) {
+        input.setAttribute('placeholder', compactSavedPlaceholder);
+        compactSavedPlaceholder = null;
+      }
+    }
+  }
+
   function compressBegin(){
-    sysMap.compress = addSysLine('◌', '压缩上下文中', '', '');
+    // busy：图标走 syspulse 脉冲动画（见 CSS）。静态字符让 46 秒的压缩
+    // 看起来和「卡住」一模一样。
+    sysMap.compress = addSysLine('◌', '压缩上下文中', '', 'busy');
     // 新一次压缩开始：上一轮留下的「压缩完成」行从此不该再被任何回执改写
     compressLine = null;
+    setCompactLock(true);
     rendered('compress/begin', {});
   }
 
@@ -10759,6 +10833,9 @@ body[data-drawer="true"] #toBottom{display:none}
 
   function compressEnd(p){
     var ok = !p || p.ok !== false;
+    // 压缩收口：解锁输入区。放在这里而不是 compress/result 里，
+    // 是因为 core 的 finally 一定会发这条——异常/取消路径也跑得到。
+    setCompactLock(false);
     // 协议 §4.8：ok/before/after 当前恒为 null（ui.py:643 无论成败都发 null）。
     // 所以这里**没有任何信息**能判断压缩成没成 —— 打「✓ 压缩完成」是在猜：
     // 自动压缩失败时界面上照样一个绿勾（实测）。真正确凿的结论只来自
@@ -10781,6 +10858,47 @@ body[data-drawer="true"] #toBottom{display:none}
     // 一轮中间，也可能由命令触发。
     if (REAL && ok) post('sessionList', {});
     rendered('compress/end', { ok: ok });
+  }
+
+  /**
+   * /compact 的真实结论（后端异步跑完才发，见 server._run_compact）。
+   *
+   * 为什么不能沿用 command/result：那条回执现在是「已受理」的即时应答
+   *（backend `_m_compact_async` 立即返回），压缩还在跑时它就是空的。
+   * 在这里**改写** compress/end 画的那一行，而不是新增一行：
+   * 同一件事在一屏里出现两次（「· 压缩结束 36.2s」+「✓ 已压缩 6 条」）
+   * 会让用户以为压缩跑了两次。
+   */
+  function applyCompactResult(p){
+    var ok = !p || p.ok !== false;
+    var noop = !!(p && p.noop);
+    // lines 必须兜住非数组：宿主/后端若给成字符串，下面的 join 会抛 TypeError，
+    // 整条结论静默消失（与 command/result 那里同一处教训）。
+    var lines = Array.isArray(p && p.lines) ? p.lines : (p && p.lines ? [String(p.lines)] : []);
+    var body2 = lines.join('\n');
+    setCompactLock(false);
+    if (noop) {
+      // 无历史可压 / 用户取消：历史一条没变，打勾会让用户以为压缩成功了
+      if (compressLine && compressLine.parentNode) {
+        updateSysLine(compressLine, '·', esc(body2 || '历史未变更'), '', '');
+      } else {
+        addSysLine('·', esc(body2 || '历史未变更'), '', '');
+      }
+    } else if (ok) {
+      if (compressLine && compressLine.parentNode) {
+        updateSysLine(compressLine, '✓', esc(body2 || '压缩完成'), '', 'ok');
+      } else {
+        addSysLine('✓', esc(body2 || '压缩完成'), '', 'ok');
+      }
+    } else {
+      if (compressLine && compressLine.parentNode) {
+        updateSysLine(compressLine, '✗', '压缩失败', '', 'err');
+      }
+      if (body2) addSysLine('·', esc(body2), '', 'err');
+    }
+    compressLine = null;
+    scrollBottom();
+    rendered('compress/result', { ok: ok, noop: noop });
   }
 
   /* ---------- 后台任务 ---------- */
@@ -11741,6 +11859,12 @@ body[data-drawer="true"] #toBottom{display:none}
   function turnEnd(p){
     // 真正的收口到了，兜底定时器就不该再开火
     if (cancelSettleTimer) { clearTimeout(cancelSettleTimer); cancelSettleTimer = null; }
+    // 压缩锁的兜底解锁。正常路径由 compress/end 解开，但压缩期间点「停止」
+    // 走的是 cancel → turn/end，中间若丢了 compress/end（后端进程没了、
+    // 连接断了），输入框会永久 disabled —— 用户只能重载窗口。
+    // 放在幂等守卫**之前**：守卫在 data-run 已是 false 时直接 return，
+    // 偏偏那正是这条兜底最需要生效的场合。
+    if (body.getAttribute('data-compact') === 'true') setCompactLock(false);
     var reason = (p && p.reason) || 'done';
     // 幂等：一轮只收口一次。重复的 turn/end 会怎样（实测）：第二次进来时
     // data-run 已经是 false、正文也渲染过了，却又补一行「■ 已打断」——
@@ -11875,14 +11999,6 @@ body[data-drawer="true"] #toBottom{display:none}
     //（断网重连、压缩后、切会话回来）都会把 assistantBuf 当成「正在流式的
     // 后半截」再画一遍——6 条消息画成 7 条，最后一句回答重复出现。
     assistantBuf = '';
-    // 这一轮里用户想发但被守卫拦下的内容：现在正文已定稿，插入系统行不会拆散
-    // 任何东西，可以如实告诉他「刚才那条没发出去、还在输入框里」。
-    // 不在这里补的话，用户按 Enter 后几十秒内看不到任何反应（第 15 轮验收点名
-    // 「零反馈」）。当场提示又会把正文劈成两个气泡，所以只能延到这里。
-    if (blockedWhileRunning) {
-      blockedWhileRunning = false;
-      sysLine('·', '刚才那条没有发出去（这一轮还在回答）', '内容仍在输入框');
-    }
     rendered('turn/end', { reason: reason, assistant: briefAssistant() });
     // 轮末补拉一次会话列表。
     // 不拉会怎样（实测）：会话的「N 条」和列表顺序都来自 session/list 快照，
@@ -13437,6 +13553,11 @@ body[data-drawer="true"] #toBottom{display:none}
     // 这次请求已有应答，解锁分支出口按钮 —— 不解锁的话按钮会卡在
     // 「正在暂离…」直到 30 秒兜底，用户以为界面死了。
     if (window.__narnatBranchUnlock) window.__narnatBranchUnlock();
+    // async:true = 这条回执只是「已受理」，真实结论随后由 compress/result 下发
+    //（目前只有 /compact 走这条：压缩 36~47 秒，同步等必然撞上 30 秒请求超时）。
+    // 不拦会怎样：这时 lines 是空的，一路落到末尾兜底分支画一行
+    //「✓ /compact 已执行」——压缩刚起头就先报成功，正是用户报障的那种假结论。
+    if (p.async) return;
     // handled:false = 不是已知命令，被扩展转成了普通对话。
     // 这时要把用户输入原样显示出来，否则界面像什么都没发生。
     if (p.handled === false) {
@@ -13963,6 +14084,7 @@ body[data-drawer="true"] #toBottom{display:none}
       case 'verify/result': verifyResult(msg.params || {}); break;
       case 'compress/begin': compressBegin(); break;
       case 'compress/end': compressEnd(msg.params || {}); break;
+      case 'compress/result': applyCompactResult(msg.params || {}); break;
       case 'bg/submit': bgSubmit(msg.params || {}); break;
       case 'confirm/request': showConfirm(msg.params || {}); break;
       case 'confirm/result': applyConfirmResult(msg.params || {}); break;

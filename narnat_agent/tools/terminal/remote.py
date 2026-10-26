@@ -155,12 +155,16 @@ def remote_read(file_path: str, offset: int = 0, limit: int = 2000,
                 if not line:
                     break
                 line_num = start + i + 1
-                content = line.rstrip(b"\n\r").decode(encoding, errors="replace")
+                # 严格解码（与本地 Read 一致）：坏字节报错，绝不静默填 U+FFFD
+                content = line.rstrip(b"\n\r").decode(encoding, errors="strict")
                 result.append(f"  {line_num}→{content}")
             else:
                 # for...else: 读完limit行后还有剩余内容
                 if f.readline():
                     truncated = True
+    except UnicodeDecodeError:
+        # 首块之后的坏字节：这份文件不是 UTF-8（与本地 Read 同一条判据）
+        return f"[错误: 不是 UTF-8: {file_path}（远程）]"
     except OSError as e:
         # SFTP把EACCES(errno=13)也抛成IOError：一律报"不存在"会把排查方向
         # 引向路径拼写，实际问题通常是权限（chmod/属主/父目录缺x位）

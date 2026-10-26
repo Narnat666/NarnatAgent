@@ -11,6 +11,7 @@
 """
 
 import errno
+import io
 import os
 import re
 
@@ -396,7 +397,13 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
         return f"[错误: 不是 UTF-8: {file_path}]"
 
     try:
-        with open(file_path, "r", encoding=encoding, errors="replace") as f:
+        # 文本解码必须**全程严格**（errors="strict"），只有二进制判定才只看首块。
+        # 两者范围不同，曾经混用过一次（判定只看 8KB、解码却 errors="replace"），
+        # 结果：坏字节落在 8KB 之后就静默变成 U+FFFD —— AI 拿到坏数据却以为
+        # 读到了原文，比读不出来严重得多。dsh 的写法是同一套：
+        # BINARY_SAMPLE_BYTES 只作用于 NUL 采样，TextDecoder 始终 fatal: true。
+        with open(file_path, "rb") as fb:
+            f = io.TextIOWrapper(fb, encoding=encoding, errors="strict")
             start = max(offset - 1, 0) if offset > 0 else 0
 
             # 流式跳过 offset 行，避免大文件内存溢出；统计实际跳过的行数
@@ -441,7 +448,9 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
                     if os.path.getsize(file_path) <= READ_MAX_COUNT_BYTES:
                         # 探测行已读掉，从下一行计起
                         total_lines = skipped + limit + 1 + sum(1 for _ in f)
-                except OSError:
+                except (OSError, UnicodeDecodeError):
+                    # 尾部含坏字节 → 无法统计总行数；按「未知」降级，
+                    # 不因此否定已读出的内容（那部分是按严格解码验证过的）
                     total_lines = None
             elif offset and offset > 1:
                 # 未截断（读到EOF）：总行数 = 实际跳过 + 实际读出，零成本精确
@@ -449,6 +458,10 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
 
     except PermissionError:
         return f"[错误: 权限不足: {file_path}]"
+    except UnicodeDecodeError as e:
+        # 严格解码在读取途中失败：坏字节不在首块（否则前面就报了「不是 UTF-8」）。
+        # 位置报块内偏移而不是猜绝对偏移 —— 只说「这份文件含坏字节」这个事实。
+        return f"[错误: 不是 UTF-8: {file_path}（读取中途解码失败，块内偏移 {e.start}）]"
     except OSError as e:
         return f"[错误: 读取失败: {e}]"
 
