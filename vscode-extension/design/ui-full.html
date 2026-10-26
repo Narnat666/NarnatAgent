@@ -13027,6 +13027,57 @@ body[data-run="true"] #goalRounds{opacity:.45}
   }
 
   /**
+   * 对话区里「实时产生、但还没进入历史页快照」的那一段节点。
+   *
+   * 为什么需要它：`applyHistoryPage` 是整段重画，而重画用的 `HIST_PAGE` 是
+   * **打开会话那一刻的尾页快照**。用户趁着 AI 还在跑点「加载更早」时，
+   * 刚发出去的那条提问、已经流出来的正文、这一轮的工具行/思考块都不在快照里，
+   * 清屏之后没有任何恢复路径 —— 提问凭空消失，回答被拦腰截断（实测报障：
+   * 「我刚才提问的内容 UI 层上不显示了，只有 AI 的回复」，退出会话重进才恢复）。
+   *
+   * 判据：把对话区里的用户气泡与历史页里的 user 消息**按顺序**对齐，第一条
+   * 对不上的就是从那一轮开始实时产生的。不用「文本在不在快照里」的集合判断：
+   * 用户可能先后问同一句话，集合判断会把实时那条误判成「历史里已经有了」而漏保。
+   *
+   * @returns {HTMLElement[]} 要原样保留的节点（保序）；没有实时段时是空数组
+   */
+  function liveTailNodes() {
+    var histUsers = [];
+    (HIST_PAGE || []).forEach(function (m) {
+      if (!m || m.role !== 'user') return;
+      // 与 renderHistory 用同一套跳过判据：被跳过的那几条根本没有气泡，
+      // 留在序列里会让后面每一条都错位一格，把历史节点误判成实时节点
+      //（结果是重画后整段历史显示两遍）。
+      if (isInternalOnly(m.text) || isGoalInjection(m.text)) return;
+      var fp = normCmp(m.text);
+      if (fp) histUsers.push(fp);
+    });
+    var kids = Array.prototype.slice.call(convo.children);
+    var idx = 0;
+    for (var i = 0; i < kids.length; i++) {
+      var el = kids[i];
+      if (!el.classList.contains('msg') || el.getAttribute('data-role') !== 'user') continue;
+      var got = normCmp((el.querySelector('.text') || {}).textContent || '');
+      if (idx < histUsers.length && got === histUsers[idx]) { idx++; continue; }
+      return kids.slice(i);
+    }
+    /* 用户在界面上对得上、但正文/思考还在流：这一轮的提问已经进了 HIST_PAGE
+       （典型是 initialize 带着分页重画过一次），只有还在长的正文没进快照。
+       此时按「最靠前的流式节点」划界 —— 不兜这一下，那半截正文照样会被清掉，
+       用户看到的就是「回答只剩最后几段」。 */
+    var streamNodes = [curAssistant, curThink && curThink.wrap].filter(function (n) {
+      return n && n.parentNode === convo;
+    });
+    var from = -1;
+    streamNodes.forEach(function (n) {
+      var at = kids.indexOf(n);
+      if (at >= 0 && (from < 0 || at < from)) from = at;
+    });
+    if (from >= 0) return kids.slice(from);
+    return [];
+  }
+
+  /**
    * 处理更早一页的回执（webview 发出 `sessionHistory` 后宿主转回的那条）。
    *
    * 做法与 dsh 的 `prepend` 一致：把这一页拼到已渲染内容**前面**，整段重画。
@@ -13055,6 +13106,25 @@ body[data-run="true"] #goalRounds{opacity:.45}
     var sh = convo.scrollHeight;
     var st = convo.scrollTop;
     var keepFollow = followBottom;
+    /* 重画前把「实时产生、还没进过快照」的那一段摘出来（本轮提问 / 流式正文 /
+       工具行 / 思考块 / 已折叠的轮次）。不摘的后果：清屏把它们永久删掉，而
+       HIST_PAGE 里没有它们，重画再也画不出来（见 liveTailNodes 注释）。 */
+    var live = liveTailNodes();
+    live.forEach(function (el) {
+      if (el.parentNode === convo) convo.removeChild(el);
+    });
+    /* resetConversationDom 会把这些状态一起清掉，先备份、重画后再恢复。
+       少了哪一个，这一轮在重画后都会「接不上」：
+         · curAssistant / assistantBuf：不恢复则回答从当前 delta 从头开始，前半截永久丢失
+         · toolMap / sysMap：已画的工具行、状态行再也收不到更新（停在「执行中」）
+         · curThink：流式思考被劈成两块，前一块永远停在「思考中」
+         · pendingTodoRow：之后到达的 todo/update 找不到计划行
+         · pendingConfirmLine：确认条点了没反应（更新的是已脱离文档的节点）
+         · turnStartTime / turnToolCount / turnThinkCount：轮末折叠的耗时与计数归零 */
+    var kAssistant = curAssistant, kBuf = assistantBuf;
+    var kToolMap = toolMap, kSysMap = sysMap, kThink = curThink;
+    var kTodoRow = pendingTodoRow, kConfirm = pendingConfirmLine;
+    var kTurnTime = turnStartTime, kTurnTools = turnToolCount, kTurnThinks = turnThinkCount;
     resetConversationDom();
     HIST_PAGE = merged;
     HIST_HAS_MORE = keepMore;
@@ -13065,6 +13135,33 @@ body[data-run="true"] #goalRounds{opacity:.45}
     historyDrawnFor = CUR;
     authHintShown = false;
     renderHistory(HIST_PAGE);
+    /* 实时段接回历史之后：它们在时间上属于最后一轮，位置就是历史末尾。
+       节点身份不重建（append 而非 clone），绑在它们上面的流式句柄、折叠状态、
+       工具展开状态全部原样保留。 */
+    live.forEach(function (el) {
+      convo.appendChild(el);
+    });
+    if (live.length) {
+      toolMap = kToolMap;
+      sysMap = kSysMap;
+      if (kThink) curThink = kThink;
+      if (kTodoRow) pendingTodoRow = kTodoRow;
+      if (kConfirm) pendingConfirmLine = kConfirm;
+      turnStartTime = kTurnTime;
+      turnToolCount = kTurnTools;
+      turnThinkCount = kTurnThinks;
+      // 轮末折叠靠它划界：重画后本轮起点变成「历史最后画出来的那个节点」
+      turnStartNode = live[0].previousElementSibling;
+      /* 正文引用必须接回来，而且要用缓冲区的全文重画一次：
+         resetStreamRender 已经把 mdLockNode/mdTailNode 清成 null，光接引用不够——
+         后续 delta 会往旧容器里塞，前缀容器丢了就只剩尾巴。
+         renderAssistant 自己会重建容器并渲染全文，所以不会画两遍。 */
+      if (kAssistant && kBuf) {
+        curAssistant = kAssistant;
+        assistantBuf = kBuf;
+        renderAssistant();
+      }
+    }
     // renderHistory 末尾排了一次 scrollBottom(true)。不取消的话下一帧会把
     // 下面刚恢复的位置再拉到底——用户点「加载更早」正是为了往上读。
     scrollPending.queued = false;
