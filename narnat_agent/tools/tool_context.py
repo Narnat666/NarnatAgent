@@ -169,9 +169,6 @@ class ToolContext:
     # 其它配置仍按启动时的 load_config 结果生效
     api_keys: Dict[str, str] = field(default_factory=dict)
 
-    # 忽略目录（glob/grep使用）
-    ignore_dirs: List[str] = field(default_factory=list)
-
     # 安全确认开关（由配置驱动）
     git_skip_confirm: bool = False   # True=git命令免确认直接执行
     rm_skip_confirm: bool = False    # True=rm命令免确认直接执行

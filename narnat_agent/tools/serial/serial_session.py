@@ -44,9 +44,11 @@ def _truncate_output(text: str, max_chars: int) -> str:
         return text
     head = max_chars * 2 // 3
     tail = max_chars - head
+    # 措辞与 bash/terminal 对齐：逗号分隔，不用「+」连接（会被误读成可加关系）
     return (
         text[:head]
-        + f"\n...[中间截断: 输出共{len(text)}字符, 已保留首{head}字符+尾{tail}字符。增大max_output_chars可获取完整输出]\n"
+        + f"\n...[中间截断: 原输出{len(text)}字符，中段已丢弃。"
+          f"已保留首{head}字符、尾{tail}字符]\n"
         + text[-tail:]
     )
 
@@ -605,10 +607,10 @@ class SerialSession:
         try:
             if SerialSession.RE_NESTED_QUANT.search(wf):
                 return (re.compile(re.escape(wf)),
-                        "[提示: wait_for 含嵌套量词（可能灾难性回溯），已按字面量匹配]")
+                        "[提示: wait_for 含嵌套量词，已按字面量匹配]")
             if SerialSession._has_ambiguous_alternation(wf):
                 return (re.compile(re.escape(wf)),
-                        "[提示: wait_for 含重叠交替分支（可能灾难性回溯），已按字面量匹配]")
+                        "[提示: wait_for 含重叠交替分支，已按字面量匹配]")
             return re.compile(wf), ""
         except re.error:
             return re.compile(re.escape(wf)), "[提示: wait_for 正则非法，已按字面量匹配]"
@@ -636,8 +638,7 @@ class SerialSession:
         n_bad = raw_output.count("\ufffd")
         if n_bad > 0:
             hints.append(
-                f"[提示: 输出含{n_bad}个乱码字符，设备编码可能不是{self.encoding}，"
-                f"可尝试 encoding=gbk]"
+                f"[提示: 输出含{n_bad}个乱码字符（U+FFFD，当前 encoding={self.encoding}）]"
             )
         if self._dropped_chars > 0:
             hints.append(f"[提示: 本次会话累计丢弃{self._dropped_chars}字符（背压）]")

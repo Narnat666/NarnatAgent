@@ -78,7 +78,6 @@ class ToolConfig:
     max_transfer_mb: int = 100                          # 文件传输上限(MB)
     max_output_chars: int = DEFAULT_MAX_TOOL_OUTPUT_KB * 1024  # 工具输出上限(字符数)
     max_timeout_seconds: int = DEFAULT_MAX_TIMEOUT_SECONDS     # 工具超时上限(秒)，0=不限制
-    ignore_dirs: tuple = ()                             # 忽略目录（唯一来源narnat.json"忽略目录"键，空=不忽略）
     # 插件工具开关（narnat.json "工具"."插件"，值字符串 "on"/"off"，缺项默认 on）
     plugin_tools: Dict[str, bool] = field(
         default_factory=lambda: {name: True for name in DEFAULT_PLUGIN_TOOLS})
@@ -633,17 +632,11 @@ def _sanitize_sections(data: dict) -> None:
             _warn(f"「{name}」段格式错误（应为对象），已按默认处理")
             data[name] = {}
     if "忽略目录" in data:
-        if not isinstance(data["忽略目录"], list):
-            _warn("「忽略目录」格式错误（应为数组），已按默认处理")
-            data["忽略目录"] = []
-        else:
-            # 元素类型防御：数字/对象/null 元素会让 Glob/Grep 的 set() 与排序比较
-            # 抛 TypeError，且在真实 agent 中归因误导为"工具参数错误"（AI 参数无误，
-            # 问题在配置）——入口处过滤非字符串项，保证工具侧只收到字符串集合
-            cleaned = [v for v in data["忽略目录"] if isinstance(v, str)]
-            if len(cleaned) != len(data["忽略目录"]):
-                _warn("「忽略目录」含非字符串项，已忽略")
-                data["忽略目录"] = cleaned
+        # 已废弃：Grep/Glob 改由各目录 .gitignore 决定，技能发现固定用
+        # DEFAULT_IGNORE_DIRS。保留这个键只为不破坏老配置文件 —— 存在即提示，
+        # 静默忽略会让用户以为自己设的目录还在生效。
+        _warn("「忽略目录」已废弃（Grep/Glob 改由 .gitignore 决定），此键将被忽略")
+        data.pop("忽略目录", None)
 
 
 
@@ -1068,7 +1061,6 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
                             "提醒语": "",
                             "间隔轮数": DEFAULT_STYLE_NOTICE_INTERVAL,
                         },
-                        "忽略目录": DEFAULT_IGNORE_DIRS,
                     }, f, indent=2, ensure_ascii=False)
                 else:
                     f.write("")
@@ -1167,7 +1159,6 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
             max_transfer_mb=_int_or(data.get("工具", {}).get("最大传输文件MB"), 100),
             max_output_chars=max_output_chars,
             max_timeout_seconds=_int_or(data.get("工具", {}).get("超时上限秒"), DEFAULT_MAX_TIMEOUT_SECONDS),
-            ignore_dirs=tuple(data.get("忽略目录") or []),
             plugin_tools=plugin_tools,
         ),
         safety=SafetyConfig(

@@ -1208,7 +1208,7 @@ class SessionManager:
                  plugin_setter: Callable[[str, bool], bool] = None,
                  goal_max_rounds: int = 0,
                  project_skill_roots=None,
-                 skill_ignore_dirs: tuple = (),
+
                  context_reset_func: Callable[[], None] = None,
                  logger=None):
         self.narnat_dir = narnat_dir
@@ -1248,8 +1248,7 @@ class SessionManager:
         self._set_plugin_enabled = plugin_setter
         # 项目技能根目录: None=自动发现（扫描所有名为 skills 的目录）；空元组=关闭；非空=显式
         self._project_skill_roots = project_skill_roots
-        # 自动发现时跳过的目录名（narnat.json "忽略目录"，默认含 node_modules/.git 等）
-        self._skill_ignore_dirs = tuple(skill_ignore_dirs or ())
+
         self._auto_save_done: bool = False
         self._pending_auto_save_name: Optional[str] = None
         # 最近一次「离开游离态」（新建对话 / /cd 切走）时兜底存下的会话名
@@ -1513,8 +1512,8 @@ class SessionManager:
 
     def on_skill(self, name: str) -> str:
         content, err, path = load_skill(self.narnat_dir, name,
-                                        project_roots=self._project_skill_roots,
-                                        ignore_dirs=self._skill_ignore_dirs)
+                                        project_roots=self._project_skill_roots)
+
         if err:
             return err
         if path:
@@ -1703,8 +1702,8 @@ class SessionManager:
     def on_list_skill_tree(self) -> list:
         """技能树（供 /skill 按层级 Tab 补全）。"""
         return list_skill_tree(self.narnat_dir,
-                               project_roots=self._project_skill_roots,
-                               ignore_dirs=self._skill_ignore_dirs)
+                               project_roots=self._project_skill_roots)
+
 
     def is_child_session(self) -> bool:
         return self._state.is_child()

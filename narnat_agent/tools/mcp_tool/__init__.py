@@ -19,18 +19,14 @@ DEFINITION = {
                     "type": "string",
                     "enum": ["connect", "disconnect"],
                     "description": (
-                        "操作类型（默认connect）。"
-                        "connect 连接一个 MCP 服务器（本地 stdio 或远程 HTTP），"
-                        "连接后其工具以 mcp__<服务器名>__<工具名> 注册，后续轮次可直接调用；"
-                        "disconnect 断开并注销其工具"
+                        "操作类型。默认 connect。"
+                        "connect 连接 MCP 服务器，其工具以 mcp__<服务器名>__<工具名> 注册；"
+                        "disconnect 断开并注销其工具。"
                     ),
                 },
                 "name": {
                     "type": "string",
-                    "description": (
-                        "服务器名（成为工具名前缀 mcp__<name>__）；"
-                        "disconnect 用已连接的服务器名或 all（断开全部）"
-                    ),
+                    "description": "服务器名，成为工具名前缀 mcp__<name>__。disconnect 时可填 all。",
                 },
                 "config": {
                     "type": "object",
@@ -39,9 +35,9 @@ DEFINITION = {
                         "本地：{\"command\": \"python\", \"args\": [\"main.py\"], "
                         "\"env\": {}, \"cwd\": \"\"}\n"
                         "远程：{\"url\": \"https://.../mcp\", "
-                        "\"headers\": {\"X-API-Key\": \"...\"}}（认证用自定义请求头）\n"
-                        "（可选 startup_timeout_sec 启动超时、tool_timeout_sec 工具调用超时、"
-                        "enabled_tools/disabled_tools 工具白/黑名单）"
+                        "\"headers\": {\"X-API-Key\": \"...\"}}\n"
+                        "可选：startup_timeout_sec、tool_timeout_sec、"
+                        "enabled_tools/disabled_tools"
                     ),
                 },
             },
@@ -99,7 +95,7 @@ def _connect(manager, name: str, config: dict) -> str:
     for tool_name in tool_names[:_MAX_TOOLS_SHOWN]:
         lines.append(f"  {tool_name}")
     if len(tool_names) > _MAX_TOOLS_SHOWN:
-        lines.append(f"  …共{len(tool_names)}个")
+        lines.append(f"  ...共{len(tool_names)}个")
     return "\n".join(lines)
 
 

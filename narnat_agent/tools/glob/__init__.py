@@ -15,6 +15,8 @@ import os
 import re
 from functools import lru_cache
 
+from ..gitignore import GitIgnore as _GitIgnore
+
 class GlobLimits:
     """Glob 工具边界参数（原模块级常量收敛为类成员）"""
     MAX_BRACE_EXPANSIONS = 100
@@ -22,7 +24,7 @@ class GlobLimits:
 
 
 # 用户中断（ESC）导致遍历/扫描提前结束时的返回文本（Grep/Glob 共用同一标记）
-_CANCELLED_TEXT = "[已取消: 用户中断，扫描提前结束]"
+_CANCELLED_TEXT = "[已取消]"
 
 
 # ── 花括号展开 ────────────────────────────────────────────────
@@ -376,12 +378,16 @@ def _is_nt_reparse(entry) -> bool:
 def _collect(
     root: str,
     regexes: list[re.Pattern[str]],
-    ignore_dirs: set[str],
     max_results: int,
     skip_hidden_files: bool,
     gate: "_CancelGate | None" = None,
 ) -> tuple[list[tuple[str, float]], int]:
     """scandir 遍历目录树，返回 (按 mtime 降序的结果, 总匹配数)。
+
+    忽略规则来自该 root 下的 .gitignore（与 Grep 一致），不再读配置的忽略目录：
+    两套规则并存时 AI 无法判断「找不到」到底是被哪一套挡的。
+
+    root 本身不参与忽略判定（它就是调用方指定的入口），只有遍历出的子项才判。
 
     gate 命中取消时立即停止遍历（已收集部分不回滚，由调用方按取消语义处理）。
     """
@@ -391,6 +397,7 @@ def _collect(
     stack: list[tuple[str, str]] = [(root, "")]
     single_regex = regexes[0] if len(regexes) == 1 else None
     _is_nt = (os.name == "nt")  # 缓存，避免循环内重复判断
+    gi = _GitIgnore(root)
 
     if gate is not None and gate.check():
         return [], 0
@@ -438,10 +445,11 @@ def _collect(
                         else:
                             continue
 
-                    if is_dir:
-                        if name in ignore_dirs:
-                            continue
+                    # ── 忽略规则：.gitignore（与 Grep 一致） ──
+                    if gi.is_ignored(entry.path, is_dir):
+                        continue
 
+                    if is_dir:
                         # ── 目录也参与匹配（对齐 DEFINITION"匹配文件和目录"） ──
                         dir_rel = rel_prefix + name  # 无尾部斜杠
                         dir_rel_norm = _norm_path(dir_rel, _is_nt)
@@ -522,29 +530,10 @@ def _pattern_has_dot_component(pattern: str) -> bool:
 
 
 def _hidden_files_hint(skip_hidden_files: bool) -> str:
-    """无匹配时的隐藏文件提示：把默认跳过规则变成可见路标，AI 无需背规则。"""
+    """无匹配时的隐藏文件提示：说明范围被收缩这个事实。"""
     if not skip_hidden_files:
         return ""
-    return "（注: 隐藏文件默认跳过；pattern中含以.开头的路径组件可匹配隐藏文件）"
-
-
-def _ignored_dirs_hint(ignore_dirs) -> str:
-    """无匹配时的忽略目录提示：把静默收缩的搜索范围变成可见路标。
-
-    忽略目录来自配置（Glob/Grep 默认跳过），无匹配时 AI 无从知道范围被收缩，
-    会误判"文件不存在/写入没生效"；此处对齐隐藏文件提示，附上清单与出路。
-    排序：非默认（用户自定义）条目优先，默认项补充在后；否则按字母序取前 5
-    时用户的 output 等自定义目录会被裁掉，AI 需多花试错回合。
-    """
-    if not ignore_dirs:
-        return ""
-    from ...config.defaults import DEFAULT_IGNORE_DIRS
-    defaults = set(DEFAULT_IGNORE_DIRS)
-    custom = sorted(n for n in ignore_dirs if n not in defaults)
-    builtin = sorted(n for n in ignore_dirs if n in defaults)
-    names = custom + builtin
-    head = "，".join(names[:5]) + ("等" if len(names) > 5 else "")
-    return f"（注: 已跳过忽略目录 {head}；如需搜索请显式传路径）"
+    return "（注: 已跳过隐藏文件）"
 
 
 # ── 静态前缀拆分 ─────────────────────────────────────────────
@@ -596,7 +585,9 @@ def _pattern_syntax_error(pattern: str) -> str:
                 j += 1
             end = pattern.find("]", j)
             if end == -1:
-                return f'未闭合的字符类 "{pattern[i:]}"'
+                # 用中文引号包片段：英文双引号紧邻消息末尾的 ] 会被误读成
+                # 「多一个引号」，中文引号与英文括号视觉上不会混淆
+                return f'未闭合的字符类「{pattern[i:]}」'
             i = end + 1
             continue
         i += 1
@@ -610,8 +601,8 @@ DEFINITION = {
     "function": {
         "name": "Glob",
         "description": (
-            "按模式匹配文件和目录。返回匹配路径，按修改时间倒序。"
-            "（仅支持本机文件，不支持远程设备文件）"
+            "按模式匹配文件和目录（仅支持本机文件）。默认跳过 .gitignore 所列文件与隐藏项。"
+            "返回匹配路径，按修改时间倒序。"
         ),
         "parameters": {
             "type": "object",
@@ -619,16 +610,13 @@ DEFINITION = {
                 "pattern": {
                     "type": "string",
                     "description": (
-                        '匹配路径任意位置，如 "*.py" 递归匹配所有层的.py文件，'
-                        '"dir/*.ext" 递归匹配 dir 下所有层的.ext（含子目录）；'
-                        '例："**/*.h"、"src/**/*.cpp"、"*.{docx,pdf}"。'
-                        '支持绝对路径（如 win:"D:\\work\\**\\*.py"、'
-                        'linux/macOS:"/home/user/**/*.py"），绝对与相对写法语义一致。'
-                        '默认跳过隐藏文件；含以.开头的路径组件时匹配隐藏文件（".*"匹配点开头的项）'
+                        '匹配路径任意位置。"*.py" 匹配所有层的 .py；'
+                        '"src/**/*.{c,h}" 匹配 src 下所有层的 c/h。支持绝对路径。'
+                        '默认跳过隐藏文件；pattern 含 . 开头的路径组件时可匹配隐藏文件。'
                     ),
                 },
-                "path": {"type": "string", "description": "搜索目录（默认当前目录）"},
-                "max_results": {"type": "integer", "description": "最大结果数（正整数，默认50）"},
+                "path": {"type": "string", "description": "搜索目录。默认当前目录。"},
+                "max_results": {"type": "integer", "description": "最大结果数。默认50。"},
             },
             "required": ["pattern"],
         },
@@ -677,12 +665,7 @@ def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=N
     # 硬上限防止 OOM（对齐 fd 设计）
     max_results = min(max_results, GlobLimits.MAX_HARD_LIMIT)
 
-    # 忽略目录统一来自 narnat.json 配置（经 ToolContext 注入），工具内不再写死
-    # str() 兜底：绕过 loader 直接构造 ToolContext 时元素可能是数字/对象，
-    # set() 对不可哈希元素抛 TypeError（配置侧已在 loader 过滤，此处仅防御）
-    extra = getattr(_tool_context, "ignore_dirs", None) if _tool_context is not None else None
-    ignore_dirs = {str(d) for d in extra} if extra else set()
-
+    # 忽略规则来自 .gitignore（见 _collect 内 _GitIgnore），配置项「忽略目录」已废弃
     # 取消门（用户中断时遍历/扫描提前结束；cancel_check 缺省为 None，行为不变）
     gate = _CancelGate(getattr(_tool_context, "cancel_check", None)
                        if _tool_context is not None else None)
@@ -712,6 +695,7 @@ def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=N
     merged: dict[str, float] = {}   # 归一化路径(/分隔) → mtime
     total = 0
     missing_dirs: list[str] = []
+    missing_paths: list[str] = []   # 无通配的具体路径，stat 失败（文件或目录都不存在）
     root_patterns: list[str] = []
 
     for p in patterns:
@@ -723,6 +707,10 @@ def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=N
             try:
                 st = os.stat(target)
             except OSError:
+                # 记录而不是静默 continue：报「无匹配」会让 AI 以为目录对但没
+                # 命中，而真实原因是这个路径根本不存在（与 Read/Edit 的
+                # 「文件不存在」口径对齐）
+                missing_paths.append(p)
                 continue
             if os.path.isdir(target) or os.path.isfile(target):
                 label = p if os.path.isabs(p) else os.path.relpath(target, root)
@@ -748,7 +736,7 @@ def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=N
                 missing_dirs.append(static_dir)
                 continue
             search_dir = joined
-        res, t = _collect(search_dir, [_compile_pattern(rest)], ignore_dirs,
+        res, t = _collect(search_dir, [_compile_pattern(rest)],
                           max_results, skip_hidden_files, gate)
         # 输出前缀保持 AI 写法（相对 path 的用相对、绝对用绝对；
         # Windows 下大小写跟随 pattern 字面量，文件系统不区分大小写，路径仍有效）
@@ -759,7 +747,7 @@ def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=N
 
     if root_patterns:
         res, t = _collect(root, [_compile_pattern(p) for p in root_patterns],
-                          ignore_dirs, max_results, skip_hidden_files, gate)
+                          max_results, skip_hidden_files, gate)
         for rel, mtime in res:
             merged.setdefault(rel.replace("\\", "/"), mtime)
         total += t
@@ -770,11 +758,14 @@ def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=N
 
     if not merged:
         hint = _hidden_files_hint(skip_hidden_files)
+        if missing_paths:
+            # 优先报「不存在」：这是 AI 需要的第一手事实（与 Read/Edit 一致）
+            return f"[错误: 文件不存在: {missing_paths[0]}（当前目录: {os.getcwd()}）]"
         if missing_dirs:
             return f"[错误: 目录不存在: {missing_dirs[0]}（当前目录: {os.getcwd()}）]"
         # 带上实际搜索目录，帮 AI 一次定位（Shell cd 会改变当前目录，无匹配常因目录不对）
-        # 附隐藏文件/忽略目录提示：让静默的坑变成可见路标，AI 无需背规则
-        return f"[无匹配（搜索目录: {root}）]{hint}{_ignored_dirs_hint(ignore_dirs)}"
+        # 附隐藏文件提示：让静默的坑变成可见路标，AI 无需背规则
+        return f"[无匹配（搜索目录: {root}）]{hint}"
 
     results = sorted(merged.items(), key=lambda kv: (-kv[1], kv[0]))
     shown = [
@@ -785,8 +776,7 @@ def execute(pattern: str, path: str = "", max_results: int = 50, _tool_context=N
 
     if total > max_results:
         output += (
-            f"\n...[已截断: 共{total}个匹配项, "
-            f"当前显示按修改时间最近的{max_results}个。增大max_results可获取完整列表]"
+            f"\n...[已截断: 共{total}个匹配项，显示按修改时间最近的{max_results}个]"
         )
 
     return output

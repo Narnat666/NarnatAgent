@@ -133,11 +133,11 @@ CAPABILITY = {
 
 
 def _sniff_bom_encoding(head: bytes):
-    """BOM 嗅探：返回 "utf-16"（Python 解码时按 BOM 自动定字节序）或 None。
+    """BOM 嗅探：返回 "utf-16" 或 None。
 
-    必须在二进制判定之前调用：UTF-16 文本的 ASCII 字符含 NUL 字节，会被
-    "首块含 NUL"误判为二进制（Windows 生态常见：PowerShell 5.1 重定向输出、
-    部分导出文件为 UTF-16LE）。无 BOM 的 UTF-16 不猜（与 ripgrep 一致）。
+    只用于「识别出这是 UTF-16 并拒绝」，不用于正常读取（Read 只读 UTF-8）。
+    Grep/Write 仍需要它：Grep 用它避免把 UTF-16 误判成二进制，Write 用它
+    避免把含 NUL 的 UTF-16 当二进制而丢 diff。
     """
     if head.startswith(b"\xff\xfe") or head.startswith(b"\xfe\xff"):
         return "utf-16"
@@ -145,16 +145,20 @@ def _sniff_bom_encoding(head: bytes):
 
 
 def _detect_text_encoding(head: bytes) -> str:
-    """先嗅探BOM（命中 → utf-16）；否则 utf-8 严格解码成功 → utf-8-sig，失败 → None。
+    """严格 UTF-8 解码成功 → "utf-8-sig"；否则 None。
 
-    只认能百分百确定的两种：BOM 声明的 UTF-16、严格解码通过的 UTF-8。
+    只认能百分百确定的一件事：严格解码通过的 UTF-8（BOM 由 utf-8-sig 吸收）。
     其余一律返回 None，由调用方报「不是 UTF-8」。
 
-    不再回退 gb18030：GB18030 是 GBK 的超集，几乎任何字节序列都能解出字符
+    不回退 gb18030：GB18030 是 GBK 的超集，几乎任何字节序列都能解出字符
     （连随机二进制都能解成一串合法汉字），因此「解得出」不构成「是这个编码」的
     证据。实测同一串字节（UTF-16LE「中文内容测试」与 GBK「-N噀匭筟Km諎」）
     两种读法都能严格通过 —— 判据根本不存在。把猜测当结论输出，AI 会拿错字
     当原文回写，比读不出来严重得多。
+
+    不嗅探 UTF-16 BOM：Read 只读 UTF-8。虽然 BOM 能确定字节序，但 Write/Edit
+    都只写 UTF-8，单方面支持读取会造成「读得到、改不了」的不对称 —— AI 会以为
+    文件可改，实际每次编辑都失败。
 
     尾部窗口重试: 首块8KB可能恰好多字节序列边界截断，utf-8严格解码在截断处
     抛错会误判。**仅当首块读满 8KB**（确认是被窗口切开而非文件本身如此）时，
@@ -163,9 +167,6 @@ def _detect_text_encoding(head: bytes) -> str:
     末尾 3 字节内 → 切成「-N」解码成功 → 整个文件被当成 UTF-8，读出来是
     「-N\uFFFD e」这种半截乱码。
     """
-    encoding = _sniff_bom_encoding(head)
-    if encoding:
-        return encoding
     trial = head
     full_window = len(head) >= _HEAD_SNIFF_BYTES
     for _ in range(3):
@@ -181,15 +182,11 @@ def _detect_text_encoding(head: bytes) -> str:
 
 
 def _write_encoding_for(head: bytes, encoding: str) -> tuple:
-    """原文件编码 → (写回编解码器, 需前置的 BOM 字符)。
+    """写回形态 → (编解码器, 需前置的 BOM 字符)。
 
-    读一遍再写回时必须保持原文件编码形态：固定按 UTF-8 写会把 UTF-16 文件静默
-    改写成 UTF-8、把带 BOM 的 UTF-8 的 BOM 丢掉，按原编码读取的下游工具链拿到
-    坏数据。utf-16-le/be 编解码器自身不写 BOM，需调用方在正文前置 U+FEFF 还原
-    原 BOM 字节（LE=FF FE / BE=FE FF）。
+    Edit/Write 都只处理 UTF-8，所以这里只需决定「原文件有 BOM 要不要保留」：
+    读一遍再写回时丢掉 BOM，会让按原形态读取的下游工具链拿到不同的内容。
     """
-    if encoding == "utf-16":
-        return ("utf-16-be" if head.startswith(b"\xfe\xff") else "utf-16-le"), "\ufeff"
     if encoding == "utf-8-sig":
         return ("utf-8-sig", "") if head.startswith(b"\xef\xbb\xbf") else ("utf-8", "")
     return encoding, ""
@@ -384,17 +381,19 @@ def execute(file_path: str, offset: int = 0, limit: int = 2000,
     except OSError as e:
         return f"[错误: 读取失败: {e}]"
 
-    # BOM 嗅探优先于二进制判定：UTF-16 文本的 ASCII 字符含 NUL 字节，
-    # 会被"首块含 NUL"误判为二进制（判定顺序与 Grep 一致）
-    encoding = _sniff_bom_encoding(head_bytes)
+    # 判定顺序（与 Edit 一致）：先识别 BOM 声明的 UTF-16，再判二进制，再判编码。
+    # 顺序不是随意定的：UTF-16 文本的 ASCII 字符含 NUL，先判 NUL 会把它报成
+    # 「二进制文件」—— 而它确实是文本，只是编码不支持。两处报同一件事时必须
+    # 用同一句话，否则 AI 对同一个文件会得到两个结论。
+    if _sniff_bom_encoding(head_bytes):
+        return f"[错误: 不是 UTF-8: {file_path}]"
+    if b"\x00" in head_bytes:
+        return f"[错误: 二进制文件: {file_path}]"
+    encoding = _detect_text_encoding(head_bytes)
     if encoding is None:
-        if b"\x00" in head_bytes:
-            return f"[错误: 二进制文件: {file_path}]"
-        encoding = _detect_text_encoding(head_bytes)
-        if encoding is None:
-            # 探测不出、且严格 UTF-8 解码失败：只报这个确定的事实。
-            # 不猜是哪一种编码（判据不存在，见 _detect_text_encoding）。
-            return f"[错误: 不是 UTF-8: {file_path}]"
+        # 严格 UTF-8 解码失败：只报这个确定的事实。
+        # 不猜是哪一种编码（判据不存在，见 _detect_text_encoding）。
+        return f"[错误: 不是 UTF-8: {file_path}]"
 
     try:
         with open(file_path, "r", encoding=encoding, errors="replace") as f:

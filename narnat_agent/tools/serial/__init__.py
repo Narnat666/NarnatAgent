@@ -54,7 +54,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "Serial",
-        "description": "多设备持久串口：连接后保持，同一串口重复调用复用同一会话。",
+        "description": "多设备持久串口：连接后保持，重复调用复用同一会话。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -62,116 +62,88 @@ DEFINITION = {
                     "type": "string",
                     "enum": ["scan", "connect", "exec", "raw_exec", "input", "signal", "status", "close"],
                     "description": (
-                        "操作类型（默认exec）。"
+                        "操作类型。默认 exec。"
                         "scan 扫描本机可用串口；"
-                        "connect 打开串口连接（自动分配或指定session_id）；"
+                        "connect 打开串口连接；"
                         "exec 发送命令，等待提示符或超时返回；"
-                        "raw_exec 发送命令，纯超时返回（不检测提示符，适合裸机/AT固件等无标准提示符设备）；"
+                        "raw_exec 发送命令，纯超时返回，不检测提示符；"
                         "input 发送交互输入；"
-                        "signal 设置DTR/RTS信号线（ESP32进bootloader等复位场景）；"
+                        "signal 设置 DTR/RTS 信号线；"
                         "status 查看所有串口会话状态；"
-                        "close 关闭指定会话（省略session_id/port时关闭全部会话）"
+                        "close 关闭指定会话，省略 session_id/port 时关闭全部。"
                     ),
                 },
                 "port": {
                     "type": "string",
-                    "description": (
-                        "串口设备名，如COM1、/dev/ttyUSB0（connect时必填；"
-                        "其他action可直接填已连接的串口名指定会话）"
-                    ),
+                    "description": "串口设备名，如 COM1、/dev/ttyUSB0。connect 时必填。",
                 },
                 "baudrate": {
                     "type": "integer",
-                    "description": "波特率，默认115200",
+                    "description": "波特率。默认115200。",
                 },
                 "databits": {
                     "type": "integer",
-                    "description": "数据位5/6/7/8，默认8",
+                    "description": "数据位。5/6/7/8，默认8。",
                 },
                 "parity": {
                     "type": "string",
-                    "description": "校验位N/E/O/M/S，默认N",
+                    "description": "校验位。N/E/O/M/S，默认N。",
                 },
                 "stopbits": {
                     "type": "number",
-                    "description": "停止位1/1.5/2，默认1",
+                    "description": "停止位。1/1.5/2，默认1。",
                 },
                 "flow_control": {
                     "type": "string",
-                    "description": "流控none/hardware/software，默认none",
+                    "description": "流控。none/hardware/software，默认none。",
                 },
                 "line_ending": {
                     "type": "string",
-                    "description": "行结束符\\n/\\r\\n/\\r，默认\\n",
+                    "description": "行结束符。\\n/\\r\\n/\\r，默认\\n。",
                 },
                 "prompt_pattern": {
                     "type": "string",
-                    "description": "自定义提示符正则（给定时替代默认字符集 $#%>:❯~）",
+                    "description": "自定义提示符正则。给定时替代默认字符集 $#%>:❯~。",
                 },
                 "encoding": {
                     "type": "string",
-                    "description": (
-                        "串口文本编码（可选，默认utf-8）。国产设备/GBK输出场景可设gbk；"
-                        "解码失败时自动回退到utf-8 replace"
-                    ),
+                    "description": "文本编码。默认utf-8；解码失败回退 utf-8 replace。",
                 },
                 "command": {
                     "type": "string",
-                    "description": (
-                        "发送的命令（action=exec/raw_exec时使用）；"
-                        "raw_exec时为空则纯监听：不发送，仅在timeout内收集设备主动输出"
-                    ),
+                    "description": "发送的命令。raw_exec 时为空则纯监听，仅在 timeout 内收集设备输出。",
                 },
                 "wait_for": {
                     "type": "string",
-                    "description": (
-                        "等待输出中出现的正则（可选，exec/raw_exec时使用）。"
-                        "命中即返回，适合'等待设备启动完成/等待特定响应'场景；"
-                        "非法正则自动按字面量匹配；未指定时按提示符检测判断命令结束。"
-                    ),
+                    "description": "等待输出中出现的正则。命中即返回。未指定时按提示符判断结束。",
                 },
                 "input": {
                     "type": "string",
-                    "description": (
-                        "交互输入内容（action=input时使用，如密码、y/n确认）。"
-                        "发送 ^C 可中断设备上仍在运行的命令；"
-                        "其他文本追加行结束符发送，空闲时等同 exec 执行命令"
-                    ),
+                    "description": "交互输入内容。发送 ^C 可中断设备上运行中的命令。",
                 },
                 "dtr": {
                     "type": "string",
-                    "description": (
-                        "DTR信号线状态（action=signal时使用）：high/low/pulse（pulse=脉冲后恢复原状）"
-                    ),
+                    "description": "DTR信号线状态。high/low/pulse。",
                 },
                 "rts": {
                     "type": "string",
-                    "description": (
-                        "RTS信号线状态（action=signal时使用）：high/low/pulse"
-                    ),
+                    "description": "RTS信号线状态。high/low/pulse。",
                 },
                 "pulse_ms": {
                     "type": "integer",
-                    "description": "脉冲时长毫秒（action=signal且值为pulse时使用，默认100，上限5000）",
+                    "description": "脉冲时长毫秒。默认100，上限5000。",
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": (
-                        "超时秒数（正整数，默认120）。"
-                        "超时返回已收集输出，设备上命令仍在运行，可用input发送^C中断"
-                    ),
+                    "description": "超时秒数。默认120。超时返回已收集输出。",
                 },
                 "session_id": {
                     "type": "integer",
-                    "description": (
-                        "终端ID（默认自动分配；0=第一个串口终端）。"
-                        "exec/raw_exec/input 省略时自动选择唯一会话（多个会话时需指定），"
-                        "close 省略时关闭全部会话"
-                    ),
+                    "description": "终端ID。默认自动分配，0=第一个串口终端。",
                 },
                 "max_output_chars": {
                     "type": "integer",
-                    "description": "最大输出字符数（正整数，默认8000）",
+                    "description": "最大输出字符数。默认8000。",
                 },
             },
             "required": [],
@@ -266,7 +238,7 @@ def _scan() -> str:
         from serial.tools.list_ports import comports
         ports = list(comports())
     except ImportError:
-        return error_line("无法导入 pyserial，请确认已安装")
+        return error_line("无法导入 pyserial")
     except Exception as e:
         return error_line(f"扫描串口失败: {e}")
     if not ports:
@@ -310,7 +282,7 @@ def _connect(port: str, baudrate: int = 115200, databits: int = 8,
                 continue
             existing_port = s.port.upper() if sys.platform == "win32" else s.port
             if existing_port == port_key and s.is_alive:
-                return error_line(f"{port} 已被终端{sid}占用，请先 close 终端{sid}")
+                return error_line(f"{port} 已被终端{sid}占用")
 
 
         if session_id >= 0:
@@ -329,7 +301,7 @@ def _connect(port: str, baudrate: int = 115200, databits: int = 8,
             alloc_id = _allocate_session_id()
             if alloc_id < 0:
                 active = list(SerialRuntime.sessions.keys())
-                return error_line(f"已达最大会话数({SerialRuntime.max_sessions})，当前终端: {active}，请先 close 释放")
+                return error_line(f"已达最大会话数({SerialRuntime.max_sessions})，当前终端: {active}")
 
         # 预留 slot（置 None），防止锁外构造期间其他线程抢占同一 alloc_id
         SerialRuntime.sessions[alloc_id] = None
@@ -393,7 +365,7 @@ def _exec(session_id: int, port: str, command: str, timeout: int = 120,
     if not command:
         return error_line("exec 需要提供 command")
     if timeout <= 0:
-        return error_line("timeout 需为正整数（秒）")
+        return error_line("timeout需为正整数（秒）")
 
     if _tool_context and _tool_context.max_timeout_seconds > 0:
         timeout = min(timeout, _tool_context.max_timeout_seconds)
@@ -410,7 +382,7 @@ def _exec(session_id: int, port: str, command: str, timeout: int = 120,
 
     if not session.is_alive:
         _drop_dead_session(sid, session)
-        return error_line(f"终端{sid}串口已断开，请重新 connect")
+        return error_line(f"终端{sid}串口已断开")
 
     try:
         with SerialRuntime.active_exec_lock:
@@ -439,7 +411,7 @@ def _raw_exec(session_id: int, port: str, command: str, timeout: int = 120,
       设备主动输出（boot日志、登录提示、刷屏日志等）
     """
     if timeout <= 0:
-        return error_line("timeout 需为正整数（秒）")
+        return error_line("timeout需为正整数（秒）")
 
     if _tool_context and _tool_context.max_timeout_seconds > 0:
         timeout = min(timeout, _tool_context.max_timeout_seconds)
@@ -458,7 +430,7 @@ def _raw_exec(session_id: int, port: str, command: str, timeout: int = 120,
 
     if not session.is_alive:
         _drop_dead_session(sid, session)
-        return error_line(f"终端{sid}串口已断开，请重新 connect")
+        return error_line(f"终端{sid}串口已断开")
 
     try:
         with SerialRuntime.active_exec_lock:
@@ -481,7 +453,7 @@ def _input(session_id: int, port: str, text: str, timeout: int = 120,
     if not text:
         return error_line("input 需要提供 input 内容")
     if timeout <= 0:
-        return error_line("timeout 需为正整数（秒）")
+        return error_line("timeout需为正整数（秒）")
 
     if _tool_context and _tool_context.max_timeout_seconds > 0:
         timeout = min(timeout, _tool_context.max_timeout_seconds)
@@ -498,7 +470,7 @@ def _input(session_id: int, port: str, text: str, timeout: int = 120,
 
     if not session.is_alive:
         _drop_dead_session(sid, session)
-        return error_line(f"终端{sid}串口已断开，请重新 connect")
+        return error_line(f"终端{sid}串口已断开")
 
     try:
         with SerialRuntime.active_exec_lock:
@@ -541,7 +513,7 @@ def _signal(session_id: int, port: str, dtr: str = "", rts: str = "",
 
     if not session.is_alive:
         _drop_dead_session(sid, session)
-        return error_line(f"终端{sid}串口已断开，请重新 connect")
+        return error_line(f"终端{sid}串口已断开")
 
     result = session.set_signals(dtr=dtr, rts=rts, pulse_ms=pulse_ms)
     return f"[终端{sid}] {result}{clamp_hint}"
@@ -671,10 +643,10 @@ def _resolve_session_id(session_id: int, port: str = "") -> tuple[int, "SerialSe
     with SerialRuntime.sessions_lock:
         if session_id >= 0:
             if session_id not in SerialRuntime.sessions:
-                raise ValueError(f"终端{session_id}未连接，请先 connect")
+                raise ValueError(f"终端{session_id}未连接")
             session = SerialRuntime.sessions[session_id]
             if session is None:
-                raise ValueError(f"终端{session_id}正在连接中，请稍候")
+                raise ValueError(f"终端{session_id}正在连接中")
             return session_id, session
 
         if port:
@@ -688,7 +660,7 @@ def _resolve_session_id(session_id: int, port: str = "") -> tuple[int, "SerialSe
             if matched:
                 sid = matched[0]
                 return sid, SerialRuntime.sessions[sid]
-            raise ValueError(f"端口 {port} 未连接，请先 connect 或 status 查看已连接的串口")
+            raise ValueError(f"端口 {port} 未连接")
 
         # 自动选择：跳过 None 预留 slot
         active = {k: v for k, v in SerialRuntime.sessions.items() if v is not None}
@@ -696,10 +668,10 @@ def _resolve_session_id(session_id: int, port: str = "") -> tuple[int, "SerialSe
             sid = list(active.keys())[0]
             return sid, active[sid]
         elif len(active) == 0:
-            raise ValueError("无活跃会话，请先 connect")
+            raise ValueError("无活跃会话")
         else:
             summaries = [f"终端{k}: {v.prompt_info}" for k, v in sorted(active.items())]
             raise ValueError(
-                f"有{len(active)}个会话，请指定 session_id 或 port（串口设备名，如COM1、/dev/ttyUSB0）。\n"
+                f"有{len(active)}个会话，需用 session_id 或 port 指定。\n"
                 + "\n".join(summaries)
             )

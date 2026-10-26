@@ -65,7 +65,7 @@ DEFINITION = {
         "name": "Terminal",
         "description": (
             "多设备SSH：远程执行命令、设备间传输文件。"
-            "连接后保持（复用SSH连接），每条命令独立执行完毕返回退出码与输出。"
+            "连接后保持，每条命令独立执行并返回退出码与输出。"
         ),
         "parameters": {
             "type": "object",
@@ -74,66 +74,51 @@ DEFINITION = {
                     "type": "string",
                     "enum": ["connect", "exec", "status", "close", "transfer"],
                     "description": (
-                        "操作类型（默认exec）。"
-                        "connect 建立SSH会话（成功后返回该设备的dev编号）；"
+                        "操作类型。默认 exec。"
+                        "connect 建立SSH会话，返回该设备的 dev 编号；"
                         "exec 在指定设备执行命令；"
                         "status 查看所有设备状态；"
-                        "close 关闭指定设备会话（省略host时关闭全部会话）；"
-                        "transfer 在任意设备间传输文件（本机↔被控设备、被控设备↔被控设备）"
+                        "close 关闭指定设备会话，省略 host 时关闭全部；"
+                        "transfer 在设备间传输文件。"
                     ),
                 },
                 "host": {
                     "type": "string",
                     "description": (
-                        "设备引用，统一用dev编号：dev0=本机（本机执行命令请用Shell工具），"
-                        "dev1..devn=已connect的被控设备。"
-                        "connect时填被控设备IP/域名（连接成功后返回其dev编号）；"
-                        "exec/close 填dev编号：exec 省略时自动选择唯一会话（多个会话时需指定），"
-                        "close 省略时关闭全部会话"
+                        "设备编号。dev0=本机（本机命令用 Shell），dev1..devn=已 connect 的被控设备。"
+                        "connect 时填 IP/域名；exec/close 填 dev 编号，省略时自动选唯一会话。"
                     ),
                 },
-                "username": {"type": "string", "description": "SSH用户名（connect时使用）"},
-                "port": {"type": "integer", "description": "SSH端口（默认22）"},
+                "username": {"type": "string", "description": "SSH用户名。connect 时使用。"},
+                "port": {"type": "integer", "description": "SSH端口。默认22。"},
                 "password": {
                     "type": "string",
-                    "description": (
-                        "认证凭据（connect时使用）：登录密码或私钥路径（如~/.ssh/id_rsa），"
-                        "不填则自动尝试默认密钥"
-                    ),
+                    "description": "登录密码或私钥路径。connect 时使用，不填则尝试默认密钥。",
                 },
-                "command": {"type": "string", "description": "执行的命令（action=exec时使用）"},
+                "command": {"type": "string", "description": "执行的命令。action=exec 时使用。"},
                 "timeout": {
                     "type": "integer",
-                    "description": (
-                        "命令超时秒数（正整数）。exec默认120，超时后终止命令通道并明确报错；"
-                        "connect默认15，连不上时快速报错"
-                    ),
+                    "description": "超时秒数。exec 默认120，connect 默认15。",
                 },
                 "max_output_chars": {
                     "type": "integer",
-                    "description": "最大输出字符数（默认8000，超出截断并提示）",
+                    "description": "最大输出字符数。默认8000，超出截断。",
                 },
                 "source_host": {
                     "type": "string",
-                    "description": (
-                        "传输源设备：dev0=本机（默认，可省略），"
-                        "dev1..devn=被控设备（action=transfer时使用）"
-                    ),
+                    "description": "传输源设备。dev0=本机（默认），dev1..devn=被控设备。",
                 },
                 "source_path": {
                     "type": "string",
-                    "description": "源文件在源设备上的绝对路径（action=transfer时使用）",
+                    "description": "源文件在源设备上的绝对路径。",
                 },
                 "target_host": {
                     "type": "string",
-                    "description": (
-                        "传输目标设备：dev0=本机（默认，可省略），"
-                        "dev1..devn=被控设备（action=transfer时使用）"
-                    ),
+                    "description": "传输目标设备。dev0=本机（默认），dev1..devn=被控设备。",
                 },
                 "target_path": {
                     "type": "string",
-                    "description": "目标文件在目标设备上的绝对路径（action=transfer时使用）",
+                    "description": "目标文件在目标设备上的绝对路径。",
                 },
             },
             "required": [],
@@ -236,10 +221,10 @@ def _list_devices() -> str:
 
 def _dev_hint_locked() -> str:
     """设备标识错误时的统一指导（调用者需持有TerminalRuntime.sessions_lock）"""
-    base = "设备引用统一用devN编号(dev0=本机, dev1..devn=被控设备；本机执行命令请用Shell工具)"
+    base = "设备引用统一用devN编号(dev0=本机, dev1..devn=被控设备)"
     devs = _list_devices_locked()
     if devs == "(无)":
-        return f"{base}。当前无已连接设备，请先connect"
+        return f"{base}。当前无已连接设备"
     return f"{base}。当前已连接: {devs}"
 
 
@@ -268,7 +253,7 @@ def _file_tool_device_hint() -> str:
     base = "设备引用统一用devN编号(dev0=本机, dev1..devn=被控设备)"
     devs = _list_devices()
     if devs == "(无)":
-        return f"{base}。当前无已连接设备，请先Terminal connect"
+        return f"{base}。当前无已连接设备"
     return f"{base}。当前已连接: {devs}"
 
 
@@ -350,7 +335,7 @@ def _resolve_session_id(session_id: int, host: str = "") -> tuple:
         if session_id >= 0:
             if session_id not in TerminalRuntime.sessions:
                 raise ValueError(
-                    f"{_dev_label(session_id)}未连接，请先connect。当前已连接: {_list_devices_locked()}")
+                    f"{_dev_label(session_id)}未连接。当前已连接: {_list_devices_locked()}")
             return session_id, TerminalRuntime.sessions[session_id]
 
         if host:
@@ -360,11 +345,10 @@ def _resolve_session_id(session_id: int, host: str = "") -> tuple:
                 d = int(m.group(1))
                 if d == 0:
                     raise ValueError(
-                        "dev0是本机，无SSH会话。本机执行命令请用 Shell 工具"
-                        "（Terminal 的 exec 用于SSH远程设备，dev0仅用于transfer）")
+                        "dev0是本机，无SSH会话（dev0 仅用于 transfer）")
                 sid = d - 1
                 if sid >= TerminalRuntime.max_sessions or sid not in TerminalRuntime.sessions:
-                    raise ValueError(f"dev{d}未连接，请先connect。当前已连接: {_list_devices_locked()}")
+                    raise ValueError(f"dev{d}未连接。当前已连接: {_list_devices_locked()}")
                 return sid, TerminalRuntime.sessions[sid]
 
             # 宽松匹配: 允许直接用IP或用户名@IP引用已连接设备，避免AI回查dev编号
@@ -375,17 +359,17 @@ def _resolve_session_id(session_id: int, host: str = "") -> tuple:
             if len(matched) > 1:
                 detail = "、".join(f"dev{s + 1}({TerminalRuntime.sessions[s].username}"
                                    f"@{TerminalRuntime.sessions[s].host})" for s in matched)
-                raise ValueError(f"多个会话匹配 '{h}'，请用dev编号区分: {detail}")
+                raise ValueError(f"多个会话匹配 '{h}'，需用dev编号区分: {detail}")
             raise ValueError(_dev_hint_locked())
 
         if len(TerminalRuntime.sessions) == 1:
             sid = list(TerminalRuntime.sessions.keys())[0]
             return sid, TerminalRuntime.sessions[sid]
         elif len(TerminalRuntime.sessions) == 0:
-            raise ValueError("无活跃会话，请先connect")
+            raise ValueError("无活跃会话")
         keys = [f"dev{s + 1}({TerminalRuntime.sessions[s].username}@{TerminalRuntime.sessions[s].host})"
                 for s in sorted(TerminalRuntime.sessions.keys())]
-        raise ValueError(f"有多个会话，请指定host=dev编号，当前已连接: {'、'.join(keys)}")
+        raise ValueError(f"有多个会话，需用 host=devN 指定。当前已连接: {'、'.join(keys)}")
 
 
 def get_session(session_id: int = -1, host: str = "") -> Optional["SSHSession"]:
@@ -468,12 +452,12 @@ def _looks_like_key_path(p: str) -> bool:
 
 
 def _auth_hint(password: str) -> str:
-    """认证失败时按 password 形态给出排查提示（两种文案，其余留空）"""
+    """认证失败时按 password 形态补充可确定的事实（两种，其余留空）。"""
     p = (password or "").strip()
     if not p:
-        return "。未提供password，大多数设备需要密码认证，请在password参数填登录密码后重试"
+        return "。未提供 password"
     if _looks_like_key_path(p) and not os.path.isfile(os.path.expanduser(p)):
-        return "。password疑似私钥路径但本地文件不存在，请确认路径或改填登录密码"
+        return "。password 是路径但该文件不存在"
     return ""
 
 
@@ -499,7 +483,7 @@ def _connect(host: str, username: str, port: int = 22,
              session_id: int = -1, timeout: int = 15) -> str:
     """建立SSH会话。timeout为连接超时（默认15秒），黑洞IP快速失败。"""
     if not host or not username:
-        return error_line("connect需要提供host和username")
+        return error_line("connect 需要提供 host 和 username")
     if timeout <= 0:
         timeout = 15  # timeout<=0 兜底回默认值（保持旧契约）
 
@@ -510,7 +494,7 @@ def _connect(host: str, username: str, port: int = 22,
             if session_id in TerminalRuntime.sessions:
                 existing = TerminalRuntime.sessions[session_id]
                 if existing is None:
-                    return error_line(f"{_dev_label(session_id)}正在连接中，请稍后重试")
+                    return error_line(f"{_dev_label(session_id)}正在连接中")
                 if existing.alive:
                     return f"[{_dev_label(session_id)}已连接: {existing.username}@{existing.host}]"
                 # 死会话: 关闭回收后复用该槽位
@@ -525,18 +509,17 @@ def _connect(host: str, username: str, port: int = 22,
             if alloc_id < 0:
                 return error_line(
                     f"已达最大会话数({TerminalRuntime.max_sessions})，当前已连接: "
-                    f"{_list_devices_locked()}，请先close释放")
+                    f"{_list_devices_locked()}")
 
         # 锁内预留占位（防锁外构造期间另一个 connect 抢同一槽位）
         TerminalRuntime.sessions[alloc_id] = None
 
         # 相同设备重复连接提示（仅提示，不阻止）
-        dup_refs, dup_devs = [], []
+        dup_devs = []
         for sid, s in sorted(TerminalRuntime.sessions.items()):
             if s is None or sid == alloc_id:
                 continue
             if s.host == host and s.username == username:
-                dup_refs.append(f"dev{sid + 1}")
                 dup_devs.append(_dev_label(sid))
 
     # 锁外建连（可能阻塞数秒，不持锁）
@@ -545,7 +528,7 @@ def _connect(host: str, username: str, port: int = 22,
                              key_path=key_path, password=password, timeout=timeout)
     except paramiko.AuthenticationException:
         _release_slot(alloc_id)
-        return error_line(f"认证失败({username}@{host})，请检查password{_auth_hint(password)}")
+        return error_line(f"认证失败({username}@{host}){_auth_hint(password)}")
     except (paramiko.SSHException, OSError) as e:
         _release_slot(alloc_id)
         return error_line(f"SSH连接失败({username}@{host}): {e}")
@@ -558,8 +541,7 @@ def _connect(host: str, username: str, port: int = 22,
 
     parts = [f"[已连接 {_dev_label(alloc_id)}: {username}@{host}]"]
     if dup_devs:
-        parts.append(f"[注意: 相同设备已有连接: {'、'.join(dup_devs)}。"
-                     f"如非必要请勿重复连接，可直接用 host={'、'.join(dup_refs)} 执行命令]")
+        parts.append(f"[注意: 相同设备已有连接: {'、'.join(dup_devs)}]")
     banner = _fold_banner(session.banner)
     if banner:
         parts.append(banner)
@@ -605,7 +587,7 @@ def _exec(session_id: int, host: str, command: str,
           timeout: int = 120, max_output_chars: int = 8000, _tool_context=None) -> str:
     """在指定会话中执行命令（单通道）。"""
     if not command:
-        return error_line("exec需要提供command")
+        return error_line("exec 需要提供 command")
     if timeout <= 0:
         return error_line("timeout需为正整数（秒）")
 
@@ -624,13 +606,11 @@ def _exec(session_id: int, host: str, command: str,
         return error_line(str(e))
 
     if session is None:
-        return error_line(f"{_dev_label(sid)}正在连接中，请稍后重试")
+        return error_line(f"{_dev_label(sid)}正在连接中")
 
     # 断线自愈：凭据保留，设备恢复后重试可自动连上
     if not session.alive and not _try_reconnect(session):
-        return error_line(
-            f"{_dev_label(sid)}连接中断，自动重连失败（设备可能未开机/网络不通）。"
-            f"设备恢复后重试将自动重连")
+        return error_line(f"{_dev_label(sid)}连接中断，自动重连失败")
 
     try:
         with TerminalRuntime.active_exec_lock:
@@ -643,13 +623,12 @@ def _exec(session_id: int, host: str, command: str,
                 TerminalRuntime.active_exec_session = None
         out = f"[{_dev_label(sid)}] {result}"
         if hint_cd_only:
-            out += ("\n[提示: 单通道执行下 cd 不影响后续命令，"
-                    "请用 'cd X && 命令'；Windows 跨盘符请用 'cd /d X && 命令']")
+            out += "\n[提示: cd 仅对本次命令生效]"
         return out
     except Exception as e:
-        # 执行中连接掉线：重连成功让 AI 直接重试（原命令结果未知，不能当成功）
+        # 执行中连接掉线：重连成功说明原命令结果未知，不能当成功
         if not session.alive and _try_reconnect(session):
-            return error_line(f"{_dev_label(sid)}连接曾中断，已自动重连，请重试命令")
+            return error_line(f"{_dev_label(sid)}连接曾中断，已自动重连；原命令结果未知")
         return error_line(f"{_dev_label(sid)}命令执行失败: {e}")
 
 
@@ -739,7 +718,7 @@ def _transfer_local_to_remote(local_path: str, session, target_ref: str,
         return error_line(f"源文件不存在: {local_path}")
     if os.path.isdir(local_path):
         return error_line(
-            f"源是目录，transfer仅支持文件传输。请先打包为文件再传输: {local_path}")
+            f"源是目录，transfer 仅支持文件: {local_path}")
 
     size = os.path.getsize(local_path)
     err = _check_transfer_size(size, max_transfer_mb)
@@ -749,7 +728,7 @@ def _transfer_local_to_remote(local_path: str, session, target_ref: str,
     try:
         if not _ensure_remote_dir(session, target_path):
             parent = target_path.rsplit("/", 1)[0] or "/"
-            return error_line(f"无法创建远程目标目录: {parent}（可能无写权限）")
+            return error_line(f"无法创建远程目标目录: {parent}")
         sftp = session.open_sftp()
         try:
             sftp.put(local_path, target_path)
@@ -770,7 +749,7 @@ def _transfer_remote_to_local(session, source_ref: str, source_path: str,
     size, is_dir = info
     if is_dir:
         return error_line(
-            f"源是目录，transfer仅支持文件传输。请先打包为文件再传输: {source_path}")
+            f"源是目录，transfer 仅支持文件: {source_path}")
 
     err = _check_transfer_size(size, max_transfer_mb)
     if err:
@@ -805,7 +784,7 @@ def _transfer_remote_to_remote(src_session, source_ref: str, source_path: str,
     size, is_dir = info
     if is_dir:
         return error_line(
-            f"源是目录，transfer仅支持文件传输。请先打包为文件再传输: {source_path}")
+            f"源是目录，transfer 仅支持文件: {source_path}")
 
     err = _check_transfer_size(size, max_transfer_mb)
     if err:
@@ -815,7 +794,7 @@ def _transfer_remote_to_remote(src_session, source_ref: str, source_path: str,
     try:
         if not _ensure_remote_dir(dst_session, target_path):
             parent = target_path.rsplit("/", 1)[0] or "/"
-            return error_line(f"无法创建远程目标目录: {parent}（可能无写权限）")
+            return error_line(f"无法创建远程目标目录: {parent}")
         src_sftp = src_session.open_sftp()
         try:
             dst_sftp = dst_session.open_sftp()
@@ -843,9 +822,9 @@ def _transfer(source_host: str, source_path: str, target_host: str,
               target_path: str, _tool_context=None) -> str:
     """设备间文件传输: 本机↔被控设备、被控设备↔被控设备"""
     if not source_path:
-        return error_line("transfer需要提供source_path（源文件路径）")
+        return error_line("transfer 需要提供 source_path")
     if not target_path:
-        return error_line("transfer需要提供target_path（目标文件路径）")
+        return error_line("transfer 需要提供 target_path")
 
     for ref in (source_host, target_host):
         err = _device_error(ref)
@@ -858,7 +837,7 @@ def _transfer(source_host: str, source_path: str, target_host: str,
     if src_dev == dst_dev and source_path == target_path:
         return error_line("源和目标相同，无需传输")
     if not src_dev and not dst_dev:
-        return error_line("源和目标都是本机(dev0)，请使用本地文件操作工具")
+        return error_line("源和目标都是本机(dev0)")
 
     max_transfer_mb = _tool_context.max_transfer_mb if _tool_context is not None else 100
 
@@ -867,12 +846,12 @@ def _transfer(source_host: str, source_path: str, target_host: str,
     if src_dev:
         src_session = _get_transfer_session(src_dev)
         if src_session is None:
-            return error_line(f"源设备 {source_host} 未连接或已断开，请先connect。"
+            return error_line(f"源设备 {source_host} 未连接或已断开。"
                               f"当前已连接: {_list_devices()}")
     if dst_dev:
         dst_session = _get_transfer_session(dst_dev)
         if dst_session is None:
-            return error_line(f"目标设备 {target_host} 未连接或已断开，请先connect。"
+            return error_line(f"目标设备 {target_host} 未连接或已断开。"
                               f"当前已连接: {_list_devices()}")
 
     if src_session is None:

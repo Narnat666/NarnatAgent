@@ -328,6 +328,9 @@ def main():
         "--include-module=PIL.Image",
         "--include-module=PIL.ImageOps",
         "--include-package-data=PIL",
+        # pathspec：Grep/Glob 的 .gitignore 过滤依赖它。纯 Python 包，
+        # 静态分析能跟上 import，但显式声明可避免将来改成延迟导入时漏掉。
+        "--include-module=pathspec",
     ]
     for name in NOFOLLOW_IMPORTS:
         cmd.append("--nofollow-import-to=%s" % name)

@@ -295,10 +295,13 @@ class SSHSession:
             tail_raw = tail_raw[nl + 1:]
         head_text = self._decode_edge(head_raw, is_head=True)
         tail_text = self._decode_edge(tail_raw, is_head=False)
+        # 单位分开表述：总量是字节（收到的原始字节），保留量是解码后字符，
+        # 两者不可相加（多字节字符使字节数 ≠ 字符数）。用「+」连接会被误读为
+        # 可加关系，改成逗号分隔并明确「中段已丢弃」。
         return (
             head_text
-            + f"\n...[中间截断: 输出共{buf.total}字节, 已保留首{len(head_text)}字符"
-              f"+尾{len(tail_text)}字符。增大max_output_chars可获取完整输出]\n"
+            + f"\n...[中间截断: 原输出{buf.total}字节，中段已丢弃。"
+              f"已保留首{len(head_text)}字符、尾{len(tail_text)}字符]\n"
             + tail_text
         )
 
@@ -322,7 +325,7 @@ class SSHSession:
             [stderr]\\n{stderr}             ← stderr 非空时附加
         超时（返回，不抛）:
             {已收集输出}
-            [错误: 命令超时（{timeout}秒），已终止该命令通道。命令可能仍在远端运行，长时间任务请用 nohup/setsid 后台化后轮询日志]
+            [错误: 命令超时（{timeout}秒），已终止该命令通道。命令未在远端被终止]
         中断（ESC，返回）:
             {已收集输出}\\n[用户中断]
         """
@@ -334,7 +337,7 @@ class SSHSession:
             try:
                 self.reconnect()
             except Exception as e:
-                return error_line(f"连接中断，自动重连失败（设备可能未开机/网络不通）: {e}")
+                return error_line(f"连接中断，自动重连失败: {e}")
 
         if max_output_chars <= 0:
             return error_line("max_output_chars需为正整数")
@@ -398,12 +401,12 @@ class SSHSession:
                 if timed_out:
                     text = self._render_all(out_buf, err_buf)
                     msg = (f"命令超时（{timeout}秒），已终止该命令通道。"
-                           f"命令可能仍在远端运行，长时间任务请用 nohup/setsid 后台化后轮询日志")
+                           f"命令未在远端被终止")
                     return f"{text}\n{error_line(msg)}" if text else error_line(msg)
 
                 if interrupted:
                     text = self._render_all(out_buf, err_buf)
-                    tag = "[用户中断: 已关闭命令通道；远端进程可能仍在运行]"
+                    tag = "[用户中断: 已关闭命令通道，未终止远端进程]"
                     return f"{text}\n{tag}" if text else tag
 
                 rc = chan.recv_exit_status()
@@ -411,12 +414,12 @@ class SSHSession:
                 # 真实命令退出码范围为 0-255，-1 只可能是"无退出码"——不能当成功返回，
                 # 否则 AI 与 UI 都看不到失败（命令结果未知）
                 if rc == -1:
-                    raise IOError("未收到命令退出码（连接可能中断），命令结果未知")
+                    raise IOError("未收到命令退出码（服务端未提供退出码），命令结果未知")
             except Exception:
                 if self._interrupt.is_set():
                     # ESC 从其他线程关闭了飞行中通道: 读循环异常退出属正常中断路径
                     text = self._render_all(out_buf, err_buf)
-                    tag = "[用户中断: 已关闭命令通道；远端进程可能仍在运行]"
+                    tag = "[用户中断: 已关闭命令通道，未终止远端进程]"
                     return f"{text}\n{tag}" if text else tag
                 raise
             finally:
@@ -430,6 +433,8 @@ class SSHSession:
                         pass
 
             text = self._render_all(out_buf, err_buf)
+            # 退出码 0 不输出：无退出码行即成功（与 Shell 口径一致）
+            rc_text = "" if rc == 0 else rc_line(rc)
             if text:
-                return f"{rc_line(rc)}\n{text}"
-            return rc_line(rc)
+                return f"{rc_text}\n{text}" if rc_text else text
+            return rc_text or "(无输出)"

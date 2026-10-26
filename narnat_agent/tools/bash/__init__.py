@@ -16,7 +16,6 @@ from typing import Optional
 from . import truncate_store
 from .. import safety
 from ..exec_signal import rc_line, error_line, tag_error, safe_cut_points, strip_tags
-from ..token_estimate import estimate_text_tokens
 from ..tool_context import AWAIT_CONFIRM
 from ..param_utils import to_bool
 
@@ -182,56 +181,36 @@ DEFINITION = {
         "name": "Shell",
         "description": (
             f"本地Shell — 在{BashRuntime.PLATFORM_LABEL}执行命令。"
-            "前台同步执行并返回输出；支持后台任务（提交、查询、等待、取消）。"
+            "每次调用都是新进程：cd 与 set/export 不作用于后续调用，"
+            "换目录的写法是 'cd X && 命令'；Windows cmd 只执行命令的第一行。"
+            "前台同步返回输出，支持后台任务。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": (
-                        "命令（前台执行或 background=true 提交时必填；"
-                        "bg=status/wait/cancel 时可省略）"
-                    ),
+                    "description": "命令。前台执行或 background=true 时必填；bg 管理操作可省略。",
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": (
-                        "前台=超时秒数（正整数，默认120，超时后命令被终止）；"
-                        "bg=wait时=最长等待秒数"
-                    ),
+                    "description": "前台=超时秒数，默认120。bg=wait 时=最长等待秒数。",
                 },
                 "max_output_chars": {
                     "type": "integer",
-                    "description": (
-                        "最大输出字符数（正整数，默认4000，仅前台命令生效；"
-                        "超出时保留首尾，完整输出写入临时文件并在提示中给出该文件路径）"
-                    ),
+                    "description": "最大输出字符数，默认4000。仅前台生效。超出保留首尾，完整输出落盘并在提示中给出路径。",
                 },
                 "background": {
                     "type": "boolean",
-                    "description": (
-                        "true=命令在后台执行，立即返回 bgN 编号（不阻塞）；"
-                        "结果写入会话专属临时目录的 bgN.log（提交时返回该文件绝对路径）；"
-                        "用 Read/Grep 读取该文件；"
-                        "输出随任务运行分块落盘（输出量小的任务可能到结束才可见）；"
-                        "并发上限8个（bg1~bg8，终态槽位自动释放复用，"
-                        "复用前旧结果归档为 bgN.log.N.prev，仍可 Read 读取），"
-                        "会话结束自动清理全部后台任务"
-                    ),
+                    "description": "true=后台执行，立即返回 bgN。结果写入 bgN.log（提交时返回绝对路径）。并发上限8个，会话结束自动清理。",
                 },
                 "bg": {
                     "type": "string",
-                    "description": (
-                        "后台任务管理操作："
-                        "status 查看所有后台任务状态（编号/状态/退出码/输出大小/结果路径）；"
-                        "wait 挂起等待任意后台任务完成（有完成立即返回，超时返回最新状态快照）；"
-                        "cancel 取消 bgN（杀进程树，已产出内容保留可读，配合 id）"
-                    ),
+                    "description": "status 查看状态；wait 等待完成（超时返回快照）；cancel 取消（杀进程树，已产出保留）。",
                 },
                 "id": {
                     "type": "integer",
-                    "description": "后台任务编号（bg=cancel 时必填，如 id=3 取消 bg3）",
+                    "description": "后台任务编号。bg=cancel 时必填。",
                 },
             },
             "required": [],
@@ -459,18 +438,14 @@ def _truncate_output(text: str, max_chars: int) -> str:
         return text
     head = max_chars * 2 // 3
     head_end, tail_start = safe_cut_points(text, head, len(text) - (max_chars - head))
-    est = estimate_text_tokens(text)  # ≈token（AI预算单位，混合密度估算）
     # 落盘前剥离进程级随机标签：标签是防伪协议的一部分，不得经落盘文件
     # 泄漏（AI 已知标签后可伪造 has_error 判定；AI 视图本来也不含标签）
     full_path = truncate_store.store_output(strip_tags(text))
-    tip = (
-        f"完整输出已落盘，用 Read/Grep 读取: {full_path}"
-        if full_path
-        else "增大max_output_chars可获取完整输出"
-    )
+    tip = f"完整输出: {full_path}" if full_path else "完整输出未能落盘"
     return (
         text[:head_end]
-        + f"\n...[中间截断: 输出共{len(text)}字符, 已保留首{head_end}字符+尾{len(text) - tail_start}字符(≈{est}token)。{tip}]\n"
+        + f"\n...[中间截断: 原输出{len(text)}字符，中段已丢弃。"
+          f"已保留首{head_end}字符、尾{len(text) - tail_start}字符。{tip}]\n"
         + text[tail_start:]
     )
 
@@ -570,10 +545,7 @@ def execute(
         return bg_execute(command, timeout, background, bg, id, _tool_context)
 
     if not command:
-        return error_line(
-            "command为空：前台执行需提供 command；"
-            "后台任务用 background=true 提交，管理用 bg=status/wait/cancel"
-        )
+        return error_line("command为空")
 
     if timeout <= 0:
         return error_line("timeout需为正整数（秒）")
@@ -620,7 +592,7 @@ def execute(
     # ═════════════════════════════════════════════════════════════
     shell = _find_executable("bash", "sh")
     if shell is None:
-        return error_line("未找到shell，请安装bash或sh后重试")
+        return error_line("未找到 bash/sh")
 
     # 单段 cd：子进程内 cd 无副作用，照常执行并附提示引导（不拦截）
     cd_hint = _is_cd_command(command)
@@ -727,7 +699,9 @@ def execute(
             parts.append(tag_error(f"[超时: 命令执行超过{timeout:.0f}秒，已终止]"))
             return _truncate_output("\n".join(parts), max_output_chars)
 
-        parts = [rc_line(proc.returncode)]
+        # 退出码 0 不输出：无退出码行即成功（与多段路径、dsh 一致）。
+        # AI 从「有没有这行」就能判断，写出来属可推导的冗余。
+        parts = [] if proc.returncode == 0 else [rc_line(proc.returncode)]
         out = _decode_output(stdout)
         if out.strip():
             parts.append(out.strip())
@@ -741,24 +715,23 @@ def execute(
 
 
 def _with_cd_hint(result: str, cd_hint: bool) -> str:
-    """单段 cd 命令的结果附提示：命令已照常执行，仅引导 AI 改用 cd X && 命令。
+    """单段 cd 命令的结果附提示：命令已照常执行，但 cd 不作用于后续命令。
 
     不拦截：判断正则一旦误判，整条命令不执行（代价远大于收益）。
     """
     if not cd_hint:
         return result
-    return f"{result}\n[提示: 单通道执行下 cd 不影响后续命令，当前目录: {os.getcwd()}。请用 'cd X && 命令' 形式]"
+    return f"{result}\n[提示: cd 仅对本次命令生效，当前目录仍为 {os.getcwd()}]"
 
 
 def _with_multiline_hint(result: str, command: str) -> str:
-    """Windows 多行命令的结果附提示：cmd 仅执行首行，其余行被静默丢弃。
+    """Windows 多行命令的结果附提示：cmd 仅执行首行，其余行被丢弃。
 
     Linux/macOS（bash -c 多行逐行执行）与 python -c 直执行路径不加。
     """
     if sys.platform != "win32" or ("\n" not in command and "\r" not in command):
         return result
-    return (f"{result}\n[提示: 命令含换行符，Windows cmd 仅执行首行（其余行被静默丢弃）。"
-            "多步命令请用 && 串联，或写入 .cmd 脚本后执行]")
+    return f"{result}\n[提示: 命令含换行符，仅第 1 行被执行]"
 
 
 def _collect_proc_output(proc: subprocess.Popen, timeout: int, max_output_chars: int):
@@ -845,7 +818,8 @@ def _format_result(rc: int, out: str, err: str, status: str,
             parts.append(f"[stderr]\n{err.strip()}")
         parts.append(tag_error(f"[超时: 命令执行超过{timeout:.0f}秒，已终止]"))
     else:
-        parts = [rc_line(rc)]
+        # 退出码 0 不输出：无退出码行即成功（同单段 Windows 路径）
+        parts = [] if rc == 0 else [rc_line(rc)]
         if out.strip():
             parts.append(out.strip())
         if err.strip():
@@ -1176,27 +1150,22 @@ def _execute_segments(segments: list, timeout: int,
     if was_interrupted:
         all_parts.append("[用户中断]")
 
-    # set/export 段提示：多段命令逐段独立进程执行，前段的环境变量设置
-    # 不作用于后续段（与真实 cmd/bash 同行 && 的语义不同），静默失效会
-    # 误导 AI。不拦截、附提示引导用 `cmd /c "set X=Y && 命令"` 形式
-    # （引号内 && 不拆分，整条交给 shell，语义与真实终端一致）。
-    if any(re.match(r"(?i)\s*(?:set|export)\s", seg) for _op, seg in segments[:-1]):
-        all_parts.append(
-            "[提示: 各段独立进程执行，set/export 设置的环境变量不作用于后续段。"
-            "如需跨命令生效，请用 cmd /c \"set X=Y && 命令\" 形式（或 bash 前置赋值 X=Y 命令）]")
+    # set/export 段提示已删除：description 已写明「每次调用都是新进程，
+    # set/export 不作用于后续调用」，而这条提示不带任何本次调用的特有信息
+    # （哪个变量、哪个值都不体现），属结构 9 的「用法该在 description」。
 
-    # 段内含 cd（非纯 cd 段）提示：`&`/`;` 混用段在独立子进程执行，段内 cd
-    # 不作用于后续段（与真实终端同会话语义不同），静默失效会让后续命令在
-    # 旧目录执行——附提示引导用独立 && cd 段形式（与 set/export 提示对齐）
+    # 段内含 cd 的命令有独立 cwd，需要单独提示：这条虽然在 description 里
+    # 有对应说明，但它触发时意味着「本次调用的这条命令实际在另一个目录跑了」——
+    # 与「多段命令整体」这一事实绑定，删掉 AI 会以为所有段都在同一目录。
     if any((not _is_cd_command(seg))
            and re.search(r"(?i)(?:^|[&|;(]\s*)cd(\s|$)", seg)
            for _op, seg in segments[:-1]):
         all_parts.append(
-            "[提示: 段内含 cd 的命令在独立子进程内执行，cd 不作用于后续段。"
-            "如需切换目录后继续执行，请用独立段形式：cd <目录> && <命令>]")
+            "[提示: 段内含 cd 的命令在独立子进程内执行，cd 不作用于后续段]")
 
-    # 总退出码（最后执行段的退出码；超时/中断时不显示，避免误导AI）
-    if prev_rc >= 0 and not was_interrupted:
-        all_parts.append(rc_line(prev_rc))
+    # 不再追加末尾总退出码：每个失败段已在段内标注自己的码，末尾再写一次
+    # 只有在「最后一段失败」时才会出现，而那正是与段内标注完全相同的一行
+    # （实测 `echo a && exit /b 5` 会输出两个 [exit code: 5]）。最后一段成功
+    # 时 prev_rc=0，按「0 不输出」的规则本来也不该写。
 
     return _truncate_output("\n".join(all_parts), max_output_chars)

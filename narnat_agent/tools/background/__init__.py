@@ -358,8 +358,6 @@ def submit(command: str) -> str:
             return error_line(
                 f"后台并发已达上限{MAX_SLOTS}(bg1~bg{MAX_SLOTS})，当前运行: "
                 + (", ".join(f"bg{i}" for i in running) or "无")
-                + "。请用 Shell(bg=\"wait\") 等待完成，"
-                + "或 Shell(bg=\"cancel\", id=N) 取消不再需要的任务"
             )
         # 最旧终态优先：空闲槽(finished_at=0)最前，终态按完成时间升序
         free.sort(key=lambda s: s.finished_at if s.status else -1.0)
@@ -417,7 +415,7 @@ def submit(command: str) -> str:
         else:
             sh = shutil.which("bash") or shutil.which("sh")
             if sh is None:
-                raise OSError("未找到shell，请安装bash或sh后重试")
+                raise OSError("未找到 bash/sh")
             proc = subprocess.Popen(
                 [sh, "-c", slot.command],
                 stdin=subprocess.DEVNULL,
@@ -445,11 +443,10 @@ def submit(command: str) -> str:
     threading.Thread(target=_monitor, args=(slot, proc, gen), daemon=True).start()
     msg = (
         f"bg{slot.id} 已提交（后台运行）\n"
-        f"结果: {slot.log_path}\n"
-        f"查状态: Shell(bg=\"status\") · 等待完成: Shell(bg=\"wait\")"
+        f"结果: {slot.log_path}"
     )
     if archived:
-        msg += f"\n提示: 已归档该槽位旧任务结果到 {archived}，仍可 Read 读取"
+        msg += f"\n提示: 已归档该槽位旧任务结果到 {archived}"
     return msg
 
 
@@ -739,10 +736,7 @@ def cancel_task(bg_id: int) -> str:
         log_path = slot.log_path
     if proc is not None and proc.poll() is None:
         threading.Thread(target=_kill_proc_tree, args=(proc,), daemon=True).start()
-    return (
-        f"bg{bg_id} 已取消（进程树已终止，已产出内容保留在 {log_path} 仍可 Read 读取；"
-        "管道中尚未收口的剩余输出随后补落盘）"
-    )
+    return f"bg{bg_id} 已取消（进程树已终止）。结果: {log_path}"
 
 
 def cancel_all() -> int:
@@ -988,7 +982,7 @@ def bg_execute(command, timeout, background, bg, task_id, tool_context) -> str:
         return wait_tasks(t)
     if op == "cancel":
         if task_id is None:
-            return error_line("cancel 需指定任务编号 id（如 id=3 取消 bg3）")
+            return error_line("cancel 需指定任务编号 id")
         try:
             tid = int(task_id)
         except (TypeError, ValueError, OverflowError):

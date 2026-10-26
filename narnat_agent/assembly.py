@@ -131,7 +131,6 @@ class Assembly:
         tool_context = ToolContext(
             ui_callback=ui_callback,
             api_keys=config.api_keys,
-            ignore_dirs=list(config.tools.ignore_dirs),
             git_skip_confirm=config.safety.git_skip_confirm,
             rm_skip_confirm=config.safety.rm_skip_confirm,
             max_transfer_mb=config.tools.max_transfer_mb,
@@ -165,7 +164,6 @@ class Assembly:
             plugin_setter=llm.set_plugin_enabled,
             goal_max_rounds=config.ai.goal_max_rounds,
             project_skill_roots=config.skills.project_roots,
-            skill_ignore_dirs=config.tools.ignore_dirs,
             context_reset_func=lambda: context.reset(),
             # 传日志器：载入会话时若清掉了孤儿工具结果（删了用户数据），
             # 必须留下一条可追查的 warning。不传的话那行日志永远打不出来。

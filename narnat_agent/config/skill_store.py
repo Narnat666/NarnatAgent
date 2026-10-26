@@ -20,7 +20,7 @@ import os
 import re
 from typing import List
 
-from .defaults import CONFIG_SUBDIR, DEFAULT_SKILL_SCAN_DEPTH
+from .defaults import CONFIG_SUBDIR, DEFAULT_IGNORE_DIRS, DEFAULT_SKILL_SCAN_DEPTH
 
 # 技能树目录递归深度上限（兜底；防环主要靠 realpath 已访问集合）。
 # 正常技能目录嵌套不超过 2-3 层，8 层足够宽裕。
@@ -30,7 +30,6 @@ _MAX_DIR_DEPTH = 8
 def load_skill(narnat_dir: str, name: str,
                project_roots=None,
                cwd: str = "",
-               ignore_dirs: tuple = (),
                scan_depth: int = DEFAULT_SKILL_SCAN_DEPTH) -> tuple:
     """加载技能内容。返回 (content, error, path)。
 
@@ -61,7 +60,7 @@ def load_skill(narnat_dir: str, name: str,
 
     # 2. 项目技能
     cwd = cwd or os.getcwd()
-    for root in _project_roots(narnat_dir, project_roots, cwd, ignore_dirs, scan_depth):
+    for root in _project_roots(narnat_dir, project_roots, cwd, scan_depth):
         result = _load_project_skill(root, name)
         if result is not None:
             content, err, path = result
@@ -77,7 +76,6 @@ def load_skill(narnat_dir: str, name: str,
 def list_skill_tree(narnat_dir: str,
                     project_roots=None,
                     cwd: str = "",
-                    ignore_dirs: tuple = (),
                     scan_depth: int = DEFAULT_SKILL_SCAN_DEPTH) -> List[dict]:
     """技能树（供 /skill 按层级 Tab 补全）。
 
@@ -109,7 +107,7 @@ def list_skill_tree(narnat_dir: str,
 
     cwd = cwd or os.getcwd()
     merged = {}
-    for root in _project_roots(narnat_dir, project_roots, cwd, ignore_dirs, scan_depth):
+    for root in _project_roots(narnat_dir, project_roots, cwd, scan_depth):
         _merge_nodes(merged, _scan_dir(root))
     tree.extend(_nodes_to_list(merged))
     return tree
@@ -118,7 +116,7 @@ def list_skill_tree(narnat_dir: str,
 # ── 内部工具 ──
 
 def _project_roots(narnat_dir: str, project_roots, cwd: str,
-                   ignore_dirs: tuple, scan_depth: int) -> list:
+                   scan_depth: int) -> list:
     """解析项目技能根目录列表。
 
     - None → 自动发现（扫描工作目录下所有名为 skills 的目录，排除系统技能目录）
@@ -132,20 +130,24 @@ def _project_roots(narnat_dir: str, project_roots, cwd: str,
             if os.path.isdir(base):
                 bases.append(base)
         return bases
-    return _discover_skill_roots(cwd, narnat_dir, ignore_dirs, scan_depth)
+    return _discover_skill_roots(cwd, narnat_dir, scan_depth)
 
 
-def _discover_skill_roots(cwd: str, narnat_dir: str,
-                          ignore_dirs: tuple, max_depth: int) -> list:
+def _discover_skill_roots(cwd: str, narnat_dir: str, max_depth: int) -> list:
     """在 cwd 下递归查找名为 skills 的目录作为项目技能根。
 
-    - 跳过忽略目录（默认含 node_modules/.git 等噪音目录）
+    - 跳过噪音目录（DEFAULT_IGNORE_DIRS 种子，与工具遍历的 .gitignore 规则无关：
+      技能发现是内部扫描，不该因为项目 .gitignore 写了某个目录就找不到其中的技能）
     - 深度超过 max_depth（根算第1层）不再深入
     - 发现 skills 目录后不再进入其内部（技能内容本身不再找技能根）
     - 排除系统技能目录本身（避免与系统技能重复列出）
     """
     system_skills = os.path.realpath(os.path.join(narnat_dir, CONFIG_SUBDIR, "skills"))
-    ignores = set(ignore_dirs or ())
+    # 忽略清单固定用 DEFAULT_IGNORE_DIRS 种子，不读配置"忽略目录"键：
+    # 该键原本服务于 Grep/Glob，现已由 .gitignore 接管；留在这里会让用户
+    # 以为自定义清单还在生效，而自定义噪音目录对「找一个叫 skills 的目录」
+    # 这件事没有意义
+    ignores = set(DEFAULT_IGNORE_DIRS)
     roots = []
 
     def walk(path: str, depth: int):

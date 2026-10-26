@@ -258,10 +258,9 @@ class GoalVerifier:
         # 验证器工具定义（从各工具模块 DEFINITION 取，顺序固定；Shell 走策略检查）
         self._tool_defs = [_READ_DEF, _GLOB_DEF, _GREP_DEF, _BASH_DEF]
         self._tool_names = {d["function"]["name"] for d in self._tool_defs}
-        # 轻量独立 ToolContext：只填 ignore_dirs/输出硬上限，不触碰主上下文状态；
+        # 轻量独立 ToolContext：只填输出硬上限，不触碰主上下文状态；
         # git_skip_confirm 让白名单 git 命令不被 bash 层确认拦下，超时上限收紧到 300 秒
         self._tool_context = ToolContext(
-            ignore_dirs=list(getattr(config.tools, "ignore_dirs", ()) or ()),
             max_tool_output_chars=getattr(config.tools, "max_output_chars", 0) or 0,
             git_skip_confirm=True,      # 白名单 git 命令不被 bash 层 git 确认拦下
             max_timeout_seconds=300,    # Shell 抽查命令超时上限

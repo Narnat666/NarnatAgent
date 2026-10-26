@@ -6,11 +6,7 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "TodoWrite",
-        "description": (
-            "创建并管理当前任务的计划清单。多步任务开始前先建计划："
-            "每步一条、用祈使句、可验证；同时只保留一个进行中的项；"
-            "完成一步立即勾选。"
-        ),
+        "description": "创建并管理当前任务的计划清单。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -21,17 +17,17 @@ DEFINITION = {
                         "properties": {
                             "content": {
                                 "type": "string",
-                                "description": "任务描述（祈使句，如'运行测试'）",
+                                "description": "任务描述。",
                             },
                             "status": {
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "completed"],
-                                "description": "任务状态（同时刻最多1个in_progress，多余的自动调整为待处理）",
+                                "description": "任务状态。同时刻最多1个 in_progress。",
                             },
                         },
                         "required": ["content", "status"],
                     },
-                    "description": "任务列表（每次提交完整列表，整体替换）",
+                    "description": "任务列表。每次提交完整列表，整体替换。",
                 },
             },
             "required": ["todos"],
@@ -73,14 +69,14 @@ def execute(todos: List[Dict[str, Any]], _tool_context=None) -> str:
         if todo["status"] not in ("pending", "in_progress", "completed"):
             return f"[错误: 第{i+1}项status非法: {todo['status']}]"
         if not str(todo["content"]).strip():
-            return f"[错误: 第{i+1}项content为空，请补全后重新提交]"
+            return f"[错误: 第{i+1}项 content 为空]"
 
     # 校验重复content（strip后比较）
     seen = set()
     for i, todo in enumerate(todos):
         key = str(todo["content"]).strip()
         if key in seen:
-            return f"[错误: 重复的content \"{key}\"，请合并或改写]"
+            return f"[错误: 重复的 content: {key}]"
         seen.add(key)
 
     # in_progress 自动容错：保留第一个，其余降级为 pending。

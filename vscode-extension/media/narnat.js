@@ -8027,16 +8027,26 @@
     // 「完成」，与真正成功的那一行一模一样，只有折叠区第一行藏着
     // `[exit code: 4]`（实测，agent 每天都要跑测试）。
     // 退出码是客观事实，界面按它纠正显示，不动后端的判定。
-    var mExit = outText.match(/\[\s*exit code:\s*(\d+)\s*\]/i);
+    //
+    // 取**最后一个**退出码：多段命令（`a && b`）逐段各标一个，整体结果由
+    // 最后一段决定。取第一个会在「前段失败、后段用 || 兜回」时错标失败。
+    var exitCodes = outText.match(/\[\s*exit code:\s*(-?\d+)\s*\]/gi) || [];
+    var mExit = exitCodes.length
+      ? /\[\s*exit code:\s*(-?\d+)\s*\]/i.exec(exitCodes[exitCodes.length - 1])
+      : null;
     if (mExit && parseInt(mExit[1], 10) !== 0) ok = false;
     // 退出码 0 也可能不是真成功：命令里带管道时退出码取的是**末端**命令
     // （`pytest | more` 的退出码来自 more，恒为 0）。此时输出里明明写着
     // `1 failed` / `FAILED test_x.py::y`，行头却是绿色「完成」——
     // 用户只看行头就会以为测试全过（实测，AI 很常这么写命令）。
     // 无法从退出码判断时，至少把「输出里有失败信号」这件事说出来。
+    //
+    // 注意 mExit 可能为 null：后端现在**不再为退出码 0 输出该行**，所以
+    // 「没有这行」= 退出码 0 = 成功。这里不能再要求 `!!mExit`，否则这条
+    // 警告永远不触发（原来的写法就是这样，改完 A1 后成为死代码）。
     var exitSaysOk = !mExit || parseInt(mExit[1], 10) === 0;
     var outHasFail = /\b\d+\s+failed\b|\bFAILED\b|\bTraceback\b|\b\d+\s+errors?\b/i.test(outText);
-    var uncertain = ok && exitSaysOk && outHasFail && !!mExit;
+    var uncertain = ok && exitSaysOk && outHasFail;
     var ms = (typeof p.durationMs === 'number') ? p.durationMs + 'ms' : '';
     var meta = entry.row.querySelector('.meta');
     // 判空与同函数上面的 awaiting 分支保持一致（那里是 if (meta)）。

@@ -25,22 +25,21 @@ DEFINITION = {
     "function": {
         "name": "Edit",
         "description": (
-            "编辑文件（字符串精确替换）。支持本地或远程编辑文件。"
-            "自动识别并保持原编码（UTF-8/GBK）。"
+            "编辑UTF-8文本文件（字符串精确替换）。支持本地或远程编辑文件。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "文件路径"},
-                "old_string": {"type": "string", "description": "待替换的原文（必须与文件内容精确匹配）"},
-                "new_string": {"type": "string", "description": "替换后的新文本"},
+                "file_path": {"type": "string", "description": "文件路径。"},
+                "old_string": {"type": "string", "description": "待替换的原文，须与文件内容精确匹配。"},
+                "new_string": {"type": "string", "description": "替换后的新文本。"},
                 "replace_all": {
                     "type": "boolean",
-                    "description": "是否替换全部匹配（默认否，即只替换唯一匹配处）",
+                    "description": "是否替换全部匹配。默认否。",
                 },
                 "device": {
                     "type": "string",
-                    "description": "设备dev编号：默认dev0即编辑本地指定文件，设置dev1..devn则编辑指定远程设备文件",
+                    "description": "设备编号。默认dev0编辑指定的本地文件，设置dev1..devn则编辑指定的远程设备文件。",
                 },
             },
             "required": ["file_path", "old_string", "new_string"],
@@ -60,34 +59,32 @@ CAPABILITY = {
 def _read_for_edit(file_path: str) -> tuple:
     """读取文件内容用于编辑，返回 (content, 写回编码)。
 
-    编码策略与 Read 一致（BOM 嗅探优先 → utf-16；未命中再探测严格 UTF-8），
-    但必须严格解码：Edit 会把内容写回文件，errors="replace" 会以 U+FFFD
-    永久替换原字节，造成静默数据损坏。探测不出编码时抛 UnicodeDecodeError，
-    由调用方拒绝编辑（对齐远程 Edit 行为）。
+    只处理 UTF-8 文本（原文件有 BOM 就保留 BOM）。Edit 会把内容写回文件，
+    编码判断一旦出错就是静默数据损坏（错字写回、原字节永久丢失），所以只
+    接受能严格验证的 UTF-8。与 Write 的能力声明一致：两者都只做 UTF-8。
 
     Raises:
-        ValueError: 二进制文件（含NUL字节；BOM 未命中时才判）
-        UnicodeDecodeError: 无法按 UTF-8 / UTF-16(BOM) 严格解码
+        ValueError: 二进制文件（含 NUL 字节）
+        UnicodeDecodeError: 不是 UTF-8（含 UTF-16 等其它编码）
     """
-    from ..read import _detect_text_encoding, _sniff_bom_encoding, _write_encoding_for
+    from ..read import (_HEAD_SNIFF_BYTES, _detect_text_encoding,
+                        _sniff_bom_encoding, _write_encoding_for)
     with open(file_path, "rb") as fb:
-        head = fb.read(8192)
-    # BOM 嗅探优先于二进制判定（与 Read/Grep 一致）：UTF-16 文本的 ASCII 字符
-    # 含 NUL 字节，会被"首块含 NUL"误判为二进制（PowerShell 5.1 重定向输出等）
+        head = fb.read(_HEAD_SNIFF_BYTES)
+    # BOM 优先于 NUL 判定：UTF-16 文本的 ASCII 字符含 NUL，先判 NUL 会把它
+    # 报成「二进制」。先识别出来，再按「不是 UTF-8」拒绝——这句更准确，
+    # 因为文件确实是文本，只是编码不支持。
     if _sniff_bom_encoding(head):
-        encoding = "utf-16"
-    else:
-        if b"\x00" in head:
-            raise ValueError("binary")
-        encoding = _detect_text_encoding(head)
-        if encoding is None:
-            # 探测不出编码就必须拒绝：猜一种（如 GB18030）会把错字写回文件，
-            # 原字节永久丢失。抛 UnicodeDecodeError 让调用方走"拒绝编辑"分支。
-            raise UnicodeDecodeError("utf-8", b"", 0, 1, "encoding not determined")
+        raise UnicodeDecodeError("utf-8", b"", 0, 1, "utf-16 not supported")
+    if b"\x00" in head:
+        raise ValueError("binary")
+    encoding = _detect_text_encoding(head)
+    if encoding is None:
+        # 探测不出编码：猜一种（如 GB18030）会把错字写回文件，原字节永久丢失
+        raise UnicodeDecodeError("utf-8", b"", 0, 1, "encoding not determined")
     with open(file_path, "r", encoding=encoding, newline="") as f:
         content = f.read()
-    # 写回编码保持原文件形态：UTF-16 保持原字节序+BOM，UTF-8 有 BOM 保留 BOM、
-    # 无 BOM 不添加，GB18030 写回 GB18030（GBK 的超集，GBK 内容字节不变）
+    # 写回形态：原文件有 BOM 就保留，没有就不加
     write_encoding, bom_prefix = _write_encoding_for(head, encoding)
     return bom_prefix + content, write_encoding
 
@@ -116,7 +113,7 @@ def execute(file_path: str, old_string: str = "", new_string: Optional[str] = No
     # 且返回成功文案，造成不可回溯的数据破坏（LLM 偶发漏参/压缩后参数丢失）。
     # 删除语义必须显式传空字符串。
     if new_string is None:
-        return ('[错误: 缺少参数 new_string（如需清空匹配文本，请显式传入空字符串 ""）]', "")
+        return ('[错误: 缺少参数 new_string]', "")
 
     # 归一化布尔参数: LLM 偶发传 "false" 字符串，bool("false") 恒为 True
     # 会导致全量替换（与意图相反的危险行为），必须按字符串语义解析
@@ -133,20 +130,19 @@ def execute(file_path: str, old_string: str = "", new_string: Optional[str] = No
     # 含 ':' 的路径是 NTFS 备用数据流语法（非普通文件）：原子替换必然 WinError 123，
     # 此前只回原始系统错误、不说明原因（与 Write 的 ADS 拦截同款判据）
     if _has_nt_ads_colon(file_path):
-        return ("[错误: 路径含非法字符 ':'（Windows 中冒号后的部分是备用数据流语法，"
-                "非普通文件路径），请使用普通文件名]", "")
+        return (f"[错误: 路径含非法字符 ':': {file_path}]", "")
 
     if not os.path.isfile(file_path):
         # 目录路径单独给出准确文案（与 Read/Write 对齐）：报"不存在"会误导 AI
         # 改用 Write 创建（Write 对目录同样拒绝），陷入二次错误
         if os.path.isdir(file_path):
-            return (f"[错误: {file_path} 是目录，请使用正确的文件路径]", "")
-        # 先细分真实原因：权限不足/超长路径会被 isfile 吞成 False 误报"不存在"
+            return (f"[错误: {file_path} 是目录]", "")
+        # 先细分真实原因：权限不足会被 isfile 吞成 False 误报"不存在"
         from ..read import _isfile_miss_reason
         miss_reason = _isfile_miss_reason(file_path)
         if miss_reason:
             return (miss_reason, "")
-        return (f"[错误: 文件不存在: {file_path}，如需创建请用Write工具]", "")
+        return (f"[错误: 文件不存在: {file_path}（当前目录: {os.getcwd()}）]", "")
 
     try:
         content, write_encoding = _read_for_edit(file_path)
@@ -197,10 +193,10 @@ def _edit_by_string(content: str, old_string: str, new_string: str,
 
     if count == 0:
         hint = _find_similar(content, old_string)
-        return (f"[错误: 未找到匹配文本。请先Read确认文件内容。]\n{hint}", "")
+        return (f"[错误: 未找到匹配文本]\n{hint}", "")
 
     if count > 1 and not replace_all:
-        return (f"[错误: 找到{count}处匹配，old_string不唯一。请扩大上下文使其唯一，或设置replace_all=True]", "")
+        return (f"[错误: 找到{count}处匹配，old_string 不唯一]", "")
 
     if replace_all:
         new_content = content.replace(old_string_normalized, new_string_normalized)
@@ -273,7 +269,7 @@ def _write_and_diff(old_content: str, new_content: str, file_path: str,
     if old_content == new_content:
         # 空编辑提醒：文件已照常写盘，但明确告知AI本次无实质修改
         # （此前返回"[已替换1处]\n[无差异]"，首行误导AI以为编辑成功）
-        return ("[提示: 新旧内容相同，文件无实质修改。请确认new_string是否漏写]", _make_color_diff("[无差异]"))
+        return ("[提示: 新旧内容相同，文件无实质修改]", _make_color_diff("[无差异]"))
 
     diff = _make_diff(old_content, new_content, file_path)
     llm_result = f"[已替换{count}处]\n{diff}"
@@ -300,9 +296,9 @@ def _find_similar(content: str, old_string: str) -> str:
         return ""
 
     similarities.sort(reverse=True)
-    hints = ["相似行（供参考）:"]
-    for ratio, line_num, line in similarities[:3]:
-        hints.append(f"  行{line_num}: {line.strip()} (相似度{ratio:.0%})")
+    hints = ["相似行:"]
+    for _ratio, line_num, line in similarities[:3]:
+        hints.append(f"  行{line_num}: {line.strip()}")
     return "\n".join(hints)
 
 

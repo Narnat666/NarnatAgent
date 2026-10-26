@@ -17,17 +17,17 @@ DEFINITION = {
     "function": {
         "name": "Write",
         "description": (
-            "创建新文件或全量覆盖文件。支持本地或远程写入文件。"
-            "覆写已存在的文件时返回diff。"
+            "创建或全量覆盖UTF-8文本文件。支持本地或远程写入文件。"
+            "覆写时保留原文件的 UTF-8 BOM，并返回 diff。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "文件路径"},
-                "content": {"type": "string", "description": "完整文件内容"},
+                "file_path": {"type": "string", "description": "文件路径。"},
+                "content": {"type": "string", "description": "完整文件内容。"},
                 "device": {
                     "type": "string",
-                    "description": "设备dev编号：默认dev0即写入本地指定文件，设置dev1..devn则写入指定远程设备文件",
+                    "description": "设备编号。默认dev0写入指定的本地文件，设置dev1..devn则写入指定的远程设备文件。",
                 },
             },
             "required": ["file_path", "content"],
@@ -171,12 +171,11 @@ def execute(file_path: str, content: str,
     # NTFS 备用数据流（ADS）：`a.txt:notes` 会被 open 写进 a.txt 的隐藏数据流，
     # 报"已写入"但资源管理器/Glob 都看不见，Edit 对该路径也必然失败——提前拒绝
     if _has_nt_ads_colon(file_path):
-        return ("[错误: 路径含非法字符 ':'（Windows 中冒号后的部分会被写入备用数据流，"
-                "目录不可见），请使用普通文件名]", "")
+        return (f"[错误: 路径含非法字符 ':': {file_path}]", "")
 
     # 目录路径：open()会报Permission denied，误导AI去查权限而非换路径，提前拦截给出真实原因
     if os.path.isdir(abs_path):
-        return (f"[错误: {file_path} 是目录，请使用正确的文件路径]", "")
+        return (f"[错误: {file_path} 是目录]", "")
 
     # 自动创建父目录（盘不存在/超 MAX_PATH 等失败给出明确错误，不做未捕获抛出）
     parent = os.path.dirname(abs_path)
@@ -190,37 +189,33 @@ def execute(file_path: str, content: str,
     color_diff = ""
     old_content = ""
     old_bytes = None
-    old_encoding = None
-    write_encoding = "utf-8"    # 写回编码：默认 UTF-8，覆写时沿用原文件编码
-    write_bom_prefix = ""       # 需前置的 BOM 字符（UTF-16 用 LE/BE 编解码器时手工补回）
+    write_bom = False       # 原文件带 UTF-8 BOM → 写回也带（与 Edit 一致）
     diff = ""
     if os.path.isfile(abs_path):
         try:
-            # 旧内容编码探测（与Read一致）：GBK文件按utf-8-sig读会抛异常导致diff静默丢失，
-            # AI 覆写后看不到差异。此处仅用于展示diff，errors=replace 不影响写入内容
-            from ..read import (_detect_text_encoding, _sniff_bom_encoding,
-                                _write_encoding_for)
+            # 旧内容探测：只用于生成 diff 与决定「BOM 要不要保留」，
+            # 不参与编码决策 —— 写盘永远 UTF-8（见下方 content.encode("utf-8")）。
+            from ..read import _detect_text_encoding, _sniff_bom_encoding
             with open(abs_path, "rb") as fb:
                 head = fb.read(8192)
-                # BOM 命中的 UTF-16 文本同样含 NUL 字节，但它确实是文本：必须按文本
-                # 读全文，否则既没有 diff 也拿不到原编码，写回只能退回 UTF-8
+                # BOM 命中的 UTF-16 文本同样含 NUL 字节，但它确实是文本：
+                # 必须按文本读全文，否则没有 diff
                 if _sniff_bom_encoding(head) or not (head and b"\x00" in head):
-                    # 仅文本文件读全文用于字节级变更判定（二进制只取首块，避免大文件占内存）
                     fb.seek(0)
                     old_bytes = fb.read()
             if old_bytes is not None:
-                # None = 探测不出编码（非 UTF-8 且无 BOM）。这里只用于生成 diff，
-                # 用 utf-8+replace 尽力展示即可：写回编码由 _write_encoding_for 决，
-                # 探测不出时它返回 utf-8，与新写内容一致。
+                # 探测不出编码时按 utf-8+replace 尽力展示 diff：
+                # 这只影响面板/diff 的呈现，不改变写入字节
                 old_encoding = _sniff_bom_encoding(head) or _detect_text_encoding(head)
-                if old_encoding is None:
-                    old_encoding = "utf-8"
-                # 写回保持原文件编码：固定按 UTF-8 写会把 UTF-16/BOM/GBK 文件静默
-                # 改写编码形态（下游按原编码读取的工具链拿到坏数据，且无任何提示）
-                write_encoding, write_bom_prefix = _write_encoding_for(head, old_encoding)
-                old_content = old_bytes.decode(old_encoding, errors="replace")
+                old_content = old_bytes.decode(old_encoding or "utf-8", errors="replace")
                 diff = _make_diff(old_content, content, file_path)
                 color_diff = colorize_diff(diff)
+                # 原文件是「带 BOM 的 UTF-8」→ 写回也带 BOM。
+                # 不保留会怎样（实测）：Edit 保留 BOM、Write 丢弃，同一文件
+                # 走两条路得到两种字节形态，之后按原形态读取的下游工具链
+                # 拿到的东西不一样；用户也会看到「我只改了内容，BOM 怎么没了」。
+                if head.startswith(b"\xef\xbb\xbf"):
+                    write_bom = True
         except Exception:
             pass
     else:
@@ -235,16 +230,12 @@ def execute(file_path: str, content: str,
             pass
 
     try:
-        data = (write_bom_prefix + content).encode(write_encoding)
-    except UnicodeEncodeError:
-        # 原编码表示不了新内容（GB18030 覆盖全 Unicode，实践上只剩孤立代理项这类
-        # 连 UTF-8 也编不了的情况）：退回 UTF-8 写盘并由 _describe_form_drift
-        # 明确告知编码变更，不静默改编码；UTF-8 也编不了则直接报错、不碰原文件
-        write_encoding, write_bom_prefix = "utf-8", ""
-        try:
-            data = content.encode("utf-8")
-        except UnicodeEncodeError as e:
-            return (f"[错误: 写入失败: {e}]", "")
+        # BOM 保留：原文件是「带 BOM 的 UTF-8」时写回同样带 BOM
+        data = (b"\xef\xbb\xbf" + content.encode("utf-8")) if write_bom \
+            else content.encode("utf-8")
+    except UnicodeEncodeError as e:
+        # 内容含孤立代理项（连 UTF-8 也编不了）：直接报错、不碰原文件
+        return (f"[错误: 写入失败: {e}]", "")
     tmp_path = ""
     try:
         # 临时文件 + 原子替换：并发读端（其它进程/编辑器重载）不会读到
@@ -298,45 +289,13 @@ def execute(file_path: str, content: str,
         if new_bytes == old_bytes:
             # 覆写内容与现有内容相同：文件已照常写盘，但明确告知AI本次无实质修改
             # （此前返回"[已写入...]\n[无差异]"，首行误导AI以为写入成功）
-            return ("[提示: 新旧内容完全相同（字节级一致），文件无实质修改。请确认content是否漏写]", color_diff)
+            return ("[提示: 新旧内容字节级一致，文件无实质修改]", color_diff)
         detail = describe_bytes_only_change(old_bytes, new_bytes)
         return (f"[提示: 文件已写入，正文内容相同，但字节层面有变化（{detail}）]",
                 colorize_diff(f"[正文相同，字节变化] {detail}"))
     if diff:
-        tip = ""
-        if old_bytes is not None:
-            drift = _describe_form_drift(old_bytes, old_encoding, old_content, content,
-                                         write_encoding)
-            if drift:
-                tip = f"（注意: {drift}）"
-        return (f"[已写入: {file_path} ({byte_count}字节)]{tip}\n{diff}", color_diff)
+        return (f"[已写入: {file_path} ({byte_count}字节)]\n{diff}", color_diff)
     return (f"[已写入: {file_path} ({byte_count}字节)]", color_diff)
-
-
-def _describe_form_drift(old_bytes: bytes, old_encoding, old_content: str, content: str,
-                         write_encoding: str = "utf-8") -> str:
-    """正文有变化时，描述"正文之外"的文件形态（编码/BOM/行尾符）。
-
-    写回默认沿用原文件编码：原编码表示不了新内容时退回 UTF-8（编码形态被改变），
-    行尾也可能由 CRLF 变为 LF。"正文相同"分支已有字节变化提示，正文不同时此前
-    只回 diff、对形态漂移零提示——AI/用户会误以为"只改了那几行"，按原编码读取的
-    下游工具链静默拿到坏数据。无形态变化时返回空串。
-    """
-    notes = []
-    if old_encoding == "utf-16" and write_encoding not in ("utf-16-le", "utf-16-be"):
-        notes.append("编码 UTF-16→UTF-8（新内容含原编码无法表示的字符）")
-    elif old_encoding in ("gbk", "gb18030") and write_encoding == "utf-8":
-        notes.append("编码 GBK→UTF-8（新内容含原编码无法表示的字符）")
-    if old_bytes.startswith(b"\xef\xbb\xbf") and write_encoding != "utf-8-sig":
-        notes.append("UTF-8 BOM 已移除")
-    if old_encoding == "utf-16" and write_encoding in ("utf-16-le", "utf-16-be"):
-        # 编码保持是最容易被误判为"改了"的形态（面板 diff 只显示文本），显式告知
-        notes.append(f"编码保持 {write_encoding.upper()}，BOM 保留")
-    if "\r\n" in old_content and "\r\n" not in content and "\n" in content:
-        notes.append("行尾符 CRLF→LF")
-    elif "\r\n" in content and "\r\n" not in old_content and "\n" in old_content:
-        notes.append("行尾符 LF→CRLF")
-    return "、".join(notes)
 
 
 def _make_diff(old_content: str, new_content: str, file_path: str) -> str:

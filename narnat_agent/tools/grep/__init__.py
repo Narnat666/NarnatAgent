@@ -18,7 +18,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from ..param_utils import to_bool
 from ..glob import (_CancelGate, _CANCELLED_TEXT, _expand_braces,
-                    _unescape_braces, _ignored_dirs_hint)
+                    _unescape_braces)
+from ..gitignore import GitIgnore as _GitIgnore
 from ..read import _detect_text_encoding, _sniff_bom_encoding
 
 class GrepLimits:
@@ -58,8 +59,9 @@ DEFINITION = {
     "function": {
         "name": "Grep",
         "description": (
-            "正则搜索文件内容（仅支持本机文件，不支持远程设备文件）。"
-            "默认返回每个命中文件的分组结果：文件表头（含匹配计数）+ 带行号的匹配行。"
+            "正则搜索文件内容（仅支持本机文件）。"
+            "默认跳过 .gitignore 所列文件与隐藏项。"
+            "返回按文件分组的匹配行，带行号。"
         ),
         "parameters": {
             "type": "object",
@@ -73,40 +75,31 @@ DEFINITION = {
                         {"type": "string"},
                         {"type": "array", "items": {"type": "string"}},
                     ],
-                    "description": (
-                        "搜索路径（默认当前目录）；可填目录、单个文件，或多个路径的数组"
-                        "（文件/目录可混合，按给定顺序输出），如 [\"src/a.c\", \"include\"]"
-                    ),
+                    "description": "搜索路径。默认当前目录。可填目录、文件或路径数组。",
                 },
                 "glob": {
                     "type": "string",
-                    "description": (
-                        "文件过滤，如*.py、src/*.c、**/*.c、*.{c,h}、src/**/*.{py,md}"
-                        "（花括号多模式，与Glob工具语法一致，默认空）"
-                    ),
+                    "description": "文件过滤，如 *.py、src/**/*.{py,md}。默认空。",
                 },
                 "i": {
                     "type": "boolean",
-                    "description": "是否忽略大小写（默认否）",
+                    "description": "是否忽略大小写。默认否。",
                 },
                 "A": {
                     "type": "integer",
-                    "description": "额外带后续N行（默认0）",
+                    "description": "额外带后续N行。默认0。",
                 },
                 "B": {
                     "type": "integer",
-                    "description": "额外带前面N行（默认0）",
+                    "description": "额外带前面N行。默认0。",
                 },
                 "C": {
                     "type": "integer",
-                    "description": "额外带前后各N行（默认0）",
+                    "description": "额外带前后各N行。默认0。",
                 },
                 "head_limit": {
                     "type": "integer",
-                    "description": (
-                        "最大返回匹配行数（正整数，默认30）；达到后剩余文件仅列文件名（含计数），"
-                        "增大可展开更多匹配行"
-                    ),
+                    "description": "最大返回匹配行数。默认30。",
                 },
             },
             "required": ["pattern"],
@@ -318,13 +311,11 @@ def execute(
 
     # ── ReDoS 防护 ──
     if len(pattern) > GrepLimits.MAX_PATTERN_LENGTH:
-        return f"[错误: 正则表达式过长（>{GrepLimits.MAX_PATTERN_LENGTH}字符），拒绝执行以防ReDoS]"
+        return f"[错误: 正则过长: {len(pattern)}字符，上限{GrepLimits.MAX_PATTERN_LENGTH}]"
     if _has_nested_quantifier(pattern):
-        return ("[错误: 正则含嵌套量词（如 (a+)+、(a+)*b），可能灾难性回溯导致挂死，"
-                "请改写（避免对含 +/* 的分组再加 +/*，必要时展开重复）]")
+        return "[错误: 正则含嵌套量词]"
     if _has_too_many_optional(pattern):
-        return ("[错误: 正则含过多可选量词 ?（可能灾难性回溯导致挂死），"
-                "请改写（减少可选元素或展开重复）]")
+        return "[错误: 正则含过多可选量词]"
 
     flags = re.IGNORECASE if to_bool(i) else 0
     try:
@@ -345,11 +336,6 @@ def execute(
     paths = path if isinstance(path, (list, tuple)) else [path]
     if not paths or all(p is None for p in paths):
         paths = [""]
-
-    # str() 兜底：绕过 loader 直接构造 ToolContext 时元素可能是数字/对象，
-    # set() 对不可哈希元素抛 TypeError（配置侧已在 loader 过滤，此处仅防御）
-    ignore_dirs = ({str(d) for d in _tool_context.ignore_dirs}
-                   if _tool_context and _tool_context.ignore_dirs else set())
 
     # 取消门（用户中断时目录遍历/文件扫描提前结束；缺省 None → 行为不变）
     gate = _CancelGate(getattr(_tool_context, "cancel_check", None)
@@ -396,7 +382,7 @@ def execute(
     results = []
     for target, label, is_file in entries:
         _search_target(target, label, is_file, regex, fast_searcher,
-                       glob, A, B, head_limit, ignore_dirs, results, ctx, gate)
+                       glob, A, B, head_limit, results, ctx, gate)
         if gate.cancelled:
             return _CANCELLED_TEXT
 
@@ -421,15 +407,11 @@ def execute(
             no_match += f"\n{line}"
         if skip_line:
             no_match += f"\n{skip_line}"
-        # 忽略目录提示：无匹配时说明范围被配置收缩（有匹配时不加，避免噪音）
-        ignored_hint = _ignored_dirs_hint(ignore_dirs)
-        if ignored_hint:
-            no_match += f"\n{ignored_hint}"
         return no_match
 
     output = "\n".join(results)
     if ctx["limit_hit"]:
-        output += f"\n...[已截断: 达到head_limit({head_limit})，剩余文件仅列文件名（含计数）。增大head_limit可展开更多匹配行]"
+        output += f"\n...[已截断: head_limit={head_limit}]"
     if warnings:
         head = "、".join(warnings[:5]) + ("等" if len(warnings) > 5 else "")
         output = f"路径不存在，已跳过: {head}\n{output}"
@@ -529,15 +511,18 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget, gate=None)
         raw_f.seek(0)
 
         first_chunk = raw_f.read(GrepLimits.BUFFER_SIZE)
-        encoding = _sniff_bom_encoding(first_chunk)
+        # 判定顺序与 Read/Edit 一致：BOM → 二进制 → 编码，且三类结果各自标记。
+        # UTF-16 与「探测不出编码」都要跳过：Read/Edit 对这两种文件都直接拒绝，
+        # Grep 单方面搜出结果会让 AI 以为「文件能读」——同一文件两个结论。
+        if _sniff_bom_encoding(first_chunk):
+            return "skip_utf16"
+        if _check_binary_first_chunk(first_chunk):
+            return "skip_binary"
+        encoding = _detect_text_encoding(first_chunk)
         if encoding is None:
-            # BOM 嗅探优先于二进制判定：UTF-16 文本含 NUL，不能被误判为二进制
-            if _check_binary_first_chunk(first_chunk):
-                return "skip_binary"
-            # 探测不出编码（非 UTF-8 且无 BOM，如 GBK/Shift-JIS）：按 utf-8+replace
-            # 扫描。Grep 只输出匹配行，AI 能看到具体内容自行判断；直接跳过文件
-            # 会让"文件里有这个词却搜不到"变成更难查的假阴性。
-            encoding = _detect_text_encoding(first_chunk) or "utf-8"
+            # 非 UTF-8（GBK/Shift-JIS/未知）：不猜编码、不按 utf-8+replace 硬扫，
+            # 与 Read/Edit 的「不是 UTF-8」保持一致
+            return "skip_nonutf8"
     except (PermissionError, OSError):
         return "skip_unreadable"
     finally:
@@ -672,6 +657,8 @@ def _scan_file(file_path, regex, fast_searcher, A, B, collect_budget, gate=None)
 
 _SKIP_KINDS = {"skip_oversize": "oversize",
                "skip_binary": "binary",
+               "skip_utf16": "utf16",
+               "skip_nonutf8": "nonutf8",
                "skip_unreadable": "unreadable",
                "skip_longline": "longline",
                "skip_binary_cut": "binary_cut"}
@@ -680,7 +667,8 @@ _SKIP_MAX_SAMPLES = 3
 
 def _new_skip_stats() -> dict:
     """跳过统计容器（跨 path 项共享，挂在 ctx 上）。"""
-    return {"oversize": 0, "binary": 0, "unreadable": 0, "longline": 0,
+    return {"oversize": 0, "binary": 0, "utf16": 0, "nonutf8": 0,
+            "unreadable": 0, "longline": 0,
             "binary_cut": 0, "direrror": 0,
             "paths": [], "dir_paths": [], "cut_paths": []}
 
@@ -700,39 +688,50 @@ def _record_skip(ctx, sentinel: str, rel: str):
 
 
 def _skip_summary_line(ctx) -> str:
-    """跳过提示行；无跳过返回 ""。"""
+    """跳过的文件汇总；无跳过返回 ""。"""
     stats = ctx["skipped"]
-    total = (stats["oversize"] + stats["binary"] + stats["unreadable"]
-             + stats["longline"])
+    total = (stats["oversize"] + stats["binary"] + stats["utf16"]
+             + stats["nonutf8"] + stats["unreadable"] + stats["longline"])
     if total <= 0:
         return ""
-    return (f"[已跳过 {total} 个文件: 超100MB({stats['oversize']}) / "
-            f"二进制({stats['binary']}) / 不可读({stats['unreadable']}) / "
-            f"超长行中止({stats['longline']})（如 {'、'.join(stats['paths'])}）]")
+    parts = []
+    if stats["oversize"]:
+        parts.append(f"超100MB({stats['oversize']})")
+    if stats["binary"]:
+        parts.append(f"二进制({stats['binary']})")
+    if stats["utf16"]:
+        parts.append(f"UTF-16({stats['utf16']})")
+    if stats["nonutf8"]:
+        parts.append(f"不是UTF-8({stats['nonutf8']})")
+    if stats["unreadable"]:
+        parts.append(f"不可读({stats['unreadable']})")
+    if stats["longline"]:
+        parts.append(f"超长行中止({stats['longline']})")
+    samples = ("（如 " + "、".join(stats["paths"]) + "）") if stats["paths"] else ""
+    return f"[已跳过 {total} 个文件: {' / '.join(parts)}{samples}]"
 
 
 def _binary_cut_line(ctx) -> str:
-    """二进制截断提示行（NUL 出现在文件中段：该文件只搜索了 NUL 之前的部分）。"""
+    """二进制截断：该文件只搜索了 NUL 之前的部分。"""
     stats = ctx["skipped"]
     if not stats["binary_cut"]:
         return ""
-    return (f"[二进制截断 {stats['binary_cut']} 个文件（搜索到二进制数据处停止，"
-            f"其后内容未搜索；如需完整搜索请用其他工具提取文本）"
-            f"{('（如 ' + '、'.join(stats['cut_paths']) + '）') if stats['cut_paths'] else ''}]")
+    samples = ("（如 " + "、".join(stats["cut_paths"]) + "）") if stats["cut_paths"] else ""
+    return f"[二进制截断 {stats['binary_cut']} 个文件，其后未搜索{samples}]"
 
 
 def _dir_error_line(ctx) -> str:
-    """目录遍历错误提示行（权限不足/路径过长等导致目录内容未被搜索）。
+    """目录遍历出错：这些目录的内容未被搜索。
 
     此前 os.walk 静默吞掉目录级错误，输出"[无匹配]"——AI 会把"未读到"
-    误判为"内容不存在"。此处显式提示，错误可见。
+    误判为"内容不存在"。此处报出数量与样本，但不猜原因（权限、路径长度
+    还是别的问题，从异常里分不出来）。
     """
     stats = ctx["skipped"]
     if not stats["direrror"]:
         return ""
-    samples = "、".join(stats["dir_paths"])
-    return (f"[目录不可访问 {stats['direrror']} 个（权限/路径长度等原因，"
-            f"其内容未被搜索）{('（如 ' + samples + '）') if samples else ''}]")
+    samples = ("（如 " + "、".join(stats["dir_paths"]) + "）") if stats["dir_paths"] else ""
+    return f"[目录不可访问 {stats['direrror']} 个{samples}]"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -778,7 +777,7 @@ def _emit_file(label, count, blocks, in_file_trunc, head_limit, results, ctx):
 
     if in_file_trunc:
         remaining = count - len(blocks)
-        results.append(f"...[该文件其余{remaining}处匹配未展开: 已达head_limit({budget})。增大head_limit或缩小搜索范围查看其余]")
+        results.append(f"...[该文件其余{remaining}处匹配未展开: head_limit={budget}]")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -814,7 +813,7 @@ def _gate_poll_check(gate) -> bool:
 
 
 def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
-                   A, B, head_limit, ignore_dirs, results, ctx, gate):
+                   A, B, head_limit, results, ctx, gate):
     """搜索一个目标（文件或目录），结果按预算追加到 results。
 
     目录内文件按相对路径排序（确定性输出）；文件数 >= 10 并行扫描。
@@ -834,16 +833,28 @@ def _search_target(target, label, is_file, regex, fast_searcher, glob_filter,
             if len(stats["dir_paths"]) < _SKIP_MAX_SAMPLES:
                 stats["dir_paths"].append(str(getattr(exc, "filename", None) or target))
 
+        # .gitignore 规则 + 隐藏项跳过：与 ripgrep 默认行为一致
+        # （未传 --no-ignore / --hidden）。显式指定的 target 本身不参与过滤，
+        # 只有遍历出的子项才判 —— 这正是「AI 想搜被忽略目录或 .env 时
+        # 显式传 path 就能搜到」的依据。
+        gi = _GitIgnore(target)
         for dirpath, dirnames, filenames in os.walk(target, onerror=_on_walk_error):
             if gate.check():
                 return
-            dirnames[:] = [d for d in dirnames
-                           if d not in ignore_dirs
-                           and not _is_nt_reparse_dir(os.path.join(dirpath, d))]
+            dirnames[:] = [
+                d for d in dirnames
+                if not d.startswith(".")
+                and not _is_nt_reparse_dir(os.path.join(dirpath, d))
+                and not gi.is_ignored(os.path.join(dirpath, d), True)
+            ]
             for fname in filenames:
                 if gate.check():
                     return
+                if fname.startswith("."):
+                    continue
                 full = os.path.join(dirpath, fname)
+                if gi.is_ignored(full, False):
+                    continue
                 try:
                     rel = os.path.relpath(full, target)
                 except ValueError:

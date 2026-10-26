@@ -21,18 +21,12 @@ DEFINITION = {
     "function": {
         "name": "GoalComplete",
         "description": (
-            "声明当前任务已完成——任务执行的最后一步调用。\n"
-            "调用前必须全部满足：\n"
-            "1. 任务目标已实际达成，关键结果已经真实验证，而非仅凭推理判断；\n"
-            "2. 最终答复已完整写出。\n"
-            "必须提交完成清单：逐条列出 任务要求 → 改动文件 → 可检查证据 → 状态，覆盖任务的全部要求；"
-            "未完成或受阻的项也要列出并写明原因。\n"
-            "「改动文件」是独立验证员的核对入口，必须逐项如实申报：改动了哪些文件就填其完整路径"
-            "（多个用换行分隔）；确实没有文件改动的项填「无」。\n"
-            "证据必须可检查：可复现命令+输出摘要 / 文件路径 / 实际现象；"
-            "「已验证」「已完成」这类空泛表述不算证据。\n"
-            "未完成或受阻的项，如实标注并写明原因。\n"
-            "收到工具结果后简短收尾，不要重复完整答复内容。"
+            "声明当前任务已完成——任务执行的最后一步。\n"
+            "调用前必须满足：1) 任务目标已实际达成并真实验证，非仅凭推理判断；"
+            "2) 最终答复已完整写出。\n"
+            "必须提交完成清单，覆盖任务的全部要求；未完成或受阻的项也列出并写明原因。\n"
+            "「改动文件」是独立验证员的核对入口，须逐项如实申报。\n"
+            "调用后向用户总结完成情况，不要重复完整答复内容。"
         ),
         "parameters": {
             "type": "object",
@@ -107,8 +101,8 @@ def _check_checklist(checklist, ctx):
     """机械校验完成清单：通过返回 None，否则返回对AI的具体问题描述"""
     if not isinstance(checklist, list) or not checklist:
         return (
-            "未提交完成清单。请提交 checklist：逐条列出 任务要求 → 改动文件 → 可检查证据 → 状态"
-            "（状态为 完成/未完成/受阻），覆盖任务的全部要求。"
+            "未提交完成清单。checklist 每项需含四个字段："
+            "要求 / 改动文件 / 证据 / 状态（完成、未完成 或 受阻）。"
         )
 
     for i, item in enumerate(checklist, 1):
@@ -122,20 +116,19 @@ def _check_checklist(checklist, ctx):
             if key == "改动文件":
                 item[key] = _normalize_files(v)   # 数组形态容错归一化为字符串
                 if not item[key]:
-                    return (f"第{i}项的 改动文件 为空白。必须如实申报：改动了哪些文件就填其完整路径"
-                            "（多个用换行分隔）；确实没有文件改动的项填「无」。")
+                    return (f"第{i}项的 改动文件 为空白。填完整路径，多个用换行分隔；"
+                            "无改动填「无」。")
                 continue
             if not isinstance(v, str):
                 return f"第{i}项的 {key} 必须是字符串。"
         if not item["要求"].strip():
-            return f"第{i}项的 要求 为空白，请写明该项任务要求。"
+            return f"第{i}项的 要求 为空白。"
         if item["状态"].strip() not in _STATUSES:
             return f"第{i}项的 状态 非法：{item['状态']}，只能是 完成/未完成/受阻。"
         if not item["证据"].strip():
             return (
-                f"第{i}项的 证据 为空白。证据必须可检查：可复现命令+输出摘要 / "
-                "文件路径 / 实际现象；「已验证」「已完成」这类空泛表述不算证据；"
-                "未完成/受阻项须写明原因。"
+                f"第{i}项的 证据 为空白。证据须可检查：可复现命令+输出摘要 / "
+                "文件路径 / 实际现象；「已验证」「已完成」不算证据。"
             )
 
     # todo 交叉校验：计划仍有未勾选项时，清单必须如实含'未完成/受阻'项
@@ -148,8 +141,7 @@ def _check_checklist(checklist, ctx):
         tail = f"等共{len(unfinished)}项" if len(unfinished) > 5 else ""
         return (
             f"计划仍有未勾选完成的项: {names}{tail}。"
-            "若这些任务实际已完成，请先调用TodoWrite勾选它们，再重新调用GoalComplete；"
-            "若确实未完成或放弃，请在完成清单中如实标注「未完成」或「受阻」并写明原因。"
+            "清单须把未完成/受阻的项如实标注。"
         )
     return None
 
@@ -167,14 +159,14 @@ def _approve(ctx, checklist, forced: bool = False) -> str:
         ctx.goal_forced = True
         return (
             f"[GOAL_COMPLETE] 完成清单连续被拒已达上限（{_MAX_MECHANICAL_REJECTS}次），已放行。"
-            "请向用户总结完成情况，并如实说明清单未通过校验的情况。"
+            "清单未通过校验。"
         )
     if ctx.goal_honest:
         return (
             "[GOAL_COMPLETE] 完成声明已提交（清单含未完成/受阻项），"
-            "系统将独立复核申报的阻碍是否成立。请向用户总结完成情况与未完成原因。"
+            "系统将独立复核申报的阻碍是否成立。"
         )
-    return "[GOAL_COMPLETE] 完成声明已提交，系统将独立复核。请向用户总结完成情况。"
+    return "[GOAL_COMPLETE] 完成声明已提交，系统将独立复核。"
 
 
 def execute(checklist=None, _tool_context=None) -> str:
@@ -191,7 +183,7 @@ def execute(checklist=None, _tool_context=None) -> str:
     """
     if _tool_context is None:
         # 理论不发生（registry 始终注入）；保持健壮：不校验、不计数，仅提示
-        return "[提示] 缺少工具上下文，完成清单未记录。请重新调用GoalComplete。"
+        return "[提示] 缺少工具上下文，完成清单未记录。"
 
     problem = _check_checklist(checklist, _tool_context)
     if problem is None:
@@ -202,4 +194,4 @@ def execute(checklist=None, _tool_context=None) -> str:
     _tool_context.goal_mech_rejects += 1
     if _tool_context.goal_mech_rejects > _MAX_MECHANICAL_REJECTS:
         return _approve(_tool_context, checklist, forced=True)
-    return f"[拒绝] 完成清单未通过校验：{problem}修正后重新调用GoalComplete。"
+    return f"[拒绝] 完成清单未通过校验：{problem}"

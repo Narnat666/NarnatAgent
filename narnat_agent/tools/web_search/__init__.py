@@ -82,22 +82,19 @@ DEFINITION = {
     "type": "function",
     "function": {
         "name": "WebSearch",
-        "description": "联网搜索或抓取网页。action=search 按关键词搜索并返回标题、"
-                       "URL 与摘要；action=fetch 抓取指定网页并返回 Markdown 全文。"
-                       "需要正文时，先 search 再对选中的 URL 执行 fetch。",
+        "description": "联网搜索或抓取网页。search 按关键词搜索，返回标题、"
+                       "URL 与摘要；fetch 抓取指定网页，返回正文。",
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["search", "fetch"],
-                           "description": "search=按关键词搜索；fetch=抓取指定网页正文"},
+                           "description": "search=按关键词搜索；fetch=抓取网页正文。"},
                 "query": {"type": "string",
-                          "description": "搜索词，action=search 时必填。"
-                                         "支持 site: / lang: / after: / before: 等语法"},
+                          "description": "搜索词。action=search 时必填。"},
                 "url": {"type": "string",
-                        "description": "要抓取正文的网页地址（http/https），"
-                                       "action=fetch 时必填"},
+                        "description": "网页地址（http/https）。action=fetch 时必填。"},
                 "num": {"type": "integer",
-                        "description": "返回条数，action=search 时有效，默认 10，上限 20"},
+                        "description": "返回条数。默认 10，上限 20。"},
             },
             "required": ["action"],
         },

@@ -523,7 +523,6 @@ class RpcServer:
             cfg.paths.narnat_dir,
             project_roots=getattr(cfg.skills, "project_roots", None),
             cwd=os.getcwd(),
-            ignore_dirs=getattr(cfg.tools, "ignore_dirs", ()),
         )
         out = []
 
@@ -2345,8 +2344,11 @@ def _tool_failed_from_output(output: str) -> bool:
     """
     if not isinstance(output, str):
         return False
-    m = re.search(r"\[exit code:\s*(-?\d+)\]", output)
-    if m and int(m.group(1)) != 0:
+    # 取**最后一个**退出码，与前端 narnat.js 及 exec_signal.parse_rc 口径一致：
+    # 多段命令逐段各标一个，整体结果由最后一段决定。取第一个会在
+    # 「前段失败、后段用 || 兜回」时错标失败。
+    found = re.findall(r"\[exit code:\s*(-?\d+)\]", output)
+    if found and int(found[-1]) != 0:
         return True
     head = output.lstrip()[:20]
     return head.startswith("[编辑失败") or head.startswith("[写入失败")

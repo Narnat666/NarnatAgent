@@ -20,11 +20,11 @@ def _no_session_msg(host: str = "") -> str:
         from . import _list_devices
         devs = _list_devices()
         if devs == "(无)":
-            return "[错误: 无可用SSH会话，请先Terminal connect建立连接]"
+            return "[错误: 无可用SSH会话]"
         target = f"指定设备 {host} 未连接。" if host else "无法确定目标设备。"
         return f"[错误: {target}设备标识只支持devN编号(dev1..devn)。当前已连接: {devs}]"
     except Exception:
-        return "[错误: 无可用SSH会话，请先Terminal connect]"
+        return "[错误: 无可用SSH会话]"
 
 
 def _get_sftp(session: SSHSession):
@@ -55,7 +55,7 @@ def remote_read_bytes(file_path: str, max_bytes: int, host: str = ""):
     try:
         sftp = _get_sftp(session)
     except Exception as e:
-        return None, f"[错误: 远程SFTP打开失败: {e}]"
+        return None, f"[错误: SFTP 打开失败: {e}]"
 
     try:
         import stat as _stat_mod
@@ -64,28 +64,25 @@ def remote_read_bytes(file_path: str, max_bytes: int, host: str = ""):
         except IOError:
             info = None
         if info is not None and _stat_mod.S_ISDIR(info.st_mode):
-            return None, (f"[错误: 远程路径是目录: {file_path}，"
-                          "请用 Terminal exec 查看目录内容]")
+            return None, f"[错误: {file_path} 是目录（远程）]"
         # 先看大小再决定读不读：一个 500MB 的远程文件不该先拉完再拒绝
         if info is not None and info.st_size > max_bytes:
-            return None, ("[错误: 远程文件过大（%d 字节，上限 %d 字节），"
-                          "请用 Terminal exec 先在远程缩小]"
+            return None, ("[错误: 远程文件过大（%d 字节，上限 %d 字节）]"
                           % (info.st_size, max_bytes))
 
         with sftp.open(file_path, "rb") as f:
             data = f.read(max_bytes + 1)
         if len(data) > max_bytes:
-            return None, ("[错误: 远程文件过大（超过 %d 字节上限），"
-                          "请用 Terminal exec 先在远程缩小]" % max_bytes)
+            return None, ("[错误: 远程文件过大（超过 %d 字节上限）]" % max_bytes)
         return data, ""
     except OSError as e:
         if e.errno == errno.ENOENT:
-            return None, f"[错误: 远程文件不存在: {file_path}]"
+            return None, f"[错误: 文件不存在: {file_path}（远程）]"
         if e.errno == errno.EACCES:
-            return None, f"[错误: 远程文件权限不足（EACCES）: {file_path}]"
-        return None, f"[错误: 远程读取失败: {file_path} ({e})]"
+            return None, f"[错误: 权限不足: {file_path}（远程）]"
+        return None, f"[错误: 读取失败: {file_path}（远程）({e})]"
     except Exception as e:
-        return None, f"[错误: 远程读取失败: {e}]"
+        return None, f"[错误: 读取失败（远程）: {e}]"
     finally:
         try:
             sftp.close()
@@ -110,7 +107,7 @@ def remote_read(file_path: str, offset: int = 0, limit: int = 2000,
     try:
         sftp = _get_sftp(session)
     except Exception as e:
-        return f"[错误: 远程SFTP打开失败: {e}]"
+        return f"[错误: SFTP 打开失败: {e}]"
 
     try:
         # "rb"模式: read/readline均返回bytes（"r"模式的readline会按UTF-8强解码，
@@ -123,20 +120,23 @@ def remote_read(file_path: str, offset: int = 0, limit: int = 2000,
         # 目录路径: SFTP open 目录抛原始IOError被误报为"文件不存在"，
         # 提前判定给出准确指引（与本地Read的目录提示对齐）
         if info is not None and _stat_mod.S_ISDIR(info.st_mode):
-            return ("[错误: 远程路径是目录: "
-                    f"{file_path}，请用 Terminal exec 查看目录内容]")
+            return f"[错误: {file_path} 是目录（远程）]"
 
         with sftp.open(file_path, "rb") as f:
-            # 二进制检测: 仅读首块8KB（与本地Read检测策略一致）
+            # 判定顺序必须与本地 Read/Edit 一致：BOM → 二进制 → 编码。
+            # 顺序错了会怎样（实测）：UTF-16 文本的 ASCII 字符含 NUL，先判 NUL
+            # 会把同一个文件报成「二进制文件」，而本地报「不是 UTF-8」——
+            # AI 对同一文件从两个入口得到两个结论。
             head = f.read(8192)
-            if b"\x00" in head:
-                return f"[错误: 二进制文件: {file_path}]"
-
-            # 编码探测（与本地Read一致）：只认 BOM 声明的 UTF-16 与严格 UTF-8
             from ..read import _detect_text_encoding, _sniff_bom_encoding
-            encoding = _sniff_bom_encoding(head) or _detect_text_encoding(head)
+            if _sniff_bom_encoding(head):
+                return f"[错误: 不是 UTF-8: {file_path}（远程）]"
+            if b"\x00" in head:
+                return f"[错误: 二进制文件: {file_path}（远程）]"
+            # 编码探测：只认严格 UTF-8，UTF-16 已由上面的 BOM 分支拦下
+            encoding = _detect_text_encoding(head)
             if encoding is None:
-                return f"[错误: 不是 UTF-8: {file_path}]"
+                return f"[错误: 不是 UTF-8: {file_path}（远程）]"
 
             f.seek(0)
             start = max(offset - 1, 0) if offset > 0 else 0
@@ -165,12 +165,12 @@ def remote_read(file_path: str, offset: int = 0, limit: int = 2000,
         # SFTP把EACCES(errno=13)也抛成IOError：一律报"不存在"会把排查方向
         # 引向路径拼写，实际问题通常是权限（chmod/属主/父目录缺x位）
         if e.errno == errno.ENOENT:
-            return f"[错误: 远程文件不存在: {file_path}]"
+            return f"[错误: 文件不存在: {file_path}（远程）]"
         if e.errno == errno.EACCES:
-            return f"[错误: 远程文件权限不足（EACCES）: {file_path}]"
-        return f"[错误: 远程读取失败: {file_path} ({e})]"
+            return f"[错误: 权限不足: {file_path}（远程）]"
+        return f"[错误: 读取失败: {file_path}（远程）({e})]"
     except Exception as e:
-        return f"[错误: 远程读取失败: {e}]"
+        return f"[错误: 读取失败（远程）: {e}]"
     finally:
         try:
             sftp.close()
@@ -183,9 +183,12 @@ def remote_read(file_path: str, offset: int = 0, limit: int = 2000,
             return f"[无内容: offset={offset} 已超出文件末尾（文件共{skipped}行）]"
         return "[文件为空]"
 
-    # 截断提示（与本地Read一致: 给出精确续读offset，AI无需自己计算）
+    # 截断提示（与本地 Read 逐字对齐：只报已显示区间与续读 offset）
     if truncated:
-        result.append(f"  ... [截断: 已显示 {limit} 行。使用 offset={start + limit + 1} 参数可读取其余部分]")
+        end_line = start + limit
+        result.append(
+            f"  ... [已显示 {start + 1}-{end_line} 行。用 offset={end_line + 1} 继续]"
+        )
 
     return "\n".join(result)
 
@@ -212,7 +215,7 @@ def remote_write(file_path: str, content: str, host: str = "") -> tuple:
         # 目录路径：SFTP写入会报原始IOError，误导AI去查权限，提前拦截给出真实原因
         if file_exists and _stat_mod.S_ISDIR(info.st_mode):
             sftp.close()
-            return (f"[错误: 远程路径是目录: {file_path}，请使用正确的文件路径]", "")
+            return (f"[错误: {file_path} 是目录（远程）]", "")
 
         # 读取旧内容生成diff
         diff = ""
@@ -235,7 +238,7 @@ def remote_write(file_path: str, content: str, host: str = "") -> tuple:
             if not _ensure_remote_dir(session, file_path):
                 sftp.close()
                 parent = file_path.rsplit("/", 1)[0] or "/"
-                return (f"[错误: 无法创建远程目标目录: {parent}（可能无写权限）]", "")
+                return (f"[错误: 无法创建目标目录: {parent}（远程）]", "")
 
         # 写入
         data = content.encode("utf-8")
@@ -253,7 +256,7 @@ def remote_write(file_path: str, content: str, host: str = "") -> tuple:
     # 据其报"无实质修改"会在文件已被改写（CRLF静默变LF）时给出假报告
     if diff == "[无差异]" and old_bytes is not None:
         if new_bytes == old_bytes:
-            return (f"{dev_tag}[提示: 新旧内容完全相同（字节级一致），文件无实质修改。请确认content是否漏写]", color_diff)
+            return (f"{dev_tag}[提示: 新旧内容字节级一致，文件无实质修改]", color_diff)
         detail = describe_bytes_only_change(old_bytes, new_bytes)
         return (f"{dev_tag}[提示: 文件已写入，正文内容相同，但字节层面有变化（{detail}）]",
                 colorize_diff(f"[正文相同，字节变化] {detail}"))
@@ -281,20 +284,19 @@ def remote_edit(file_path: str, old_string: str = "", new_string: str = "",
         # EACCES与ENOENT必须区分：文件存在但无权限时若提示"请用Write创建"，
         # 会诱导AI覆盖一个真实存在的文件
         if e.errno == errno.ENOENT:
-            return (f"[错误: 远程文件不存在: {file_path}，如需创建请用Write工具]", "")
+            return (f"[错误: 文件不存在: {file_path}（远程）]", "")
         if e.errno == errno.EACCES:
-            return (f"[错误: 远程文件权限不足（EACCES），未做任何修改: {file_path}]", "")
-        return (f"[错误: 远程文件无法读取: {file_path} ({e})]", "")
+            return (f"[错误: 权限不足: {file_path}（远程，未修改）]", "")
+        return (f"[错误: 无法读取: {file_path}（远程）({e})]", "")
     except Exception as e:
-        return (f"[错误: 远程读取失败: {e}]", "")
+        return (f"[错误: 读取失败（远程）: {e}]", "")
 
     try:
         content = raw.decode("utf-8")
     except UnicodeDecodeError:
         # 非UTF-8文件（GBK/Latin-1等）拒绝编辑：decode失败时若降级errors="replace"，
         # 写回会把原文件字节永久替换为U+FFFD，造成静默数据损坏
-        return (f"[错误: 远程文件非UTF-8编码，为防止内容损坏已拒绝编辑: {file_path}。"
-                f"请用Terminal exec处理（如转码为UTF-8后再编辑）]", "")
+        return (f"[错误: 不是 UTF-8: {file_path}（远程）]", "")
 
     # 字符串模式
     if not old_string:
@@ -313,11 +315,10 @@ def remote_edit(file_path: str, old_string: str = "", new_string: str = "",
 
     count = content.count(old_string_normalized)
     if count == 0:
-        return ("[错误: 未找到匹配文本。请先Read确认远程文件内容。]", "")
+        return ("[错误: 未找到匹配文本]", "")
 
     if count > 1 and not replace_all:
-        return ((f"[错误: 找到{count}处匹配，old_string不唯一。"
-                 f"请扩大上下文使其唯一，或设置replace_all=True"), "")
+        return (f"[错误: 找到{count}处匹配，old_string 不唯一]", "")
 
     if replace_all:
         new_content = content.replace(old_string_normalized, new_string_normalized)
@@ -346,7 +347,7 @@ def _remote_write_and_diff(old_content: str, new_content: str, file_path: str,
     if old_content == new_content:
         # 空编辑提醒（与本地Edit行为一致）：此前返回"[已替换1处]\n[无差异]"，
         # 首行误导AI以为编辑成功。文件已照常写盘，但明确告知本次无实质修改
-        return (f"{dev_tag}[提示: 新旧内容相同，文件无实质修改。请确认new_string是否漏写]",
+        return (f"{dev_tag}[提示: 新旧内容相同，文件无实质修改]",
                 colorize_diff("[无差异]"))
     llm_result = f"{dev_tag}[已替换{count}处]\n{diff}"
 
