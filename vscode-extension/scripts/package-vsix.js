@@ -292,12 +292,15 @@ function main() {
          本仓库托管在 gitcode.com，推断失败时报
          `Couldn't detect the repository where this extension is published`。
          vsce 3.x 把这条当 WARNING 放行，4.0.0 改为 ERROR 直接中止打包。
-         给出 base URL 后相对链接改写不再依赖推断，README 里的截图也能正常显示。 */
+         给出 base URL 后相对链接改写不再依赖推断，README 里的截图也能正常显示。
+         分支必须与插件的开发分支一致：README 里的截图只存在于该分支，
+         写 master 会让详情页按 master 路径取图 —— master 上没有这些文件，图全裂。 */
+      const BRANCH = 'VSCODE_PLUGIN';
       const BASE = 'https://gitcode.com/xyint/NarnatAgent';
       const pkgArgs = ['--yes', '@vscode/vsce', 'package', '--no-dependencies',
         '--target', 'win32-x64',
-        '--baseContentUrl', BASE + '/blob/master/vscode-extension/',
-        '--baseImagesUrl', BASE + '/raw/master/vscode-extension/',
+        '--baseContentUrl', BASE + '/blob/' + BRANCH + '/vscode-extension/',
+        '--baseImagesUrl', BASE + '/raw/' + BRANCH + '/vscode-extension/',
         '-o', out];
       execFileSync('npx', pkgArgs, {
         cwd: ROOT, stdio: 'inherit', timeout: 600000, shell: true

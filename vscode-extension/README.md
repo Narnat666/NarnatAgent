@@ -43,21 +43,21 @@ Read、Write、Edit 配合 Terminal 可操作远程设备。
 
 ## 界面
 
-<img src="media/ui-sessions.png" alt="对话记录" width="460">
+![对话记录](media/ui-sessions.jpg)
 
 对话记录：历史会话卡片列表，支持新建对话、保存当前为、新建探索分支。
 
-<img src="media/ui-chat.png" alt="对话" width="460">
+![对话](media/ui-chat.jpg)
 
 对话：用户消息、AI 回答、工具调用行与结论块，支持 `/` 调出命令、附件、发送中断。
 
-<img src="media/ui-tools.png" alt="调度" width="460">
+![调度](media/ui-tools.jpg)
 
 调度：工具调用折叠为一行摘要，支持展开查看逐条卡片及完成状态。
 
-<img src="media/ui-settings-api.png" alt="模型 API" width="240">
-<img src="media/ui-settings-web.png" alt="联网工具" width="240">
-<img src="media/ui-settings-prompt.png" alt="提示词" width="240">
+| 模型 API | 联网工具 | 提示词 |
+|---|---|---|
+| ![模型 API](media/ui-settings-api.jpg) | ![联网工具](media/ui-settings-web.jpg) | ![提示词](media/ui-settings-prompt.jpg) |
 
 设置分三页：
 
@@ -67,7 +67,7 @@ Read、Write、Edit 配合 Terminal 可操作远程设备。
 
 ## 命令行模式
 
-<img src="media/ui-cli.png" alt="命令行" width="460">
+![命令行](media/ui-cli.jpg)
 
 插件内置的后端 `bin/narnat.exe` 也可单独使用：双击或在终端中运行，即进入命令行模式。
 
