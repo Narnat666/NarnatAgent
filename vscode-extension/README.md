@@ -1,7 +1,5 @@
 # Narnat
 
-AI 编程智能体：Narnat Agent。
-
 ## AI工具（12 个）
 
 | 工具 | 作用 |

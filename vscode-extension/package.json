@@ -1,8 +1,8 @@
 {
   "name": "narnat-vscode",
   "displayName": "Narnat",
-  "description": "AI 编程智能体：在侧边栏对话，自主读写代码、执行命令、SSH/串口调试、联网搜索。内置后端，装完填 API Key 即可用。",
-  "version": "0.0.2",
+  "description": "AI 编程智能体：Narnat Agent。",
+  "version": "0.0.3",
   "publisher": "narnat",
   "license": "MIT",
   "icon": "media/icon.png",
