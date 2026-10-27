@@ -94,12 +94,32 @@ class StatsTracker:
         self._total_prompt_tokens = 0  # 累计输入token（所有轮次求和）
         self._total_cache_tokens = 0   # 累计缓存命中token
         self._total_cost = 0.0
+        # 消耗变化监听（rpc 层注入）：外部调用（压缩/复核/总结/命名）发生后
+        # 立即推一次 stats，界面不用等下一次轮末才看到费用/缓存变化。
+        self._usage_listener = None
         self._balance_to_show = 0.0
         self._balance_known = False   # 是否曾经成功查到过余额（持久，见 fetch_balance）
         # 本轮是否**刚刚**查到新余额（瞬时，每轮开始时由 begin_round 清零）。
         # 与上面的持久标记分工不同：终端统计栏只在"这一轮真的查了"时显示余额，
         # 否则同一条旧余额会连续出现在 10 个统计栏里，看着像在重复报告。
         self._balance_fresh = False
+
+    def set_usage_listener(self, fn) -> None:
+        """注入「消耗发生变化」回调（rpc 层用它即时刷新状态栏）。
+
+        只在一个地方抛出去、由消费方自己容错：统计出错绝不能影响主流程
+        （压缩/复核失败和「状态栏慢一拍」不是一个量级的问题）。
+        """
+        self._usage_listener = fn
+
+    def _notify_usage(self) -> None:
+        fn = self._usage_listener
+        if fn is None:
+            return
+        try:
+            fn()
+        except Exception:
+            pass
 
     def begin_round(self) -> None:
         """新的一轮开始：清掉"本轮刚查到余额"的瞬时标记。
@@ -154,17 +174,38 @@ class StatsTracker:
             self._append_cost_log(prompt, completion, cached)
 
     def log_external_usage(self, usage: dict) -> None:
-        """旁路记账：外部子会话（如完成验证器）的 API 调用。
+        """旁路调用的记账：压缩摘要 / 完成复核 / 分支总结 / 自动命名。
 
-        只追加费用日志行（与主口径同一分项计算），不参与主会话
-        token/费用累计——验证器"不触碰主会话统计"的边界不变。
+        这些调用的 token 与费用**同样是本会话真实花掉的钱**，所以与主口径
+        一起累计（输出 token、prompt/cache token、费用）。不这样做会怎样
+        （实测）：界面状态栏写 ¥0.0123，而同一目录的 cost_log.csv 求和是
+        ¥0.0194 —— 用户按 CSV 对账只会以为界面在少报，且没有任何地方能
+        解释差额。
+
+        唯一的例外是 `input_tokens`（上下文占比的来源）：那是**主会话上下文
+        快照**，外部调用有自己的独立 prompt，混进来会把「当前上下文占用」
+        算成别人的。
+
+        记账后主动通知一次（`_notify_usage`）：压缩/复核常常发生在轮中或轮
+        间，不推的话界面要等到下一次轮末才更新，用户看到的是旧费用。
         """
-        if not self._cost_log_enabled:
-            return
         prompt = _as_int(usage.get("prompt_tokens"))
         completion = _as_int(usage.get("completion_tokens"))
         cached = _as_int(usage.get("cached_tokens"))
-        self._append_cost_log(prompt, completion, cached)
+        self._total_output_tokens += completion
+        self._total_prompt_tokens += prompt
+        self._total_cache_tokens += cached
+        self._total_cost += calculate_cost(
+            self._model,
+            prompt,
+            completion,
+            cached,
+            self._user_pricing,
+        )
+        # 费用日志与主口径同一分项落盘；关掉 CSV 只是不落盘，不影响上面的累计
+        if self._cost_log_enabled:
+            self._append_cost_log(prompt, completion, cached)
+        self._notify_usage()
 
     def _append_cost_log(self, prompt: int, completion: int, cached: int) -> None:
         """追加一行费用记录到CSV（每次LLM请求调用一次）。

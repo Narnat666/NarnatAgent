@@ -100,7 +100,10 @@ class RpcStream:
             if self._begun or self._turn_closed or self._aborted:
                 return
             self._begun = True
-        emit("turn/begin", {"round": self._round, "goal": self._ui.goal_state()})
+        # startedAt：本轮权威起点（毫秒）。面板重建后 webview 据此恢复真实耗时，
+        # 取不到就是 0（客户端退回自己的当前时间）。
+        emit("turn/begin", {"round": self._round, "goal": self._ui.goal_state(),
+                            "startedAt": self._ui.turn_started_ms})
 
     def feed(self, chunk: str) -> None:
         if not chunk:
@@ -124,6 +127,9 @@ class RpcStream:
         with self._lock:
             if self._turn_closed or self._aborted:
                 return
+        # 系统行同样切断思考段（前端 addSysLine 会就地收口，理由同 on_tool_call：
+        # 必须先给后端真值，否则那一段的耗时退回本地计时）。
+        self._end_thinking()
         emit("notice", {"text": _clean(text).strip()})
 
     def pause_spinner(self) -> None:
@@ -273,6 +279,10 @@ class RpcStream:
         summary = summary if summary is not None else kwargs.get("summary")
         if arguments is None:
             arguments = kwargs.get("arguments")
+        # 工具调用是思考段的边界：必须先收口再下发 tool/call。顺序反了会怎样：
+        # 前端收到 tool/call 时就地本地收口（拿不到后端值 → 用本地计时），
+        # 之后的 thinking/end 因 curThink 已为 null 被丢弃，段级真值仍然丢失。
+        self._end_thinking()
         emit("tool/call", {
             "id": call_id,
             "name": name,
@@ -324,6 +334,20 @@ class RpcStream:
     # ── 内部 ──
 
     def _end_thinking(self) -> None:
+        """收口**当前这一段**思考，下发它的耗时与字数。
+
+        这里的「段」是这一块 `.think` 的生命周期，不是整轮。段边界 = 任何
+        非思考内容插进来：正文（feed）、工具调用（on_tool_call）、系统提示
+        （notice）、轮末、中断。
+
+        为什么工具调用也算边界（原来不算，是真缺陷）：一轮里「思考→调工具
+        →再思考→再调工具」很常见，而 `on_thinking_delta` 的 `_thinking_started`
+        守卫让计时器整轮只启动一次。工具调用不收口会怎样（实测）：85 次工具
+        调用的一轮，最后一次思考块标题显示「思考 255.1s · 20337 字」——那是
+        从第一次思考累计到轮末的总时间，含全部工具执行与模型等待，而它读起来
+        是「这一段想了两百多秒」。中间那些块因为前端本地收口反而显示成 0.2s，
+        同一屏两种粒度。
+        """
         with self._lock:
             if not self._thinking_started:
                 return
@@ -363,6 +387,11 @@ class RpcUI:
         self._active_stream: Optional[RpcStream] = None
         self._turn_end_callback = None
         self._round = 0
+        # 这一轮的真实起点（毫秒，0 = 还没开过流）。turn/begin 的下发时刻
+        # 可能远晚于轮起点（工具确认流程会另建新流），面板重建后宿主补发
+        # turn/begin{resumed:true} 时也靠它把真实起点带回去 —— 否则 webview
+        # 只能从 0 重算，跑了 5 分钟的一轮会被报成「1 秒」。
+        self._turn_started_ms = 0
         self._command_lock = threading.RLock()
         # 正在等用户点「确认执行」的闸门：点停止时要能把它推开。
         # 不处理会怎样（实测）：后端阻塞在确认读上，界面已显示「已打断」，
@@ -385,8 +414,17 @@ class RpcUI:
 
         注入后 RpcStream.finish() 的 inputTokens/outputTokens/cacheRatio/cost/
         balance/thinkingEffort 缺省值回落到 stats 的当前值。
+
+        同时注册「消耗变化」回调：压缩摘要、完成复核、分支总结、自动命名这些
+        旁路调用走的是 `log_external_usage`，它们既不经过 RpcStream 也不在轮末，
+        不即时推的话界面的费用/缓存要等到下一次轮末才更新（用户看到旧数字）。
+        `emit_stats` 自带内容去重，重复推送不会产生多余事件。
         """
         self._stats = stats
+        try:
+            stats.set_usage_listener(lambda: self.emit_stats(self.resolve_stats()))
+        except Exception:
+            pass
 
     # ── 输入通道 ──
 
@@ -484,11 +522,19 @@ class RpcUI:
         # 否则目标模式自动续跑的每一轮都会提前放开 busy（实测）。
         self._close_dangling("done", intermediate=True)
         self._round += 1
+        # 在流创建处取时间 = 这一轮真正开始的时刻（begin() 只读这个字段，
+        # 不再自己取时间，幂等守卫下也不会每流重置）。
+        self._turn_started_ms = int(time.time() * 1000)
         stream = RpcStream(self, round_no=self._round)
         with self._stream_lock:
             self._active_stream = stream
         stream.begin()
         return stream
+
+    @property
+    def turn_started_ms(self) -> int:
+        """本轮起点（毫秒）。给 turn/begin 载荷与面板重建用，0 = 还没开过流。"""
+        return self._turn_started_ms
 
     def _close_dangling(self, reason: str, intermediate: bool = False) -> None:
         with self._stream_lock:

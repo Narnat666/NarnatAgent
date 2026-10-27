@@ -59,7 +59,8 @@ class CompressionCoordinator:
         # 自动压缩成功后修正探索分支的 /done 增量基准（手动 /compact 由
         # session_callbacks 负责，见 compress_manual）
         self._session_mgr = session_mgr
-        # 旁路记账：压缩调用的费用日志（不触碰主会话统计，同验证器口径）
+        # 压缩摘要的 token/费用计入本会话消耗（与主口径同一份累计；不动
+        # input_tokens 快照），并即时刷新状态栏 —— 见 stats.log_external_usage
         self._stats = stats
 
     def _log_usage(self, usage: dict) -> None:

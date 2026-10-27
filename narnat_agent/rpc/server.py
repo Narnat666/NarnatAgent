@@ -2439,6 +2439,18 @@ _EXIT_CODE_TOOLS = frozenset({"Shell", "Terminal"})
 # 编辑类工具：失败时返回 `[错误: …]`，需要据此把行标红。
 _EDIT_TOOLS = frozenset({"Write", "Edit"})
 
+# 会写框架超时提示 `[超时: …]` 的工具（唯一真源）。之所以要白名单：
+# `[超时:` 是普通中文文本，读文件的工具返回的内容里完全可能有这几个字，
+# 不区分工具就会把成功的一次读取标红。
+#
+# **Serial 不在名单里**（是刻意的，不是漏了）：`serial_session.py:425` 的
+# exec 超时带 `tag_error()` 标签，`:491` 的 raw_exec 超时**不带**（那里明写
+# 「超时是设计内的工作方式，不是失败」）。标签在落盘前被 strip_tags 剥掉，
+# 两者磁盘文本完全同形 —— 认它就等于把 raw_exec 的**正常返回**标成红行。
+# 假阳性比原来的假阴性更糟，故排除：Serial 的 exec 超时在回放里仍显示成功
+#（已知限制，要修得先让两种超时文本可区分）。
+_TIMEOUT_TOOLS = frozenset({"Shell", "Terminal"})
+
 
 def _tool_failed_from_output(output: str, name: str = "") -> bool:
     """从工具输出判断这次调用是否失败。
@@ -2451,11 +2463,20 @@ def _tool_failed_from_output(output: str, name: str = "") -> bool:
     diff 把这句话带进返回值 → 被当成退出码 3 → 行名标红，而文件其实
     写得好好的。用户看到「写入成功但显示红色」。
 
-    两条判据：
+    三条判据：
       · Shell / Terminal：取**最后一个** `[exit code: N]`，非 0 即失败。
         多段命令逐段各标一个，整体结果由最后一段决定。
       · 编辑类工具失败时会回 `[编辑失败: …]` / `[写入失败: …]`（开头），
         一并识别，否则失败行会显示成「完成」。
+      · Shell / Terminal：输出**有一行以** `[超时: …]` 开头即失败。
+        这条只能靠文本近似：实时流里框架失败消息带一个不可伪造的随机错误
+        标签（`tag_error()` 追加），但那标签在落盘前已被 `strip_tags()`
+        剥掉（它只服务判定，不给 AI 看），磁盘上只剩这串中文。命令自己
+        打印的同样文字不会在行首，故按行首匹配把误判面压到最小；仍然
+        必须限制工具白名单，理由同上一条 —— 其它工具的输出是文件内容。
+        `[错误:` 前缀**不**扩展到这几个工具：那是编辑类的专用前缀，命令
+        输出里出现 `[错误:` 是完全正常的中文。Serial 也排除，见
+        `_TIMEOUT_TOOLS` 上方的注释。
     """
     if not isinstance(output, str):
         return False
@@ -2463,6 +2484,9 @@ def _tool_failed_from_output(output: str, name: str = "") -> bool:
     # 编辑类工具的失败：统一走 `[错误: …]` 前缀（旧版的 `[编辑失败`/`[写入失败`
     # 两个前缀在文案统一时已不存在 —— 判据留着就是死代码，会漏判所有编辑失败）。
     if name in _EDIT_TOOLS and head.startswith("[错误"):
+        return True
+    # 框架超时提示：必须出现在行首（命令自己的输出里也可能印这几个字）
+    if name in _TIMEOUT_TOOLS and re.search(r"^[ \t]*\[超时:", output, re.MULTILINE):
         return True
     # 退出码只对命令类工具有意义
     if name not in _EXIT_CODE_TOOLS:

@@ -18,7 +18,8 @@ class Summarizer:
         self._llm = llm
         self._config = config
         self._logger = logger
-        # 旁路记账：总结/命名调用计入费用日志（同压缩/验证器口径，不动主会话统计）
+        # 总结/命名调用的 token 与费用计入本会话消耗（同压缩/验证器口径），
+        # 并即时刷新状态栏 —— 见 stats.log_external_usage
         self._stats = stats
 
     def _log_usage(self, usage: dict) -> None:

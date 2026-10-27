@@ -159,6 +159,14 @@ function turnWasActive() {
 }
 
 /**
+ * 正在跑的这一轮的权威起点（毫秒，后端 turn/begin 里的 startedAt）。
+ * 0 = 不知道。重建面板补发 turn/begin{resumed} 时要带回去，否则 webview
+ * 只能把起点重算成「现在」——跑了 5 分钟的一轮会被报成「1 秒」。
+ * 与 turnActive 一样只在 forwardEvent() 里维护，不旁路双写。
+ */
+let turnStartedAt = 0;
+
+/**
  * 最后一条还没被应答的确认请求。
  * webview 重建（关面板再打开、VSCode 重载界面）后必须补发：确认条只发一次，
  * 不补发的话用户眼前没有任何按钮可点，而后端还在原地等确认——
@@ -173,8 +181,11 @@ let pendingConfirm = null;
 function forwardEvent(message) {
   if (message && message.type === 'turn/begin') {
     turnActive = true;
+    const startedAt = message.params && message.params.startedAt;
+    turnStartedAt = (typeof startedAt === 'number' && startedAt > 0) ? startedAt : 0;
   } else if (message && message.type === 'turn/end') {
     turnActive = false;
+    turnStartedAt = 0;              // 轮次结束，起点失效
     pendingConfirm = null;          // 轮次结束，确认条自然失效
   } else if (message && message.type === 'confirm/request') {
     pendingConfirm = message;
@@ -2052,8 +2063,12 @@ function onWebviewReady(source) {
   }
   // 一轮正在跑：把运行态补回去，否则重建后的界面没有停止按钮，
   // 用户既停不下来也发不出去（实测）。
+  // 同时带上后端给的权威起点，重建后这一轮的耗时才不会从 0 重算；
+  // 取不到就不带（webview 退回自己的当前时间，与旧行为一致）。
   if (turnActive) {
-    broadcast({ type: 'turn/begin', params: { resumed: true } });
+    broadcast({ type: 'turn/begin', params: turnStartedAt
+      ? { resumed: true, startedAt: turnStartedAt }
+      : { resumed: true } });
   }
 }
 

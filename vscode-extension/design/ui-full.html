@@ -11155,7 +11155,17 @@ body[data-run="true"] #goalRounds{opacity:.45}
     // 记这一轮的起点：tool/result 到达时要知道「这条属于本轮」
     //（历史重放的工具行不带 data-turn，不该被本轮收口卷进去）
     turnStartNode = convo.lastElementChild;
-    turnStartTime = Date.now();
+    /* 耗时起点的三态（按优先级）：
+       ① p.startedAt：后端给的本轮真实起点（毫秒）。面板重建时宿主补发的
+          turn/begin{resumed:true} 也带它 —— 不认这个值就只能把起点重算成
+          「现在」，已经跑了 5 分钟的一轮会被报成「1 秒」（实测）；
+       ② resumed 且已有 turnStartTime：这一轮还在跑，补发的事件不该重置起点；
+       ③ 其余（真·新一轮，后端没给起点）：用当前时间。 */
+    if (p && p.startedAt) {
+      turnStartTime = p.startedAt;
+    } else if (!(p && p.resumed) || !turnStartTime) {
+      turnStartTime = Date.now();
+    }
     turnToolCount = 0;
     turnThinkCount = 0;
     // 这一轮真的开始了 = 刚才那次发送必然已被后端接受（busy 的情况不会走到
@@ -11596,8 +11606,14 @@ body[data-run="true"] #goalRounds{opacity:.45}
     var metaText = '';
     var elapsed = o.elapsedMs || 0;
     if (!status && elapsed > 0) {
-      var sec = Math.round(elapsed / 1000);
-      metaText = sec >= 60 ? (Math.floor(sec / 60) + ' 分 ' + (sec % 60) + ' 秒') : (sec + ' 秒');
+      /* 秒级保留一位小数（与 dsh 的 formatDuration 同口径：45.2s），
+         满 60 秒后取整成分秒。原来一律 Math.round 到整秒，200ms 的一轮
+         被写成「0 秒」再被调用方的 Math.max(1000, …) 抬成「1 秒」——
+         屏幕上那个「1 秒」其实是假值。 */
+      var sec = Math.round(elapsed / 100) / 10;
+      metaText = sec >= 60
+        ? (Math.floor(sec / 60) + ' 分 ' + Math.round(sec % 60) + ' 秒')
+        : ((sec % 1 === 0 ? String(sec) : sec.toFixed(1)) + ' 秒');
     }
     // 计数同时留在 DOM 属性上（测试与无障碍要用）
     var counts = tpCounts(moving);
@@ -11905,7 +11921,10 @@ body[data-run="true"] #goalRounds{opacity:.45}
       if (members.length) {
         box = buildTurnProc(members, {
           reason: reason,
-          elapsedMs: turnStartTime ? Math.max(1000, Date.now() - turnStartTime) : 0,
+          /* 不再用 Math.max(1000, …) 抬下界：那会把 200ms 的一轮写成「1 秒」，
+             看起来像真值。格式化那边已经支持一位小数（0.2 秒），不显示 0 秒
+             由 elapsed > 0 保证。 */
+          elapsedMs: turnStartTime ? (Date.now() - turnStartTime) : 0,
           headline: true,
           animate: true,
           /* 状态前缀只在「用户主动打断」时加。
@@ -11958,6 +11977,14 @@ body[data-run="true"] #goalRounds{opacity:.45}
       if (curAssistant && assistantBuf) {
         renderAssistantFinal();
       }
+      /* 中间轮也要把本轮过程收进折叠组。不收会怎样（实测）：目标模式续跑
+         10 轮时，只有最后一轮的 turn/end 走到下面的 foldTurnProcess，前 9 轮
+         的工具行/思考块永久平铺在屏幕上；折叠行写的「N 次工具调用」又只数
+         最后一轮，和屏幕上摊着的数量对不上。
+         位置在 renderAssistantFinal 之后：正文定稿前收会把正在流式写的那条
+         气泡一起卷进组（同下面正常轮的注释）。中间轮的组不需要再挂标签，
+         状态由折叠行自己交代。 */
+      foldTurnProcess(reason);
       rendered('turn/end', { reason: reason, intermediate: true });
       // 中间轮也会往会话里加消息，条数要跟上（同末尾那条补拉）
       if (REAL) post('sessionList', {});
@@ -12832,7 +12859,17 @@ body[data-run="true"] #goalRounds{opacity:.45}
       rowGlyph('think') + '<span class="name"></span></div>' +
       '<div class="slot"><p></p></div>';
     // 思考全文可能很长且含 < >，用 textContent 而不是拼 HTML
-    wrap.querySelector('.name').textContent = '思考 · ' + text.length + ' 字';
+    /* 标题只写「思考」，**不带字数也不带耗时**——与 dsh 对齐：它的
+       ReasoningRow 标题就是 t('message.think') 一项，reasoning 是独立的
+       AssistantBlock、前端逐块渲染，不在标题上标任何数字。
+       为什么这里的字数必须去掉：会话 json 的 `thinking` 是**一条 assistant
+       消息一个字符串**，而一条消息可能含多个思考块（llm.py 把流式
+       thinking_blocks 按 index 拼成 thinking_combined）。所以 text.length
+       是「这条消息的思考总字数」，不是「这一段」。实时路径按段显示，
+       历史路径按消息显示，同一轮的数字差好几个数量级（实测
+       实时 20337 字 vs 历史 6 字）。数字本身不具备可比性时，不显示比
+       显示一个错量级的更诚实。 */
+    wrap.querySelector('.name').textContent = '思考';
     wrap.querySelector('.slot p').textContent = text;
     convo.appendChild(wrap);
     return wrap;

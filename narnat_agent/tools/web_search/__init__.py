@@ -174,7 +174,8 @@ def _format_results(results: List[Dict]) -> str:
         if desc:
             # 仅压缩换行/连续空白为单空格：这是排版（多行摘要会破坏列表结构），
             # 不是内容裁剪
-            lines.append(f"   {re.sub(r'\s+', ' ', desc).strip()}")
+            flat = re.sub(r"\s+", " ", desc).strip()
+            lines.append(f"   {flat}")
     return "\n".join(lines)
 
 

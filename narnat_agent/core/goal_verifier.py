@@ -252,8 +252,8 @@ class GoalVerifier:
         self._llm = llm
         self._config = config
         self._logger = logger
-        # 可选旁路记账（费用日志）：验证器的 API 调用同样计入 cost_log，
-        # 但不触碰主会话的 token/费用累计（stats.log_external_usage）
+        # 验证器自己的 API 调用计入本会话消耗（与主口径同一份累计，不动
+        # input_tokens 快照），并即时刷新状态栏 —— 见 stats.log_external_usage
         self._stats = stats
         # 验证器工具定义（从各工具模块 DEFINITION 取，顺序固定；Shell 走策略检查）
         self._tool_defs = [_READ_DEF, _GLOB_DEF, _GREP_DEF, _BASH_DEF]
@@ -404,7 +404,7 @@ class GoalVerifier:
                 interrupted_info = chunk["stream_interrupted"]
             if "finish_reason" in chunk:
                 finish = chunk["finish_reason"]
-            # 旁路记账：验证器调用同样计入费用日志（不触碰主会话统计）
+            # 验证器调用计入本会话消耗 + 即时刷新状态栏（不动上下文快照）
             if "usage" in chunk and self._stats is not None:
                 try:
                     self._stats.log_external_usage(chunk["usage"])

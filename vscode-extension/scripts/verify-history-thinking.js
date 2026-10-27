@@ -104,15 +104,19 @@ const TEST = String.raw`
     ck('K12 历史里没有「（图片内容见附件）」这种占位气泡',
        convo().textContent.indexOf('（图片内容见附件）') < 0);
 
-    // 思考耗时**不落盘**（与 dsh 一致：dsh 的会话记录里也没有 reasoning 时长，
-    // 它只在流式期间用「已思考」占位）。界面流式那份耗时由 RPC 层自己计时，
-    // 进历史后不显示时间，只显示字数。
+    // 历史思考块标题**只有「思考」二字，不带任何数字**（与 dsh 对齐：
+    // 它的 ReasoningRow 标题就是 t('message.think')，reasoning 是独立
+    // block 逐块渲染，标题上不标秒数/字数）。
+    // 为什么连字数也不能标：会话 json 的 thinking 是「一条 assistant 消息
+    // 一个字符串」，一条消息可能含多个思考块（llm.py 把流式 thinking_blocks
+    // 拼成 thinking_combined），所以 text.length 是「这条消息的思考总字数」
+    // 而不是「这一段」，与实时的段级字数差好几个数量级（实测 20337 vs 6）。
     var names = [].slice.call(convo().querySelectorAll('.think .name')).map(function(n){
       return n.textContent;
     });
     out.push('DIAG 思考标题=' + JSON.stringify(names));
-    ck('K13 历史思考标题只有字数、不带耗时（耗时不入库）',
-       names.length > 0 && names.every(function(s){ return /^思考 · \d+ 字$/.test(s); }),
+    ck('K13 历史思考标题只有「思考」，不带耗时也不带字数',
+       names.length > 0 && names.every(function(s){ return s === '思考'; }),
        JSON.stringify(names));
 
     // 就算后端/老客户端在 payload 里塞了 thinkingMs，界面也不许读它 ——
@@ -128,7 +132,7 @@ const TEST = String.raw`
     });
     out.push('DIAG 带 thinkingMs 的标题=' + JSON.stringify(names2));
     ck('K14 payload 里塞了 thinkingMs 也不显示时间（界面不读该字段）',
-       names2.length > 0 && names2.every(function(s){ return /^思考 · \d+ 字$/.test(s); }),
+       names2.length > 0 && names2.every(function(s){ return s === '思考'; }),
        JSON.stringify(names2));
 
     finish();
