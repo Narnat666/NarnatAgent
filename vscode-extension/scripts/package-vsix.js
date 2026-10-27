@@ -288,8 +288,17 @@ function main() {
          代价：vsixmanifest 里 TargetPlatform="win32-x64"，安装目录名变成
          narnat.narnat-vscode-<ver>-win32-x64（install-vsix.js 用 startsWith
          匹配，不受影响）。 */
+      /* --baseContentUrl/--baseImagesUrl 必须显式给：vsce 只认 GitHub/GitLab，
+         本仓库托管在 gitcode.com，推断失败时报
+         `Couldn't detect the repository where this extension is published`。
+         vsce 3.x 把这条当 WARNING 放行，4.0.0 改为 ERROR 直接中止打包。
+         给出 base URL 后相对链接改写不再依赖推断，README 里的截图也能正常显示。 */
+      const BASE = 'https://gitcode.com/xyint/NarnatAgent';
       const pkgArgs = ['--yes', '@vscode/vsce', 'package', '--no-dependencies',
-        '--target', 'win32-x64', '-o', out];
+        '--target', 'win32-x64',
+        '--baseContentUrl', BASE + '/blob/master/vscode-extension/',
+        '--baseImagesUrl', BASE + '/raw/master/vscode-extension/',
+        '-o', out];
       execFileSync('npx', pkgArgs, {
         cwd: ROOT, stdio: 'inherit', timeout: 600000, shell: true
       });

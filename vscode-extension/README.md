@@ -1,60 +1,76 @@
 # Narnat
 
-AI 编程智能体。在侧边栏对话，读写代码、执行命令、联网检索。
+AI 编程智能体：Narnat Agent。
 
-## 开始使用
+## AI工具（12 个）
 
-1. `Ctrl+Shift+P` 执行 `Narnat: 打开配置文件（填 API Key）`
-2. 填写 `智能体 → 接口密钥`，保存
-3. `Ctrl+Shift+P` 执行 `Narnat: 重启后端`
+| 工具 | 作用 |
+|---|---|
+| Read | 支持文本与图片读取 |
+| Write | 新建文件或覆盖已有文件 |
+| Edit | 替换文件中的指定内容 |
+| Glob | 按文件名模式查找文件 |
+| Grep | 按正则表达式搜索文件内容 |
+| Shell | 在本机执行命令 |
+| Terminal | 通过 SSH 远程执行命令、传输文件 |
+| Serial | 连接串口设备收发数据 |
+| WebSearch | 搜索网页、抓取网页正文 |
+| TodoWrite | 维护任务清单与状态 |
+| GoalComplete | 声明完成并提交证据清单 |
+| MCP | 连接外部 MCP 服务器，注册其工具 |
 
-配置只在后端启动时读取一次，修改后必须重启后端。
+Read、Write、Edit 配合 Terminal 可操作远程设备。
 
-配置文件路径：`~/.narnat/config/narnat.json`
+## 用户命令（15 个）
+
+`/` 唤起，Tab 补全。
+
+| 命令 | 行为 |
+|---|---|
+| `/goal` | 目标模式，任务未完成自动续跑 |
+| `/mode` | 切换模型，由 `模型.列表` 定义 |
+| `/thinking` | 调整思考强度 |
+| `/thinkback` | 思考内容是否随请求回传 |
+| `/explore` | 从当前会话创建探索分支 |
+| `/done` | 结束分支，总结后合并回父会话 |
+| `/skill` | 加载技能文件 |
+| `/compact` | 压缩上下文 |
+| `/save` | 保存当前会话 |
+| `/ls` | 列出会话 |
+| `/cd` | 进入历史会话 |
+| `/rm` | 删除会话 |
+| `/plugin` | 开关 Terminal / WebSearch / Serial / MCP |
+| `/clear` | 清屏 |
+| `/exit` | 退出 |
 
 ## 界面
 
-VSCode 1.106 及以上：面板停靠在右侧辅助侧边栏。
-VSCode 1.90 至 1.105：不支持辅助侧边栏容器，视图注册到左侧 explorer 容器。
-视图未注册时：退回编辑器区面板。
+<img src="media/ui-sessions.png" alt="对话记录" width="460">
 
-关闭后点击左侧活动栏 Narnat 图标重新打开。
+对话记录：历史会话卡片列表，支持新建对话、保存当前为、新建探索分支。
 
-界面组成：
+<img src="media/ui-chat.png" alt="对话" width="460">
 
-| 区域 | 内容 |
-|---|---|
-| 对话区 | 消息、思考块、计划清单、工具卡片 |
-| 会话抽屉 | 会话列表，悬停可改名或删除 |
-| 输入框 | 输入 `/` 打开命令面板 |
-| 状态行 | 模型、思考强度、目标模式、上下文、缓存、费用、余额 |
+对话：用户消息、AI 回答、工具调用行与结论块，支持 `/` 调出命令、附件、发送中断。
 
-关闭启动时自动打开：设置中搜索 `Narnat: Auto Open`。
+<img src="media/ui-tools.png" alt="调度" width="460">
 
-## 可用命令
+调度：工具调用折叠为一行摘要，支持展开查看逐条卡片及完成状态。
 
-在输入框输入 `/` 触发。
+<img src="media/ui-settings-api.png" alt="模型 API" width="240">
+<img src="media/ui-settings-web.png" alt="联网工具" width="240">
+<img src="media/ui-settings-prompt.png" alt="提示词" width="240">
 
-| 命令 | 作用 |
-|---|---|
-| `/ls` `/cd` `/rm` | 浏览、切换、删除工作目录 |
-| `/save` | 保存当前会话 |
-| `/mode` | 切换工作模式 |
-| `/goal` | 目标模式，自主推进至完成 |
-| `/thinking` `/thinkback` | 调整思考强度、回看思考块 |
-| `/explore` | 先摸清代码结构再修改 |
-| `/done` | 结束当前任务 |
-| `/plugin` | 查看已加载插件 |
-| `/compact` | 压缩上下文 |
-| `/skill` | 查看可用技能 |
+设置分三页：
 
-## 命令面板
+- **模型 API**：接口地址、密钥、协议、模型名、思考强度，支持重新读取、打开配置文件。
+- **联网工具**：搜索接口、密钥、认证方式、抓取接口，支持启用开关与高级设置。
+- **提示词**：编辑 `narnat.md`，支持复制、全屏、保存。
 
-| 命令 | 作用 |
-|---|---|
-| `Narnat: 打开对话` | 打开对话面板 |
-| `Narnat: 切换调度面板` | 打开或关闭会话抽屉 |
-| `Narnat: 打开配置文件（填 API Key）` | 打开 narnat.json |
-| `Narnat: 重启后端` | 重启后端子进程 |
+## 命令行模式
 
-设置项：`narnat.autoOpen`、`narnat.rpc.executable`、`narnat.rpc.args`、`narnat.rpc.timeout`。
+<img src="media/ui-cli.png" alt="命令行" width="460">
+
+插件内置的后端 `bin/narnat.exe` 也可单独使用：双击或在终端中运行，即进入命令行模式。
+
+完整配置与源码构建见[仓库 README](https://gitcode.com/xyint/NarnatAgent)。
