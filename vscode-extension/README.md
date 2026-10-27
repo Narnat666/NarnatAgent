@@ -43,21 +43,21 @@ Read、Write、Edit 配合 Terminal 可操作远程设备。
 
 ## 界面
 
-![对话记录](media/ui-sessions.jpg)
+![对话记录](https://api.gitcode.com/api/v5/repos/xyint/NarnatAgent/raw/vscode-extension/media/ui-sessions.jpg?ref=VSCODE_PLUGIN)
 
 对话记录：历史会话卡片列表，支持新建对话、保存当前为、新建探索分支。
 
-![对话](media/ui-chat.jpg)
+![对话](https://api.gitcode.com/api/v5/repos/xyint/NarnatAgent/raw/vscode-extension/media/ui-chat.jpg?ref=VSCODE_PLUGIN)
 
 对话：用户消息、AI 回答、工具调用行与结论块，支持 `/` 调出命令、附件、发送中断。
 
-![调度](media/ui-tools.jpg)
+![调度](https://api.gitcode.com/api/v5/repos/xyint/NarnatAgent/raw/vscode-extension/media/ui-tools.jpg?ref=VSCODE_PLUGIN)
 
 调度：工具调用折叠为一行摘要，支持展开查看逐条卡片及完成状态。
 
 | 模型 API | 联网工具 | 提示词 |
 |---|---|---|
-| ![模型 API](media/ui-settings-api.jpg) | ![联网工具](media/ui-settings-web.jpg) | ![提示词](media/ui-settings-prompt.jpg) |
+| ![模型 API](https://api.gitcode.com/api/v5/repos/xyint/NarnatAgent/raw/vscode-extension/media/ui-settings-api.jpg?ref=VSCODE_PLUGIN) | ![联网工具](https://api.gitcode.com/api/v5/repos/xyint/NarnatAgent/raw/vscode-extension/media/ui-settings-web.jpg?ref=VSCODE_PLUGIN) | ![提示词](https://api.gitcode.com/api/v5/repos/xyint/NarnatAgent/raw/vscode-extension/media/ui-settings-prompt.jpg?ref=VSCODE_PLUGIN) |
 
 设置分三页：
 
@@ -67,7 +67,7 @@ Read、Write、Edit 配合 Terminal 可操作远程设备。
 
 ## 命令行模式
 
-![命令行](media/ui-cli.jpg)
+![命令行](https://api.gitcode.com/api/v5/repos/xyint/NarnatAgent/raw/vscode-extension/media/ui-cli.jpg?ref=VSCODE_PLUGIN)
 
 插件内置的后端 `bin/narnat.exe` 也可单独使用：双击或在终端中运行，即进入命令行模式。
 
