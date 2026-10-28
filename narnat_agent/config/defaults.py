@@ -55,11 +55,15 @@ DEFAULT_COMPRESS_HEADROOM = 65536
 DEFAULT_COMPRESS_RETAIN_TOKENS = 16000
 
 # ── 回话风格提醒（narnat.json "风格"）──
-# 周期性提醒：AI 连续若干轮纯讨论（未调用任何工具）后，在下一轮请求末尾追加
+# 通道一（轮次）：AI 连续若干轮纯讨论（未调用任何工具）后，在下一轮请求末尾追加
 # 一条提醒（仅发给AI，终端不显示）；AI 一旦调用工具即视为在干活，计数清零。
-# "提醒语"留空时用下面的内置默认文案；"间隔轮数"= 每多少轮讨论提醒一次。
+# 通道二（token 间隔）：上下文距上次注入的 token 增量达到间隔值时，在下一轮请求
+# 末尾追加一条提醒；不看 AI 在讨论还是干活，到点即注入。压缩后上下文变小，
+# 基准惰性重置（重新计时）。
+# 两通道共用"提醒语"；"间隔轮数"/"间隔token数"= 各自触发间隔，0=关闭对应通道。
 DEFAULT_STYLE_NOTICE_ENABLED = False
 DEFAULT_STYLE_NOTICE_INTERVAL = 5
+DEFAULT_STYLE_NOTICE_TOKEN_INTERVAL = 0
 STYLE_NOTICE_TEXT = ("回复内容简洁且抓住核心")
 # 提醒语由用户配置原文，程序只加统一前缀（与 TodoWrite 迟到提醒同形）
 STYLE_NOTICE_TEMPLATE = "[系统提醒] {text}"

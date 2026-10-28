@@ -155,14 +155,49 @@ class AgentLoop:
         if self._compression is not None:
             self._compression.refresh_ratio(self._stats.input_tokens)
 
+    def _inject_style_notice(self):
+        """注入风格提醒并重置两个通道的计数（注入的唯一入口）。
+
+        轮次通道清零、token 通道基准重置为当前上下文快照：
+        刚注入完两边都重新计时，同一轮不会因另一通道再触发一次。
+        """
+        cfg = self._config.style
+        self._msg_manager.append_user_merged(
+            STYLE_NOTICE_TEMPLATE.format(text=cfg.notice_text))
+        ctx = self._tool_context
+        ctx.style_discuss_rounds = 0
+        ctx.style_token_baseline = max(0, self._stats.input_tokens)
+
+    def _check_token_interval(self):
+        """token 通道检查：上下文距上次注入的增量达到「间隔token数」即注入。
+
+        不看 AI 在讨论还是干活，到点即注入；压缩后上下文变小 → 基准惰性
+        重置（取更小值重新计时）。每轮请求发出前调用（循环顶部，压缩自查后）。
+        """
+        cfg = self._config.style
+        if not cfg.enabled or cfg.token_interval <= 0:
+            return
+        ctx = self._tool_context
+        cur = self._stats.input_tokens
+        if ctx.style_token_baseline < 0:
+            ctx.style_token_baseline = max(0, cur)
+            return
+        if cur < ctx.style_token_baseline:
+            # 压缩后上下文缩小：人设已回到最前，距离重置，重新计时
+            ctx.style_token_baseline = max(0, cur)
+            return
+        if cur - ctx.style_token_baseline < cfg.token_interval:
+            return
+        self._inject_style_notice()
+
     def _discuss_round_done(self):
-        """一轮纯讨论结束 → 计数；达配置间隔则追加一条风格提醒并清零。
+        """一轮纯讨论结束 → 计数；达配置间隔则追加一条风格提醒。
 
         判据与复位：只有"AI 未调用任何工具"的轮到此（工具轮在分支内清零），
         故计数等价于"连续纯讨论轮数"，AI 一干活即归零——干活期间不打扰。
         提醒经 append_user_merged 进入历史后不再改动（与 Claude 的
         system-reminder 同构：只追加、不改写，缓存前缀天然稳定）。
-        开关/间隔/文案见 narnat.json "风格"（默认关闭）。
+        开关/间隔/文案见 narnat.json "风格"。
         """
         cfg = self._config.style
         if not cfg.enabled or cfg.notice_interval <= 0:
@@ -171,9 +206,7 @@ class AgentLoop:
         ctx.style_discuss_rounds += 1
         if ctx.style_discuss_rounds < cfg.notice_interval:
             return
-        ctx.style_discuss_rounds = 0
-        self._msg_manager.append_user_merged(
-            STYLE_NOTICE_TEMPLATE.format(text=cfg.notice_text))
+        self._inject_style_notice()
 
     def run(self, stream, goal_mode: bool = False, force_final: bool = False,
             goal_task: str = "", round_budget_left: int = -1):
@@ -249,6 +282,10 @@ class AgentLoop:
                     _notice(stream, "压缩未执行\n")
                 stream.flush_renderer()
                 stream.begin()  # 压缩动画已停止，重启"思考中"spinner
+
+            # a0.5 风格提醒 token 通道：上下文距上次注入的增量达标即注入
+            #      （不分讨论/干活，到点即注入；压缩后基准已变小，此处重新计时）
+            self._check_token_interval()
 
             # a. 修复messages
             self._msg_manager.repair()

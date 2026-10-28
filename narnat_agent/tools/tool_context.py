@@ -246,6 +246,13 @@ class ToolContext:
     # 不带 task_scoped：讨论是跨任务的会话级状态，不随用户新输入复位。
     style_discuss_rounds: int = field(default=0, repr=False)
 
+    # 风格提醒 token 通道基准：上次注入提醒时的上下文快照（prompt_tokens）。
+    # 当前上下文距此基准的增量达到「间隔token数」即注入；注入后重置为当前值。
+    # 压缩后上下文变小 → 基准惰性重置（取更小值），重新计时。
+    # -1 = 尚未初始化（首轮请求前；首次注入检查时置为当前值）。
+    # 不带 task_scoped：与轮次通道同为会话级状态。
+    style_token_baseline: int = field(default=-1, repr=False)
+
     def __post_init__(self) -> None:
         # 启动快照包成热读视图：之后每次读 api_keys 都反映磁盘最新的「联网搜索」段
         self.api_keys = _HotSearchKeys(self.api_keys)

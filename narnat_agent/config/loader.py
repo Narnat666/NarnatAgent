@@ -31,6 +31,7 @@ from .defaults import (
     DEFAULT_GOAL_VERIFY,
     DEFAULT_STYLE_NOTICE_ENABLED,
     DEFAULT_STYLE_NOTICE_INTERVAL,
+    DEFAULT_STYLE_NOTICE_TOKEN_INTERVAL,
     STYLE_NOTICE_TEXT,
 )
 
@@ -138,13 +139,17 @@ class SkillConfig:
 class StyleConfig:
     """回话风格提醒配置（只读）
 
-    enabled=True 时，AI 连续 notice_interval 轮纯讨论（未调用任何工具）后，
-    在下一轮请求末尾追加一条提醒（仅发给AI，终端不显示）；AI 调工具即清零。
-    notice_text 为空时用内置默认文案；notice_interval<=0 视为关闭周期性提醒。
+    通道一（轮次）：enabled=True 时，AI 连续 notice_interval 轮纯讨论
+    （未调用任何工具）后，在下一轮请求末尾追加一条提醒（仅发给AI，
+    终端不显示）；AI 调工具即清零。
+    通道二（token 间隔）：token_interval>0 时，上下文距上次注入的增量达到
+    token_interval 即在下一轮请求末尾追加提醒；不看讨论还是干活，到点即注入。
+    两通道共用 notice_text；notice_interval<=0 与 token_interval<=0 分别关闭。
     """
     enabled: bool = DEFAULT_STYLE_NOTICE_ENABLED
     notice_text: str = STYLE_NOTICE_TEXT
     notice_interval: int = DEFAULT_STYLE_NOTICE_INTERVAL
+    token_interval: int = DEFAULT_STYLE_NOTICE_TOKEN_INTERVAL
 
 
 @dataclass(frozen=True)
@@ -1059,6 +1064,7 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
                             "启用": DEFAULT_STYLE_NOTICE_ENABLED,
                             "提醒语": "",
                             "间隔轮数": DEFAULT_STYLE_NOTICE_INTERVAL,
+                            "间隔token数": DEFAULT_STYLE_NOTICE_TOKEN_INTERVAL,
                         },
                     }, f, indent=2, ensure_ascii=False)
                 else:
@@ -1119,10 +1125,15 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
     style_notice = (_notice_raw.strip()
                     if isinstance(_notice_raw, str) and _notice_raw.strip()
                     else STYLE_NOTICE_TEXT)
-    # 间隔轮数：0 是合法值（关闭周期性提醒），不能用 `or` 兜底；负数按 0 处理
+    # 间隔轮数：0 是合法值（关闭轮次通道），不能用 `or` 兜底；负数按 0 处理
     _interval_raw = _coerce(data.get("风格", {}).get("间隔轮数"), int)
     style_interval = (DEFAULT_STYLE_NOTICE_INTERVAL if _interval_raw is None
                       else max(0, _interval_raw))
+    # 间隔token数：0 是合法值（关闭 token 通道，默认关闭）；负数按 0 处理
+    _tok_interval_raw = _coerce(data.get("风格", {}).get("间隔token数"), int)
+    style_token_interval = (DEFAULT_STYLE_NOTICE_TOKEN_INTERVAL
+                            if _tok_interval_raw is None
+                            else max(0, _tok_interval_raw))
 
     # 补充 AIConfig 的 retry_count（从JSON读取，不在 _build_ai_config 中处理）
     ai_config = AIConfig(
@@ -1179,6 +1190,7 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
             enabled=_coerce_bool(data.get("风格", {}).get("启用"), DEFAULT_STYLE_NOTICE_ENABLED),
             notice_text=style_notice,
             notice_interval=style_interval,
+            token_interval=style_token_interval,
         ),
         pricing=pricing_config,
         balance=balance_config,
