@@ -12665,10 +12665,11 @@ body[data-run="true"] #goalRounds{opacity:.45}
 
   // 档位名 → 中文显示名。只在**演示态**与后端没给 options 时兜底；
   // 真实态一律用后端下发的显示名（见 rebuildThinkPop）。
-  // 这里必须和后端默认配置对齐（loader.py:56 `{"high": "高", "max": "全开"}`）：
+  // 这里必须和后端默认对齐（defaults.py 的 DEFAULT_THINKING_OPTIONS）：
   // 原来写 '最高'，而按钮走的是 stats 里的后端显示名「全开」——同一屏上
   // 按钮写「全开」、点开下拉写「最高」，用户会怀疑档位到底切没切（实测）。
-  var THINK_LABEL = { low: '低', medium: '中', high: '高', max: '全开', off: '关闭' };
+  // medium 不在后端默认档位里，留着只服务演示态（官方把它映射成 high，无实际档位）。
+  var THINK_LABEL = { low: '快速', medium: '中', high: '高', max: '全开', off: '关闭' };
   /** 后端下发的 {档位: 显示名}，供「/thinking 高」这类中文反查用 */
   var thinkLabels = null;
   function rebuildThinkPop(options){

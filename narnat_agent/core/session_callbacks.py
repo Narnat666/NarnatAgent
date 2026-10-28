@@ -26,7 +26,7 @@ from ..config.session_store import (
     # 全仓凡是要签名的地方都从这里取，别各写一套。
     file_signature, session_signature,
 )
-from ..config.defaults import DEFAULT_THINKING_PASSBACK
+from ..config.defaults import DEFAULT_THINKING_PASSBACK, DEFAULT_THINKING_OPTIONS
 from ..config.skill_store import load_skill, list_skill_tree
 from ..output import write as _stdout_write, D, R
 from ..tools.registry import (
@@ -1233,7 +1233,7 @@ class SessionManager:
         self._context_resets = []
         self._get_thinking_effort = thinking_effort_getter
         self._set_thinking_effort = thinking_effort_setter
-        self._thinking_options = thinking_options or {"high": "高", "max": "全开"}
+        self._thinking_options = thinking_options or dict(DEFAULT_THINKING_OPTIONS)
         self._get_thinking_passback = thinking_passback_getter or (lambda: DEFAULT_THINKING_PASSBACK)
         self._set_thinking_passback = thinking_passback_setter
         self._get_model = model_getter

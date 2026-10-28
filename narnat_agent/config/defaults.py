@@ -166,8 +166,10 @@ DEFAULT_BASE_URL = "https://api.deepseek.com/anthropic"
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_PROTOCOL = "anthropic"          # "openai" | "anthropic"
 DEFAULT_THINKING_ENABLED = True
-DEFAULT_THINKING_EFFORT = "high"      # high / max
+DEFAULT_THINKING_EFFORT = "high"      # low / high / max
 DEFAULT_THINKING_PASSBACK = False     # 思考回传：默认不回传（思考内容仍记录到会话，只是不发给模型）
+# /thinking 档位 → 显示名（唯一归属：loader / session_callbacks / 首次生成的 json 都取这里）
+DEFAULT_THINKING_OPTIONS = {"low": "快速", "high": "高", "max": "全开"}
 
 
 # ── Thinking 参数映射表 ──

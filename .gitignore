@@ -30,6 +30,9 @@ nuitka-crash-report.xml
 .narnat/
 logs/
 
+# ═══ 首启配置模板的内嵌产物（build.py 生成，真源在 config/templates/）═══
+narnat_agent/config/_embedded_templates.py
+
 # ═══ 系统文件 ═══
 Thumbs.db
 .DS_Store

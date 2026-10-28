@@ -263,6 +263,72 @@ def parse_version():
     raise SystemExit("错误：未能从 main.py 解析 __version__")
 
 
+# ── 内嵌配置模板 ────────────────────────────────────────────────────────────
+
+CONFIG_DIR = os.path.join(ROOT, "narnat_agent", "config")
+TEMPLATE_DIR = os.path.join(CONFIG_DIR, "templates")
+EMBEDDED_PY = os.path.join(CONFIG_DIR, "_embedded_templates.py")
+TEMPLATE_NAMES = ("narnat.json", "narnat.md")
+
+
+def write_embedded_templates():
+    """把 templates/ 下的配置模板内嵌成 Python 模块（编译前调用）
+
+    单文件 exe 里，模板文件要靠 --include-data-files 落到运行期解压目录，而
+    loader 只能用 __file__ 去猜那个位置——onefile 的 tempdir-spec 可配置，
+    猜错就是静默写出空配置，用户装完得到一份"什么都没配"的文件（等于白装）。
+    内嵌成 base64 字符串后，模板正文就在字节码里，与路径彻底无关。
+
+    生成物不入库（见 .gitignore）：它是模板的派生物，入库会分叉成两份真源。
+    """
+    import base64
+
+    lines = [
+        '"""首次生成配置用的模板正文（由 build.py 生成，请勿手改）',
+        "",
+        "真源是 narnat_agent/config/templates/ 下的同名文件；build.py 在编译前",
+        "把它们的 base64 写到这里，使单文件 exe 不依赖运行期文件路径。",
+        "开发态（未编译）没有本模块时，loader 回退读 templates/ 下的文件。",
+        '"""',
+        "import base64",
+        "",
+        "TEXTS = {",
+    ]
+    for name in TEMPLATE_NAMES:
+        path = os.path.join(TEMPLATE_DIR, name)
+        if not os.path.isfile(path):
+            raise SystemExit("错误：缺少配置模板 %s" % path)
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        lines.append('    %r: base64.b64decode(%r).decode("utf-8"),' % (name, b64))
+    lines.append("}")
+
+    with open(EMBEDDED_PY, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+    print("[build] 已内嵌配置模板: %s" % ", ".join(TEMPLATE_NAMES))
+
+
+def verify_embedded_templates():
+    """回读生成物，逐字节比对：内嵌正文必须与模板完全一致
+
+    这里不能只 import 成功就算过 —— 编码/解码错一位，用户拿到的就是坏配置，
+    而编译本身不会报错（实测同类问题只在用户机上才暴露）。
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_emb_check", EMBEDDED_PY)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for name in TEMPLATE_NAMES:
+        with open(os.path.join(TEMPLATE_DIR, name), "rb") as f:
+            expect = f.read()
+        got = mod.TEXTS.get(name, "").encode("utf-8")
+        if got != expect:
+            raise SystemExit("错误：内嵌模板 %s 与 templates/ 不一致（%d / %d 字节）"
+                             % (name, len(got), len(expect)))
+    print("[build] 内嵌模板校验通过（%s）" % ", ".join(TEMPLATE_NAMES))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="一键编译 narnat 单文件二进制（Windows / Linux 通用）"
@@ -301,6 +367,10 @@ def main():
         return 0 if run_nuitka_patch(args.revert_nuitka) else 1
 
     version = parse_version()
+    # 配置模板必须在编译**之前**内嵌：编译期才生成的模块进不了产物，
+    # 而首启写配置发生在用户机器上，届时没有任何补救机会。
+    write_embedded_templates()
+    verify_embedded_templates()
     if args.runtime == "beside":
         if not run_nuitka_patch(False):
             return 1
@@ -341,6 +411,11 @@ def main():
         # import 全部子包（patterns / _backends），用包级声明保证子包一起进去，
         # 免得将来改成延迟导入时只进来了顶层模块。
         "--include-package=pathspec",
+        # 首启配置模板的内嵌模块：由 write_embedded_templates() 在编译前生成，
+        # loader 里是 try/except ImportError 的可选导入（开发态没有它）。
+        # 必须显式声明：可选导入被 Nuitka 判成"可能不存在"就可能不进产物，
+        # 那样用户首次启动拿到的是空配置。
+        "--include-module=narnat_agent.config._embedded_templates",
     ]
     for name in NOFOLLOW_IMPORTS:
         cmd.append("--nofollow-import-to=%s" % name)

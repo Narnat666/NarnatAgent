@@ -16,7 +16,7 @@ from .defaults import (
     CONFIG_SUBDIR, DATA_SUBDIR, LOGS_SUBDIR,
     DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL,
     DEFAULT_PROTOCOL, DEFAULT_THINKING_ENABLED, DEFAULT_THINKING_EFFORT,
-    DEFAULT_THINKING_PASSBACK,
+    DEFAULT_THINKING_OPTIONS, DEFAULT_THINKING_PASSBACK,
     DEFAULT_CONTEXT_WINDOW, DEFAULT_SHOW_RATIO, DEFAULT_WARN_RATIO, DEFAULT_COMPRESS_RATIO,
     DEFAULT_COMPRESS_RETAIN_TOKENS, DEFAULT_COMPRESS_HEADROOM,
     DEFAULT_GIT_SKIP, DEFAULT_RM_SKIP,
@@ -54,7 +54,7 @@ class AIConfig:
     thinking_enabled: bool = DEFAULT_THINKING_ENABLED
     thinking_effort: str = DEFAULT_THINKING_EFFORT
     thinking_passback: bool = DEFAULT_THINKING_PASSBACK  # 思考回传开关（由 /thinkback 命令修改）
-    thinking_options: dict = field(default_factory=lambda: {"high": "高", "max": "全开"})
+    thinking_options: dict = field(default_factory=lambda: dict(DEFAULT_THINKING_OPTIONS))
     context_window: int = DEFAULT_CONTEXT_WINDOW   # 模型上下文窗口（token数），≤0 视为无效
     retry_count: int = 3
     goal_max_rounds: int = DEFAULT_GOAL_MAX_ROUNDS  # 目标模式单个任务的自动续跑轮数上限（总预算）
@@ -684,10 +684,10 @@ def _build_ai_config(data: dict) -> AIConfig:
     thinking_enabled = _coerce_bool(thinking_cfg.get("启用"), DEFAULT_THINKING_ENABLED)
     thinking_effort = thinking_cfg.get("强度", DEFAULT_THINKING_EFFORT)
     thinking_passback = _coerce_bool(thinking_cfg.get("回传"), DEFAULT_THINKING_PASSBACK)
-    thinking_options = thinking_cfg.get("强度选项", {"high": "高", "max": "全开"})
+    thinking_options = thinking_cfg.get("强度选项", DEFAULT_THINKING_OPTIONS)
     if not isinstance(thinking_options, dict):
         _warn("「智能体.思考.强度选项」格式错误（应为对象），已按默认处理")
-        thinking_options = {"high": "高", "max": "全开"}
+        thinking_options = dict(DEFAULT_THINKING_OPTIONS)
 
     # 上下文窗口：缺失/非法 → 默认；显式 ≤0 → 保留原值（下游视为无效，占比显示 --）
     parsed_cw = _coerce(ai.get("上下文窗口大小"), int)
@@ -961,6 +961,80 @@ def _build_system_prompt(model: str, user_md: str, cwd: str = "", os_name: str =
     return "\n".join(parts)
 
 
+# 首次生成配置用的模板目录（单一定义源：改了模板，用户首次生成的配置就跟着变）
+_TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
+
+
+def _embedded_text(fname: str) -> Optional[str]:
+    """发布态的模板正文：build.py 编译前把 templates/ 内嵌成模块，零路径依赖。
+
+    为什么不能只靠读文件：单文件 exe 里模块的 __file__ 指向运行期解压目录，
+    与 --include-data-files 的落点未必一致（onefile 的 tempdir-spec 是可变的），
+    对不上就静默写出空配置——用户装完拿到的是一份"什么都没配"的文件。
+    import 失败（开发态没生成该模块）返回 None，由调用方回退读文件。
+    """
+    try:
+        from . import _embedded_templates as emb
+    except ImportError:
+        return None
+    try:
+        return emb.TEXTS.get(fname)
+    except (AttributeError, TypeError):
+        return None
+
+
+def _initial_text(fname: str) -> str:
+    """首次生成的配置文件全文：模板正文（打包态内嵌 / 开发态读文件）
+
+    两种来源都试，顺序按"哪个更可信"定：
+      - 编译后（exe）：内嵌优先。此时 __file__ 指向运行期解压目录，路径不可靠。
+      - 开发态：先读 templates/ 下的文件。否则改了模板却没重新编译时，
+        内嵌的是上一次构建的旧正文，开发者会以为改动没生效。
+    两个来源都拿不到可用内容才告警 —— 只缺其中一个属于正常（发布态不带模板
+    文件、开发态没生成内嵌模块），逐条报警会把真正的故障淹掉。
+    """
+    path = os.path.join(_TEMPLATE_DIR, fname)
+    if _is_compiled():
+        sources = (("内嵌模板", _embedded_text(fname)), ("模板文件", _read_template(path)))
+    else:
+        sources = (("模板文件", _read_template(path)), ("内嵌模板", _embedded_text(fname)))
+
+    for source, text in sources:
+        if text is None:
+            continue
+        if fname != NARNAT_JSON:
+            return text
+        # narnat.json 必须是 JSON 对象：坏了会让用户拿到一份全靠代码默认值的
+        # 文件（等于什么都没配），必须告警让他看见
+        try:
+            if isinstance(json.loads(text), dict):
+                return text
+            _warn(f"{source}不是合法配置（顶层应为对象），已尝试下一个来源: {fname}")
+        except json.JSONDecodeError as e:
+            _warn(f"{source}不是合法 JSON（{e}），已尝试下一个来源: {fname}")
+
+    _warn("配置模板缺失：{} 未能确定可用内容，已按默认配置运行（模板: {}）".format(
+        fname, path))
+    # json 留空串会被 _load_json 判成「不是合法 JSON」再报一条，而它本意是
+    # 「按默认值继续」——写成 {} 才是同一件事，也少一条误导性的告警
+    return "{}" if fname == NARNAT_JSON else ""
+
+
+def _is_compiled() -> bool:
+    """当前是否跑在编译后的 exe 里（决定模板来源的可信顺序）"""
+    return bool(getattr(sys, "frozen", False)) or \
+        "__compiled__" in dir(sys.modules.get("__main__", type(None)))
+
+
+def _read_template(path: str) -> Optional[str]:
+    """读磁盘模板；读不到返回 None（由调用方决定是否告警）"""
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
 def load_config(project_root: Optional[str] = None, headless: bool = False) -> Config:
     """
     加载全部配置，返回不可变的 Config 对象。
@@ -984,92 +1058,14 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
     # 系统技能目录（README「首次运行自动生成」树含 config/skills/，/skill 的放置位置）
     os.makedirs(os.path.join(config_dir, "skills"), exist_ok=True)
 
-    # 确保关键配置文件存在
+    # 确保关键配置文件存在（首次生成即模板原样复制，见 _initial_text）
     for fname in (NARNAT_JSON, NARNAT_MD):
         fpath = os.path.join(config_dir, fname)
         if not os.path.isfile(fpath):
-            with open(fpath, "w", encoding="utf-8") as f:
-                if fname == NARNAT_JSON:
-                    json.dump({
-                        "智能体": {
-                            "接口密钥": DEFAULT_API_KEY,
-                            "接口地址": DEFAULT_BASE_URL,
-                            "模型": {
-                                "当前": DEFAULT_MODEL,
-                                "列表": [DEFAULT_MODEL],
-                            },
-                            "协议": "anthropic",
-                            "温度": None,
-                            "最大输出token数": 128000,
-                            "上下文窗口大小": DEFAULT_CONTEXT_WINDOW,
-                            "目标模式最大轮数": DEFAULT_GOAL_MAX_ROUNDS,
-                            "完成验证": DEFAULT_GOAL_VERIFY,
-                            "验证模型": "",
-                            "思考": {
-                                "启用": True,
-                                "强度": "high",
-                                "强度选项": {"high": "高", "max": "全开"},
-                                "回传": False,
-                            },
-                            "LLM重试次数": 3,
-                        },
-                        "余额查询": {
-                            "启用": True,
-                            "查询地址": "https://api.deepseek.com/user/balance",
-                            "认证方式": "bearer",
-                            "响应路径": "balance_infos.0.total_balance",
-                            "货币路径": "balance_infos.0.currency",
-                        },
-                        "联网搜索": {
-                            "key": "",
-                            "auth": "bearer",
-                            "http": {
-                                "search": {
-                                    "url": "https://api.deepseek.com/v1/tools/search",
-                                    "query_field": "query",
-                                    "count_field": "count",
-                                    "args": {},
-                                    "rail": {
-                                        "list": "results",
-                                        "title": "title",
-                                        "url": "url",
-                                        "desc": ["snippet", "summary", "content"],
-                                    },
-                                    "extra_params": {},
-                                },
-                                "fetch": {
-                                    "url": "https://api.deepseek.com/v1/tools/fetch",
-                                    "url_field": "url",
-                                    "args": {},
-                                    "rail": {"title": "title", "content": "content"},
-                                },
-                            },
-                        },
-                        "定价": {"模型": {}},
-                        "费用日志": {"启用": False, "输出文件": "", "最大容量MB": 50},
-                        "界面": {
-                            "显示费用": False,
-                            "显示余额": False,
-                            "最大输出token数": 128000,
-                        },
-                        "工具": {"输出上限KB": DEFAULT_MAX_TOOL_OUTPUT_KB, "超时上限秒": DEFAULT_MAX_TIMEOUT_SECONDS},
-                        "会话": {"自动保存Token量": DEFAULT_AUTO_SAVE_TOKENS},
-                        "压缩": {
-                            "占比显示": DEFAULT_SHOW_RATIO,
-                            "告警": DEFAULT_WARN_RATIO,
-                            "压缩": DEFAULT_COMPRESS_RATIO,
-                            "保留尾部": DEFAULT_COMPRESS_RETAIN_TOKENS,
-                            "安全余量": DEFAULT_COMPRESS_HEADROOM,
-                        },
-                        "风格": {
-                            "启用": DEFAULT_STYLE_NOTICE_ENABLED,
-                            "提醒语": "",
-                            "间隔轮数": DEFAULT_STYLE_NOTICE_INTERVAL,
-                            "间隔token数": DEFAULT_STYLE_NOTICE_TOKEN_INTERVAL,
-                        },
-                    }, f, indent=2, ensure_ascii=False)
-                else:
-                    f.write("")
+            # newline="\n"：模板是 LF，Windows 下按默认文本模式写出会被换成
+            # CRLF，首次生成的文件与模板字节不一致（用户跨机器 diff 就全是差异）
+            with open(fpath, "w", encoding="utf-8", newline="\n") as f:
+                f.write(_initial_text(fname))
 
     # 读取配置
     data = _load_json(config_dir)
