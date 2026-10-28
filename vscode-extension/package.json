@@ -2,7 +2,7 @@
   "name": "narnat-vscode",
   "displayName": "Narnat",
   "description": "AI 编程智能体：Narnat Agent。",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "publisher": "narnat",
   "license": "MIT",
   "icon": "media/icon.png",

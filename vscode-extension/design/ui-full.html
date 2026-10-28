@@ -720,6 +720,19 @@ body[data-real="true"] .demo-tip{display:none}
   color:var(--err);border:1px solid var(--err);border-radius:3px;
   padding:0 4px;vertical-align:middle;
 }
+/* 运行中插话、已经生效的那条：与普通用户气泡同一个形状，只在左侧多一条
+   2px 竖线。线的颜色是 accent 与分隔线各掺一半 —— 纯 --line 只有 1px 时在
+   深色气泡上根本看不见（实测截图里完全分辨不出），纯 accent 又太跳。
+   掺半后是一条安静的蓝灰，扫一眼能看出「这句是中途补进来的」，
+   不读内容也不会被它抓走注意力。不加文字标签、不换底色、不做角标。 */
+.msg[data-inserted] .text{
+  border-left:2px solid color-mix(in srgb, var(--accent) 50%, var(--line));
+  padding-left:14px;
+}
+/* 旧内核没有 color-mix：退成纯 --line，宽度仍是 2px，仍比普通气泡可见 */
+@supports not (color: color-mix(in srgb, red 50%, blue)) {
+  .msg[data-inserted] .text{border-left-color:var(--line)}
+}
 .msg p{margin:0 0 16px}
 .msg p:last-child{margin-bottom:0}
 /* 无空格长 token（长 URL / 长路径 / 长 hash）必须能在容器内折行，
@@ -1441,6 +1454,60 @@ body[data-real="true"] .demo-tip{display:none}
 .atch img{flex:none;max-width:26px;max-height:18px;border-radius:2px;display:block}
 .atch .x{flex:none;color:var(--fg-faint);padding:0 1px;line-height:1}
 .atch .x:hover{color:var(--err)}
+
+/* ---------- 运行中插话：待处理队列条 + 临时提示 ----------
+   位置在输入框**上方**、#convo **之外**（骨架见 HTML 的 #insertBar / #insertHint）。
+   为什么绝不能放进对话区：那条路径上的每一行都会先 closeAssistantSegment()
+   （系统行必须落在「当前正文之后」，见 cmdOne 的注释），而队列条每加一条都要
+   重画一次 —— 走那条路径等于用户每插一句就把正在流的回答锯成两段。
+   显隐只由 data-on 管：队列为空时 display:none，输入区不因此高一个像素。 */
+.insbar{
+  display:none;margin:0 0 6px;
+  border:1px solid var(--line);border-radius:6px;
+  background:var(--bg-elev);
+  /* 与附件条同一个限高口径（5.5em≈3 行）：条数多时内部滚动，
+     不把输入框与状态行顶出可视区。滚动条沿用下面全局那条。 */
+  max-height:5.5em;overflow-y:auto;overflow-x:hidden;
+  font-size:11.5px;line-height:1.7;
+}
+.insbar[data-on="true"]{display:block}
+/* 首行「待处理 N 条」：只在多条时出现，整行可点（折叠/展开） */
+.insbar .hd{
+  display:flex;align-items:center;gap:6px;
+  padding:2px 8px;color:var(--fg-faint);cursor:pointer;
+  user-select:none;
+}
+.insbar .hd .n{
+  flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.insbar .row{display:flex;align-items:center;gap:4px;padding:1px 8px}
+.insbar .row .tx{
+  flex:1;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--fg-dim);
+}
+/* 折叠态：只留首行。用 display 切换，不做高度动画（一闪就够了） */
+.insbar[data-fold="true"] .row{display:none}
+/* 行内编辑：文本位换成输入框，Enter 保存 / Esc 取消（见 onInsertBarKeydown） */
+.insbar .row .ed{
+  flex:1;min-width:0;
+  font:inherit;font-size:11.5px;color:var(--fg);
+  background:var(--bg);border:1px solid var(--line-strong);border-radius:3px;
+  padding:0 4px;
+}
+.insbar .row .b{
+  flex:none;background:none;border:none;padding:0 2px;
+  font:inherit;font-size:11px;color:var(--fg-faint);cursor:pointer;
+}
+.insbar .row .b:hover{color:var(--fg)}
+.insbar .row .b.del:hover{color:var(--err)}
+/* 临时提示（运行中敲 / 命令、运行中带附件插话）：2~3 秒自动消失。
+   同样不走 sysLine —— 理由与上面 .insbar 那条一样（会劈气泡）。 */
+.ins-hint{
+  display:none;margin:0 0 6px;padding:0 2px;
+  font-size:11px;color:var(--fg-dim);
+}
+.ins-hint[data-on="true"]{display:block}
 /* 圆形图标按钮（形态同 dsh：附件是 28px 圆、发送是实心圆）：
    一排胶囊 chip 后面跟两个圆钮，形状上有主次，不再是一排等大的长方形盒子。 */
 .attach-btn{
@@ -2457,6 +2524,17 @@ body[data-run="true"] #goalRounds{opacity:.45}
 
       <!-- 附件列表：拖拽/粘贴/「＋附件」进来的路径排在这里，发送后清空 -->
       <div class="attach" id="attachBox" data-on="false"></div>
+
+      <!-- 运行中插话的两块 UI。位置必须在输入框上方、#convo 之外：
+           放进对话区会触发 closeAssistantSegment()，把正在流式输出的正文
+           劈成两个气泡（详见 narnat.css 里 .insbar 那段注释）。
+             ① #insertHint：临时提示（运行中敲 / 命令、运行中带附件插话），
+                2~3 秒自动消失 —— 不用系统行，同样是怕劈气泡；
+             ② #insertBar：待处理队列条，队列为空时 display:none 不占空间。
+           「已插入」的气泡不在这里：它是普通用户气泡 + data-inserted
+           （只用来画左边一条 1px 发丝线），由 insert/consumed 事件画进 #convo。 -->
+      <div class="ins-hint" id="insertHint" data-on="false"></div>
+      <div class="insbar" id="insertBar" data-on="false" data-fold="false"></div>
 
       <textarea id="input" rows="1" placeholder="输入消息，/ 调出命令"></textarea>
 
@@ -6898,10 +6976,17 @@ body[data-run="true"] #goalRounds{opacity:.45}
 
   /** 把输入框里的内容当命令执行（与 sendChat 对称），执行后清空 */
   function runInputCommand(){
-    // 运行中不执行命令：后端此刻 busy，命令要么被拒、要么把这一轮的上下文换掉。
-    // 与 sendChat 的 data-run 守卫同口径——静默拦住（输入框内容保留、不写系统行），
-    // 用户看到停止按钮还在，就知道要等这一轮结束。
-    if (turnRunning()) return;
+    // 运行中不执行命令：后端此刻 busy，命令要么被拒、要么把这一轮的上下文换掉
+    // （/mode、/cd 这类会把这一轮的参数与消息列表改掉）。一个都不放行。
+    // 但**不能静默 return**（原来的写法）：敲 /clear 敲完屏幕上什么都没变，
+    // 用户以为界面卡了，于是再敲一遍、再敲一遍。这里给一句两秒半就消失的提示，
+    // 并把输入框内容留着 —— 等这一轮结束再按 Enter 即可。
+    // 提示刻意不走 sysLine：那条路径会 closeAssistantSegment()，正在流式的
+    // 正文会被劈成两个气泡（代价远大于提示本身）。
+    if (turnRunning()) {
+      flashInsertHint('命令需等本轮结束（正在回答中，这条命令没有执行）');
+      return;
+    }
     var v = input.value.trim();
     if (!v) return;
     // 已经掉线时敲命令：不能把输入框清空，命令根本发不出去，
@@ -9335,6 +9420,367 @@ body[data-run="true"] #goalRounds{opacity:.45}
      页面保持纯模拟演示。
      ================================================================== */
 
+  /* ==================================================================
+     运行中插话：待处理队列条 + 已插入气泡
+     ------------------------------------------------------------------
+     运行中提交的消息不再被静默丢弃，而是进后端的待处理队列（RPC chat/insert），
+     由后端在工具批次收尾、轮次收尾时**逐条**消费。前端只负责三件事：
+       ① 立刻把这条送出去并清空输入框（字已经交给队列了，留着会让人以为没生效）；
+       ② 队列条完全跟着后端走（insert/queued → consumed → updated 与
+          insertList 回执），不做本地"猜一份"——两份真相一旦分叉就再也对不上；
+       ③ **消费到（insert/consumed）才画气泡**。气泡是「这句真的进了上下文」的
+          唯一信号；提前画会让用户以为 AI 已经看到，而它可能整轮都没被消费到
+          （用户取消、后端压缩、轮次比我以为的更早结束，都会这样）。
+     UI 只有两处：输入框上方的队列条、对话区里那条「已插入」气泡。
+     ================================================================== */
+  /** 后端队列的本地镜像：[{id, text}]。内容一律以事件/回执为准，不本地造。 */
+  var insertItems = [];
+  /** 多条时是否折叠（默认展开：刚插的那句应该看得见） */
+  var insertFold = false;
+  /** 正在行内编辑的条目 id（0 = 没有） */
+  var insertEditing = 0;
+  /** 临时提示的定时器句柄 */
+  var insertHintTimer = null;
+  /** 已发出、还没收到回执的插话正文（回执说「没插进去」时用它兜底重发） */
+  var insertPending = '';
+  /** 排队条上的监听器是否已挂过（骨架是现成的，只挂一次） */
+  var insertBound = false;
+
+  /**
+   * 取（必要时就地创建）排队条与临时提示两个容器。
+   *
+   * 为什么要兜底创建：这段骨架有三份载体 —— design/ui-full.html（真源）、
+   * src/webview.js 注入给真 webview 的那一份、以及由 scripts/sync-ui.js
+   * 生成的 media/narnat.body.js。只要有一份还没跟上（例如重跑 sync-ui.js
+   * 之前的老 body、或 preview.html 沿用的旧快照），getElementById 就会拿到
+   * null，运行中按 Enter 直接在 sendChat 里抛 TypeError —— 表现出来正好是
+   * 本功能要消灭的症状「按了没反应」。已有骨架时这里一个节点都不建。
+   */
+  function ensureInsertUi(){
+    var bar = document.getElementById('insertBar');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.className = 'insbar';
+      bar.id = 'insertBar';
+      bar.setAttribute('data-on', 'false');
+      bar.setAttribute('data-fold', 'false');
+      if (input && input.parentNode) input.parentNode.insertBefore(bar, input);
+    }
+    var hint = document.getElementById('insertHint');
+    if (!hint) {
+      hint = document.createElement('div');
+      hint.className = 'ins-hint';
+      hint.id = 'insertHint';
+      hint.setAttribute('data-on', 'false');
+      if (bar.parentNode) bar.parentNode.insertBefore(hint, bar);
+    }
+    if (!insertBound) {
+      insertBound = true;
+      bar.addEventListener('click', onInsertBarClick);
+      bar.addEventListener('keydown', onInsertBarKeydown);
+      // focusout 会冒泡（blur 不会）：行内编辑靠它收尾，否则焦点一走输入框
+      // 就永远留在编辑态，用户点别处再回来还在改同一行。
+      bar.addEventListener('focusout', onInsertBarFocusOut);
+    }
+    return { bar: bar, hint: hint };
+  }
+
+  /**
+   * 排队条上方那行临时提示，2.6 秒后自动消失。
+   * 不用 sysLine：那条路径会 closeAssistantSegment()（见 cmdOne），正在流的
+   * 正文会被劈成两个气泡 —— 提示本来只是「现在做不了」，代价不该是回答断成两截。
+   */
+  function flashInsertHint(text){
+    var ui = ensureInsertUi();
+    if (!ui.hint) return;
+    ui.hint.textContent = String(text || '');
+    ui.hint.setAttribute('data-on', 'true');
+    if (insertHintTimer) clearTimeout(insertHintTimer);
+    insertHintTimer = setTimeout(function(){
+      insertHintTimer = null;
+      ui.hint.setAttribute('data-on', 'false');
+      ui.hint.textContent = '';
+    }, 2600);
+  }
+
+  /**
+   * 重画排队条。只重建这一个容器，**不碰 #convo**（碰了就会劈气泡）。
+   * 条目文本必须过 esc()：它是用户自己打的字，可能含 < > &。
+   */
+  function renderInsertBar(){
+    var ui = ensureInsertUi();
+    var bar = ui.bar;
+    if (!bar) return;
+    var n = insertItems.length;
+    if (!n) {
+      // 空队列：整块隐藏，不占空间（不是留一个空盒子）
+      insertEditing = 0;
+      insertFold = false;
+      bar.setAttribute('data-on', 'false');
+      bar.setAttribute('data-fold', 'false');
+      bar.innerHTML = '';
+      return;
+    }
+    bar.setAttribute('data-on', 'true');
+    bar.setAttribute('data-fold', insertFold ? 'true' : 'false');
+    var html = '';
+    // 一条时不画首行：单个条目本身就说明了「有 1 条」，多一行纯属噪音
+    if (n > 1) {
+      html += '<div class="hd" data-act="fold">' +
+        '<span class="n">待处理 ' + n + ' 条</span>' +
+        '<span>' + (insertFold ? '展开' : '收起') + '</span></div>';
+    }
+    insertItems.forEach(function(it){
+      var sid = esc(String(it.id));
+      if (insertEditing && String(insertEditing) === String(it.id)) {
+        html += '<div class="row" data-id="' + sid + '">' +
+          '<input class="ed" value="' + esc(it.text) + '">' +
+          '</div>';
+        return;
+      }
+      html += '<div class="row" data-id="' + sid + '">' +
+        '<span class="tx">' + esc(it.text) + '</span>' +
+        '<button class="b" data-act="edit">改</button>' +
+        '<button class="b del" data-act="del">删</button>' +
+        '</div>';
+    });
+    bar.innerHTML = html;
+    // 编辑态：焦点交给输入框，光标放末尾（用户多半是在补后半句）
+    if (insertEditing) {
+      var ed = bar.querySelector('.row .ed');
+      if (ed) {
+        ed.focus();
+        try { ed.setSelectionRange(ed.value.length, ed.value.length); } catch (e) {}
+      }
+    }
+  }
+
+  /** 按 id 从本地镜像里删一条（真值仍以后端为准，这里只是先让界面少一行） */
+  function removeInsertItem(id){
+    var out = [];
+    insertItems.forEach(function(it){
+      if (String(it.id) !== String(id)) out.push(it);
+    });
+    insertItems = out;
+    if (insertEditing && String(insertEditing) === String(id)) insertEditing = 0;
+    renderInsertBar();
+  }
+
+  /** 排队条上的点击：折叠 / 改 / 删 */
+  function onInsertBarClick(e){
+    var t = e.target;
+    var act = (t && t.getAttribute) ? t.getAttribute('data-act') : '';
+    if (!act && t && t.closest) {
+      // 点首行任意位置都算折叠开关（一个小箭头太难点中）
+      var hd = t.closest('.hd');
+      if (hd) act = 'fold';
+    }
+    if (!act) return;
+    if (act === 'fold') {
+      insertFold = !insertFold;
+      renderInsertBar();
+      return;
+    }
+    var row = (t && t.closest) ? t.closest('.row') : null;
+    var id = row ? Number(row.getAttribute('data-id')) : 0;
+    if (!id) return;
+    if (act === 'edit') {
+      insertEditing = id;
+      renderInsertBar();
+      return;
+    }
+    if (act === 'del') {
+      /* 只发请求，不在本地删。真值在后端队列里：本地先删会出现「本地没了、
+         后端还在」，下一次 insert/updated 又把它冒出来（删不掉的错觉）。 */
+      post('insertRemove', { id: id });
+    }
+  }
+
+  /** 行内编辑：Enter 保存 / Esc 取消 */
+  function onInsertBarKeydown(e){
+    var t = e.target;
+    if (!t || t.className !== 'ed') return;
+    var row = t.closest ? t.closest('.row') : null;
+    var id = row ? Number(row.getAttribute('data-id')) : 0;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (id) commitInsertEdit(id, t.value);
+      return;
+    }
+    if (e.key === 'Escape') {
+      // 先清编辑态再重画：重画会把 input 拆掉并触发一次 focusout，
+      // 靠 insertEditing 已归零让那次 focusout 什么都不做（不会再发 insertEdit）。
+      e.preventDefault();
+      insertEditing = 0;
+      renderInsertBar();
+      input.focus();
+    }
+  }
+
+  /** 行内编辑失去焦点 = 保存（只有鼠标的用户没有别的收尾方式） */
+  function onInsertBarFocusOut(e){
+    var t = e.target;
+    if (!t || t.className !== 'ed') return;
+    var row = t.closest ? t.closest('.row') : null;
+    var id = row ? Number(row.getAttribute('data-id')) : 0;
+    // 只有还停在编辑态时才提交：Enter / Esc 已经收尾的那次 focusout 是拆节点
+    // 带出来的，再提交一遍就等于改了两次。
+    if (!id || String(insertEditing) !== String(id)) return;
+    commitInsertEdit(id, t.value);
+  }
+
+  /**
+   * 提交行内编辑。
+   * 本地**不**改文本：改完立刻重画会闪回旧字（后端还没回），但本地先改一份
+   * 又会出现「本地新、后端旧」的第二份真相。让后端 insert/updated 的全量快照
+   * 来定稿，闪一下比两边不一致好。
+   */
+  function commitInsertEdit(id, text){
+    var t = String(text == null ? '' : text).trim();
+    insertEditing = 0;
+    // 空文本没有意义（后端也不收）：当取消处理
+    if (t) post('insertEdit', { id: id, text: t });
+    renderInsertBar();
+    input.focus();
+  }
+
+  /** 入队：画一行到排队条（insert/queued 与 chatInsert 回执共用） */
+  function onInsertQueued(p){
+    var id = p ? p.id : 0;
+    if (!id) return;
+    var text = String((p && p.text) || '');
+    for (var i = 0; i < insertItems.length; i++) {
+      // 本面板发的那条通常已经从 chatInsert 回执里先入队了：按 id 去重，
+      // 只把文本更新成后端那份（后端是权威）
+      if (String(insertItems[i].id) === String(id)) {
+        if (text) insertItems[i].text = text;
+        renderInsertBar();
+        return;
+      }
+    }
+    insertItems.push({ id: id, text: text });
+    renderInsertBar();
+  }
+
+  /** 编辑/删除后的全量快照 → 整条重画（insert/updated 与 insertList 回执共用） */
+  function onInsertUpdated(p){
+    var list = (p && p.items) || [];
+    var next = [];
+    list.forEach(function(it){
+      if (!it || !it.id) return;
+      next.push({ id: it.id, text: String(it.text == null ? '' : it.text) });
+    });
+    insertItems = next;
+    // 编辑中的那条可能已经被消费掉/删掉了：不复位的话这一行会永远停在输入框形态
+    if (insertEditing) {
+      var alive = false;
+      insertItems.forEach(function(it){
+        if (String(it.id) === String(insertEditing)) alive = true;
+      });
+      if (!alive) insertEditing = 0;
+    }
+    renderInsertBar();
+  }
+
+  /**
+   * 画一条插话的用户气泡（这条已经真进了上下文）。
+   * 结构与 sendChat 里那条一致（.msg[data-role=user] + .text），只多一个
+   * data-inserted —— 它唯一的作用是让 CSS 画左边那条 1px 发丝线，
+   * 用来区分「这句是中途补进来的」与「这是一轮的提问」。不写任何文字标签。
+   * **不加 data-pending**：那是「后端还没确认」的既有语义，turn/begin 会把所有
+   * data-pending 统一摘掉 —— 两个语义挤在一个属性上，这个标记会在一轮开始时被误清。
+   */
+  function addInsertedBubble(text){
+    var t = String(text || '').trim();
+    if (!t) return;
+    /* 先收口正在流式输出的那一段。
+       不收口会怎样（与 sysLine 那条老问题同源）：后续 stream/delta 继续追加进
+       上面那个旧气泡，屏幕上就成了「旧正文（含插话之后的全部文字）→ 插话气泡」，
+       而插话明明发生在中间。收口后本轮剩下的正文会新开一段 —— 用户插话本来
+       就该开新段。 */
+    closeAssistantSegment();
+    var m = document.createElement('div');
+    m.className = 'msg';
+    m.setAttribute('data-role', 'user');
+    m.setAttribute('data-inserted', '1');
+    m.innerHTML = '<div class="text">' + esc(t) + '</div>';
+    convo.appendChild(m);
+    scrollBottom(true);
+  }
+
+  /** insert/consumed：这一条真的进了上下文 → 队列去掉它 + 画进对话区 */
+  function onInsertConsumed(p){
+    var id = p ? p.id : 0;
+    if (id) removeInsertItem(id);
+    addInsertedBubble((p && p.text) || '');
+  }
+
+  /**
+   * 运行中提交：把文本交给后端的待处理队列。
+   * 清空输入框与 sendChat 完全一致（字已经交给队列了）；**不画气泡**。
+   */
+  function submitInsert(text, wireText){
+    insertPending = text;
+    input.value = '';
+    input.style.height = '21px';
+    input.style.overflowY = 'hidden';
+    // 程序化清空不触发 input 事件：发送按钮的亮暗手动同步一次（同 sendChat）
+    refreshSendState();
+    openPalette(false);
+    pushHistory(text);
+    post('chatInsert', { text: wireText });
+  }
+
+  /** chatInsert 的回执：插进去了就本地入队（去重靠 id），没插进去按 reason 收场 */
+  function applyInsertResult(p){
+    var pend = insertPending;
+    insertPending = '';
+    var r = p || {};
+    if (r.inserted) {
+      // insert/queued 事件随后也会到（而且是广播的，别的面板发的也算）：
+      // 这里先入队只为即时反馈，那条事件到了按 id 去重、只更新文本。
+      if (r.id && pend) onInsertQueued({ id: r.id, text: pend });
+      return;
+    }
+    /* 下面全是「没插进去」的收场，而且只处理**本面板刚发的那条**（pend 非空）。
+       回执是广播的、不带发起方 id：别的面板插话失败跟本面板无关，若在这里
+       跟着改 data-run、弹提示，用户会看到一句莫名其妙的「插话未生效」。 */
+    if (!pend) return;
+    if (r.reason === 'idle') {
+      /* 没有活跃轮次 = 本地那个 data-run 是陈旧的（轮次刚好在这一刻结束）。
+         这条不能丢，也不能留在队列里等一个不存在的轮次：放回输入框、清掉
+         陈旧的运行态，重走一次普通发送。**必须清 data-run**，不清的话
+         sendChat 会再次进插话分支，变成死循环。 */
+      body.setAttribute('data-run', 'false');
+      if (!input.value.trim()) {
+        input.value = pend;
+        sendChat();
+        return;
+      }
+      flashInsertHint('本轮已结束，消息没有插进去，请重新发送');
+      return;
+    }
+    if (r.reason === 'command') {
+      // 后端拒收「以 / 开头的插话」：明确提示，并把文本还给用户
+      flashInsertHint('运行中不支持命令，请等本轮结束');
+    } else {
+      /* 其余情况（旧后端没有 chat/insert、内部错误）：文本已经从输入框清掉了，
+         什么都不显示才是最糟的 —— 说一句。 */
+      flashInsertHint('插话未生效：' + (r.error || r.reason || '未知原因'));
+    }
+    if (!input.value.trim()) {
+      input.value = pend;
+      autoGrowInput();
+      refreshSendState();
+    }
+  }
+
+  /** insertEdit / insertRemove 的回执：失败说明那条已经不在（多半被消费了）→ 重新拉快照 */
+  function applyInsertAck(p, key){
+    if (p && p[key]) return;   // 成功：等 insert/updated 的全量快照来重画
+    post('insertList', {});
+  }
+
   function sendChat(){
     var text = input.value.trim();
     /* 允许「只发附件、不打字」——附件本身就是内容，凭什么逼用户再敲个字。
@@ -9371,18 +9817,33 @@ body[data-run="true"] #goalRounds{opacity:.45}
        拦下时把内容留在输入框里（不清、不进历史），用户按停止或等回答完再发即可。
        命令（/ 开头）不受影响：走 runInputCommand，后端对命令的处理与对话不同。
 
-       **这里刻意不写系统行**（这一点踩过一次）：`sysLine` → `cmdOne` 会无条件
+       **这里不能写系统行**（这一点踩过一次）：`sysLine` → `cmdOne` 会无条件
        `closeAssistantSegment()`（系统行必须落在「当前正文之后」，否则后面流进来的
        文字会把它夹在句子中间，那是它存在的理由）。而运行中插入系统行恰恰要断开
        正在流式的这一段 —— 于是「拦住了发送」却把回答劈成了两个气泡，
        和修复前一样坏（第 15 轮独立验收实测：A 无插入=1 气泡 / B 插话=2 气泡，
        且前半截的下一个兄弟正是那行提示）。
-       改为静默拦住：输入框里的字还在、停止按钮亮着，屏幕上已经把「没发出去」
-       和「为什么」都说完了。早先在这里记一笔、等 turn/end 后再补一行
-       「刚才那条没有发出去（这一轮还在回答），内容仍在输入框」—— 那是在把
-       用户眼皮底下的事再念一遍（用户反馈：废话）。 */
+
+       **现在的做法：不再拦，改走「插话」**（RPC chat/insert）。运行中提交 =
+       进后端的待处理队列，后端在工具批次收尾/轮次收尾时逐条消费；界面上先在
+       输入框上方的排队条里看到它，被消费到（insert/consumed）才变成一条带
+       「已插入」标记的气泡（实现见上面 submitInsert / addInsertedBubble 那段）。
+       为什么不在这里直接画气泡：这一条可能整轮都没被消费到（用户点了停止、
+       后端压缩），画了就是一句「说出去了却没有回答」的假消息。 */
     if (body.getAttribute('data-run') === 'true') {
-      return;
+      /* 后端已经断了，data-run 只是断线前留下的陈旧值：插话没有接收方，
+         也不能像插话路径那样清空输入框 —— 交给下面的离线分支提示并保留文字。 */
+      if (!(REAL && body.getAttribute('data-offline') === 'true')) {
+        if (ATCH.length) {
+          /* 附件刻意不支持插话（不扩大范围）：队列里的条目只有文本，带附件
+             的那条在消费时会丢掉附件 —— 与其静默丢，不如说清并让用户等这一轮
+             结束。文字与附件都留在输入框里。 */
+          flashInsertHint('运行中暂不支持插入附件，请等本轮结束');
+          return;
+        }
+        submitInsert(text, wireText);
+        return;
+      }
     }
     // 压缩期间同样不发（用户要求「干脆不让发，等结束再解锁」）。
     // 输入框此时是 disabled，正常打字根本进不来；这道守卫兜的是
@@ -11992,6 +12453,10 @@ body[data-run="true"] #goalRounds{opacity:.45}
     }
     body.setAttribute('data-run', 'false');
     resetStopBtn();
+    /* 插话队列重同步。后端逐条消费（每次只吃一条），一轮跑完可能还有没吃到的；
+       「队列里还剩几条」只有后端知道，本地镜像靠全量快照对齐。本地队列是空的
+       时（绝大多数轮次）不发这一枪，免得每轮白跑一次请求。 */
+    if (REAL && insertItems.length) post('insertList', {});
     if (curThink) endThink({});
     // 轮次已结束 = 后端不再等任何确认。挂着的确认条必须收掉，
     // 否则界面上还摆着可点的「确认执行」（实测：确认中点停止，
@@ -12395,6 +12860,11 @@ body[data-run="true"] #goalRounds{opacity:.45}
     }
     // 隐藏「示例数据」提示条
     body.setAttribute('data-real', 'true');
+    /* 补一次插话队列快照。队列条平时只靠三条增量事件维护，而事件是流式的、
+       没有「当前状态」—— 面板重建/重连后一条事件都不会重放，不查一次的话
+       运行中重开面板就看不到那几条待处理消息（用户会以为插话丢了）。
+       旧后端没有 insert/list：不回执，这里发出去也只是没人应答，不影响别的。 */
+    post('insertList', {});
     if (firstInit) {
       // 首次切真实态：把对话区的任何残留清空（生产骨架本来就是空的，
       // preview 演示态注入的内容也在这里让位）
@@ -14287,6 +14757,13 @@ body[data-run="true"] #goalRounds{opacity:.45}
       case 'bg/submit': bgSubmit(msg.params || {}); break;
       case 'confirm/request': showConfirm(msg.params || {}); break;
       case 'confirm/result': applyConfirmResult(msg.params || {}); break;
+      /* 运行中插话的三条后端事件（RPC chat/insert 的队列侧）：
+         queued=入队一份、consumed=真正进了上下文（这时才画气泡）、
+         updated=编辑/删除后的全量快照。三条都不碰 #convo（consumed 除外，
+         它是唯一被允许画进对话区的那条）。 */
+      case 'insert/queued': onInsertQueued(msg.params || {}); break;
+      case 'insert/consumed': onInsertConsumed(msg.params || {}); break;
+      case 'insert/updated': onInsertUpdated(msg.params || {}); break;
       case 'stats': applyStats(msg.params || {}); break;
       case 'error': notifyError(msg.params || {}); break;
       case 'session/list': applySessionList(msg.params || {}); break;
@@ -14311,6 +14788,14 @@ body[data-run="true"] #goalRounds{opacity:.45}
       case 'narnatmd/saved': window.__narnatOnNarnatMdSaved && window.__narnatOnNarnatMdSaved(msg.params || {}); break;
       case 'configSet/result': window.__narnatOnConfigResult && window.__narnatOnConfigResult(msg.params || {}); break;
       case 'chat/result': applyChatResult(msg.params || {}); break;
+      /* 插话的四条回执。宿主侧把 webview 的 chatInsert / insertList /
+         insertEdit / insertRemove 转成 RPC 后原样回一条 <类型>/result ——
+         没有这四条，前端发出去就再也听不到结果（插话「没插进去」时尤其要紧：
+         reason:'idle' 必须知道，否则那句话既没进队列、也没走普通发送）。 */
+      case 'chatInsert/result': applyInsertResult(msg.params || {}); break;
+      case 'insertList/result': onInsertUpdated(msg.params || {}); break;
+      case 'insertEdit/result': applyInsertAck(msg.params || {}, 'edited'); break;
+      case 'insertRemove/result': applyInsertAck(msg.params || {}, 'removed'); break;
       case 'cancel/result': applyCancelResult(msg.params || {}); break;
       case 'prompt/result': onPromptResult(msg.params || {}); break;
       case 'notice': showNotice(msg.params || {}); break;

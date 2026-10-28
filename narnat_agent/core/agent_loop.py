@@ -168,6 +168,32 @@ class AgentLoop:
         ctx.style_discuss_rounds = 0
         ctx.style_token_baseline = max(0, self._stats.input_tokens)
 
+    def _consume_insert(self, stream) -> bool:
+        """把运行中插入的用户消息取 1 条进上下文（没有则返回 False）。
+
+        只在 RPC 形态生效：终端 UI 没有这个方法（getattr 探测不到）→ 直接
+        返回 False，终端行为完全不变，agent_loop 也不用 import 任何 rpc 模块。
+
+        每次只取 1 条：取到就 continue 重新请求，剩下的留到下一个消费点，
+        多条插话于是逐条生效（一次全塞进去会让 AI 对着几条不相干的话一起答）。
+        """
+        drain = getattr(self._ui, "drain_insert", None)
+        if drain is None:
+            return False
+        item = drain()
+        if not item:
+            return False
+        # 用 append_user_merged 而不是 append_user：插话紧跟在 tool_result 之后，
+        # 直接追加会形成连续两条 user；合并进同一条才是合法结构
+        #（llm.py 的转换层对"tool_result 后的独立 user"已有真实 API 验证，
+        # 合并只是顺带把连续 user 的隐患一并消掉）。
+        self._msg_manager.append_user_merged(item["text"])
+        # 复用同一stream继续内循环：先把上一轮文字落定到屏幕，
+        # 再重启"思考中"spinner，避免LLM等待期界面无动画静默卡住
+        stream.flush_renderer()
+        stream.begin()
+        return True
+
     def _check_token_interval(self):
         """token 通道检查：上下文距上次注入的增量达到「间隔token数」即注入。
 
@@ -638,6 +664,10 @@ class AgentLoop:
                         "单步任务或探索阶段可忽略本条。"
                     )
 
+                # ── 运行中插话：工具结果已写入，此刻插入安全 ──
+                if self._consume_insert(stream):
+                    continue
+
                 continue
 
             # ── 响应流中断（无完成标记）→ 整轮重试（指数退避）──
@@ -729,6 +759,10 @@ class AgentLoop:
                 return
 
             # （本轮的 usage 落账已上移至工具执行前统一处理）
+
+            # ── 运行中插话：纯文本轮兜底（正文已写入，此刻插入安全）──
+            if self._consume_insert(stream):
+                continue
 
             # ── 收尾软提醒：计划未全部勾选时提醒一次，仅一次 ──
             # AI漏勾选就输出总结时，注入一条提醒让它补勾；无论下一轮结果如何

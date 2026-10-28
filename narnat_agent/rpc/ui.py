@@ -23,6 +23,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from ..output import DisplayState
+from ..tools.background import wake_waiters
 from ..ui.interrupt import _interrupt_ctrl
 from .protocol import get_transport
 
@@ -383,6 +384,13 @@ class RpcUI:
         self._tool_context = tool_context
         self._stats = stats
         self._input_queue: "queue.Queue[str]" = queue.Queue()
+        # 运行中插话队列（chat/insert）：AI 正在干活时用户插入的消息。
+        # 与 _input_queue 分开：那个队列的语义是「下一轮输入」（read_input 取走
+        # 就是新的一轮），插话要的是「本轮内部追加一条 user 消息」，混用会让
+        # 一句插话把当前这一轮挤成两轮。
+        self._insert_queue: List[Dict[str, Any]] = []
+        self._insert_lock = threading.Lock()
+        self._insert_seq = 0
         self._stream_lock = threading.RLock()
         self._active_stream: Optional[RpcStream] = None
         self._turn_end_callback = None
@@ -492,6 +500,76 @@ class RpcUI:
             return out
         except Exception:
             return []
+
+    # ── 插话队列（运行中的用户消息）──
+
+    def push_insert(self, text: str) -> Optional[Dict[str, Any]]:
+        """chat/insert 入队，返回 {id, text, position}；空文本返回 None。
+
+        id 用递增整数：前端拿到就能对着改/删，重启后前端手里的旧 id 自然失效
+        （不会误改别的条目），也不需要 uuid 那种体积。
+        """
+        body = text or ""
+        if not body.strip():
+            return None
+        with self._insert_lock:
+            self._insert_seq += 1
+            item = {"id": self._insert_seq, "text": body}
+            self._insert_queue.append(item)
+            position = len(self._insert_queue)
+        emit("insert/queued", {"id": item["id"], "text": body, "position": position})
+        # 唤醒正在 Shell(bg="wait") 里挂着的这一轮，否则插话要等到某个后台任务
+        # 结束（或等满 timeout）才被消费，用户体感就是「发了没反应」。
+        # 只唤醒等待本身：后台任务照旧跑（BashRuntime.interrupted 那条路不能用，
+        # 它会把前台进程一起杀掉）。
+        wake_waiters()
+        return {"id": item["id"], "text": body, "position": position}
+
+    def drain_insert(self) -> Optional[Dict[str, Any]]:
+        """取走队首一条（每次只取 1 条），返回 {id, text}；空则 None。
+
+        只取 1 条是有意的：整批塞进去会让 AI 一次面对好几条互不相干的插话，
+        逐条消费才能一条一条地回应（agent_loop 取到就 continue 重新请求）。
+        """
+        with self._insert_lock:
+            if not self._insert_queue:
+                return None
+            item = self._insert_queue.pop(0)
+        emit("insert/consumed", {"id": item["id"], "text": item["text"]})
+        return {"id": item["id"], "text": item["text"]}
+
+    def has_insert(self) -> bool:
+        with self._insert_lock:
+            return bool(self._insert_queue)
+
+    def list_insert(self) -> List[Dict[str, Any]]:
+        with self._insert_lock:
+            return [{"id": it["id"], "text": it["text"]} for it in self._insert_queue]
+
+    def edit_insert(self, insert_id: int, text: str) -> bool:
+        """按 id 改文本；id 不存在（或改后为空）返回 False。"""
+        body = text or ""
+        if not body.strip():
+            return False
+        with self._insert_lock:
+            item = next((it for it in self._insert_queue if it["id"] == insert_id), None)
+            if item is None:
+                return False
+            item["text"] = body
+            items = [{"id": it["id"], "text": it["text"]} for it in self._insert_queue]
+        emit("insert/updated", {"items": items})
+        return True
+
+    def remove_insert(self, insert_id: int) -> bool:
+        """按 id 删除；id 不存在返回 False。"""
+        with self._insert_lock:
+            item = next((it for it in self._insert_queue if it["id"] == insert_id), None)
+            if item is None:
+                return False
+            self._insert_queue.remove(item)
+            items = [{"id": it["id"], "text": it["text"]} for it in self._insert_queue]
+        emit("insert/updated", {"items": items})
+        return True
 
     # ── 命令 ──
 

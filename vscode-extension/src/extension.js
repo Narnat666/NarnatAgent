@@ -49,11 +49,28 @@ const MESSAGE_METHODS = {
      由下面各自的分支单独发，不走通用的 RECEIPT_TYPES 白名单。 */
   configDescribe: 'config/describe',
   narnatmdGet: 'narnatmd/get',
-  narnatmdSet: 'narnatmd/set'
+  narnatmdSet: 'narnatmd/set',
+  /* 运行中插话（界面见 media/narnat.js 的 submitInsert / 队列条）。
+     四条必须一起登记：chatInsert 把「运行中说的那句话」送进后端待处理队列，
+     insertList 是面板重建后拉一次队列快照，insertEdit / insertRemove 是队列条上
+     那两个文字按钮。少登记任何一条，那条消息都会被 dispatch 的
+     `MESSAGE_METHODS[msg.type]` 静默丢弃 —— 表现是「点了没反应」，与前几次
+     分叉（sessionHistory / skillList）同一个坑。 */
+  chatInsert: 'chat/insert',
+  insertList: 'insert/list',
+  insertEdit: 'insert/edit',
+  insertRemove: 'insert/remove'
 };
 
-/** 原样转发给 webview 的通知前缀（协议 §4） */
-const EVENT_PREFIXES = ['turn/', 'stream/', 'thinking/', 'tool/', 'todo/', 'verify/', 'compress/', 'bg/', 'confirm/'];
+/**
+ * 原样转发给 webview 的通知前缀（协议 §4）。
+ *
+ * 'insert/' 是运行中插话的三条后端事件（insert/queued 入队、insert/consumed
+ * 真正进了上下文、insert/updated 编辑删除后的全量快照）。漏掉这个前缀会怎样：
+ * 事件在宿主这一层就被丢掉，前端队列条永远不动、被消费的那条也画不出气泡 ——
+ * 而请求是全通的，看起来像「后端没发事件」，极难查。
+ */
+const EVENT_PREFIXES = ['turn/', 'stream/', 'thinking/', 'tool/', 'todo/', 'verify/', 'compress/', 'bg/', 'confirm/', 'insert/'];
 /** 原样转发给 webview 的完整通知方法名 */
 const EVENT_METHODS = ['stats', 'error', 'session/list', 'session/saved', 'notice'];
 
@@ -251,7 +268,11 @@ const RECEIPT_TYPES = {
   // 不登记会怎样（第五轮 R42 实测）：失败时专用回执 + 通用 notice 双报，
   // 同屏两句话讲同一件事。这份名单的唯一用途就是「别补通用 notice」，
   // 所以只要 failReceipt 里有专属分支，这里就必须登记 —— 两处必须同步。
-  configDescribe: 1, narnatmdGet: 1, narnatmdSet: 1
+  configDescribe: 1, narnatmdGet: 1, narnatmdSet: 1,
+  // 运行中插话的发送。它在 failReceipt 里有专属分支（理由见那一支），
+  // 所以必须登记 —— 不登记就是「专用回执 + 通用 notice」双报，
+  // 用户会以为插话失败是两件事。
+  chatInsert: 1
 };
 
 /**
@@ -1763,6 +1784,15 @@ function failReceipt(type, message, params, errData) {
     broadcast({ type: 'confirm/result', params: {
       accepted: false, ok: false, error: message, message: message
     } });
+  } else if (type === 'chatInsert') {
+    // 插话失败（掉线、旧后端没有 chat/insert 回 -32601、内部错误）也必须回执。
+    // 不回执会怎样：前端在 submitInsert 里已经把输入框清空了，它等的就是这个
+    // 返回值 —— 没有回执，用户打的那句话既没进队列、也没回到输入框，屏幕上
+    // 一条痕迹都没有（比原来「静默 return」更糟）。reason 用一个前端认识的
+    // 专有值，避免被误当成 'idle'（那会让它改走普通发送）。
+    broadcast({ type: 'chatInsert/result', params: {
+      inserted: false, reason: 'error', error: message, message: message
+    } });
   } else if (type === 'command') {
     // command/exec 抛错（-32000 业务拒绝、-32603 内部错误）时也必须回执。
     // 原来这条只在 handled:false 时回，异常路径一条都不发 —— 界面点了
@@ -1946,6 +1976,32 @@ async function dispatch(type, method, params) {
       // 会去刷新下拉框）。判定用 isSkillListType —— 前端两种拼写都发过，
       // 只认一种就会在这一步把回执丢掉（R45-3 P1-1 的第二个断点）。
       broadcast({ type: 'skill/result', params: result });
+      return;
+    }
+    /* 运行中插话的四条：请求成功必须把结果原样回给 webview。
+       这张 switch 里没有「兜底回执」—— 没被任何分支接管的类型会**静默走完**，
+       前端永远收不到返回值。对插话来说这正好是最要命的一处：
+         · chatInsert 回 { inserted:false, reason:'idle' } 时，前端要据此改走
+           普通发送（轮次刚好结束了），收不到回执那句话就凭空消失；
+         · insertList 收不到，面板重建后队列条永远空白；
+         · insertEdit / insertRemove 收不到，edited/removed:false 无从判断，
+           界面上那一行会留在原地（用户以为删不掉）。
+       回执类型统一用「webview 的消息类型 + /result」，与 configSet/result
+       同一套命名，避免和 RPC 通知（insert/queued 等）撞名。 */
+    if (type === 'chatInsert') {
+      broadcast({ type: 'chatInsert/result', params: result || {} });
+      return;
+    }
+    if (type === 'insertList') {
+      broadcast({ type: 'insertList/result', params: result || {} });
+      return;
+    }
+    if (type === 'insertEdit') {
+      broadcast({ type: 'insertEdit/result', params: result || {} });
+      return;
+    }
+    if (type === 'insertRemove') {
+      broadcast({ type: 'insertRemove/result', params: result || {} });
       return;
     }
   } catch (err) {

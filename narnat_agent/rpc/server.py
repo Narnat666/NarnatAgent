@@ -203,6 +203,12 @@ class RpcServer:
             "chat/send": self._m_chat_send,
             "chat/cancel": self._m_chat_cancel,
             "confirm/reply": self._m_confirm_reply,
+            # 运行中插话：AI 干活期间用户插入的消息进独立队列，由 agent_loop
+            # 在工具批次收尾 / 轮末两个点消费。终端模式没有这套队列（RpcUI 独有）。
+            "chat/insert": self._m_chat_insert,
+            "insert/list": self._m_insert_list,
+            "insert/edit": self._m_insert_edit,
+            "insert/remove": self._m_insert_remove,
             "command/exec": self._m_command_exec,
             "session/list": self._m_session_list,
             "session/new": self._m_session_new,
@@ -813,6 +819,53 @@ class RpcServer:
                     "reason": "no pending confirm"}
         self._ui.push_input(text)
         return {"accepted": True, "text": text}
+
+    # ── 方法：运行中插话 ──
+
+    def _m_chat_insert(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        text = self._require_str(params, "text", "chat/insert", allow_empty=True)
+        if not text.strip():
+            raise RpcError(-32602, "chat/insert: params.text 不能为空")
+        # 以 / 开头的是命令，不是对话。这里**不执行**命令，只回执让前端提示：
+        # 插话发生时 AI 正在轮次中途，在轮次内部执行 /compact、/clear 这类
+        # 会改写历史的命令，会与正在跑的工具批次交错改上下文——没有任何一处
+        # 代码保证这种交错是安全的。用户想执行命令，等这一轮收尾即可。
+        if text.strip().startswith("/"):
+            return {"inserted": False, "reason": "command"}
+        # 不做 busy 拒绝（照 confirm/reply 的写法）：插话本来就只发生在轮次中途，
+        # 这里再查 busy 等于永远拒。但必须确认「确实有活跃轮次」——没有活跃轮次
+        # 时入队就再没人消费，这句话会永远躺在队列里；前端据此改走 chat/send
+        # 正常起一轮，用户完全无感。
+        with self._turn_lock:
+            active = self._turn_active
+        if not active:
+            return {"inserted": False, "reason": "idle"}
+        try:
+            item = self._ui.push_insert(text)
+        except Exception as e:
+            raise RpcError(-32603, f"chat/insert: 入队失败: {e}")
+        if not item:
+            raise RpcError(-32602, "chat/insert: params.text 不能为空")
+        # 不记输入历史：插话没走「下一轮输入」这条路（与 / 命令不记历史同源，
+        # 见 chat/send 里 append_history 那段注释），用户按 ↑ 翻到的应该是
+        # 他真正发起过的那几轮对话，而不是中途塞进来的碎片。
+        return {"inserted": True, "id": item["id"], "position": item["position"]}
+
+    def _m_insert_list(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return {"items": self._ui.list_insert()}
+
+    def _m_insert_edit(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        text = self._require_str(params, "text", "insert/edit")
+        insert_id = params.get("id", _MISSING)
+        if not isinstance(insert_id, int) or isinstance(insert_id, bool):
+            raise RpcError(-32602, "insert/edit: params.id 缺失或不是整数")
+        return {"edited": bool(self._ui.edit_insert(insert_id, text))}
+
+    def _m_insert_remove(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        insert_id = params.get("id", _MISSING)
+        if not isinstance(insert_id, int) or isinstance(insert_id, bool):
+            raise RpcError(-32602, "insert/remove: params.id 缺失或不是整数")
+        return {"removed": bool(self._ui.remove_insert(insert_id))}
 
     def _m_command_exec(self, params: Dict[str, Any]) -> Dict[str, Any]:
         command = self._require_str(params, "command", "command/exec")

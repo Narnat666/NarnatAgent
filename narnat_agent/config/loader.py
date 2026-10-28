@@ -34,6 +34,7 @@ from .defaults import (
     DEFAULT_STYLE_NOTICE_TOKEN_INTERVAL,
     STYLE_NOTICE_TEXT,
 )
+from .isolation import apply_overrides
 
 
 @dataclass
@@ -1073,6 +1074,8 @@ def load_config(project_root: Optional[str] = None, headless: bool = False) -> C
     # 读取配置
     data = _load_json(config_dir)
     _sanitize_sections(data)
+    # 父子代理隔离：覆盖必须早于下方各子配置构造（声明表见 config/isolation.py）
+    apply_overrides(data, headless)
 
     # 构建各子配置
     ai_config = _build_ai_config(data)

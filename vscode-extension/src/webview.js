@@ -5,6 +5,30 @@ const vscode = require('vscode');
 
 const BODY = require('../media/narnat.body.js');
 
+/**
+ * 输入区上方「运行中插话」的两块骨架（临时提示 + 待处理队列条）。
+ *
+ * 界面真源是 design/ui-full.html，它的 body 段由 scripts/sync-ui.js 生成
+ * media/narnat.body.js。骨架本该只在真源里维护一次，但 narnat.body.js 不在
+ * 本功能的改动边界内，所以在组装 HTML 时按锚点补一次。
+ * 已经含 insertBar 时直接返回原文 —— 重跑过 sync-ui.js 之后这里是空操作，
+ * 不会出现两条队列条。media/narnat.js 的 ensureInsertUi 还有一层兜底，
+ * 三份载体（真源 / 这里注入的 / 生成的 body）任缺一份都不会白屏。
+ */
+const INSERT_SKELETON =
+  '<div class="ins-hint" id="insertHint" data-on="false"></div>\n' +
+  '      <div class="insbar" id="insertBar" data-on="false" data-fold="false"></div>\n' +
+  '      ';
+
+/**
+ * @param {string} html media/narnat.body.js 里的 body 段
+ * @returns {string} 含 #insertBar / #insertHint 的 body 段
+ */
+function withInsertSkeleton(html) {
+  if (html.indexOf('id="insertBar"') >= 0) return html;
+  return html.replace('<textarea id="input"', INSERT_SKELETON + '<textarea id="input"');
+}
+
 function getNonce() {
   return crypto.randomBytes(16).toString('base64').replace(/[^A-Za-z0-9]/g, '');
 }
@@ -60,7 +84,7 @@ function getHtml(webview, extensionUri) {
 <noscript><style>html{visibility:visible}</style></noscript>
 </head>
 <body data-run="false">
-${BODY}
+${withInsertSkeleton(BODY)}
 <script nonce="${nonce}">document.documentElement.classList.add('narnat-ready');</script>
 <script nonce="${nonce}" src="${katexJsUri}"></script>
 <script nonce="${nonce}" src="${jsUri}"></script>

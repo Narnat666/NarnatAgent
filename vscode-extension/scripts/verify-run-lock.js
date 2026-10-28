@@ -12,7 +12,8 @@
  *   L6  运行中点插件开关 → 不发 configSet，开关状态不变
  *   L7  运行中 #goalRounds.disabled === true
  *   L8  运行中输入 /ls 按 Enter → 不发命令、输入框保留、回车被消费
- *   L9  运行中输入普通文本按 Enter → 不发 chat、输入框保留
+ *   L9  运行中输入普通文本按 Enter → 走插话（发 chatInsert、清空输入框、
+ *       不进对话区、不落普通 chat、data-run 保持 true）
  *   L10 data-run 回到 false 后全部自动恢复（锁解开、能切、外观复原、命令能发）
  */
 const fs = require('fs');
@@ -138,16 +139,24 @@ const TEST = String.raw`
       'command 增量=' + (byKind(/command/i).length - cmd0) +
       ' input=' + JSON.stringify(el('input').value) + ' prevented=' + prevented8);
 
-    /* L9 运行中普通文本不能发 */
-    var chat0 = byKind(/chat/i).length;
+    /* L9 运行中普通文本走插话（chatInsert）：不丢字、不进对话区、不落普通发送 */
+    var chat0 = byKind(/^chat$/i).length;
+    var ins0 = byKind(/chatInsert/i).length;
+    var bub0 = $('#convo').querySelectorAll('.msg[data-role="user"]').length;
     setVal('你好');
     await sleep(80);
     var prevented9 = enter();
     await sleep(60);
-    ck('L9 运行中输入普通文本回车不发送',
-      byKind(/chat/i).length === chat0 && el('input').value === '你好',
-      'chat 增量=' + (byKind(/chat/i).length - chat0) +
-      ' input=' + JSON.stringify(el('input').value) + ' prevented=' + prevented9);
+    var insD = byKind(/chatInsert/i).length - ins0;
+    var bubD = $('#convo').querySelectorAll('.msg[data-role="user"]').length - bub0;
+    ck('L9 运行中输入普通文本改走插话（chatInsert，不丢字也不画气泡）',
+      insD === 1 && byKind(/^chat$/i).length === chat0 &&
+      el('input').value === '' && bubD === 0 &&
+      document.body.getAttribute('data-run') === 'true',
+      'chatInsert 增量=' + insD + ' chat 增量=' + (byKind(/^chat$/i).length - chat0) +
+      ' input=' + JSON.stringify(el('input').value) + ' user气泡增量=' + bubD +
+      ' data-run=' + document.body.getAttribute('data-run') +
+      ' prevented=' + prevented9);
 
     /* ---------------- 这一轮结束：全部自动恢复 ---------------- */
     setRun('false');

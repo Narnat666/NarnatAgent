@@ -66,7 +66,8 @@ class Assembly:
         # 插件工具开关（narnat.json "工具"."插件"）：关闭的定义不发 LLM，
         # 必须在下方 get_tool_definitions() 之前应用
         from .tools.registry import apply_plugin_config
-        apply_plugin_config(config.tools.plugin_tools)
+        from .config.isolation import plugin_states
+        apply_plugin_config(plugin_states(config.tools.plugin_tools, headless))
 
         # 4. 日志
         logger = AgentLogger(config.paths.logs_dir)

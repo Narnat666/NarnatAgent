@@ -286,7 +286,8 @@ class _Slot:
 # 槽位表（模块级，cleanup_all 时整体重建以杜绝旧 monitor 串扰）
 _slots: List[_Slot] = [_Slot(id=i) for i in range(1, MAX_SLOTS + 1)]
 _lock = threading.Lock()             # 槽位表锁（泵线程写文件也在其内）
-_terminal_event = threading.Event()  # 任一任务进入终态时置位（wait 依赖）
+_terminal_event = threading.Event()  # 任一任务进入终态 或 用户插话时置位（wait 依赖）
+_insert_wake = threading.Event()     # 用户插话置位：只唤醒 wait，不杀任务
 _archive_seq = 0                     # 归档文件序号（会话内递增，防同秒覆盖）
 
 
@@ -681,11 +682,23 @@ def snapshot() -> str:
     return _snapshot()
 
 
+def wake_waiters() -> None:
+    """用户插话：提前结束 wait_tasks 的等待（后台任务不受影响，仍在运行）
+
+    为什么需要：AI 挂在一轮 wait 里时，用户插的话要等某个后台任务结束
+    才被消费（长的要等满 timeout），界面上就是「已经发出去了，但没反应」。
+    不能复用 BashRuntime.interrupted 走这条路——那条会把前台进程一起杀掉。
+    """
+    _insert_wake.set()
+
+
 def wait_tasks(timeout: int) -> str:
-    """等待任意任务完成：完成事件唤醒 / 超时 / 用户ESC 打断。
+    """等待任意任务完成：完成事件唤醒 / 超时 / 用户ESC 打断 / 用户插话唤醒。
 
     返回内容即完整状态快照（含新完成事件），AI 醒来无需再查。
     ESC 只打断"等待"本身，后台任务不受影响继续运行。
+    用户插话（RPC 模式的 chat/insert）同样只提前结束等待：插话文本由
+    agent_loop 的消费点追加进上下文，后台任务照旧运行。
     """
     from ..bash import BashRuntime  # 延迟导入：避免循环
     BashRuntime.interrupted = False  # 入口清零：上轮残留中断不污染本次等待
@@ -693,15 +706,22 @@ def wait_tasks(timeout: int) -> str:
         # clear 与采样原子化：任务完成要么发生在 clear 前（wait 开始前已终态，
         # 本就不在 running 列表），要么发生在采样后（事件置位可被 wait 捕获）
         _terminal_event.clear()
+        # 插话标同样入口清零：否则上一次插话的置位会让每一次 wait 都立刻返回
+        _insert_wake.clear()
         before_running = [s.id for s in _slots if s.status == STATUS_RUNNING]
     if not before_running:
         return "[后台任务] 当前无运行中的后台任务\n" + _snapshot()
     deadline = time.time() + timeout
     new_terminal = []
+    woken_by_insert = False
     while time.time() < deadline:
         if BashRuntime.interrupted:
             BashRuntime.interrupted = False
             return "[后台任务] 等待已被用户打断（后台任务不受影响，继续运行）\n" + _snapshot()
+        if _insert_wake.is_set():
+            _insert_wake.clear()
+            woken_by_insert = True
+            break
         if _terminal_event.wait(timeout=0.1):
             break
     with _lock:
@@ -717,6 +737,10 @@ def wait_tasks(timeout: int) -> str:
     )
     if events:
         return f"[后台任务] {events}\n" + _snapshot()
+    # 完成信息比「被插话唤醒」更有价值，故 events 优先；插话文本本身稍后会作为
+    # user 消息进上下文，AI 不需要靠这句提示才知道用户说了话。
+    if woken_by_insert:
+        return "[后台任务] 等待因用户插入新消息而提前结束（后台任务未受影响，仍在运行）\n" + _snapshot()
     return f"[后台任务] 等待{timeout}秒超时，当前无新完成\n" + _snapshot()
 
 
