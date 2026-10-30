@@ -252,6 +252,17 @@ def _style_mcp(name: str, arguments: dict) -> str:
     if action == "connect":
         hint = _mcp_target_hint(arguments.get("config"))
         return f"connect {target}{f' ({hint})' if hint else ''}".strip()
+    if action == "call":
+        tool = arguments.get("tool", "")
+        summary = f"call {target} {tool}".strip()
+        if arguments.get("arguments"):
+            summary += " " + json.dumps(arguments["arguments"], ensure_ascii=False,
+                                        separators=(",", ":"))
+        return summary
+    if action == "list_tools":
+        return f"list_tools {target}".strip()
+    if action == "list_servers":
+        return "list_servers"
     if action == "disconnect":
         return f"disconnect {target}".strip()
     return str(action)

@@ -321,7 +321,7 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
 
   // ── 联网搜索（WebSearch = REST 双接口：search 搜索 / fetch 抓取）──
   // 只剩 REST：厂商差异全部由本段表达，换服务商只改 json 不改代码。
-  // 要接 MCP 联网服务器请用 MCP 工具（connect 后工具名 mcp__<服务器>__<工具>）。
+  // 要接 MCP 联网服务器请用 MCP 工具（connect 后其工具用 action="call" 按名字调度）。
   // 两个接口地址至少填一个：缺哪个就只是那个 action 报「未配置」，另一个照常可用。
   "联网搜索": {
     "key": "",                                  // API key；默认 DeepSeek 官方接口与「接口密钥」同一把，留空会 401
@@ -427,7 +427,7 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
 
 #### 联网搜索（REST 双接口）
 
-WebSearch **只剩 REST**：`http.search`（搜索）与 `http.fetch`（抓取）两段子配置，厂商差异全部由配置表达，换服务商只改 json 不改代码。**本工具不带 MCP 接入**——需要 MCP 联网服务器（AnySearch、Brave、Exa…）时用 `MCP` 工具 connect，其工具以 `mcp__<服务器>__<工具>` 注册、schema 原样来自服务器。
+WebSearch **只剩 REST**：`http.search`（搜索）与 `http.fetch`（抓取）两段子配置，厂商差异全部由配置表达，换服务商只改 json 不改代码。**本工具不带 MCP 接入**——需要 MCP 联网服务器（AnySearch、Brave、Exa…）时用 `MCP` 工具 connect，之后该服务器的全部工具都用 `action="call"` 统一调度（工具表保持静态，不展开注册）。
 
 AI 侧只有 `WebSearch` 一个工具，用 `action` 判别：
 
@@ -505,11 +505,14 @@ thinking 参数按 `(协议, 模型前缀)` 由内置映射表自动翻译为对
 
 | action | 作用 |
 |--------|------|
-| `connect` | 连接并热注册工具（**连接后其工具下一轮即可直接调用**）：`name`（服务器名，成为工具名前缀）+ `config`（连接配置） |
-| `disconnect` | 断开并注销其工具；`name=all` 断开全部 |
+| `connect` | 连接服务器并返回**工具目录**（名字 + 一句话描述，作为 tool_result 落进上下文）：`name`（服务器名，作为后续调度句柄）+ `config`（连接配置） |
+| `call` | 调度该服务器的一个工具：`name`（服务器名）+ `tool`（服务端工具名）+ `arguments`（参数对象，原样转发） |
+| `list_servers` | 列出已连服务器（存活状态、工具数） |
+| `list_tools` | 列出某服务器的工具名、描述与参数签名（忘了细节就查，不要盲猜） |
+| `disconnect` | 断开；`name=all` 断开全部 |
 
 - **传输选择**：`config.url` 非空走**远程 Streamable HTTP**（形如 `{"url": "https://api.anysearch.com/mcp", "headers": {"X-API-Key": "..."}}`，认证用自定义请求头；响应整包 JSON 或 SSE 帧均支持，服务端返回 `Mcp-Session-Id` 时自动透传后续请求），否则用 `command` 启动**本地 stdio 子进程**。不支持 OAuth 与旧版 HTTP+SSE（2024-11）传输。
-- **工具命名**：`mcp__<服务器名>__<工具名>`（对标 codex 的命名规则）。名称中的非法字符替换为 `_`（清不出有效字符的用哈希兜底）；超过 64 字符或重名时截断并追加哈希后缀，保证符合各家 API 的工具名约束。
+- **工具表静态**：服务端工具**不展开注册**成独立工具——AI 工具表里永远只有 `MCP` 一项，全部调度经 `action="call"` 转发。连接、断开、服务器增减都不改变请求的工具段（缓存前缀稳定）。
 - **通道保活**：本地服务端进程中断时，用连接时记录的配置**自动重连**（并要求重试本次调用——不代它重跑，仿真/写操作绝不悄悄执行两次）；连接中断的服务器不需要 AI 重新提供配置。远程 HTTP 无长连接也无进程可检测，不存在"重连"概念——请求失败即报错，网络或服务端恢复后下一次调用自然成功。
 - **失败不阻塞**：连接失败只报一行（同"连不上某台设备"），不影响会话其他功能。
 - **生命周期**：本地服务端进程在独立进程组（Windows 新进程组 / POSIX 新会话），Esc/Ctrl+C 中断不会误杀；`/exit`、正常退出、异常退出（atexit）均回收（远程连接无子进程，仅关闭 HTTP 客户端）；并发连接上限 8（与后台任务槽位同源）。
@@ -592,13 +595,12 @@ narnat_agent/
 | Shell | 本地命令行执行（平台自适应：Windows cmd / Linux·macOS bash，支持超时/输出上限/后台任务） |
 | Terminal | 多终端持久 SSH（最多 5 个），支持远程命令执行、设备间文件传输 |
 | Serial | 多终端持久串口（最多 5 个），扫描/连接/交互 |
-| MCP | MCP 服务器管理：按需连接外部 MCP 服务（connect 连接 / disconnect 断开，详见「MCP 服务器」） |
+| MCP | MCP 服务器管理：连接与统一调度外部 MCP 服务（connect / call / list_servers / list_tools / disconnect，详见「MCP 服务器」） |
 | WebSearch | 联网搜索与网页抓取（REST 双接口，search/fetch 由 narnat.json 配置；MCP 联网请用 MCP 工具） |
 | TodoWrite | 任务列表管理（多步任务的计划建立与进度勾选） |
 | GoalComplete | 声明任务完成并提交结构化完成清单（要求→证据→状态），触发独立验证器复核（仅 `/goal` 目标模式开启时注入给 AI） |
-| mcp__… | MCP 服务器工具（由 `MCP` 工具 connect 时动态注册，命名 `mcp__<服务器名>__<工具名>`，详见「MCP 服务器」） |
 
-- 可开关的插件工具为 Terminal / WebSearch / Serial / MCP：在 `"工具"."插件"` 配置或 `/plugin` 命令中开关，关闭后该工具定义不再随请求发给 AI（省 token、聚焦任务），不做执行层拦截——已建立的 SSH / 串口 / MCP 连接保持存活，重新开启后立即可用；常驻工具（Read / Glob / Grep / Edit / Write / Shell / TodoWrite）不可关闭
+- 可开关的插件工具为 Terminal / WebSearch / Serial / MCP：在 `"工具"."插件"` 配置或 `/plugin` 命令中开关，**写入配置后重启生效**（运行中的会话工具表不变——工具段是缓存前缀的一部分，热增删会让其后全部缓存失效）；常驻工具（Read / Glob / Grep / Edit / Write / Shell / TodoWrite）不可关闭
 - 工具输出受「输出上限KB」全局硬截断（保留首尾），超时受「超时上限秒」约束；Read 例外——按行截断并提示续读 offset，保证行号连续；Shell 输出被截断时完整输出自动落盘（进程专属临时目录），截断提示给出文件路径，可用 Read / Grep 读取全文（落盘文件首行为框架标签行，读取时可忽略）
 - Shell 后台任务：`background=true` 提交后立即返回 `bgN` 编号，结果落盘到会话专属临时目录（可 Read/Grep 读取；结果文件在会话（进程）存活期间可读，进程退出后目录被自动清理，父代理需在退出前读取；单个后台日志 50MB 封顶，超出部分滚动保留最近 1MB 至 `bgN.log.tail`——错误信息通常在尾部；槽位复用时旧结果归档为 `bgN.log.<序号>.prev`）；`bg="status"/"wait"/"cancel"` 管理，并发上限 8 个，会话结束自动清理
 - 参数错误返回对 AI 友好的中文提示（未知参数 / 缺失参数直接列出有效参数名）

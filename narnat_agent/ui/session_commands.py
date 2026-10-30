@@ -380,7 +380,7 @@ def _cmd_thinkback(args: str, mgr) -> CommandResult:
 
 @_register("plugin")
 def _cmd_plugin(args: str, mgr) -> CommandResult:
-    """插件工具开关：/plugin 查看状态，/plugin <名称> <on|off> 切换（下轮对话即生效）"""
+    """插件工具开关：/plugin 查看状态，/plugin <名称> <on|off> 改配置（重启后生效）"""
     status, text = mgr.on_plugin(args.strip() if args else "")
     color = {"ok": CMD_SUCCESS, "info": CMD_HIGHLIGHT,
              "hint": CMD_MUTED, "error": CMD_ERROR}.get(status, CMD_MUTED)

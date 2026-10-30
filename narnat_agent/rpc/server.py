@@ -587,17 +587,21 @@ class RpcServer:
         threading.Thread(target=_probe, name="narnat-balance", daemon=True).start()
 
     def _plugins(self):
-        from ..tools.registry import (PLUGIN_TOOL_NAMES, get_capability,
-                                      get_plugin_states)
+        from ..tools.registry import (PLUGIN_TOOL_NAMES, get_capability)
 
-        states = get_plugin_states()
+        # 插件开关已改为「重启后生效」：运行态不会再变，面板展示配置态
+        #（读运行态会与用户刚写入的配置不一致，刷新即弹回）。
+        try:
+            configured = self._mgr._read_plugin_config()
+        except Exception:
+            configured = {}
         items = []
         for name in PLUGIN_TOOL_NAMES:
             cap = get_capability(name)
             items.append({
                 "name": name,
                 "label": cap.get("plugin_label") or cap.get("label") or name,
-                "enabled": bool(states.get(name, False)),
+                "enabled": bool(configured.get(name, True)),
             })
         return items
 
@@ -1840,10 +1844,6 @@ class RpcServer:
             enabled = _as_bool(value.get("enabled", False))
             status, text = self._mgr.on_plugin(f"{name} {'on' if enabled else 'off'}")
             if status == "error":
-                raise RpcError(-32000, text.strip())
-            # 同 model/thinking：写回失败时文本里带「仅本次会话有效」，
-            # 不能当成成功（否则下拉框显示已切换、磁盘没变）
-            if "仅本次会话有效" in text:
                 raise RpcError(-32000, text.strip())
             return {"ok": True, "current": {"name": name, "enabled": enabled}}
         if key == "api":

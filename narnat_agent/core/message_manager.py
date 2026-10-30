@@ -82,9 +82,6 @@ class MessageManager:
 
     # ── 追加方法（委托 MessageList）──
 
-    def append_system(self, content: str) -> None:
-        self._messages.append_system(content)
-
     def append_user(self, content: str) -> None:
         self._messages.append_user(content)
 
@@ -275,8 +272,11 @@ class MessageManager:
         # 不应阻塞对话，更不能让异常冒泡终止整个会话）
         summary_content = []
         llm_error = False
+        # 必须照常带 tools 段：服务端前缀缓存顺序是 system → tools → messages，
+        # 缺 tools 的请求与正常请求前缀在 tools 处分叉，压缩请求（全量历史，最贵）
+        # 几乎全价。压缩是省上下文的手段，不能反过来烧钱。
         try:
-            for chunk in llm_client.chat_stream(compress_messages, no_tools=True,
+            for chunk in llm_client.chat_stream(compress_messages,
                                                 cancel_check=cancel_check,
                                                 max_tokens=compress_max_tokens):
                 if cancel_check and cancel_check():

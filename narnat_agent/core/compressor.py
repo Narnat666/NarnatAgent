@@ -120,12 +120,14 @@ class Compressor:
         """
         创建新会话的messages。
 
-        压缩摘要作为独立的system消息注入，与skill格式一致；
+        压缩摘要作为 user 消息注入（不能用 system：发送时所有 system 会被抽进
+        顶层 system 段，摘要一变就把整个前缀缓存作废；user 消息落在 messages 段
+        末尾，只影响它之后的字节）。代价是遵守度弱于系统段，可接受。
         tail_messages 为逐字保留的近期尾部（不含 system 消息）。
         """
         messages = [{"role": "system", "content": system_prompt}]
         if summary:
-            messages.append({"role": "system",
+            messages.append({"role": "user",
                              "content": f"{COMPACTION_SUMMARY_PREFIX}\n\n{summary}"})
         for m in (tail_messages or []):
             if m.get("role") != "system":

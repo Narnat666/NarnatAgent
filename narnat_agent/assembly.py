@@ -89,10 +89,6 @@ class Assembly:
             data_dir=config.paths.data_dir,
         )
 
-        # 6.5 MCP 工具热更新接线：AI 运行时 connect/disconnect 的工具
-        # 通过回调同步进 LLM 工具表（下一轮请求即可见）
-        mcp_manager.set_tool_sinks(llm.add_tool_definitions, llm.remove_tool_definitions)
-
         # 6. 上下文管理
         context = ContextManager(
             logger,
@@ -162,7 +158,6 @@ class Assembly:
             cancel_check=lambda: _interrupt_ctrl.is_set,
             name_func=lambda msgs: summarizer.name_session(msgs),
             goal_tool_setter=llm.set_goal_tool,
-            plugin_setter=llm.set_plugin_enabled,
             goal_max_rounds=config.ai.goal_max_rounds,
             project_skill_roots=config.skills.project_roots,
             context_reset_func=lambda: context.reset(),

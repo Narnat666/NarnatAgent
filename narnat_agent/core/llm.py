@@ -543,49 +543,6 @@ class LLMClient:
                 if d.get("function", {}).get("name") != name
             ]
 
-    def add_tool_definitions(self, definitions: list) -> None:
-        """热追加工具定义（MCP 运行时连接后调用）。按名称去重，幂等。
-
-        与 set_goal_tool 同机制：_tool_defs 与后端共享同一列表对象，
-        每轮请求现读 → 追加后 AI 下一轮即可见。
-        """
-        existing = {d.get("function", {}).get("name") for d in self._tool_defs}
-        for definition in definitions or []:
-            name = definition.get("function", {}).get("name")
-            if name and name not in existing:
-                self._tool_defs.append(definition)
-                existing.add(name)
-
-    def remove_tool_definitions(self, names) -> None:
-        """热移除工具定义（MCP 断开时调用）"""
-        names = set(names or ())
-        if not names:
-            return
-        self._tool_defs[:] = [
-            d for d in self._tool_defs
-            if d.get("function", {}).get("name") not in names
-        ]
-
-    def set_plugin_enabled(self, name: str, enabled: bool) -> bool:
-        """插件工具开关热生效（/plugin 命令）：同步注册表开关状态 + 本实例工具表。
-
-        关闭 = 该工具定义不再发给 LLM；开启 = 从注册表取回定义（MCP 含 mcp__ 动态工具）。
-        只增删该插件相关项，GoalComplete 等其它项原样保留（不得全量重建）。
-        返回是否命中已知插件名。
-        """
-        # 局部导入避免模块顶层循环依赖
-        from ..tools import registry as _registry
-        if not _registry.set_plugin_enabled(name, enabled):
-            return False
-        targets = set(_registry.plugin_definition_names(name))
-        self._tool_defs[:] = [
-            d for d in self._tool_defs
-            if d.get("function", {}).get("name") not in targets
-        ]
-        if enabled:
-            self.add_tool_definitions(_registry.get_plugin_definitions(name))
-        return True
-
     @property
     def raw_sse(self):
         if hasattr(self._backend, '_last_raw_sse'):

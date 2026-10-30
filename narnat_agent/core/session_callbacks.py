@@ -1205,7 +1205,6 @@ class SessionManager:
                  cancel_check: Callable[[], bool] = None,
                  name_func: Callable[[List[Dict[str, Any]]], str] = None,
                  goal_tool_setter: Callable[[bool], None] = None,
-                 plugin_setter: Callable[[str, bool], bool] = None,
                  goal_max_rounds: int = 0,
                  project_skill_roots=None,
 
@@ -1247,8 +1246,6 @@ class SessionManager:
         # 手动压缩（/compact）：由 Assembly 注入 CompressionCoordinator.compress_manual
         self.compact_func: Optional[Callable[[], Tuple[str, str]]] = None
         self._set_goal_tool = goal_tool_setter
-        # 插件工具开关（/plugin）：由 Assembly 注入 llm.set_plugin_enabled（注册表 + LLM工具表同步）
-        self._set_plugin_enabled = plugin_setter
         # 项目技能根目录: None=自动发现（扫描所有名为 skills 的目录）；空元组=关闭；非空=显式
         self._project_skill_roots = project_skill_roots
 
@@ -1538,7 +1535,9 @@ class SessionManager:
             content = (f"本技能目录: {os.path.dirname(path)}\n"
                        "技能正文里提到的相对路径，请按上面的目录解析；引用的文件按需读取。\n\n"
                        f"{content}")
-        self._messages.append_system(content)
+        # 用 user 消息注入（不能用 system：所有 system 会被抽进顶层 system 段，
+        # 注入即改写前缀，缓存全废；user 消息只影响它之后的字节）
+        self._messages.append_user(content)
         return ""
 
     def on_thinking(self, effort: str) -> str:
@@ -1624,19 +1623,25 @@ class SessionManager:
         return list(self._model_options or [])
 
     def on_plugin(self, action: str) -> Tuple[str, str]:
-        """插件工具开关：/plugin 查看状态，/plugin <名称> <on|off> 切换并持久化。
+        """插件工具开关：/plugin 查看状态，/plugin <名称> <on|off> 改配置（重启后生效）。
 
-        关闭 = 该工具定义下一轮请求起不再发给 LLM（省token）；不做执行层拦截，
-        已建立的 SSH/串口/MCP 连接保持存活。
+        为什么不热生效：工具表是请求前缀的一部分（服务端缓存顺序 system → tools
+        → messages），运行中增删任意一条工具定义都会让 tools 段字节变化，其后全部
+        缓存作废。故此处**只写 narnat.json**，本进程的工具表与注册表状态一律不动，
+        新配置由下一次启动的 apply_plugin_config 应用。
         返回 (status, text)：status ∈ {"info","ok","hint","error"}，命令层据此着色。
         """
         from ..tools import registry as _registry
+        configured = self._read_plugin_config()
         if not action:
             states = _registry.get_plugin_states()
-            on_count = sum(1 for enabled in states.values() if enabled)
-            lines = [f"  插件开关: {on_count}/{len(states)} 开启  用法: /plugin <名称> <on|off>"]
+            on_count = sum(1 for enabled in configured.values() if enabled)
+            lines = [f"  插件开关: {on_count}/{len(configured)} 开启（配置态；"
+                     "改动重启后生效，本进程工具表不变）  用法: /plugin <名称> <on|off>"]
             for name, enabled in states.items():
-                lines.append(f"    {name.ljust(9)} {'on ' if enabled else 'off'}  "
+                lines.append(f"    {name.ljust(9)} "
+                             f"运行 {'on ' if enabled else 'off'}  "
+                             f"配置 {'on ' if configured.get(name) else 'off'}  "
                              f"{_PLUGIN_TOOL_LABELS.get(name, '')}")
             return "info", "\n".join(lines)
         parts = action.split()
@@ -1650,28 +1655,48 @@ class SessionManager:
         if value not in ("on", "off"):
             return "error", f"  无效值: {value}（可用: on / off，例如 /plugin {name} off）"
         target = value == "on"
-        current = _registry.get_plugin_states()[name]
-        if self._set_plugin_enabled is None or not self._set_plugin_enabled(name, target):
-            return "error", "  插件开关不可用"
-        err = self._persist_plugin_states()
-        suffix = f"（{err}，仅本次会话有效）" if err else ""
-        if current == target:
-            return "hint", f"  {name} 已是{'开启' if target else '关闭'}状态{suffix}"
-        if target:
-            return "ok", f"  {name} 已开启  (下轮请求起恢复向 AI 提供该工具){suffix}"
-        return "ok", f"  {name} 已关闭  (下轮请求起不再向 AI 提供该工具){suffix}"
+        state = "开启" if target else "关闭"
+        err = self._persist_plugin_states(name, target)
+        # 写回失败必须报 error：RPC 侧据此抛错（不靠文本特征匹配），
+        # 否则界面显示已切换而磁盘没变
+        if err:
+            return "error", f"  {name} 配置写回失败（{err}），重启后不会生效"
+        if configured.get(name) == target:
+            return "hint", f"  {name} 配置已是{state}状态，重启后生效"
+        return "ok", f"  {name} 已写入配置: {value}（重启后生效，本进程工具表不变）"
 
-    def _persist_plugin_states(self) -> str:
-        """把全部插件开关状态原子写回 narnat.json；返回 ""=成功，非空=错误信息"""
-        if not self._config_dir:
-            return ""
+    def _read_plugin_config(self) -> Dict[str, bool]:
+        """读 narnat.json「工具.插件」得配置态（缺项/读失败默认 on，仅 "off" 视为关，与 loader 同口径）"""
         from ..tools import registry as _registry
 
+        raw: Dict[str, Any] = {}
+        if self._config_dir:
+            try:
+                with open(os.path.join(self._config_dir, "narnat.json"),
+                          "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                raw = (data.get("工具") or {}).get("插件") or {}
+            except (json.JSONDecodeError, OSError, AttributeError):
+                raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        return {
+            name: str(raw.get(name, "on")).strip().lower() != "off"
+            for name in _registry.PLUGIN_TOOL_NAMES
+        }
+
+    def _persist_plugin_states(self, name: str, enabled: bool) -> str:
+        """把单个插件开关写回 narnat.json「工具.插件.<name>」；返回 ""=成功，非空=错误信息
+
+        只写这一项：整表覆盖会把文件里其它插件的配置一并改写（用户可能在别的
+        会话/手动改过）。
+        """
+        if not self._config_dir:
+            return ""
+
         def _mutate(data):
-            data.setdefault("工具", {})["插件"] = {
-                name: "on" if enabled else "off"
-                for name, enabled in _registry.get_plugin_states().items()
-            }
+            data.setdefault("工具", {}).setdefault("插件", {})[name] = (
+                "on" if enabled else "off")
 
         return _persist_config(self._config_dir, _mutate)
 

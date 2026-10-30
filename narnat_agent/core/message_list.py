@@ -57,10 +57,12 @@ def split_loaded_history(msgs: List[Dict[str, Any]], system_prompt: str
         return [{"role": "system", "content": system_prompt}] + msgs, []
     head = msgs[head_idx]
     rest = msgs[:head_idx] + msgs[head_idx + 1:]
-    # 摘要边界 = 最后一条摘要系统消息（更早的摘要已被它整合替换，属归档）
+    # 摘要边界 = 最后一条摘要消息（更早的摘要已被它整合替换，属归档）。
+    # 摘要自缓存修复起以 user 角色注入（见 compressor.build_new_session_messages），
+    # 旧会话文件里的历史摘要仍是 system，两种都认。
     cut = -1
     for i, m in enumerate(rest):
-        if (m.get("role") == "system"
+        if (m.get("role") in ("system", "user")
                 and str(m.get("content") or "").startswith(COMPACTION_SUMMARY_PREFIX)):
             cut = i
     current = [head] + (rest[cut:] if cut > 0 else rest)
@@ -153,8 +155,8 @@ class MessageList:
         """这条是不是「系统提示词」——MessageList 用 system_prompt 构造的首条 system。
 
         判据是「是不是首条」，**不是**"role 是不是 system"：/done 合并进父会话的
-        「# 子会话 [X] 结论」、/skill 注入的技能正文同样是 system 角色，它们是
-        历史内容，压缩时必须进归档（一刀切会让它们在展示/落盘里整段消失）。
+        「# 子会话 [X] 结论」同样是 system 角色，它们是历史内容，
+        压缩时必须进归档（一刀切会让它们在展示/落盘里整段消失）。
         用下标而非内容比较：会话载入后首条 system 是该会话自己那份提示词。
         """
         return index == 0 and msg.get("role") == "system"
@@ -196,10 +198,6 @@ class MessageList:
         return len(self._messages)
 
     # ── 受控修改接口（唯一修改入口）──
-
-    def append_system(self, content: str) -> None:
-        """追加系统消息"""
-        self._messages.append({"role": "system", "content": content})
 
     def append_user(self, content: str) -> None:
         """追加用户消息"""
