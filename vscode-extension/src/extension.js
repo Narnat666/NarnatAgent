@@ -636,9 +636,32 @@ function reportError(message, detail) {
 }
 
 /**
+ * 该目录是否是 Narnat 后端源码根。
+ *
+ * 只认 main.py 不够：任何 Python 项目（如带 main.py 的 Web 服务）都会被
+ * 误判成后端源码，于是扩展改用 `python main.py --rpc` 启动别人的程序——
+ * 对方的依赖没装就 code=1 崩掉，面板永远「后端未连接」（实测：工作区
+ * E:\桌面\HalfSugar，python 3.14 无 uvicorn）。
+ * 加一条 narnat_agent/ 包目录，只对真仓库生效；开发态源码联调不受影响。
+ * @param {string} [dir]
+ * @returns {boolean}
+ */
+function isNarnatSource(dir) {
+  if (!dir) return false;
+  const path = require('path');
+  const fs = require('fs');
+  if (!fs.existsSync(path.join(dir, 'main.py'))) return false;
+  try {
+    return fs.statSync(path.join(dir, 'narnat_agent')).isDirectory();
+  } catch (err) {
+    return false;
+  }
+}
+
+/**
  * 解析后端可执行文件。优先级：
  *   1. 用户显式配置的 narnat.rpc.executable（非默认值即视为显式）
- *   2. 工作区里能跑源码（有 main.py + python 可用）→ python main.py --rpc
+ *   2. 工作区里能跑源码（是 Narnat 源码根 + python 可用）→ python main.py --rpc
  *   3. 扩展自带的 bin/narnat.exe（发布形态）
  *   4. PATH 里的 narnat.exe
  * 前两条让「开发态」无需编译就能联调，后两条是发布形态。
@@ -657,23 +680,20 @@ function rpcSettings() {
     return { executable: configured, args, cwd, timeout, kind: 'configured' };
   }
 
-  if (cwd) {
-    const mainPy = require('path').join(cwd, 'main.py');
-    if (require('fs').existsSync(mainPy)) {
-      return {
-        executable: process.platform === 'win32' ? 'python' : 'python3',
-        args: ['main.py', ...args],
-        cwd,
-        timeout,
-        kind: 'source'
-      };
-    }
+  if (isNarnatSource(cwd)) {
+    return {
+      executable: process.platform === 'win32' ? 'python' : 'python3',
+      args: ['main.py', ...args],
+      cwd,
+      timeout,
+      kind: 'source'
+    };
   }
 
-  // 开发态兜底：扩展目录的上一级若是仓库根（含 main.py），用源码启动。
+  // 开发态兜底：扩展目录的上一级若是仓库根（是 Narnat 源码），用源码启动。
   // 让「任意工作区 + 扩展开发宿主」都能联调，不必把后端拷进工作区。
   const repoRoot = require('path').resolve(__dirname, '..', '..');
-  if (require('fs').existsSync(require('path').join(repoRoot, 'main.py'))) {
+  if (isNarnatSource(repoRoot)) {
     return {
       executable: process.platform === 'win32' ? 'python' : 'python3',
       args: ['main.py', ...args],
