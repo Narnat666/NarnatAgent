@@ -61,10 +61,14 @@ def apply_overrides(data: dict, headless: bool) -> None:
 def plugin_states(states: dict, headless: bool) -> dict:
     """合并用户插件开关与隔离屏蔽，返回给 registry.apply_plugin_config 的字典
 
-    隔离项后写入 → 强制优先于用户配置。
+    子代理（headless）默认**开启所有插件**（含 Goal）：子代理拿不到父代理的交互
+    入口，一旦某个插件默认关闭，它就彻底失去 Terminal/Serial/MCP 等能力，
+    任务只能失败。TOOL_DENY 里的隔离项后写入 → 强制优先于用户配置。
     """
-    merged = dict(states or {})
     if headless:
-        for name in TOOL_DENY:
-            merged[name] = False
+        merged = {name: True for name in (states or {})}
+    else:
+        merged = dict(states or {})
+    for name in TOOL_DENY:
+        merged[name] = False
     return merged

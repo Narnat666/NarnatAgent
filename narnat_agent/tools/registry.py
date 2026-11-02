@@ -26,7 +26,10 @@ from .web_search import execute as web_search_execute, DEFINITION as WEBSEARCH_D
 from .todo_write import execute as todo_write_execute, DEFINITION as TODOWRITE_DEF, CAPABILITY as TODOWRITE_CAP
 from .serial import execute as serial_execute, DEFINITION as SERIAL_DEF, CAPABILITY as SERIAL_CAP
 from .mcp_tool import execute as mcp_execute, DEFINITION as MCP_DEF, CAPABILITY as MCP_CAP
-from .goal_complete import execute as goal_complete_execute, CAPABILITY as GOALCOMPLETE_CAP
+from .goal_complete import (
+    execute as goal_complete_execute, DEFINITION as GOALCOMPLETE_DEF,
+    CAPABILITY as GOALCOMPLETE_CAP,
+)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -59,8 +62,15 @@ TOOL_DEFINITIONS: List[Dict] = [
     BASH_DEF, TERMINAL_DEF, WEBSEARCH_DEF, TODOWRITE_DEF,
     SERIAL_DEF, MCP_DEF,
 ]
-# GoalComplete 不进默认工具定义：由 /goal 开启时通过 LLMClient.set_goal_tool(True) 动态注入，
-# 普通模式不暴露给 LLM（执行能力始终注册，兼容历史残留调用）。
+# GoalComplete 不进默认工具定义：它是 Goal 插件控制的定义，由
+# LLMClient.set_goal_tool() 按插件开关注入，普通模式不暴露给 LLM
+#（执行能力始终注册，兼容历史残留调用）。
+# 插件名 → 其控制的工具定义名。名字相同是常态（Terminal→Terminal），
+# 只有 Goal 插件例外（Goal 本身不是工具，它控制 GoalComplete）。
+_PLUGIN_DEFINITION_NAMES: Dict[str, str] = {"Goal": "GoalComplete"}
+
+# 插件名 → 能力表里的工具名（/plugin 状态表与 RPC 插件列表取 label 用）
+_PLUGIN_CAPABILITY_ALIAS: Dict[str, str] = {"Goal": "GoalComplete"}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -142,8 +152,10 @@ def get_capability(name: str) -> Dict[str, Any]:
     未声明的动态工具（mcp__*，MCP 服务器热注册）与未知工具返回保守默认：
     串行调度 + 原名标签；动态工具输出含服务端文本（不可信，失败判定只认框架标签）
     且摘要风格为 mcp，未知工具无摘要。
+    插件名与工具名不同的一处（Goal → GoalComplete）走别名，插件状态表因此
+    能拿到「目标模式」这个说明文案。
     """
-    cap = _CAPABILITIES.get(name)
+    cap = _CAPABILITIES.get(name) or _CAPABILITIES.get(_PLUGIN_CAPABILITY_ALIAS.get(name, ""))
     if cap is not None:
         return cap
     cap = _UNDECLARED_CAPABILITIES.get(name)
@@ -252,10 +264,11 @@ def _friendly_type_error(name: str, impl: Callable, err: TypeError) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 插件工具开关（Terminal/WebSearch/Serial/MCP）
+# 插件工具开关（Terminal/WebSearch/Serial/MCP/Goal）
 #
 # 关闭的语义只有一件事：该工具定义不再随请求发给 LLM（省token + 精简聚焦）。
 # 不做执行层拦截；已连接的 SSH/串口/MCP 子进程保持存活，重开后工具立刻回来。
+# Goal 插件的特例：它没有自己的工具定义，"关闭"= 不注入 GoalComplete。
 # ═══════════════════════════════════════════════════════════════
 
 # 名单唯一来源：config.defaults.DEFAULT_PLUGIN_TOOLS（此处只做别名，不再重复定义）
@@ -310,11 +323,11 @@ def plugin_definition_names(name: str) -> List[str]:
     canonical = resolve_plugin_name(name)
     if canonical is None:
         return []
-    if canonical != "MCP":
-        return [canonical]
-    names = [canonical]
-    names += [n for n in (_definition_name(d) for d in _DYNAMIC_DEFINITIONS) if n]
-    return names
+    if canonical == "MCP":
+        names = [canonical]
+        names += [n for n in (_definition_name(d) for d in _DYNAMIC_DEFINITIONS) if n]
+        return names
+    return [_PLUGIN_DEFINITION_NAMES.get(canonical, canonical)]
 
 
 def get_plugin_definitions(name: str) -> List[Dict]:
@@ -322,7 +335,11 @@ def get_plugin_definitions(name: str) -> List[Dict]:
     canonical = resolve_plugin_name(name)
     if canonical is None:
         return []
-    defs = [d for d in TOOL_DEFINITIONS if _definition_name(d) == canonical]
+    target = _PLUGIN_DEFINITION_NAMES.get(canonical, canonical)
+    defs = [d for d in TOOL_DEFINITIONS if _definition_name(d) == target]
+    if target == "GoalComplete":
+        # GoalComplete 不在 TOOL_DEFINITIONS 里（由 set_goal_tool 注入）
+        defs += [GOALCOMPLETE_DEF]
     if canonical == "MCP":
         defs += list(_DYNAMIC_DEFINITIONS)
     return defs

@@ -117,8 +117,11 @@ class Agent:
                     self._msg_manager.append_user(stripped)
                     self._logger.info("core.agent", f"用户输入: {stripped[:100]}")
 
-                # 5. 目标模式：解析轮数上限（临时覆盖优先，否则用配置默认值）
-                goal_enabled = self._mgr._goal_enabled
+                # 5. 自动续跑：由「插件 Goal 是否启用」决定，与审核模式无关。
+                #    审核模式（「完成验证」）只是在 AI 声明完成之后再加一道独立 AI
+                #    复核，不改变续跑行为；两者曾是同一个开关，导致关掉审核就
+                #    连任务没完成也不再推进。
+                goal_enabled = self._mgr.goal_plugin_enabled()
                 if goal_enabled:
                     goal_limit = self._mgr._goal_max_rounds or self._config.ai.goal_max_rounds
                     goal_task = stripped
@@ -133,7 +136,7 @@ class Agent:
                     stream = self._ui.create_stream()
 
                     try:
-                        # 6. 工具调度内循环（目标模式传入goal_mode：中间轮不显示统计栏；
+                        # 6. 工具调度内循环（审核模式传入goal_mode：中间轮不显示统计栏；
                         #    剩余预算供验证打回前判断是否已耗尽）
                         self._agent_loop.run(stream, goal_mode=goal_enabled, goal_task=goal_task,
                                              round_budget_left=(goal_limit - goal_round)
@@ -162,7 +165,7 @@ class Agent:
                     goal_round += 1 + self._agent_loop._last_round_blocks
                     self._parts.tool_context.goal_rounds_used = goal_round
 
-                    # ── 目标模式自动续跑判断 ──
+                    # ── 审核模式自动续跑判断 ──
                     if not goal_enabled:
                         break
                     if stream.aborted:
@@ -175,9 +178,9 @@ class Agent:
                         break
                     if goal_round >= goal_limit:
                         # 达到轮数上限：注入收尾指令，让AI总结后结束（不再续跑）
-                        self._logger.info("core.agent", f"目标模式达到轮数上限({goal_limit})，停止续跑")
+                        self._logger.info("core.agent", f"审核模式达到轮数上限({goal_limit})，停止续跑")
                         self._msg_manager.append_user(
-                            f"[系统提示]目标模式已达到轮数上限（{goal_limit}轮），任务尚未完成。"
+                            f"[系统提示]审核模式已达到轮数上限（{goal_limit}轮），任务尚未完成。"
                             "请向用户总结当前进度、已完成工作和未完成原因，无需继续执行新任务。"
                         )
                         stream = self._ui.create_stream()
@@ -190,7 +193,7 @@ class Agent:
                             self._auto_save.try_save()
                         break
                     # 任务未完成：注入继续消息（含完成审计提示），再跑一轮
-                    self._logger.info("core.agent", f"目标模式自动续跑: 第{goal_round}轮完成，继续")
+                    self._logger.info("core.agent", f"审核模式自动续跑: 第{goal_round}轮完成，继续")
                     self._msg_manager.append_user(
                         f"[自动续跑]已完成{goal_round}轮，任务：{goal_task}\n"
                         "请继续推进任务。\n"
@@ -230,13 +233,14 @@ class Agent:
     def run_headless(self, task: str, max_rounds: int = 0):
         """headless 一次性任务执行（nn -p 入口）。
 
-        带 -g N（N≥1）→ 目标模式：注入 GoalComplete、自动续跑 + 完成验证，
-        预算 N 轮；不带 -g → 普通模式：单轮执行（AI 一口气干到停手），
-        不注入 GoalComplete、无验证，跑完即退。
+        带 -g N（N≥1）→ 审核模式：自动续跑 + 完成验证，预算 N 轮；
+        不带 -g → 普通模式：单轮执行（AI 一口气干到停手），无验证，跑完即退。
+        工具注入与审核模式无关：子代理的插件默认全开（含 Goal），GoalComplete
+        在启动时就已经在工具表里，运行中不再增删工具定义（前缀一变缓存全废）。
         与 run() 的区别：不读用户输入、不自动保存会话、不查余额、不显示统计栏。
         输出经 HeadlessStream（纯文本，无颜色）。
 
-        max_rounds: 续跑预算轮数（nn -g 参数）；>0 才开启目标模式。
+        max_rounds: 续跑预算轮数（nn -g 参数）；>0 才开启审核模式。
         """
         self._logger.info("core.agent", f"Agent启动(headless), model={self._config.ai.model}")
 
@@ -264,11 +268,11 @@ class Agent:
             if self._debug:
                 self._logger.start(self._config.paths.logs_dir)
             if goal_enabled:
-                # 开启目标模式：注入 GoalComplete 工具（预算 = -g N）
+                # -g N = 开启审核模式（独立 AI 复核）+ 预算 N 轮。
+                # 续跑本身由插件 Goal 决定（headless 插件全开 → 已注入工具），
+                # 这里只打开「完成验证」并记录预算。
                 self._mgr._goal_enabled = True
                 self._mgr._goal_max_rounds = max_rounds
-                if getattr(self._mgr, '_set_goal_tool', None):
-                    self._mgr._set_goal_tool(True)
             goal_limit = max_rounds if goal_enabled else 0
             goal_task = task.strip()
 
@@ -323,9 +327,9 @@ class Agent:
                     break
                 if goal_round >= goal_limit:
                     # 达到轮数上限：注入收尾指令，让AI总结后结束
-                    self._logger.info("core.agent", f"目标模式达到轮数上限({goal_limit})，停止续跑")
+                    self._logger.info("core.agent", f"审核模式达到轮数上限({goal_limit})，停止续跑")
                     self._msg_manager.append_user(
-                        f"[系统提示]目标模式已达到轮数上限（{goal_limit}轮），任务尚未完成。"
+                        f"[系统提示]审核模式已达到轮数上限（{goal_limit}轮），任务尚未完成。"
                         "请向用户总结当前进度、已完成工作和未完成原因，无需继续执行新任务。"
                     )
                     stream = self._ui.create_stream()
@@ -335,7 +339,7 @@ class Agent:
                     end_reason = "round_limit"
                     break
                 # 任务未完成：注入继续消息（含完成审计提示），再跑一轮
-                self._logger.info("core.agent", f"目标模式自动续跑: 第{goal_round}轮完成，继续")
+                self._logger.info("core.agent", f"审核模式自动续跑: 第{goal_round}轮完成，继续")
                 self._msg_manager.append_user(
                     f"[自动续跑]已完成{goal_round}轮，任务：{goal_task}\n"
                     "请继续推进任务。\n"
@@ -353,13 +357,11 @@ class Agent:
             # 完成信号哨兵：所有退出路径必经此处。父代理轮询结果文件时
             # 以该行为准判定"子代理已结束"及结束原因（goal_complete/round_limit/aborted等）。
             _stdout_write(f"\n[NN_DONE] reason={end_reason} rounds={goal_round}\n")
-            # 目标模式状态复位（无条件）：同进程复用（批处理/测试脚手架）时，
-            # 上一任务 -g 残留的 _goal_enabled/GoalComplete 工具会污染后续任务
-            # （普通模式任务被注入 GoalComplete 并触发验证器）
+            # 审核模式状态复位（无条件）：同进程复用（批处理/测试脚手架）时，
+            # 上一任务 -g 残留的 _goal_enabled 会污染后续任务（普通模式任务被
+            # 触发续跑与验证器）。工具注入不在此复位——它只由插件开关决定
             self._mgr._goal_enabled = False
             self._mgr._goal_max_rounds = 0
-            if getattr(self._mgr, '_set_goal_tool', None):
-                self._mgr._set_goal_tool(False)
             # 线程池不做任务级 shutdown（同 run()：Agent 支持同进程复用）
             from ..tools.terminal import cleanup as _terminal_cleanup
             from ..tools.serial import cleanup as _serial_cleanup

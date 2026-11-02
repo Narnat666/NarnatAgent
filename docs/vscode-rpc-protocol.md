@@ -98,12 +98,21 @@ narnat.exe --rpc [--projects-root <路径>]
      "protocol":1,
      "model":{"current":"deepseek-flash","options":["deepseek-v4-pro","deepseek-flash"]},
      "thinking":{"effort":"max","options":{"low":"低","medium":"中","high":"高","max":"最大"},"passback":false},
-     "goal":{"enabled":false,"maxRounds":10},
-     "plugins":[{"name":"terminal","label":"多终端持久 SSH","enabled":true}],
+     "goal":{"enabled":false,"maxRounds":10,"locked":false},
+     "plugins":[{"name":"Terminal","label":"多终端持久 SSH","enabled":true},
+                {"name":"WebSearch","label":"联网搜索","enabled":true},
+                {"name":"Serial","label":"多终端持久串口","enabled":true},
+                {"name":"MCP","label":"MCP 服务器管理","enabled":true},
+                {"name":"Goal","label":"目标模式","enabled":false}],
+     "pluginsLocked":false,
      "session":{"current":"grep-ignore-case","children":["try-regex"]},
      "workdir":"<启动后端时的当前工作目录>"
    }}
 ```
+
+`pluginsLocked`（boolean）：插件配置是否**已锁定**——本会话已开始工作（AI 已执行过、历史里有用户消息）即 `true`，此时 `config/set` 的 `key="plugin"` 一律抛 `-32000`，需新建对话才能调整。`plugins` 形状为 `[{name, label, enabled}]`，固定 5 项（`Terminal` / `WebSearch` / `Serial` / `MCP` / `Goal`）；`enabled` 是**当前会话生效值**，不是 `narnat.json` 里的配置态。
+
+`goal` 形状为 `{"enabled": boolean, "maxRounds": int, "locked": boolean}`。`locked`（boolean）：审核模式当前是否**不可配置**，**判据只有一条**——插件 `Goal` 未启用（审核模式依赖 `GoalComplete` 定义）。审核模式不改工具表、不占缓存前缀，因此**不受 `pluginsLocked` 约束**：会话已开始工作也照样可配；只有 AI **正在跑的那一刻**不可配置，由客户端按运行态（`turn/begin`..`turn/end`）置灰。
 
 `thinking.passback`（boolean）：思考内容是否随请求**回传给模型**（对应配置 `智能体.思考.回传`，由 `/thinkback` 或 `config/set` 切换，**默认 `false`**）。它只决定"发不发"——思考内容本身始终记录在会话里，`thinking/*` 事件也照常下发（见 §4.3）。客户端可用它渲染开关状态。
 
@@ -284,8 +293,8 @@ narnat.exe --rpc [--projects-root <路径>]
 ```
 
 `key` 取值：`model` / `thinking` / `thinkback` / `goal` / `plugin`
-- `goal` 的 value 是 `{"enabled":true,"maxRounds":10}`
-- `plugin` 的 value 是 `{"name":"serial","enabled":false}`
+- `goal` 的 value 是 `{"enabled":true,"maxRounds":10}`，成功返回 `{"ok":true,"current":{"enabled":true,"maxRounds":10,"locked":false}}`；插件 `Goal` 未启用时抛 `-32000`，AI 运行中也抛 `-32000`（本轮结束后再试）
+- `plugin` 的 value 是 `{"name":"serial","enabled":false}`，成功返回 `{"ok":true,"current":{"name":"serial","enabled":false}}`；会话已锁定（`pluginsLocked=true`）时抛 `-32000 "插件配置不可更改：本会话已开始工作（新建对话后可调整）"`
 
 **错误码区分**（实测）：
 - 未知 `key`、缺 `value`、value 类型不对 → `-32602`（参数非法）
@@ -331,6 +340,7 @@ turn/begin
   verify/start → verify/result?
   stats
 turn/end
+（turn/end 之后可能来 session/config：本轮收口后会话级配置快照，见 §4.15）
 （turn/end 之后可能来 session/saved × 2：自动保存的后台线程发出，见 §4.14）
 ```
 
@@ -424,7 +434,8 @@ turn/end
 
 `verdict` 取值：`pass` / `uncertain` / `fail` / `forced` / `skip`（与 `show_verify_result` / `show_verify_skip` 一一对应）
 
-> 仅**目标模式**（`config/set` 把 `goal.enabled` 设 true）下，AI 调 `GoalComplete` 后才会触发。
+> 仅**审核模式**（`config/set` 把 `goal.enabled` 设 true）下，AI 调 `GoalComplete` 后才会触发；
+> 而 `GoalComplete` 的注入由插件 `Goal` 决定（插件未启用时审核模式不可配置）。
 > 本轮无文件改动时 `verdict=skip`、`blocks=0`、`durationMs=0`；
 > 有文件改动时会真调验证器，实测 `verdict=pass, blocks=2, limit=2, durationMs=3108`。
 
@@ -517,6 +528,32 @@ turn/end
 > 处理——按 `name`（必要时加 `switched`）去重，重复收到不要重复插系统提示、不要重复拉 `session/list`。
 > 状态切换被跳过时（写盘后用户已 `session/new` 或切到别的会话）只发 `switched:false` 那一条；
 > 写盘失败则两条都不发。
+
+### 4.15 `session/config`
+
+会话级配置快照（方向：后端 → 客户端）。**每轮真正收口时**（`turn/end` 且非
+`intermediate`）推一条，`intermediate:true` 的中间轮不推。
+
+```jsonc
+{"method":"session/config","params":{
+  "goal":{"enabled":false,"maxRounds":10,"locked":true},
+  "plugins":[{"name":"Terminal","label":"多终端持久 SSH","enabled":true}, …共 5 项…],
+  "pluginsLocked":true}}
+```
+
+字段与 `initialize` 的 `goal` / `plugins` / `pluginsLocked` **完全同形同义**（后端同一个产出点，
+见 `rpc/server.py::_session_config_payload`），区别只在**什么时候发**：
+
+| 触发 | 为什么必须有 |
+|---|---|
+| `initialize` | 握手时对齐一次 |
+| `session/switch` / `new` / `explore` / `done` / `delete`(当前会话) 回执 | 换会话 = 换一套会话级配置 |
+| `command/exec` 回执（`stateChanged` 含 `session` / `plugin` / `goal`） | 面板里敲 `/cd`、`/plugin Goal off` 等同样会换 |
+| **`session/config` 通知（每轮收口）** | 用户问完第一句、AI 跑完 → `pluginsLocked` 变成 `true`（插件配置从此锁定）；不带这一条，界面要等下一次握手才知道，期间下拉仍是未锁定外观，点一下才被 `-32000` 拒绝 |
+| 上一行里的 `goal.locked` | **不随会话工作进度变**（只由插件 `Goal` 决定），所以这条通知对它是幂等的；带在同一份载荷里是为了保持「一份快照」而不是拆成两条 |
+
+> 客户端必须**只由后端布尔驱动**锁定态（`pluginsLocked` / `goal.locked`），并把它同步进
+> 「回滚基准」快照——否则锁定态下点一下失败、回滚又按陈旧快照把下拉画成可点，形成反复假反馈。
 
 ---
 

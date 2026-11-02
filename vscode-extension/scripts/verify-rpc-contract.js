@@ -120,5 +120,32 @@ console.log('');
 ck('S7 宿主转发的后端方法在 server.py 里都存在', backendMissing.length === 0,
   backendMissing.length ? '找不到：' + backendMissing.join(', ') : '全部命中');
 
+/* ---- 6. 反向：后端会推给 webview 的通知，宿主必须转发（不能在半路丢掉）----
+   这道检查专治「后端发了、宿主没转」：请求与回执全通，界面上只是某个 UI
+   永远不动，看起来像「后端没发事件」——insert/ 前缀那次就是这么踩的。
+   判据：这些方法名必须能在 EVENT_METHODS 里找到，或被某个 EVENT_PREFIXES 覆盖。 */
+const evMethods = new Set();
+const evmBlock = /const EVENT_METHODS = \[([\s\S]*?)\];/.exec(EXT);
+if (evmBlock) {
+  const reEv = /'([A-Za-z0-9_\/]+)'/g;
+  let e;
+  while ((e = reEv.exec(evmBlock[1]))) evMethods.add(e[1]);
+}
+const evPrefixes = [];
+const evpBlock = /const EVENT_PREFIXES = \[([\s\S]*?)\];/.exec(EXT);
+if (evpBlock) {
+  const rePf = /'([A-Za-z0-9_\/]*)'/g;
+  let p;
+  while ((p = rePf.exec(evpBlock[1]))) evPrefixes.push(p[1]);
+}
+const serverNotifies = ['session/config', 'session/saved', 'turn/end', 'stats'];
+const notForwarded = serverNotifies.filter((n) =>
+  !evMethods.has(n) && !evPrefixes.some((pf) => pf && n.startsWith(pf)));
+console.log('');
+ck('S8 后端会推的通知宿主都转发给 webview（差集为空）',
+  notForwarded.length === 0,
+  notForwarded.length ? '没有转发的：' + notForwarded.join(', ')
+    : 'methods=' + [...evMethods].sort().join(', ') + ' prefixes=' + evPrefixes.join(','));
+
 console.log('\nSUMMARY total=' + (fails.length ? '有失败' : 'ok') + ' fail=' + fails.length);
 process.exit(fails.length ? 1 : 0);

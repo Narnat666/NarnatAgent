@@ -68,7 +68,11 @@ DEFINITION = {
 
 
 CAPABILITY = {
+    # label 是**工具**在调度行里的名字（用户看到的「声明完成」那一行）；
+    # plugin_label 是它在插件列表里的名字（「目标模式」）。两者必须分开：
+    # 同一个字段既当工具名又当插件名，改一处就会把另一处带歪。
     "label": "声明完成",
+    "plugin_label": "目标模式",
     "dispatch": "serial",
     "summary": "none",
     "trusted_output": True,

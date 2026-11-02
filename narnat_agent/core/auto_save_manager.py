@@ -118,6 +118,7 @@ class AutoSaveManager:
             # 起了同名时（同一个开头 → 同一个 LLM 标题，实测 1/3 概率撞车），
             # 后到的一方不会覆盖先到的，而是自动另存为 "X (2)" 并回报实际落点。
             err = save_session(self._config.paths.narnat_dir, name, msgs,
+                               plugins=self._mgr.plugin_states(),
                                expected_signature="", result=out)
             actual = out.get("name")
             if actual and actual != name:

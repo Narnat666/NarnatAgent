@@ -241,58 +241,16 @@ def _cmd_done(args: str, mgr) -> CommandResult:
 
 @_register("goal")
 def _cmd_goal(args: str, mgr) -> CommandResult:
-    """目标模式：/goal on [N] 开启（N=临时轮数上限），/goal off 关闭，/goal 查看状态"""
-    arg = args.strip().lower()
-    if arg == "on" or arg.startswith("on "):
-        # /goal on [N]：可选临时轮数上限
-        override = 0
-        rest = arg[2:].strip()
-        if rest:
-            try:
-                override = int(rest)
-            except ValueError:
-                _stdout_write(f"  {CMD_ERROR}无效轮数: {rest}{R}\n")
-                return CommandResult.FAILED
-            if override < 1:
-                _stdout_write(f"  {CMD_ERROR}轮数必须为正整数{R}\n")
-                return CommandResult.FAILED
-        mgr._goal_enabled = True
-        mgr._goal_max_rounds = override
-        # 目标模式开启：向 LLM 动态注入 GoalComplete 工具
-        if getattr(mgr, '_set_goal_tool', None):
-            mgr._set_goal_tool(True)
-        if override:
-            _stdout_write(f"  {CMD_SUCCESS}目标模式已开启{R}  "
-                          f"{CMD_MUTED}(本轮上限 {CMD_HIGHLIGHT}{override}{R}{CMD_MUTED} 轮){R}\n")
-        else:
-            _stdout_write(f"  {CMD_SUCCESS}目标模式已开启{R}\n")
-        return CommandResult.HANDLED
-    if arg == "off":
-        was_enabled = mgr._goal_enabled
-        mgr._goal_enabled = False
-        mgr._goal_max_rounds = 0  # 关闭时清除临时轮数覆盖
-        # 目标模式关闭：从 LLM 工具定义中移除 GoalComplete
-        if getattr(mgr, '_set_goal_tool', None):
-            mgr._set_goal_tool(False)
-        if was_enabled:
-            _stdout_write(f"  {CMD_SUCCESS}目标模式已关闭{R}\n")
-        else:
-            _stdout_write(f"  {CMD_MUTED}目标模式已是关闭状态{R}\n")
-        return CommandResult.HANDLED
-    # 无参数：查看状态（含用法提示）
-    if not arg:
-        if mgr._goal_enabled:
-            # 实际生效轮数：临时覆盖 > 配置默认值 > 兜底"默认"
-            limit = mgr._goal_max_rounds or getattr(mgr, '_goal_default_rounds', 0) or "默认"
-            _stdout_write(f"  {CMD_HIGHLIGHT}目标模式: 已开启{R}  "
-                          f"{CMD_MUTED}(轮数上限: {CMD_HIGHLIGHT}{limit}{R}{CMD_MUTED})"
-                          f"（用法: /goal off）{R}\n")
-        else:
-            _stdout_write(f"  {CMD_MUTED}目标模式: 已关闭（用法: /goal on [轮数] | off）{R}\n")
-        return CommandResult.HANDLED
-    # 其它无效值：明确报错，不再静默落入查看状态分支
-    _stdout_write(f"  {CMD_ERROR}无效值: {arg}（可用: on / off）{R}\n")
-    return CommandResult.FAILED
+    """审核模式：/goal on [N] 开启（N=临时轮数上限），/goal off 关闭，/goal 查看状态
+
+    全部判定与状态变更都在 SessionManager.on_goal（终端与 RPC 的唯一实现），
+    这里只按 status 着色打印。
+    """
+    status, text = mgr.on_goal(args.strip() if args else "")
+    color = {"ok": CMD_SUCCESS, "info": CMD_HIGHLIGHT,
+             "hint": CMD_MUTED, "error": CMD_ERROR}.get(status, CMD_MUTED)
+    _stdout_write(f"{color}{text}{R}\n")
+    return CommandResult.FAILED if status == "error" else CommandResult.HANDLED
 
 
 @_register("save")
@@ -380,7 +338,7 @@ def _cmd_thinkback(args: str, mgr) -> CommandResult:
 
 @_register("plugin")
 def _cmd_plugin(args: str, mgr) -> CommandResult:
-    """插件工具开关：/plugin 查看状态，/plugin <名称> <on|off> 改配置（重启后生效）"""
+    """插件开关：/plugin 查看状态，/plugin <名称> <on|off> 改配置（会话内生效）"""
     status, text = mgr.on_plugin(args.strip() if args else "")
     color = {"ok": CMD_SUCCESS, "info": CMD_HIGHLIGHT,
              "hint": CMD_MUTED, "error": CMD_ERROR}.get(status, CMD_MUTED)

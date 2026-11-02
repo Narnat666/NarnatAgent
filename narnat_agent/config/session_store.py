@@ -440,6 +440,7 @@ def save_session(narnat_dir: str, name: str,
                  parent_msg_count: Optional[int] = None,
                  last_summarized_at: Optional[int] = None,
                  expected_signature: Optional[str] = None,
+                 plugins: Optional[Dict[str, bool]] = None,
                  result: Optional[Dict[str, Any]] = None) -> str:
     """保存会话。返回 ""=成功，非空=可读失败原因。
 
@@ -455,6 +456,9 @@ def save_session(narnat_dir: str, name: str,
     result 是可选出参，成功时填入 {"name": 实际写入的名字,
                                    "conflict": 是否发生了冲突另存,
                                    "signature": 写入后的文件指纹}。
+
+    plugins 是会话级插件开关（写进顶层「插件」字段）。必须由调用方显式给：
+    保存是整份覆盖，漏传就等于把该会话的插件配置抹成默认。
     """
     path = _session_path(narnat_dir, name, parent=parent)
     existing = {}
@@ -483,6 +487,8 @@ def save_session(narnat_dir: str, name: str,
         "summary": summary,
         "parent_msg_count": parent_msg_count if parent_msg_count is not None else existing.get("parent_msg_count"),
         "last_summarized_at": last_summarized_at if last_summarized_at is not None else existing.get("last_summarized_at"),
+        # 会话级插件开关（旧文件没有这个键，由调用方在进入会话时回填）
+        "插件": dict(plugins or {}),
     }
     # ── 写入前冲突检测 + 落点选择 ──
     write_name, write_path, conflict, placeholder = name, path, False, False
@@ -1021,6 +1027,30 @@ def session_tree_payload(tree: List[Dict[str, Any]],
             group["hidden"] = rest
         payload["groups"].append(group)
     return payload
+
+
+def write_session_plugins(narnat_dir: str, name: str, parent: Optional[str],
+                          plugins: Dict[str, bool]) -> str:
+    """把插件开关写进会话文件（只改这一个顶层字段，原子替换）。返回 ""=成功，非空=错误
+
+    单独一个函数而不是走 save_session：后者要整份 messages，进会话时回填插件
+    手上只有元数据；而且这里改的是「与会话内容无关的配置」，不该顺带改指纹以外的
+    任何东西。调用方写完必须回刷状态对象的 _sig（否则下一次 _persist 会把自己人
+    刚写的判成外部改动，另存成 "X (2)" 并弹假警报）。
+    """
+    path = _session_path(narnat_dir, name, parent=parent)
+    if not os.path.isfile(path):
+        return f"会话不存在: {name}"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError, RecursionError) as e:
+        return f"会话文件读取失败: {e}"
+    if not isinstance(data, dict):
+        return f"会话文件格式非法（顶层应为对象）: {name}"
+    data["插件"] = dict(plugins)
+    err, _raced = _write_session_json(path, data, None)
+    return err
 
 
 def load_session_meta(narnat_dir: str, name: str, parent: Optional[str] = None) -> dict:

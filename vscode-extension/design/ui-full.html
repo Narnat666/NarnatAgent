@@ -486,7 +486,7 @@ input.set-inp[type="password"]{font-family:var(--mono);letter-spacing:.02em}
 /* nowrap 之后没有折行兜底，所以每项都必须能被压缩：
    · .status > span 与其内部的 k/v 默认 flex-shrink:1，但里面的按钮/文字
      是 nowrap，实际压不下去 —— 显式 min-width:0 才能让省略号生效。
-   · 模型名（deepseek-v4-pro）、目标模式/插件这些是**可缩写**的：
+   · 模型名（deepseek-v4-pro）、审核模式/插件这些是**可缩写**的：
      压不下时宁可打省略号，也不要整项被 overflow 裁掉半个字。
    实测 600px 时不让缩会横向溢出 25px（577 > 552），费用被切掉一截。 */
 .status > span,
@@ -502,7 +502,7 @@ input.set-inp[type="password"]{font-family:var(--mono);letter-spacing:.02em}
    历史教训：曾经在这里写死「data-empty 就 display:none」，结果宽面板下刚打开
    面板时「上下文 / 费用 / 余额」整排都不见了，用户以为功能没了。 */
 /* 状态行抽屉的开关。宽面板完全不存在（全部平铺，没什么可收的）；
-   窄面板才出现，把「思考 / 目标模式 / 插件 / 缓存 / 余额」这些收进抽屉，
+   窄面板才出现，把「思考 / 审核模式 / 插件 / 缓存 / 余额」这些收进抽屉，
    而不是像以前那样直接 display:none —— 藏掉等于用户既看不到也不知道有这个功能。 */
 .st-toggle{
   display:none;flex:none;margin-left:8px;
@@ -1371,7 +1371,7 @@ body[data-real="true"] .demo-tip{display:none}
   min-width:0;overflow:hidden;text-overflow:ellipsis;
 }
 .chip.mono{font-family:var(--mono);font-size:11px}
-/* 选中态（目标模式开）只把文字提亮到正文档，不整块染成链接蓝：
+/* 选中态（审核模式开）只把文字提亮到正文档，不整块染成链接蓝：
    一排灰胶囊里突然一块亮蓝，视觉上比它承载的信息重得多（实测被点名突兀）。 */
 .chip.on{color:var(--fg)}
 .chip[data-clickable="true"]{cursor:pointer}
@@ -1544,7 +1544,7 @@ body[data-run="true"] .stop{display:grid}
 body[data-run="true"] .send{display:none}
 /* 压缩中：与「运行中」同一套按钮切换（发送→停止），但走独立属性。
    为什么不复用 data-run：那个属性绑在 turn/begin↔turn/end 的轮次生命周期上，
-   压缩发生在轮次之外（/compact 不产生 turn），混用会让目标模式续跑、
+   压缩发生在轮次之外（/compact 不产生 turn），混用会让审核模式续跑、
    中间收口那些判定跟着错。压缩中要的是「能停、不能发」。 */
 body[data-compact="true"] .stop{display:grid}
 body[data-compact="true"] .send{display:none}
@@ -1907,6 +1907,19 @@ body[data-drawer="true"] #toBottom{display:none}
   border-radius:4px;padding:1px 6px;font:inherit;font-size:11.5px;
   color:var(--fg);outline:none;
 }
+/* 会话级锁定（插件 / 审核模式）：条目**仍然看得见**，只是点不动。
+   灰显而不隐藏：用户需要看见「现在开着哪几个插件」「轮数上限是多少」，
+   锁定后整块消失会让人以为配置被清掉了。pointer-events 只挡真实鼠标，
+   程序化 click() 挡不住 —— 事件处理里还有一道 data-lock 判据。 */
+.pop[data-lock="true"] .pi{opacity:.45;pointer-events:none}
+.pop[data-lock="true"] .pin input{opacity:.45;pointer-events:none}
+/* 锁定说明行：跟着 .pd 排在最后，说明「为什么不能改、去哪改」 */
+.pop .plock{
+  font-size:11px;color:var(--warn);line-height:1.6;padding:4px 10px 6px;
+}
+/* 锁定态的状态栏按钮只是变淡，不能做成 display:none ——
+   用户要能看出「现在有几个插件开着」。 */
+#btnPlugin[data-lock="true"],#btnGoal[data-lock="true"]{color:var(--fg-faint)}
 
 /* ---------- 命令块 ---------- */
 .cmdwrap{padding-bottom:16px}
@@ -2019,7 +2032,7 @@ body[data-drawer="true"] #toBottom{display:none}
    ——用户拖窄窗口时能直接看出两套逻辑在打架。
 
    为什么用图标而不是直接藏：藏掉的功能用户既看不见也不知道存在
-   （上一版 400px 以下目标模式与插件直接消失，界面上一点线索都没有）。
+   （上一版 400px 以下审核模式与插件直接消失，界面上一点线索都没有）。
    图标虽然小，但仍可点、仍能看出开关状态（开启时用强调色）。
    判据统一带 :not([data-open="true"]) 前缀：抽屉展开后空间由浮层提供，
    这时要显示完整文字，不能连详情里都还是图标。 */
@@ -2132,7 +2145,7 @@ body[data-drawer="true"] #toBottom{display:none}
     -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 1.7a3.05 3.05 0 0 0-1.82 5.5v1.2h3.64V7.2A3.05 3.05 0 0 0 6 1.7Z'/%3E%3Cpath d='M4.8 10.2h2.4'/%3E%3C/g%3E%3C/svg%3E");
     mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 1.7a3.05 3.05 0 0 0-1.82 5.5v1.2h3.64V7.2A3.05 3.05 0 0 0 6 1.7Z'/%3E%3Cpath d='M4.8 10.2h2.4'/%3E%3C/g%3E%3C/svg%3E");
   }
-  /* 靶心 = 目标模式 */
+  /* 靶心 = 审核模式 */
   .status:not([data-open="true"]) #btnGoal::before{
     -webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15'%3E%3Ccircle cx='6' cy='6' r='4.4'/%3E%3Ccircle cx='6' cy='6' r='1.7'/%3E%3C/g%3E%3C/svg%3E");
     mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15'%3E%3Ccircle cx='6' cy='6' r='4.4'/%3E%3Ccircle cx='6' cy='6' r='1.7'/%3E%3C/g%3E%3C/svg%3E");
@@ -2156,7 +2169,7 @@ body[data-drawer="true"] #toBottom{display:none}
     mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='black' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.7 2.2 6 6.1l3.3-3.9M2.9 6.8h6.2M2.9 9h6.2M6 6.1v4.1'/%3E%3C/g%3E%3C/svg%3E");
   }
   /* 开关类图标用强调色表态：开着 = accent，关着 = 与其他图标同色。
-     只看图标时，这是唯一能看出「目标模式现在开着没有」的线索。 */
+     只看图标时，这是唯一能看出「审核模式现在开着没有」的线索。 */
   .status:not([data-open="true"]) #btnGoal[data-on="true"],
   .status:not([data-open="true"]) #btnPlugin[data-on="true"]{color:var(--accent)}
   .status:not([data-open="true"]) #btnGoal[data-on="true"]::before,
@@ -2555,7 +2568,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
       <!-- st-think：窄面板收起态把它一起收进抽屉（见 .st-toggle 那段 CSS） -->
       <span class="st-core st-think"><span class="k">思考</span> <button class="v" id="btnThink" data-tip="思考强度">—</button></span>
       <span class="sep st-opt">·</span>
-      <span class="st-opt"><button class="v" id="btnGoal" data-tip="目标模式">目标模式 关</button></span>
+      <span class="st-opt"><button class="v" id="btnGoal" data-tip="审核模式">审核模式 关</button></span>
       <span class="sep st-opt">·</span>
       <span class="st-opt"><button class="v" id="btnPlugin" data-tip="插件开关">插件 —</button></span>
       <div class="right">
@@ -2588,17 +2601,16 @@ body[data-run="true"] #goalRounds{opacity:.45}
 </div>
 
 <div class="pop" id="popGoal">
-  <div class="pt">目标模式</div>
+  <div class="pt">审核模式</div>
   <div class="pi" data-v="off" data-on="true"><span class="ck">✓</span><span class="lb">关</span></div>
-  <div class="pi" data-v="on"><span class="ck"></span><span class="lb">开</span><span class="sd">自动续跑</span></div>
+  <div class="pi" data-v="on"><span class="ck"></span><span class="lb">开</span><span class="sd">独立审核</span></div>
   <div class="pin"><span class="lb lb-dim">轮数上限</span>
     <input id="goalRounds" value="10"></div>
-  <div class="pd">未完成时自动续跑，直到声明完成或达上限</div>
 </div>
 
 <div class="pop" id="popPlugin">
   <div class="pt">插件工具 · 关闭后不再发给模型</div>
-  <div class="pd">已建立的连接不受影响</div>
+  <div class="pd">会话内立即生效；开始对话后不可更改</div>
 </div>
 
 <!-- 顶栏会话名点开：当前会话的子会话列表（内容由 renderChildPop 重建） -->
@@ -2753,7 +2765,15 @@ body[data-run="true"] #goalRounds{opacity:.45}
   }
 
   /**
-   * 运行中把目标下拉里的「轮数上限」输入框锁成只读（只读暗示交给 CSS）。
+   * 「轮数上限」输入框能不能编辑：运行中不可改，会话锁定（审核模式不可配置）
+   * 也不可改。两个原因写在一个判据里，是因为 `disabled` 只有一个布尔 ——
+   * 各写一份必然互相覆盖：先落锁定态再进运行态，后者会把前者的 disabled 抹成
+   * false（实测），锁定态下又能用键盘改上限。
+   */
+  var GOAL_LOCKED = false;
+
+  /**
+   * 运行中把审核模式下拉里的「轮数上限」输入框锁成只读（只读暗示交给 CSS）。
    *
    * 为什么用 MutationObserver 而不是在每个 `data-run` 赋值点插一句：
    * 赋值点有 20 多处（turn/begin、turn/end、cancel、离线、切会话…），
@@ -2762,7 +2782,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
    */
   function syncRunLock(){
     var r = document.getElementById('goalRounds');
-    if (r) r.disabled = turnRunning();
+    if (r) r.disabled = turnRunning() || GOAL_LOCKED;
   }
   try {
     new MutationObserver(syncRunLock).observe(body, {
@@ -2995,6 +3015,11 @@ body[data-run="true"] #goalRounds{opacity:.45}
     plan: '<path d="M3.5 4.5l1.2 1.2L7 3.5M3.5 9.5l1.2 1.2L7 8.5M9 5h4M9 10h4"' +
       ' fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round"' +
       ' stroke-linejoin="round"/>',
+    /* 声明完成（GoalComplete）：勾选在徽章里，与「计划」的清单图标区分开 */
+    goal: '<circle cx="8" cy="8" r="6.09" fill="none" stroke="currentColor"' +
+      ' stroke-width="1"/><path d="M5.2 8.2l1.9 1.9 3.7-4" fill="none"' +
+      ' stroke="currentColor" stroke-width="1" stroke-linecap="round"' +
+      ' stroke-linejoin="round"/>',
     /* 兜底：dsh 的 others 用 IconSparkle */
     other: '<path d="M5.88 3c0 3.33 1.66 5 5 5-3.34 0-5 1.67-5 5 0-3.33-1.67-5-5-5' +
       ' 3.33 0 5-1.67 5-5z" fill="none" stroke="currentColor" stroke-width="1"' +
@@ -3010,6 +3035,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
     if (n === 'Edit' || n === 'Write') return 'edit';
     if (n === 'WebSearch') return 'web';
     if (n === 'TodoWrite') return 'plan';
+    if (n === 'GoalComplete') return 'goal';
     if (/^think$/i.test(n)) return 'think';
     return 'other';
   }
@@ -4870,7 +4896,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
     { c: '/mode', d: '切换模型', s: '模型名', g: '模型与行为' },
     { c: '/thinking', d: '切换思考强度', s: '档位', g: '模型与行为' },
     { c: '/thinkback', d: '思考回传开关', s: 'on / off', g: '模型与行为' },
-    { c: '/goal', d: '目标模式开关', s: 'on / off', g: '模型与行为' },
+    { c: '/goal', d: '审核模式开关', s: 'on / off', g: '模型与行为' },
     { c: '/plugin', d: '插件工具开关', s: '名称 on/off', g: '模型与行为' }
   ];
 
@@ -6778,7 +6804,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
       { id: 'btnPlugin', empty: function (t) {
         return !t || /^插件\s*(—|-)?$/.test(t) || t === '插件';
       } },
-      { id: 'btnGoal', empty: function (t) { return !t || t === '目标模式 —'; } }
+      { id: 'btnGoal', empty: function (t) { return !t || t === '审核模式 —'; } }
     ];
     targets.forEach(function (t) {
       var btn = document.getElementById(t.id);
@@ -6827,7 +6853,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
      ③ 本次面板生命周期内发出的（pushHistory，只活在内存里）。
      换会话、新建对话**不再清空**：用户要的是「我上次问过的都能 ↑ 翻回来」，
      而不是「只有当前会话的提问」。旧设计（换会话后旧会话的提问不该出现）已废弃。
-     只放用户真正打的文字：目标模式注入的内部指令（`[自动续跑]…`）
+     只放用户真正打的文字：审核模式注入的内部指令（`[自动续跑]…`）
      不是用户输入，翻出来会让他以为自己说过那句话。 */
   var HIST = [];          // 已提交的输入，最旧在前
   var HIST_PERSIST = [];  // 磁盘全局历史（后端 inputHistory），最旧在前
@@ -7854,7 +7880,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
     // 焦点在任何文本输入控件上时 ↑↓/Enter 归它自己。
     // 只判主输入框不够：目标下拉里有个「轮数上限」输入框（#goalRounds），
     // 焦点在它上面按 ↑ 会被这里拦走，结果数字不变、选中项被改成「关」，
-    // 再按 Enter 直接把目标模式关掉（实测）。
+    // 再按 Enter 直接把审核模式关掉（实测）。
     var ae = document.activeElement;
     if (ae === input || (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName))) return;
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -7923,7 +7949,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
   window.addEventListener('resize', closePop);
 
   /* ---------- 状态行抽屉（窄面板）----------
-     窄面板下状态行固定单行，只留「模型 · 上下文 · 费用」；思考/目标模式/插件/
+     窄面板下状态行固定单行，只留「模型 · 上下文 · 费用」；思考/审核模式/插件/
      缓存/余额收进这个「⋯」，点开整条状态行变成浮层摊平 8 项（CSS 见窄宽度段）。
      收起规则的判据统一在 CSS 里（.status:not([data-open="true"]) ...），
      所以这里只负责 data-open，不必逐个元素 show/hide —— 也就不会出现
@@ -8068,14 +8094,19 @@ body[data-run="true"] #goalRounds{opacity:.45}
 
   document.getElementById('popGoal').addEventListener('click', function(e){
     if (turnRunning()) return;
+    // 锁定态下条目要看得见、点不动。CSS 的 pointer-events 只挡真实鼠标，
+    // 程序化 click()（测试、键盘触发）照样进得来，所以事件里再判一次。
+    if (this.getAttribute('data-lock') === 'true') return;
     var pi = e.target.closest('.pi');
     if (!pi) return;
     var v = pi.getAttribute('data-v');
     setChecked(this, v);
     var rounds = document.getElementById('goalRounds').value || '10';
     if (REAL) postConfigSet('goal', { enabled: v === 'on', maxRounds: Number(rounds) });
+    // 按钮先跟手，真值以后端 config/set 回执里的 current 为准（syncConfigSnapshot）。
+    // 这里**不动** data-lock：锁定态只能由后端给。
     var btn = document.getElementById('btnGoal');
-    btn.textContent = v === 'on' ? '目标模式 开 · 0/' + rounds : '目标模式 关';
+    btn.textContent = v === 'on' ? '审核模式 开 · 0/' + rounds : '审核模式 关';
     // 图标档（≤380px 时文字 font-size:0）里，CSS 靠 [data-on="true"] 上强调色，
     // 这是唯一能看出「现在开着没有」的线索；不回写这个属性，点开也看不出变化。
     btn.setAttribute('data-on', v === 'on' ? 'true' : 'false');
@@ -8083,10 +8114,11 @@ body[data-run="true"] #goalRounds{opacity:.45}
   });
 
   // 轮数上限改了要真的发出去。原来只在「点开/关」时读一次这个输入框，
-  // 于是目标已开的情况下把 10 改成 3：不发请求、按钮还写 0/10、输入框却
+  // 于是审核模式已开的情况下把 10 改成 3：不发请求、按钮还写 0/10、输入框却
   // 留着 3 —— 用户以为上限改了，实际后端还是 10（实测，纯假反馈）。
   document.getElementById('goalRounds').addEventListener('change', function(){
     if (turnRunning()) return;
+    if (document.getElementById('popGoal').getAttribute('data-lock') === 'true') return;
     var n = Math.floor(Number(this.value));
     if (!isFinite(n) || n < 1) {
       // 非法输入退回界面上的真值，不留一个不会生效的数字
@@ -8098,15 +8130,17 @@ body[data-run="true"] #goalRounds{opacity:.45}
     this.value = String(n);
     var btn = document.getElementById('btnGoal');
     var on = btn.textContent.indexOf('开') >= 0;
-    if (!on) return;   // 目标关着：上限存着不生效，等开启时一起提交
+    if (!on) return;   // 审核模式关着：上限存着不生效，等开启时一起提交
     if (REAL) postConfigSet('goal', { enabled: true, maxRounds: n });
     // 按钮上的「当前/上限」要跟着改，否则显示的还是旧上限
     var cur = btn.textContent.match(/·\s*(\d+)\//);
-    btn.textContent = '目标模式 开 · ' + (cur ? cur[1] : '0') + '/' + n;
+    btn.textContent = '审核模式 开 · ' + (cur ? cur[1] : '0') + '/' + n;
   });
 
   document.getElementById('popPlugin').addEventListener('click', function(e){
     if (turnRunning()) return;
+    // 同 popGoal：会话已开始工作后插件配置锁定，只读。
+    if (this.getAttribute('data-lock') === 'true') return;
     var pi = e.target.closest('.pi');
     if (!pi) return;
     var sw = pi.querySelector('.sw');
@@ -8119,7 +8153,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
     var enabled = this.querySelectorAll('.pi[data-on="true"]').length;
     document.getElementById('btnPlugin').textContent =
       (enabled === total ? '插件 ' + total : '插件 ' + enabled + '/' + total);
-    // 与目标模式同理：图标档里 accent 色是「还有插件开着」的唯一线索（见 CSS 1268-1275）
+    // 与审核模式同理：图标档里 accent 色是「还有插件开着」的唯一线索（见 CSS 1268-1275）
     document.getElementById('btnPlugin').setAttribute('data-on', enabled > 0 ? 'true' : 'false');
   });
 
@@ -8844,16 +8878,16 @@ body[data-run="true"] #goalRounds{opacity:.45}
         var rounds = arg.split(/\s+/)[1] || document.getElementById('goalRounds').value || '10';
         setChecked(document.getElementById('popGoal'), g);
         var btn = document.getElementById('btnGoal');
-        btn.textContent = g === 'on' ? '目标模式 开 · 0/' + rounds : '目标模式 关';
+        btn.textContent = g === 'on' ? '审核模式 开 · 0/' + rounds : '审核模式 关';
         if (g === 'on') {
-          cmdResult(CMD, '✓', '目标模式已开启', '轮数上限 ' + rounds, 'ok');
+          cmdResult(CMD, '✓', '审核模式已开启', '轮数上限 ' + rounds, 'ok');
         } else {
-          cmdResult(CMD, '✓', '目标模式已关闭', '', 'ok');
+          cmdResult(CMD, '✓', '审核模式已关闭', '', 'ok');
         }
         return;
       }
       var onNow = document.getElementById('btnGoal').textContent.indexOf('开') >= 0;
-      cmdResult(CMD, '·', '目标模式' + (onNow ? '已开启' : '已关闭'), '');
+      cmdResult(CMD, '·', '审核模式' + (onNow ? '已开启' : '已关闭'), '');
       return;
     }
     if (cmd === 'plugin') {
@@ -11662,27 +11696,27 @@ body[data-run="true"] #goalRounds{opacity:.45}
   }
 
   /**
-   * turn/begin 里的目标模式状态：按钮文字 + data-on + 下拉勾选 + 轮数输入框。
+   * turn/begin 里的审核模式状态：按钮文字 + data-on + 下拉勾选 + 轮数输入框。
    *
    * 抽成一处是因为原来 resumed 分支与正常分支各写了一遍刷新逻辑，
    * 于是「改一处漏另一处」：
    *   · resumed 分支只刷按钮、不回写 #goalRounds —— 面板重建后按钮写「1/15」，
    *     点开下拉看到的输入框还是 12（实测）
    *   · 两处都只处理 enabled=true，enabled=false 时按钮还留着上一轮的
-   *     「开 · 5/10」、图标仍亮着强调色 —— 多面板/旁路把目标模式关掉后，
-   *     这个面板的目标状态就永远陈旧
+   *     「开 · 5/10」、图标仍亮着强调色 —— 多面板/旁路把审核模式关掉后，
+   *     这个面板的审核状态就永远陈旧
    * 现在四种组合（开/关 × 新轮/重建）都走同一条路径，不会再分叉。
    */
   function applyTurnGoal(goal){
     var btn = document.getElementById('btnGoal');
     if (!btn) return;
     // 没带 goal 字段就**不改写**：普通轮次的 turn/begin 本来就不带 goal，
-    // 这时后端没告诉目标状态，武断改成「关」会把真实开态冲掉。
-    // 「明确 enabled:false」才是回落信号（多面板/旁路关掉目标模式的情形）。
+    // 这时后端没告诉审核状态，武断改成「关」会把真实开态冲掉。
+    // 「明确 enabled:false」才是回落信号（多面板/旁路关掉审核模式的情形）。
     if (!goal) return;
     var on = !!goal.enabled;
     if (on) {
-      btn.textContent = '目标模式 开 · ' + (goal.current || 0) + '/' + (goal.max || 0);
+      btn.textContent = '审核模式 开 · ' + (goal.current || 0) + '/' + (goal.max || 0);
       btn.setAttribute('data-on', 'true');
       // 只在 max 有真值时写输入框，避免把 undefined 写成字符串
       if (goal.max) {
@@ -11692,11 +11726,14 @@ body[data-run="true"] #goalRounds{opacity:.45}
       var pg = document.getElementById('popGoal');
       if (pg) setChecked(pg, 'on');
     } else {
-      btn.textContent = '目标模式 关';
+      btn.textContent = '审核模式 关';
       btn.setAttribute('data-on', 'false');
       var pg2 = document.getElementById('popGoal');
       if (pg2) setChecked(pg2, 'off');
     }
+    // 锁定态只在 initialize / config/set 回执里有；turn/begin 的 goal 通常不带。
+    // 不带就**保持原样**：每轮重算成「未锁定」会让它在第一轮之后悄悄解锁。
+    if ('locked' in goal) applyGoalLock(!!goal.locked);
   }
 
   /* ---------- 折叠摘要的标题：把工具类别合成一句话 ----------
@@ -11724,6 +11761,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
     webFetch: '已访问网页',
     subagents: '已协调子智能体',
     plan: '更新了计划',
+    goal: '声明完成',
     questions: '向用户提出了问题',
     tools: '已调用工具',
     thinking: '已完成分析'
@@ -11745,7 +11783,8 @@ body[data-run="true"] #goalRounds{opacity:.45}
     if (n === 'Write') return 'write';
     if (n === 'Shell' || n === 'Terminal') return 'commands';
     if (n === 'WebSearch') return 'webSearch';
-    if (n === 'TodoWrite' || n === 'GoalComplete') return 'plan';
+    if (n === 'TodoWrite') return 'plan';
+    if (n === 'GoalComplete') return 'goal';
     if (n === 'Serial') return 'tools';
     if (n.indexOf('mcp__') === 0) return 'tools';
     // name 缺失时的兜底：界面上的 label 是中文，逐个对回去
@@ -11757,6 +11796,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
     if (l === '执行命令') return 'commands';
     if (l === '联网搜索' || l === '搜索网页') return 'webSearch';
     if (l === '更新计划') return 'plan';
+    if (l === '声明完成' || l === '目标模式') return 'goal';
     // 未知：交给 tpPhrase 用原始工具名，绝不冒充「已调用工具」
     return null;
   }
@@ -12423,7 +12463,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
       rendered('turn/end', { reason: reason, duplicate: true, assistant: briefAssistant() });
       return;
     }
-    // intermediate：同一请求内部的中间轮收口（目标模式自动续跑）。
+    // intermediate：同一请求内部的中间轮收口（审核模式自动续跑）。
     // 这时不能退出运行态——退出会让停止按钮消失，用户以为跑完了，
     // 实际它还在自动续跑下一轮（实测）。
     if (p && p.intermediate) {
@@ -12438,7 +12478,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
       if (curAssistant && assistantBuf) {
         renderAssistantFinal();
       }
-      /* 中间轮也要把本轮过程收进折叠组。不收会怎样（实测）：目标模式续跑
+      /* 中间轮也要把本轮过程收进折叠组。不收会怎样（实测）：审核模式续跑
          10 轮时，只有最后一轮的 turn/end 走到下面的 foldTurnProcess，前 9 轮
          的工具行/思考块永久平铺在屏幕上；折叠行写的「N 次工具调用」又只数
          最后一轮，和屏幕上摊着的数量对不上。
@@ -12696,19 +12736,93 @@ body[data-run="true"] #goalRounds{opacity:.45}
     });
   }
 
+  /**
+   * 锁定说明行的唯一维护点（插件下拉 / 审核模式下拉共用）。
+   *
+   * 抽成一处是因为两块的文案与增删规则完全一样，各写一份必然漂移
+   *（本项目已经踩过「同一段刷新逻辑写两遍、改一处漏一处」的坑）。
+   * @param {HTMLElement} pop 下拉容器
+   * @param {string} text 说明文案；空串 = 移除这一行
+   */
+  function setLockNote(pop, text){
+    var note = pop.querySelector('.plock');
+    if (!text) {
+      if (note && note.parentNode) note.parentNode.removeChild(note);
+      return;
+    }
+    if (!note) {
+      note = document.createElement('div');
+      note.className = 'plock';
+      // 追加到最底部：.pd 是常驻脚注（讲这个下拉是什么），说明行讲的是
+      // 「为什么现在点不动」，排在后面才不会被当成通用说明看漏。
+      pop.appendChild(note);
+    }
+    note.textContent = text;
+  }
+
+  /**
+   * 插件面板的会话级锁定态（pluginsLocked）。
+   *
+   * 锁定后条目**仍然显示**，只是灰显只读 —— 「现在开着哪几个插件」正是用户
+   * 此刻最需要看的信息，整块藏掉会让人以为配置被清了。禁止点击由 CSS +
+   * 事件处理里的 data-lock 判据共同负责（CSS 的 pointer-events 挡不住
+   * 程序化 click()）。
+   */
+  function applyPluginLock(locked){
+    var pop = document.getElementById('popPlugin');
+    var btn = document.getElementById('btnPlugin');
+    if (!pop || !btn) return;
+    if (locked) {
+      pop.setAttribute('data-lock', 'true');
+      btn.setAttribute('data-lock', 'true');
+    } else {
+      pop.removeAttribute('data-lock');
+      btn.removeAttribute('data-lock');
+    }
+    setLockNote(pop, locked ? '本会话已开始工作，插件配置不可更改（新建对话后可调整）' : '');
+  }
+
+  /**
+   * 审核模式的锁定态。locked **只**表示「插件 Goal 未启用」——审核模式依赖
+   * GoalComplete 定义，Goal 关着就没得可审。它不受会话工作进度约束：审核模式
+   * 不改工具表、不占缓存前缀，开始对话后照样能调；AI 正在跑的当下另由运行态置灰。
+   * 判据由后端给，前端不自己推。
+   */
+  function applyGoalLock(locked){
+    var pop = document.getElementById('popGoal');
+    var btn = document.getElementById('btnGoal');
+    if (!pop || !btn) return;
+    if (locked) {
+      pop.setAttribute('data-lock', 'true');
+      btn.setAttribute('data-lock', 'true');
+    } else {
+      pop.removeAttribute('data-lock');
+      btn.removeAttribute('data-lock');
+    }
+    GOAL_LOCKED = !!locked;
+    // 不直接写 disabled：运行中也会禁用这个输入框，判据统一在 syncRunLock 里
+    syncRunLock();
+    setLockNote(pop, locked
+      ? '插件 Goal 未启用，无法配置审核模式（先在插件里开启 Goal）'
+      : '');
+  }
+
   function applyGoal(goal){
     var enabled = !!(goal && goal.enabled);
     var max = (goal && goal.maxRounds) || 10;
     var current = (goal && goal.current) || 0;
     setChecked(document.getElementById('popGoal'), enabled ? 'on' : 'off');
     document.getElementById('btnGoal').textContent = enabled
-      ? '目标模式 开 · ' + current + '/' + max
-      : '目标模式 关';
+      ? '审核模式 开 · ' + current + '/' + max
+      : '审核模式 关';
     // 同步 data-on：CSS 1268-1275 只在 [data-on="true"] 时才把图标点上强调色，
     // 全文件原来没有一处写这个属性，那条高亮规则等于永不命中。
     document.getElementById('btnGoal').setAttribute('data-on', enabled ? 'true' : 'false');
     var roundsInput = document.getElementById('goalRounds');
     if (roundsInput) roundsInput.value = String(max);
+    // 锁定态缺字段时**保持现状**（不能因为「这次没带 locked」就解锁），
+    // 只有后端明确给了布尔才改。
+    if (goal && 'locked' in goal) applyGoalLock(!!goal.locked);
   }
 
   function applyPlugins(plugins){
@@ -12739,11 +12853,53 @@ body[data-run="true"] #goalRounds{opacity:.45}
         (on ? 'on' : 'off') + '</span><span class="lb">' + esc(pl.label || pl.name) + '</span>';
       pop.insertBefore(d, anchor);
     });
+    // 项数一律按后端下发的算（现在是 5 个，之前的版本是 4 个，别写死）
     document.getElementById('btnPlugin').textContent =
       enabled === plugins.length ? '插件 ' + plugins.length : '插件 ' + enabled + '/' + plugins.length;
-    // 「有插件开着」就算开：图标档里「插件 0/4」这行字是看不见的（font-size:0），
+    // 「有插件开着」就算开：图标档里「插件 0/N」这行字是看不见的（font-size:0），
     // 没有这个属性用户就分不出「全开」和「全关」。
     document.getElementById('btnPlugin').setAttribute('data-on', enabled > 0 ? 'true' : 'false');
+  }
+
+  /**
+   * 应用「会话级配置快照」：插件开关 + 插件锁定态 + 审核模式。
+   *
+   * 后端把这三项合并在 initialize、所有会切会话的回执（session/*、command/exec）、
+   * 以及每轮收口的 session/config 通知里——它们是**会话级**的，换个会话或
+   * 跑完一轮就是另一套值。散在各分支里各写一遍必然漏。
+   * 字段缺失时**保持现状**（旧后端不带这些字段，不能因此把界面清空或解锁）。
+   */
+  function applySessionConfig(p){
+    if (!p) return;
+    if (Array.isArray(p.plugins)) applyPlugins(p.plugins);
+    if ('pluginsLocked' in p) applyPluginLock(!!p.pluginsLocked);
+    if (p.goal) applyGoal(p.goal);
+    // 回滚基准一起推进。不推会怎样（实测）：锁定态下点一下插件 → 后端 -32000
+    // → revertConfigUi() 读 RPC_STATE.init 里的**旧** pluginsLocked（未锁定），
+    // 把下拉退回可点外观；用户再点还是失败，反复假反馈。
+    syncSessionConfigSnapshot(p);
+  }
+
+  /**
+   * 把会话级配置快照写进 RPC_STATE.init（revertConfigUi 的回滚基准）。
+   *
+   * 字段缺失时保留旧值，判据与 applyGoal/applyPluginLock 的「缺字段不改」一致。
+   */
+  function syncSessionConfigSnapshot(p){
+    var init = RPC_STATE.init;
+    if (!init || !p) return;
+    if (Array.isArray(p.plugins)) init.plugins = p.plugins.slice();
+    if ('pluginsLocked' in p) init.pluginsLocked = !!p.pluginsLocked;
+    if (p.goal) {
+      var prev = init.goal || {};
+      init.goal = {
+        enabled: !!p.goal.enabled,
+        maxRounds: p.goal.maxRounds || prev.maxRounds || 10,
+        locked: ('locked' in p.goal) ? !!p.goal.locked : !!prev.locked,
+        // 快照不带「当前轮数」时沿用旧值，否则开着审核模式时刷新会把 3/10 显示成 0/10。
+        current: (typeof p.goal.current === 'number') ? p.goal.current : (prev.current || 0)
+      };
+    }
   }
 
   /**
@@ -12875,8 +13031,6 @@ body[data-run="true"] #goalRounds{opacity:.45}
 
     var model = (p && p.model) || {};
     var think = (p && p.thinking) || {};
-    var goal = (p && p.goal) || {};
-    var plugins = (p && p.plugins) || [];
     var session = (p && p.session) || {};
 
     // 内容层配色：每次握手都重新落地一次。面板底色可能换了（用户切主题后
@@ -12902,13 +13056,17 @@ body[data-run="true"] #goalRounds{opacity:.45}
       var lb = document.querySelector('#popThink .pi[data-v="' + think.effort + '"] .lb');
       document.getElementById('btnThink').textContent = lb ? lb.textContent : think.effort;
     }
-    applyGoal(goal);
     // plugins 为空数组时也必须处理 —— 原来 `if (plugins.length)` 会把整段跳过，
     // 于是「重新握手时后端把插件全删/全关」这种情况，界面还留着上一批插件名：
     // 按钮写着旧数字，下拉里点一下还会往一个后端已经不认的插件发 configSet
     // （实测脏数据残留）。applyPlugins([]) 本身是安全的：它清空下拉并把按钮
     // 写成「插件 0」。只有字段整个缺失（undefined）时才跳过。
-    if (Array.isArray(p && p.plugins)) applyPlugins(plugins);
+    //
+    // 顺序要求：插件先、审核模式后。审核模式的锁定说明要读「Goal 插件开着没有」，
+    // 而那一行是 applyPlugins 建的 —— 反过来写会读到上一批插件（握手时第一屏
+    // 就会给出错误的锁定原因）。applySessionConfig 就是按这个顺序写的，
+    // 与切会话回执共用同一份落地逻辑。
+    applySessionConfig(p);
     // workdir 不再显示：它与 VS Code 当前工作区目录是同一件事，用户已经看得到。
     // 这里原来按 `chips[1]` 下标去改工作目录 chip —— 而下标依赖 #chipSess 占着
     // chips[0]。chipSess 已删除（入口挪到顶栏），chips[1] 变成 undefined，
@@ -13347,11 +13505,14 @@ body[data-run="true"] #goalRounds{opacity:.45}
   }
 
   /**
-   * 是不是后端注入的内部指令（目标模式「轮数上限收尾」/「自动续跑」）。
+   * 是不是后端注入的内部指令（审核模式「轮数上限收尾」/「自动续跑」）。
    *
    * 后端只用 user 角色注入这两条固定文案（core/agent.py 交互与 headless 各一份，
    * 文案完全相同）：
    *   ① `[系统提示]目标模式已达到轮数上限（N轮），任务尚未完成。请向用户总结…`
+   *      后端已把这条的措辞改为「审核模式」，而**旧会话历史里存的是旧文案**，
+   *      所以正则两种都认：只认新文案会让老会话里那两条注入退化成用户消息，
+   *      切回会话就看见一段自己没打过的字。显示层不改写历史原文（历史就是历史）。
    *   ② `[自动续跑]已完成N轮，任务：<goal_task>\n请继续推进任务。\n[完成审计] …`
    *      （尾部是 config/defaults.py 的 GOAL_AUDIT_HINT 固定文案）
    *
@@ -13361,7 +13522,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
    * 第二行起全部丢失（实测）。
    * ②里的 goal_task 是用户任务原文、内容任意，所以只锚定开头与尾部固定串。
    */
-  var RE_GOAL_LIMIT_INJECT = /^\[系统提示\]目标模式已达到轮数上限（\d+轮），任务尚未完成。请向用户总结当前进度、已完成工作和未完成原因，无需继续执行新任务。$/;
+  var RE_GOAL_LIMIT_INJECT = /^\[系统提示\](?:目标模式|审核模式)已达到轮数上限（\d+轮），任务尚未完成。请向用户总结当前进度、已完成工作和未完成原因，无需继续执行新任务。$/;
   var RE_GOAL_CONT_INJECT = /^\[自动续跑\]已完成\d+轮，任务：[\s\S]*\n请继续推进任务。\n\[完成审计\] [\s\S]*$/;
 
   function isGoalInjection(text){
@@ -13735,7 +13896,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
       }
       // 纯内部纠偏指令：一个字都不显示（不是画成系统行 —— 用户没必要知道
       // 模型被提醒过要建计划、要收后台任务，那是框架自己的事）。
-      // 注意顺序：必须在「目标模式续跑」判断**之前**，否则当系统行画出来。
+      // 注意顺序：必须在「审核模式续跑」判断**之前**，否则当系统行画出来。
       if (m.role === 'user' && isInternalOnly(m.text)) {
         return;
       }
@@ -13746,7 +13907,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
       if (m.role === 'user') {
         // 新的一条用户消息 = 上一轮结束了，先把上一轮收口
         flushRound();
-        // 目标模式注入的内部指令（"[自动续跑]…" "[系统提示]…"）在历史里
+        // 审核模式注入的内部指令（"[自动续跑]…" "[系统提示]…"）在历史里
         // 也是 user 角色（必须如此，它们要发给模型）。直接当用户气泡画出来，
         // 用户切回会话会看到「自己说过」一段根本没打过的字——实测会以为
         // 账号串了或被改了记录。这里按系统行渲染，内容仍完整保留。
@@ -13963,6 +14124,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
          所以这一轮被掐断也要说一句。判据与切换同一套（见 takeCutNotice）。 */
       var cutByNew = turnRunning() || takeCutNotice();
       resetConversationDom();
+      applySessionConfig(p);
       authHintShown = false;
       CUR = '';
       CUR_IS_CHILD = false;
@@ -13996,6 +14158,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
          两者任一成立就补一句，且只在清屏之后补（否则又被抹掉）。 */
       var cutTurn = turnRunning() || takeCutNotice();
       enterSessionFrom(p);
+      applySessionConfig(p);
       if (cutTurn) {
         sysLine('■', '已停止上一轮', '');
       }
@@ -14015,6 +14178,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
          没有打断标记」。所以这里也要补标记 —— 与 sessionSwitch 同一套判据。 */
       var cutByExplore = turnRunning() || takeCutNotice();
       enterSessionFrom(p);
+      applySessionConfig(p);
       if (cutByExplore) {
         sysLine('■', '已停止上一轮', '');
       }
@@ -14033,6 +14197,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
         // 合并同样先 cancel（_m_session_done），被打断也要说一句。
         var cutByDone = turnRunning() || takeCutNotice();
         enterSessionFrom(p);
+        applySessionConfig(p);
         if (cutByDone) {
           sysLine('■', '已停止上一轮', '');
         }
@@ -14050,6 +14215,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
         // 删当前会话也会先打断并等收口（_settle_before_context_change）
         var cutByDelete = turnRunning() || takeCutNotice();
         resetConversationDom();
+        applySessionConfig(p);
         authHintShown = false;
         body.setAttribute('data-run', 'false');
         resetContextStats();
@@ -14123,7 +14289,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
       }
     } else if (cmd === 'goal') {
       // /goal on 3 后端已经生效，界面原来一个字都不改：同屏出现
-      // 「目标模式 关」和回执「目标模式已开启（轮数上限 3）」（实测）。
+      // 「审核模式 关」和回执「审核模式已开启（轮数上限 3）」（实测）。
       var gp = argLow.split(/\s+/);
       var gon = gp[0] === 'on';
       var gr = parseInt(gp[1], 10);
@@ -14138,11 +14304,12 @@ body[data-run="true"] #goalRounds{opacity:.45}
       var mCur = document.getElementById('btnGoal').textContent.match(/·\s*(\d+)\//);
       if (mCur) curNow = parseInt(mCur[1], 10) || 0;
       document.getElementById('btnGoal').textContent = gon
-        ? '目标模式 开 · ' + curNow + '/' + gr : '目标模式 关';
+        ? '审核模式 开 · ' + curNow + '/' + gr : '审核模式 关';
       // data-on 必须一起写：≤380px 时按钮只剩靶心图标，图标颜色是**唯一**
       // 能看出开关状态的线索（CSS 只在 [data-on="true"] 时点强调色）。
-      // 这条 /goal 回执路径原来漏了，于是命令把目标模式打开后，
+      // 这条 /goal 回执路径原来漏了，于是命令把审核模式打开后，
       // 窄面板上的图标还是不亮（实测，和第 1 轮修的是同一类问题，这是漏网的一处）。
+      // 注意这里**不碰 data-lock**：锁定态只有后端 initialize / config/set 能给。
       document.getElementById('btnGoal').setAttribute('data-on', gon ? 'true' : 'false');
       setChecked(document.getElementById('popGoal'), gon ? 'on' : 'off');
       var grin = document.getElementById('goalRounds');
@@ -14151,11 +14318,13 @@ body[data-run="true"] #goalRounds{opacity:.45}
         // 字段名必须与后端一致（maxRounds）。写 rounds 会怎样（实测）：
         // 快照里多出一个后端不认的键，而 applyGoal/revertConfigUi 读的是
         // maxRounds —— 之后任何一次配置失败回滚，轮数就退回旧的 10。
-        init.goal = { enabled: gon, maxRounds: gr, current: curNow };
+        // locked 原样保留：命令回执里没有这个字段，不是「解锁」的信号。
+        init.goal = { enabled: gon, maxRounds: gr, current: curNow,
+          locked: !!(init.goal && init.goal.locked) };
       }
     } else if (cmd === 'plugin') {
-      // /plugin terminal off 后端已生效，界面原来不动：状态栏还写「插件 4/4」，
-      // `/plugin` 列表却写「3/4 开启」（实测）。
+      // /plugin terminal off 后端已生效，界面原来不动：状态栏还写「插件 全部开」，
+      // `/plugin` 列表却写「3/4 开启」（实测，当时后端只有 4 个插件）。
       var pp2 = argLow.split(/\s+/);
       var pname = pp2[0];
       var pton = !(pp2[1] === 'off' || pp2[1] === 'false' || pp2[1] === '0');
@@ -14381,7 +14550,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
       // 后端回执是纯文本，每行独立、不需要跨行对齐 → 一律用换行布局。
       // 不加 wrap 会怎样（实测）：249px 下真实 /plugin 的 5 行回执
       // scrollWidth 344 > clientWidth 233；单行的 /goal 用法提示
-      // 「目标模式: 已关闭（用法: /goal on [轮数] | off）」也会溢出 78px，
+      // 「审核模式: 已关闭（用法: /goal on [轮数] | off）」也会溢出 78px，
       // 尾部要横拖才看得见。原来的条件写成「含 \n 才 wrap」，单行漏掉了。
       var cmdLines = lines.map(esc).join('\n');
       cmdMulti(esc(cmdText), cmdLines, '', 'cmdout--wrap');
@@ -14429,6 +14598,10 @@ body[data-run="true"] #goalRounds{opacity:.45}
           sysLine('·', '已离开会话', '');
         }
       }
+      /* 上面的会话切换处理都走完了，再统一落一次「会话级配置快照」：/cd、/explore、
+         /done、/exit、/rm 都会换掉插件与审核模式，后端已把这三项放进同一条回执。
+         字段缺失时 applySessionConfig 不动界面（旧后端不带），所以这里不用再判命令名。 */
+      applySessionConfig(p);
     } else {
       // 面板里的 /exit 不是退出进程：后端把 EXIT 折算成 HANDLED 且一行输出都没有，
       // 落到这里就成了一个勾「已执行」——屏幕上打了勾，会话没变、进程也没退，
@@ -14484,7 +14657,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
     if (!init || !p || p.current === undefined) return;
     // 回执与 key 的配对只能靠 FIFO 猜（协议不带请求 id）。万一某条回执丢失，
     // 后面的 key 就会整体错位 —— 这时若照写，会把一个模型名写进 goal 快照，
-    // 目标模式从此显示成「关」而后端是开着的（实测）。
+    // 审核模式从此显示成「关」而后端是开着的（实测）。
     // 用「回执形状」做最后一道校验：形状不符就不写，宁可少更新一次。
     if (key === 'model' && typeof p.current !== 'string') return;
     if (key === 'thinking' && typeof p.current !== 'string') return;
@@ -14497,13 +14670,35 @@ body[data-run="true"] #goalRounds{opacity:.45}
       init.thinking = init.thinking || {};
       init.thinking.effort = p.current;
     } else if (key === 'goal') {
-      init.goal = p.current;
+      // 成功后按后端回执刷新界面，**不靠本地推演**：current 里带着 locked，
+      // 而「Goal 插件被关掉 / 会话已开始工作」这类变化只有后端知道。
+      var gPrev = init.goal || {};
+      init.goal = {
+        enabled: !!p.current.enabled,
+        maxRounds: p.current.maxRounds || gPrev.maxRounds || 10,
+        locked: !!p.current.locked,
+        // 回执这一项不带「当前轮数」；沿用界面上已有的值，
+        // 否则开着审核模式时改上限会把 3/10 显示成 0/10。
+        current: (typeof p.current.current === 'number') ? p.current.current : (gPrev.current || 0)
+      };
+      applyGoal(init.goal);
     } else if (key === 'plugin' && p.current && p.current.name) {
-      var list = init.plugins || [];
-      for (var i = 0; i < list.length; i++) {
-        if (list[i] && list[i].name === p.current.name) list[i].enabled = !!p.current.enabled;
+      if (Array.isArray(p.plugins)) {
+        // 后端把完整快照一起回来了（插件 / 插件锁定 / 审核模式）：直接按它落地。
+        // 单独拼 list 再 applyPlugins 的话，关掉 Goal 插件时拿不到新的 goal.locked，
+        // 审核模式下拉不会跟着变灰（实测）。
+        applySessionConfig(p);
+      } else {
+        var list = init.plugins || [];
+        for (var i = 0; i < list.length; i++) {
+          if (list[i] && list[i].name === p.current.name) list[i].enabled = !!p.current.enabled;
+        }
+        init.plugins = list;
+        // 用后端真值重画一遍（按钮的「N/M」与开关状态都由它算），
+        // 锁定态一并落地：插件开关成功了不代表锁没变。
+        applyPlugins(list);
+        applyPluginLock(!!init.pluginsLocked);
       }
-      init.plugins = list;
     }
   }
 
@@ -14528,6 +14723,10 @@ body[data-run="true"] #goalRounds{opacity:.45}
       document.getElementById('btnThink').textContent = lb ? lb.textContent : think.effort;
     }
     if (want('goal') && init.goal) applyGoal(init.goal);
+    // 插件的锁定态（data-lock / 说明行）不在 applyPlugins 里重建，必须单独回退：
+    // 漏了会怎样：锁定态下点一下插件（真值没变，回执是失败）→ 说明行消失、
+    // 下拉又变成可点，用户以为「解锁了」，再点一次还是失败（两次假反馈）。
+    if (want('plugin')) applyPluginLock(!!init.pluginsLocked);
     if (want('plugin') && init.plugins && init.plugins.length) applyPlugins(init.plugins);
   }
 
@@ -14769,6 +14968,9 @@ body[data-run="true"] #goalRounds{opacity:.45}
       case 'error': notifyError(msg.params || {}); break;
       case 'session/list': applySessionList(msg.params || {}); break;
       case 'session/saved': applySessionSaved(msg.params || {}); break;
+      // 会话级配置快照（插件 / 插件锁定 / 审核模式）。后端在每轮收口时推一条：
+      // 第一句提问跑完 = 插件从此锁定，界面必须当场变灰，不能等下一次握手。
+      case 'session/config': applySessionConfig(msg.params || {}); break;
       case 'session/result': applySessionResult(msg.params || {}); break;
       // 历史分页：webview 发出 sessionHistory，宿主转发到 RPC session/history，
       // 回执以 history/result 回到这里（与 session/result 分开放：

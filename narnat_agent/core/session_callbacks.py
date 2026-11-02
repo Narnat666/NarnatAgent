@@ -20,17 +20,24 @@ from ..config.session_store import (
     save_session, load_session, delete_session,
     list_sessions_tree, format_session_tree,
     format_session_summary, load_session_meta, session_exists,
-    validate_session_name,
+    validate_session_name, write_session_plugins,
     # 文件指纹 = 冲突检测的唯一口径。实现放在 config/session_store（save_session
     # 自己也要用它，顶层反向 import 会成环），这里作为模块级函数对外暴露：
     # 全仓凡是要签名的地方都从这里取，别各写一套。
     file_signature, session_signature,
 )
-from ..config.defaults import DEFAULT_THINKING_PASSBACK, DEFAULT_THINKING_OPTIONS
+from ..config.defaults import (
+    DEFAULT_THINKING_PASSBACK, DEFAULT_THINKING_OPTIONS,
+    parse_plugin_config,
+    # 别名：__init__ 的注入参数名就叫 plugin_defaults（保留外部注入点的可读性），
+    # 与函数名撞车会把参数当函数调用
+    plugin_defaults as default_plugin_states,
+)
 from ..config.skill_store import load_skill, list_skill_tree
 from ..output import write as _stdout_write, D, R
 from ..tools.registry import (
     PLUGIN_TOOL_NAMES as _PLUGIN_TOOL_NAMES, get_capability as _get_capability,
+    apply_plugin_config as _apply_plugin_config,
 )
 from .message_list import MessageList, split_loaded_history
 
@@ -289,7 +296,7 @@ _COMMAND_META = {
     "/thinking":  ("切换思考强度", {}),
     "/thinkback": ("思考回传开关", {}),
     "/mode":      ("切换模型", {}),
-    "/goal":      ("目标模式开关", {}),
+    "/goal":      ("审核模式开关", {}),
     "/plugin":    ("插件开关", {}),
     "/explore":   ("创建探索分支", {}),
     "/done":      ("完成探索分支", {}),
@@ -414,6 +421,7 @@ class NoSession(SessionState):
         # 谁的内容都不会丢。这是该函数本来就有的语义，只是这里没用。
         out: Dict[str, Any] = {}
         err = save_session(self._mgr.narnat_dir, name, msgs,
+                           plugins=self._mgr.plugin_states(),
                            expected_signature="", result=out)
         if err:
             return readable_save_error(err)
@@ -467,6 +475,7 @@ class NoSession(SessionState):
         out: Dict[str, Any] = {}
         try:
             err = save_session(self._mgr.narnat_dir, name, msgs,
+                               plugins=self._mgr.plugin_states(),
                                expected_signature="", result=out)
         except Exception:
             return None
@@ -507,6 +516,7 @@ class NoSession(SessionState):
         name = unique_session_name(self._mgr.narnat_dir, base)
         out: Dict[str, Any] = {}
         err = save_session(self._mgr.narnat_dir, name, msgs,
+                           plugins=self._mgr.plugin_states(),
                            expected_signature="", result=out)
         if err:
             _report_exit_save_error(err)
@@ -661,6 +671,7 @@ class RootSession(SessionState):
         err = save_session(self._mgr.narnat_dir, self._name, msgs,
                            status=self._status or "active",
                            summary=self._summary,
+                           plugins=self._mgr.plugin_states(),
                            expected_signature=self._sig,
                            result=out)
         self._msg_count = len(msgs)
@@ -702,6 +713,7 @@ class RootSession(SessionState):
             # 同 NoSession.save：用「占名」防跨进程抢名后互相覆盖（P0，R40 实测）。
             out_new: Dict[str, Any] = {}
             err = save_session(self._mgr.narnat_dir, name, msgs,
+                               plugins=self._mgr.plugin_states(),
                                expected_signature="", result=out_new)
             if err:
                 return readable_save_error(err)
@@ -821,7 +833,8 @@ class RootSession(SessionState):
         parent_msg_count = len(self._mgr.get_messages())
         err = save_session(self._mgr.narnat_dir, name, msgs, parent=self._name,
                            status="new", parent_msg_count=parent_msg_count,
-                           last_summarized_at=parent_msg_count)
+                           last_summarized_at=parent_msg_count,
+                           plugins=self._mgr.plugin_states())
         if err:
             return readable_save_error(err)
         new_msgs, err = load_session(self._mgr.narnat_dir, name, parent=self._name)
@@ -984,6 +997,7 @@ class ChildSession(SessionState):
                            summary=self._summary,
                            parent_msg_count=self._parent_msg_count,
                            last_summarized_at=self._last_summarized_at,
+                           plugins=self._mgr.plugin_states(),
                            expected_signature=self._sig,
                            result=out)
         self._msg_count = len(msgs)
@@ -1095,7 +1109,11 @@ class ChildSession(SessionState):
         round_label = f" (第{round_num}轮)" if round_num > 1 else ""
         parent_msgs.append({"role": "system",
             "content": f"# 子会话 [{self._name}]{round_label} 结论\n\n{summary}"})
-        err = save_session(self._mgr.narnat_dir, self._parent, parent_msgs)
+        # 父会话的插件配置按它自己文件里的现值保留：分支创建时继承了父会话那份，
+        # 但两者此后各自维护（分支在还没开始工作时可以改），写回不能互相覆盖。
+        parent_plugins = load_session_meta(self._mgr.narnat_dir, self._parent).get("插件")
+        err = save_session(self._mgr.narnat_dir, self._parent, parent_msgs,
+                           plugins=parse_plugin_config(parent_plugins))
         if err:
             # 父会话没写成就绝不能把分支标成 completed：结论没落到父会话里，
             # 标了之后「已完成」与实际内容不符，用户还收到「结论已合并」的假成功
@@ -1114,7 +1132,8 @@ class ChildSession(SessionState):
         err = save_session(self._mgr.narnat_dir, self._name, full_msgs,
                            parent=self._parent, status="completed", summary=summary,
                            parent_msg_count=self._parent_msg_count,
-                           last_summarized_at=self._last_summarized_at)
+                           last_summarized_at=self._last_summarized_at,
+                           plugins=self._mgr.plugin_states())
         _report_save_error(err)
         # 这次写盘不经过 _persist，签名要跟着更新，否则后续 _persist 会把「自己
         # 刚写的」判成被外部改动，又另存一份 "X (2)"
@@ -1206,7 +1225,11 @@ class SessionManager:
                  name_func: Callable[[List[Dict[str, Any]]], str] = None,
                  goal_tool_setter: Callable[[bool], None] = None,
                  goal_max_rounds: int = 0,
+                 goal_verify_getter: Callable[[], bool] = None,
+                 goal_verify_setter: Callable[[bool], None] = None,
                  project_skill_roots=None,
+                 plugin_defaults: Optional[Dict[str, bool]] = None,
+                 busy_check: Optional[Callable[[], bool]] = None,
 
                  context_reset_func: Callable[[], None] = None,
                  logger=None):
@@ -1269,11 +1292,30 @@ class SessionManager:
         self._last_save_error: str = ""
         self.pending_deletes: Set[Tuple[str, Optional[str]]] = set()
         self._state: SessionState = NoSession(self)
-        # 目标模式状态：_goal_enabled=开关；_goal_max_rounds=临时轮数覆盖（0=用配置默认值）；
-        # _goal_default_rounds=配置默认轮数上限（供 /goal 查询显示具体值）
-        self._goal_enabled: bool = False
+        # 审核模式 = narnat.json「智能体.完成验证」的运行期值。
+        # 三层语义必须分清，否则又会漂移：
+        #   · 配置值（不动）      → _goal_verify_config，切会话时回到它
+        #   · 运行期覆盖（可空）   → _goal_verify_override，/goal on|off 只改这个，
+        #                           不写盘；None = 跟随配置
+        #   · 生效值（读的地方）   → _goal_enabled 属性，agent_loop 读 config.ai.goal_verify
+        self._get_goal_verify = goal_verify_getter or (lambda: False)
+        self._set_goal_verify = goal_verify_setter
+        self._goal_verify_config: bool = bool(self._get_goal_verify())
+        self._goal_verify_override: Optional[bool] = None
+        # 轮数上限：运行期覆盖（0=用配置默认值），与「完成验证」无关，故留在本类
         self._goal_max_rounds: int = 0
         self._goal_default_rounds: int = goal_max_rounds
+        # 插件开关（会话级）：_plugin_defaults = 新会话/游离态的初值（assembly 传入
+        # 已合入子代理隔离的 {name: bool}），_plugin_states = 当前会话生效值。
+        # 两者都只在 switch_state / on_plugin 里改（见 _bind_plugins）。
+        self._plugin_defaults: Dict[str, bool] = (
+            dict(plugin_defaults) if plugin_defaults is not None else default_plugin_states()
+        )
+        self._plugin_states: Dict[str, bool] = dict(self._plugin_defaults)
+        # AI 是否正在跑这一轮（审核模式在运行中只读）。默认不忙：终端/headless
+        # 形态的命令只在输入提示符处被处理，天然不会撞上运行中。
+        self._busy_check: Optional[Callable[[], bool]] = busy_check
+        self._bind_plugins()
 
     def get_messages(self) -> List[Dict[str, Any]]:
         """返回 messages 的浅拷贝列表（供状态类读取/保存使用）"""
@@ -1355,7 +1397,99 @@ class SessionManager:
             reset()
 
     def switch_state(self, new_state: SessionState):
+        """会话切换的唯一汇聚点（所有状态变更都必须走这里）。
+
+        插件开关是会话级的，绑定只能在状态**已经换好之后**做：各调用点的顺序都是
+        `replace_messages(...)` 先、`switch_state(...)` 后，在 replace_messages 里
+        读到仍然是旧状态。
+        """
         self._state = new_state
+        self._bind_plugins()
+        # 审核模式不属于会话，只跟随 narnat.json「完成验证」：换会话时把 /goal
+        # 的临时覆盖丢掉，界面按配置显示（需求：「进入其他会话时按 narnat.json 配置」）
+        self._reset_goal_audit()
+
+    def _bind_plugins(self) -> None:
+        """按当前会话绑定插件开关（switch_state 与构造时各调一次）。
+
+        - 不在会话中（游离态）：用默认值（assembly 注入的 _plugin_defaults）
+        - 会话文件里有「插件」字段：以它为准（这是会话自己的配置）
+        - 旧会话没有该字段：用默认值并**立即回填**会话文件（需求 4），此后锁定
+        """
+        name, parent = self._state.session_name(), self._state.session_parent()
+        if not name:
+            self._plugin_states = dict(self._plugin_defaults)
+            self._apply_plugins(self._plugin_states)
+            return
+        meta = load_session_meta(self.narnat_dir, name, parent=parent)
+        raw = meta.get("插件")
+        if isinstance(raw, dict):
+            self._plugin_states = parse_plugin_config(raw)
+            self._apply_plugins(self._plugin_states)
+            return
+        self._plugin_states = dict(self._plugin_defaults)
+        # 回填写盘改了文件内容 → 必须回刷指纹。不回刷的话下一次 _persist 会把
+        # 「自己人刚写的」判成「另一个实例改过」，另存成 "X (2)" 并弹假警报。
+        if not write_session_plugins(self.narnat_dir, name, parent,
+                                     self._plugin_states):
+            self._state._sig = session_signature(self.narnat_dir, name, parent=parent)
+        self._apply_plugins(self._plugin_states)
+
+    def _apply_plugins(self, states: Dict[str, bool]) -> None:
+        """把插件开关施加到工具表（唯一生效点）。
+
+        **不碰**审核模式（=读取「完成验证」的运行期值）：审核模式只是一道
+        额外的独立 AI 复核，与工具表无关，也不因插件开关而改变。Goal 插件关掉时
+        工具虽然没了，但审核模式开关本身仍在（界面上按「Goal 未启用」灰显只读）。
+        """
+        _apply_plugin_config(states)
+        if self._set_goal_tool:
+            self._set_goal_tool(bool(states.get("Goal", False)))
+
+    @property
+    def _goal_enabled(self) -> bool:
+        """审核模式开关（生效值）。真源是 narnat.json「智能体.完成验证」，
+        /goal on|off 只写运行期覆盖（不写盘），切会话时覆盖失效、回到配置值。
+        """
+        if self._goal_verify_override is not None:
+            return bool(self._goal_verify_override)
+        return bool(self._goal_verify_config)
+
+    @_goal_enabled.setter
+    def _goal_enabled(self, value: bool) -> None:
+        # 覆盖值落到 AIConfig（agent_loop 读的是它，不读本类），
+        # 同时记下覆盖状态供切会话复位。
+        enabled = bool(value)
+        self._goal_verify_override = enabled
+        if self._set_goal_verify is not None:
+            self._set_goal_verify(enabled)
+
+    def _reset_goal_audit(self) -> None:
+        """回到配置文件里的「完成验证」（切会话/新建对话时调用）。
+
+        需求：进入其它会话时，审核模式显示按 narnat.json 配置 —— /goal 的
+        on/off 只是本次操作的临时覆盖，不该跨会话带过去。
+        """
+        self._goal_verify_override = None
+        self._goal_max_rounds = 0
+        if self._set_goal_verify is not None:
+            self._set_goal_verify(self._goal_verify_config)
+
+    def goal_plugin_enabled(self) -> bool:
+        """插件 Goal 是否启用（= GoalComplete 是否在工具表里 = 要不要自动续跑）"""
+        return bool(self._plugin_states.get("Goal", False))
+
+    def plugin_states(self) -> Dict[str, bool]:
+        """当前会话生效的插件开关（浅拷贝，防止外部改内存状态）"""
+        return dict(self._plugin_states)
+
+    def plugin_locked(self) -> bool:
+        """本会话的插件开关是否已锁定：AI 已经执行过工作（历史里有用户消息）。
+
+        会话重载后历史里必有 user 消息，因此「锁定」对旧会话天然成立；
+        游离态（新建、还没提问）不锁定，可以随便调。
+        """
+        return any(m.get("role") == "user" for m in self._messages.view().to_list())
 
     def create_root_state(self, name: str) -> RootSession:
         return RootSession(self, name)
@@ -1460,7 +1594,9 @@ class SessionManager:
     def on_exit(self) -> str:
         msg, new_state = self._state.exit()
         if new_state is not None:
-            self._state = new_state
+            # 必须走 switch_state：插件绑定挂在它上面，直接赋值会让回到游离态后
+            # 仍带着上一个会话的插件开关
+            self.switch_state(new_state)
         return msg
 
     def on_auto_save(self):
@@ -1517,11 +1653,17 @@ class SessionManager:
         # （实测：聊一句→新建，内容既不落盘也不提示）。
         self._auto_save_done = False
         self._pending_auto_save_name = None
-        self._state = NoSession(self)
-        msgs = self.get_messages()
-        system = msgs[0] if msgs and msgs[0].get("role") == "system" else None
-        # replace_messages 会顺带复位上下文占比（与会话切换同语义）
-        self.replace_messages([system] if system else [])
+        # 走 switch_state：回到游离态要把插件开关一并复位成默认值
+        self.switch_state(NoSession(self))
+        # 新对话的 system 必须用**本进程启动时构建的那条**（含当前窗口的 cwd），
+        # 不能沿用上一段会话文件里的那条。
+        # 沿用会怎样（实测）：先进 aaa（system 里写的是 A 目录），再点新建对话，
+        # 新对话的提示词仍是 A 目录 —— 模型以为在 A 干活，实际工具在当前窗口的
+        # 目录执行，两者对不上，只能重启后端才恢复。
+        # 这不涉及缓存取舍：新对话本来没有可复用的前缀缓存，而 aaa 的文件一个字节
+        # 都不动（上面 auto_save 只写它自己的文件），它的缓存不受影响。
+        self.replace_messages(
+            [{"role": "system", "content": self._messages.system_prompt}])
         return ""
 
     def on_skill(self, name: str) -> str:
@@ -1622,26 +1764,74 @@ class SessionManager:
     def on_list_model_names(self) -> list:
         return list(self._model_options or [])
 
-    def on_plugin(self, action: str) -> Tuple[str, str]:
-        """插件工具开关：/plugin 查看状态，/plugin <名称> <on|off> 改配置（重启后生效）。
+    def on_goal(self, action: str) -> Tuple[str, str]:
+        """审核模式开关：/goal 查状态，/goal on [轮数] 开启，/goal off 关闭。
 
-        为什么不热生效：工具表是请求前缀的一部分（服务端缓存顺序 system → tools
-        → messages），运行中增删任意一条工具定义都会让 tools 段字节变化，其后全部
-        缓存作废。故此处**只写 narnat.json**，本进程的工具表与注册表状态一律不动，
-        新配置由下一次启动的 apply_plugin_config 应用。
+        审核模式 = 在「AI 调用 GoalComplete 声明完成」之后**再加一道独立 AI 复核**
+        （即 narnat.json「智能体.完成验证」）。它不碰工具表、也不是自动续跑的开关：
+          · 工具是否可用 → 插件 Goal（见 on_plugin）
+          · 要不要自动续跑 → 同上，Goal 插件开着就续跑
+          · 声明完成后要不要独立复核 → 本方法（只改内存，不写 narnat.json）
+        返回 (status, text)：status ∈ {"ok","hint","error","info"}，命令层据此着色。
+        """
+        arg = (action or "").strip().lower()
+        goal_plugin = bool(self._plugin_states.get("Goal", False))
+        if not arg:
+            if not goal_plugin:
+                return "hint", ("  审核模式: 不可用"
+                                "（插件 Goal 未启用，/plugin Goal on 后可配置）")
+            if self._goal_enabled:
+                # 实际生效轮数：临时覆盖 > 配置默认值 > 兜底"默认"
+                limit = self._goal_max_rounds or self._goal_default_rounds or "默认"
+                return "info", (f"  审核模式: 已开启  (轮数上限: {limit})"
+                                "（用法: /goal off，仅本次运行有效）")
+            return "hint", "  审核模式: 已关闭（用法: /goal on [轮数] | off，仅本次运行有效）"
+        # 先判依赖：插件 Goal 关闭时没有 GoalComplete，复核无从触发，整条不可用
+        if not goal_plugin:
+            return "error", "  审核模式不可用：插件 Goal 未启用（先执行 /plugin Goal on）"
+        if self._busy_check is not None and self._busy_check():
+            return "error", "  AI 正在运行，暂时不可更改审核模式（本轮结束后再试）"
+        if arg == "off":
+            was_enabled = self._goal_enabled
+            self._goal_enabled = False
+            if was_enabled:
+                return "ok", "  审核模式已关闭（仅本次运行有效，未写入配置）"
+            return "hint", "  审核模式已是关闭状态"
+        if arg == "on" or arg.startswith("on "):
+            # /goal on [N]：可选临时轮数上限
+            override = 0
+            rest = arg[2:].strip()
+            if rest:
+                try:
+                    override = int(rest)
+                except ValueError:
+                    return "error", f"  无效轮数: {rest}"
+                if override < 1:
+                    return "error", "  轮数必须为正整数"
+            self._goal_enabled = True
+            self._goal_max_rounds = override
+            if override:
+                return "ok", f"  审核模式已开启  (本轮上限 {override} 轮，仅本次运行有效)"
+            return "ok", "  审核模式已开启（仅本次运行有效，未写入配置）"
+        return "error", f"  无效值: {arg}（可用: on [轮数] / off）"
+
+    def on_plugin(self, action: str) -> Tuple[str, str]:
+        """插件开关（会话级）：/plugin 查看状态，/plugin <名称> <on|off> 改配置。
+
+        改动在**本会话内**立即生效（工具表按新开关重建）。会话一旦开始工作
+        （AI 已执行过、历史里有用户消息）就锁定，之后只能新建对话再调——
+        否则同一段对话的前缀会在中途变化，服务端缓存全部失效。
         返回 (status, text)：status ∈ {"info","ok","hint","error"}，命令层据此着色。
         """
         from ..tools import registry as _registry
-        configured = self._read_plugin_config()
         if not action:
-            states = _registry.get_plugin_states()
-            on_count = sum(1 for enabled in configured.values() if enabled)
-            lines = [f"  插件开关: {on_count}/{len(configured)} 开启（配置态；"
-                     "改动重启后生效，本进程工具表不变）  用法: /plugin <名称> <on|off>"]
+            states = self._plugin_states
+            on_count = sum(1 for enabled in states.values() if enabled)
+            lock_note = "已锁定（新建对话后可调整）" if self.plugin_locked() else "可调整"
+            lines = [f"  插件开关: {on_count}/{len(states)} 开启（会话内生效，{lock_note}）"
+                     "  用法: /plugin <名称> <on|off>"]
             for name, enabled in states.items():
-                lines.append(f"    {name.ljust(9)} "
-                             f"运行 {'on ' if enabled else 'off'}  "
-                             f"配置 {'on ' if configured.get(name) else 'off'}  "
+                lines.append(f"    {name.ljust(9)} {'on ' if enabled else 'off'}  "
                              f"{_PLUGIN_TOOL_LABELS.get(name, '')}")
             return "info", "\n".join(lines)
         parts = action.split()
@@ -1654,36 +1844,44 @@ class SessionManager:
             return "error", f"  参数不完整（用法: /plugin {name} on|off）"
         if value not in ("on", "off"):
             return "error", f"  无效值: {value}（可用: on / off，例如 /plugin {name} off）"
+        if self.plugin_locked():
+            return "error", "  插件配置不可更改：本会话已开始工作（新建对话后可调整）"
         target = value == "on"
         state = "开启" if target else "关闭"
+        if bool(self._plugin_states.get(name)) == target:
+            return "hint", f"  {name} 已处于{state}状态"
+        # 先写盘再改内存：写盘失败就当这次没改过（否则内存与磁盘/会话文件不一致，
+        # 重启后行为突变）
         err = self._persist_plugin_states(name, target)
-        # 写回失败必须报 error：RPC 侧据此抛错（不靠文本特征匹配），
-        # 否则界面显示已切换而磁盘没变
         if err:
-            return "error", f"  {name} 配置写回失败（{err}），重启后不会生效"
-        if configured.get(name) == target:
-            return "hint", f"  {name} 配置已是{state}状态，重启后生效"
-        return "ok", f"  {name} 已写入配置: {value}（重启后生效，本进程工具表不变）"
+            return "error", f"  {name} 配置写回失败（{err}）"
+        session_err = self._persist_session_plugins(name, target)
+        self._plugin_states[name] = target
+        # 默认值同步：本次改动已写进 narnat.json（新会话的默认来源），内存那份
+        # 也得跟上，否则「改完插件 → 提问 → 新建对话」会退回启动时的旧值。
+        self._plugin_defaults[name] = target
+        self._apply_plugins(self._plugin_states)
+        if session_err:
+            return "error", f"  {name} 已{state}，但会话文件写入失败（{session_err}）"
+        return "ok", f"  {name} 已{state}（会话内生效）"
 
-    def _read_plugin_config(self) -> Dict[str, bool]:
-        """读 narnat.json「工具.插件」得配置态（缺项/读失败默认 on，仅 "off" 视为关，与 loader 同口径）"""
-        from ..tools import registry as _registry
+    def _persist_session_plugins(self, name: str, enabled: bool) -> str:
+        """把单个插件开关写回当前会话文件；返回 ""=成功，非空=错误信息。
 
-        raw: Dict[str, Any] = {}
-        if self._config_dir:
-            try:
-                with open(os.path.join(self._config_dir, "narnat.json"),
-                          "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                raw = (data.get("工具") or {}).get("插件") or {}
-            except (json.JSONDecodeError, OSError, AttributeError):
-                raw = {}
-        if not isinstance(raw, dict):
-            raw = {}
-        return {
-            name: str(raw.get(name, "on")).strip().lower() != "off"
-            for name in _registry.PLUGIN_TOOL_NAMES
-        }
+        不在会话中（游离态）时无文件可写，直接成功。
+        写完回刷状态对象的 _sig，理由见 _bind_plugins。
+        """
+        session_name = self._state.session_name()
+        if not session_name:
+            return ""
+        parent = self._state.session_parent()
+        states = dict(self._plugin_states)
+        states[name] = enabled
+        err = write_session_plugins(self.narnat_dir, session_name, parent, states)
+        if not err:
+            self._state._sig = session_signature(self.narnat_dir, session_name,
+                                                 parent=parent)
+        return err
 
     def _persist_plugin_states(self, name: str, enabled: bool) -> str:
         """把单个插件开关写回 narnat.json「工具.插件.<name>」；返回 ""=成功，非空=错误信息

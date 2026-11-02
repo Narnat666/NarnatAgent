@@ -391,7 +391,10 @@ class MessageManager:
             [m for i, m in enumerate(full_messages)
              if id(m) not in retained_ids
              and not self._messages.is_system_prompt(i, m)])
-        self._messages.replace_all(new_messages)
+        # new_session=False：压缩不是换会话。压缩就发生在正在跑的轮次内部，
+        # 之后这一轮还要继续 append 工具声明/结果；算成换会话的话它们全被判过期
+        # 丢弃，界面表现为「压缩完成后立刻『本轮结果已丢弃』+ 请求失败」（P0）。
+        self._messages.replace_all(new_messages, new_session=False)
 
         self._logger.info(
             "message_manager",
@@ -402,4 +405,5 @@ class MessageManager:
     def clear_and_rebuild(self, system_prompt: str, summary_text: str) -> None:
         """清空并重建消息列表（压缩后使用）"""
         new_messages = self._compressor.build_new_session_messages(system_prompt, summary_text)
-        self._messages.replace_all(new_messages)
+        # 同 handle_compress：压缩不是换会话，不动代际
+        self._messages.replace_all(new_messages, new_session=False)

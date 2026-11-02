@@ -6,7 +6,7 @@
  *   /skill  → 敲空格后面板直接关掉，一条候选都没有   ← 缺陷
  *   /ls     → 同上                                   ← 缺陷
  *   /rm     → 只列会话，没有 --all（后端认这个开关）  ← 缺陷
- *   /plugin → 有候选（Terminal/WebSearch/Serial/MCP） ← 本来就是好的
+ *   /plugin → 有候选（Terminal/WebSearch/Serial/MCP/Goal） ← 本来就是好的
  *
  * 根因是 `ARG_SOURCE` 只登记了 5 个命令：没登记 = 敲完命令名加空格后
  * `refreshPalette` 直接 return，面板关闭。候选来源本身都是现成的
@@ -68,7 +68,8 @@ const TEST = String.raw`
         { name: 'Terminal', label: '终端', enabled: true },
         { name: 'WebSearch', label: '联网搜索', enabled: false },
         { name: 'Serial', label: '串口', enabled: true },
-        { name: 'MCP', label: 'MCP', enabled: true }
+        { name: 'MCP', label: 'MCP', enabled: true },
+        { name: 'Goal', label: '目标模式', enabled: false }
       ],
       session: { current: '甲', messages: [] },
       workdir: '<t>' } });
@@ -131,8 +132,9 @@ const TEST = String.raw`
     await sleep(200);
     var pl = codeItems();
     out.push('DIAG /plugin 候选=' + JSON.stringify(pl));
-    ck('P5 /plugin 仍有插件候选（未被本次改动弄坏）',
-       palOpen() && pl.length === 4 && pl.indexOf('Terminal') >= 0, JSON.stringify(pl));
+    ck('P5 /plugin 仍有插件候选（未被本次改动弄坏；插件已是 5 项，含 Goal）',
+       palOpen() && pl.length === 5 && pl.indexOf('Terminal') >= 0 &&
+       pl.indexOf('Goal') >= 0, JSON.stringify(pl));
 
     /* ---- P6 没参数可补的命令不弹面板 ---- */
     setVal('/compact ');

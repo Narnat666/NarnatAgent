@@ -107,12 +107,12 @@ const TEST = String.raw`
       cfgSets().length === n0 && txt('btnThink') === '高',
       'configSet 增量=' + (cfgSets().length - n0) + ' btnThink=' + JSON.stringify(txt('btnThink')));
 
-    /* L5 目标条目点击无效果 */
+    /* L5 审核模式条目点击无效果 */
     n0 = cfgSets().length;
     $('#popGoal .pi[data-v="on"]').click();
     await sleep(40);
-    ck('L5 运行中点目标模式「开」不生效',
-      cfgSets().length === n0 && txt('btnGoal') === '目标模式 关',
+    ck('L5 运行中点审核模式「开」不生效',
+      cfgSets().length === n0 && txt('btnGoal') === '审核模式 关',
       'configSet 增量=' + (cfgSets().length - n0) + ' btnGoal=' + JSON.stringify(txt('btnGoal')));
 
     /* L6 插件开关点击无效果 */

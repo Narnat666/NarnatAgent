@@ -367,7 +367,8 @@ class MessageList:
         self._archived = []
         self._archived_ids.clear()
 
-    def replace_all(self, new_messages: List[Dict[str, Any]]) -> None:
+    def replace_all(self, new_messages: List[Dict[str, Any]],
+                    new_session: bool = True) -> None:
         """原子替换全部消息（会话切换时使用）。
 
         单次引用赋值（GIL 下原子）：并发读者要么看到旧列表、要么看到新列表，
@@ -377,11 +378,18 @@ class MessageList:
         注意：本方法不动归档（压缩路径正是「先 archive 再 replace_all」）。
         会话切换必须走 SessionManager.replace_messages()，它先 clear_archive()。
 
-        代际 +1 也在这里：这是「换了一段对话」的唯一汇聚点（切换/新建/删除/
-        载入/压缩后重建都经过它）。agent_loop 靠代际判断自己的结果还该不该写。
+        new_session=False 表示「不是换会话，只是就地重建这段对话的上下文」——
+        目前只有压缩（自动/手动/溢出恢复）走这条。代际不 +1：
+        压缩发生在**正在跑的轮次内部**，之后这一轮还要继续 append 工具声明与
+        结果；一旦 +1，那些写入会被代际守卫判成「上一段对话的残留」而丢弃，
+        表现为「压缩成功后立刻『会话已切换，本轮结果已丢弃』+ 请求失败」，
+        用户得手动再发一句才能继续（实测 P0）。
+
+        代际 +1 只在真换会话时发生（切换/新建/删除/载入都经过本方法）。
         """
         self._messages = list(new_messages)
-        self._generation += 1
+        if new_session:
+            self._generation += 1
 
     def replace_last(self, msg: Dict[str, Any]) -> None:
         """替换最后一条消息（**不是**换会话，代际不变）。

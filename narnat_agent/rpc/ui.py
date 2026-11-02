@@ -400,6 +400,12 @@ class RpcUI:
         # turn/begin{resumed:true} 时也靠它把真实起点带回去 —— 否则 webview
         # 只能从 0 重算，跑了 5 分钟的一轮会被报成「1 秒」。
         self._turn_started_ms = 0
+        # RpcServer._turn_active 的镜像（由它置位/清零）。SessionManager 早于
+        # RpcServer 构造、拿不到服务端那份状态，故由服务端推进来供 on_goal
+        # 判断「AI 运行中不允许改审核模式」。
+        # 不能用「read_input 取到文本」当判据：命令（/goal on）也走 read_input，
+        # 那会把命令自己判成"运行中"而被拒绝。
+        self._turn_active = False
         self._command_lock = threading.RLock()
         # 正在等用户点「确认执行」的闸门：点停止时要能把它推开。
         # 不处理会怎样（实测）：后端阻塞在确认读上，界面已显示「已打断」，
@@ -447,6 +453,16 @@ class RpcUI:
         """阻塞等输入。此处即"轮次已结束"的确定性边界：进来先把悬空的 turn/end 收口。"""
         self._close_dangling("done")
         return self._input_queue.get()
+
+    def set_turn_active(self, active: bool) -> None:
+        """由 RpcServer 推送本轮 busy 状态（它才是权威判据）"""
+        with self._stream_lock:
+            self._turn_active = bool(active)
+
+    def turn_active(self) -> bool:
+        """AI 是否正在跑这一轮（RpcServer._turn_active 的镜像，供 on_goal 拒绝运行中改配置）"""
+        with self._stream_lock:
+            return self._turn_active
 
     def read_input_with_prompt(self, prompt_text: str = "") -> Optional[str]:
         """确认提示（删除/git 确认）：推 confirm/request 通知，等客户端应答。
@@ -637,6 +653,8 @@ class RpcUI:
             emit("turn/end", {"reason": "cancelled"})
         except Exception:
             pass
+        with self._stream_lock:
+            self._turn_active = False
         callback = self._turn_end_callback
         if callback is not None:
             try:
@@ -717,6 +735,10 @@ class RpcUI:
         with self._stream_lock:
             if stream is None or self._active_stream is stream:
                 self._active_stream = None
+            # intermediate（审核模式中间轮）不解锁：这一轮对用户还没结束，
+            # 与 RpcServer._on_turn_end 的 busy 处理同一口径
+            if not intermediate:
+                self._turn_active = False
         callback = self._turn_end_callback
         if callback is not None:
             try:

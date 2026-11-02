@@ -63,11 +63,13 @@ class Assembly:
 
         # 3. 全局工具配置（写入各工具模块的状态类；LLM 重试次数由 LLMClient 构造时读取）
         TerminalRuntime.set_max_sessions(config.tools.max_sessions)
-        # 插件工具开关（narnat.json "工具"."插件"）：关闭的定义不发 LLM，
-        # 必须在下方 get_tool_definitions() 之前应用
+        # 插件工具开关（narnat.json "工具"."插件" + 子代理隔离）：关闭的定义不发 LLM，
+        # 必须在下方 get_tool_definitions() 之前应用。这一份 merged 同时是
+        # SessionManager 的会话级插件初值（游离态/新会话用它）。
         from .tools.registry import apply_plugin_config
         from .config.isolation import plugin_states
-        apply_plugin_config(plugin_states(config.tools.plugin_tools, headless))
+        merged_plugin_states = plugin_states(config.tools.plugin_tools, headless)
+        apply_plugin_config(merged_plugin_states)
 
         # 4. 日志
         logger = AgentLogger(config.paths.logs_dir)
@@ -140,6 +142,16 @@ class Assembly:
         )
 
         # 10. 会话管理器
+        # busy_check：AI 是否正在跑这一轮（审核模式运行中只读）。判据由 UI 提供
+        #（RpcUI.turn_active，与服务端 busy 同口径）；UI 在第 11 步才构造，
+        # 故用惰性引用。终端/headless 形态没有这个方法 → 恒不忙（命令只在
+        # 输入提示符处被处理，天然撞不上运行中）。
+        _ui_ref: dict = {}
+
+        def _busy() -> bool:
+            check = getattr(_ui_ref.get("ui"), "turn_active", None)
+            return bool(check()) if check else False
+
         session_mgr = SessionManager(
             config.paths.narnat_dir,
             message_list,
@@ -159,7 +171,13 @@ class Assembly:
             name_func=lambda msgs: summarizer.name_session(msgs),
             goal_tool_setter=llm.set_goal_tool,
             goal_max_rounds=config.ai.goal_max_rounds,
+            # 审核模式 = narnat.json「智能体.完成验证」的运行期值：
+            # /goal on|off 只改内存（读这里），不写盘。
+            goal_verify_getter=lambda: config.ai.goal_verify,
+            goal_verify_setter=lambda v: setattr(config.ai, "goal_verify", bool(v)),
             project_skill_roots=config.skills.project_roots,
+            plugin_defaults=merged_plugin_states,
+            busy_check=_busy,
             context_reset_func=lambda: context.reset(),
             # 传日志器：载入会话时若清掉了孤儿工具结果（删了用户数据），
             # 必须留下一条可追查的 warning。不传的话那行日志永远打不出来。
@@ -181,6 +199,8 @@ class Assembly:
         # 补充 session_mgr 的 UI 回调（需要 ui 先创建）
         session_mgr.summary_anim_start = lambda: ui.begin_summarizing()
         session_mgr.summary_anim_stop = lambda: ui.end_summarizing()
+        # busy_check 的惰性引用挂上真实 UI（见第 10 步）
+        _ui_ref["ui"] = ui
 
         # 12. 工具调度器
         dispatcher = ToolDispatcher(

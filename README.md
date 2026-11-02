@@ -1,6 +1,6 @@
 # Narnat Agent
 
-终端 AI 代码智能体。自主调用工具（读文件、改代码、执行命令、SSH/串口、联网搜索），支持会话探索分支、目标模式自动续跑、多模型热切换、headless 一次性任务（脚本化/子代理调度）。
+终端 AI 代码智能体。自主调用工具（读文件、改代码、执行命令、SSH/串口、联网搜索），支持会话探索分支、审核模式自动续跑、多模型热切换、headless 一次性任务（脚本化/子代理调度）。
 
 ## 下载与安装
 
@@ -63,7 +63,7 @@ AgentByNarnat/
 | `/save <名称>` | 保存当前会话（不填名称自动命名） |
 | `/ls`、`/cd <名称>` | 列出 / 打开历史会话 |
 | `/mode <模型>` | 切换模型 |
-| `/goal on` | 目标模式：任务没完成自动续跑 |
+| `/goal on` | 审核模式：任务没完成时自动续跑并独立审核（需先开插件 `Goal`） |
 | `/exit` | 退出 |
 
 > 关于工作目录：文件操作以启动目录为基准；配置与会话始终保存在程序目录的 `.narnat/` 中，与启动位置无关（源码运行/开发模式时 `.narnat` 从当前目录向上查找；编译版为 exe 所在目录）。如需处理某个项目，在项目目录打开终端并运行 `<解压目录>\narnat.exe`（替换为你的实际解压路径）。
@@ -243,10 +243,10 @@ Linux 上推荐直接用一键脚本 `python build.py`（自动打补丁、自�
 | `-d, --debug` | 调试模式，日志写入 `.narnat/logs/` |
 | `-v, --version` | 显示版本号 |
 | `-p, --prompt <任务>` | headless 模式：执行一次性任务后退出（纯文本输出） |
-| `-g, --goal-rounds N` | headless 模式：开启目标模式并设置续跑预算轮数（如 `-g 10`；0 等同不开启）；不带则单轮执行（不注入 GoalComplete、无完成验证） |
+| `-g, --goal-rounds N` | headless 模式：开启审核模式并设置续跑预算轮数（如 `-g 10`；0 等同不开启）；不带 `-g` 时不开审核模式（不自动续跑、不做完成验证） |
 | `-l, --tool-log` | headless 模式：显示详细工具调度日志（默认仅输出 AI 最终答复） |
 
-headless（`-p`）行为：注入任务后执行，**不带 `-g` 为单轮执行**（AI 一口气干到停手即退出，不注入 GoalComplete、无完成验证；`reason=done` 仅表示执行结束，**不校验任务是否达成**——需要任务成败判定/自动续跑请用 `-g` 目标模式）；**带 `-g N` 开启目标模式**：自动续跑 + AI 调用 GoalComplete 提交完成清单（经独立验证器复核）或达预算上限收尾 → 退出。不读用户输入、不保存会话、不查余额、不显示统计栏，适合脚本化与父代理调度（如派发子代理任务）。输出为纯文本（全局去色，表格/列表结构保留），末行输出哨兵 `[NN_DONE] reason=… rounds=…` 供程序判定结束与结束原因（reason：`done` / `goal_complete` / `goal_honest` / `goal_forced` / `goal_suspect` / `round_limit` / `aborted` / `round_failed` / `compress_failed` / `unknown`）。
+headless（`-p`）行为：插件默认全部开启（含 `Goal`，即启动就向 AI 注入 GoalComplete），注入任务后执行，**不带 `-g` 时不开审核模式**（AI 一口气干到停手即退出，不自动续跑、不做完成验证；`reason=done` 仅表示执行结束，**不校验任务是否达成**——需要任务成败判定/自动续跑请用 `-g` 审核模式）；**带 `-g N` 开启审核模式**：自动续跑 + AI 调用 GoalComplete 提交完成清单（经独立验证器复核）或达预算上限收尾 → 退出。不读用户输入、不保存会话、不查余额、不显示统计栏，适合脚本化与父代理调度（如派发子代理任务）。输出为纯文本（全局去色，表格/列表结构保留），末行输出哨兵 `[NN_DONE] reason=… rounds=…` 供程序判定结束与结束原因（reason：`done` / `goal_complete` / `goal_honest` / `goal_forced` / `goal_suspect` / `round_limit` / `aborted` / `round_failed` / `compress_failed` / `unknown`）。
 
 headless 退出码对照：`0`=正常收尾（`done` / `goal_*` / `round_limit` 等）；`1`=参数错误（如空任务、负轮数）或启动异常；`2`=任务级失败（`round_failed` / `aborted` / `compress_failed` / `unknown`）或参数解析错误（argparse）。注意 `round_limit`（任务未完成）退出码为 `0`——判定结束与结果以末行哨兵为准，退出码仅作辅助。进程被外部强制终止（如 `taskkill`）时退出码同样为 `1`，且可能没有任何输出与哨兵行——父代理应将"自己发起的终止"单独记账（超时兜底建议 `taskkill /F /T`，避免孙进程残留）。已开启「费用日志.启用」时，headless 的每次 API 调用照常记账（写入 `.narnat/data/cost_log.csv`）。
 
@@ -298,8 +298,8 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
     "温度": null,
     "最大输出token数": 128000,
     "上下文窗口大小": 1000000,                   // 模型上下文窗口 token 数，≤0 视为无效（占比显示 --）
-    "目标模式最大轮数": 10,                      // /goal 开启后单个任务的续跑总预算（每轮续跑消耗1，每次验证打回额外消耗1）
-    "完成验证": true,                            // 默认 true（首次生成含此 key）；GoalComplete 提交清单后由独立 AI 验证器（只读工具实地复核）验证
+    "目标模式最大轮数": 10,                      // /goal 开启后（审核模式）单个任务的续跑总预算（每轮续跑消耗1，每次验证打回额外消耗1）
+    "完成验证": false,                           // 默认 false（= 界面上的「审核模式」）；GoalComplete 提交清单后由独立 AI 验证器（只读工具实地复核）验证
     "验证模型": "",                              // 默认空=当前模型；验证器使用的模型
     "思考": {
       "启用": true,                             // 关闭则不传 thinking 参数
@@ -387,8 +387,8 @@ AI 按需自主调用工具——读文件、改代码、执行命令、搜索�
     "最大传输文件MB": 100,                      // 可选，默认 100
     "git免确认": false,                         // 可选，默认 false（git 命令需二次确认）
     "rm免确认": false,                          // 可选，默认 false（rm 命令需二次确认）
-    "插件": {                                   // 可选，缺项默认全 on；值 "on"/"off"（不认 true/false），/plugin 可切换
-      "Terminal": "on", "WebSearch": "on", "Serial": "on", "MCP": "on"
+    "插件": {                                   // 可选，缺项默认：Goal 为 off，其余为 on；值 "on"/"off"（不认 true/false）；会话级生效：新会话由此处初始化，开始对话后不可更改
+      "Terminal": "on", "WebSearch": "on", "Serial": "on", "MCP": "on", "Goal": "off"
     }
   },
 
@@ -530,7 +530,7 @@ narnat_agent/
 │   ├── session_store.py      #   会话持久化与树形展示
 │   └── skill_store.py        #   技能加载
 ├── core/                     # 核心
-│   ├── agent.py              #   Agent 主循环、目标模式续跑
+│   ├── agent.py              #   Agent 主循环、审核模式续跑
 │   ├── agent_loop.py         #   单轮循环（请求 → 工具调度 → 回传）
 │   ├── llm.py                #   LLM 双协议客户端（openai / anthropic）
 │   ├── context.py            #   上下文窗口管理
@@ -564,7 +564,7 @@ narnat_agent/
 │   ├── serial/               #   Serial — 多终端持久串口
 │   ├── web_search/           #   WebSearch — 网页搜索
 │   ├── todo_write/           #   TodoWrite — 任务列表
-│   ├── goal_complete/        #   GoalComplete — 目标完成标记（目标模式动态注入）
+│   ├── goal_complete/        #   GoalComplete — 目标完成标记（审核模式动态注入）
 │   ├── registry.py           #   工具注册表
 │   ├── safety.py             #   安全判定共享正则（删除/git 命令拦截，单一定义源）
 │   ├── token_estimate.py     #   token 估算（AI 预算单位）
@@ -598,9 +598,9 @@ narnat_agent/
 | MCP | MCP 服务器管理：连接与统一调度外部 MCP 服务（connect / call / list_servers / list_tools / disconnect，详见「MCP 服务器」） |
 | WebSearch | 联网搜索与网页抓取（REST 双接口，search/fetch 由 narnat.json 配置；MCP 联网请用 MCP 工具） |
 | TodoWrite | 任务列表管理（多步任务的计划建立与进度勾选） |
-| GoalComplete | 声明任务完成并提交结构化完成清单（要求→证据→状态），触发独立验证器复核（仅 `/goal` 目标模式开启时注入给 AI） |
+| GoalComplete | 声明任务完成并提交结构化完成清单（要求→证据→状态），触发独立验证器复核（是否注入给 AI 由插件 `Goal` 决定，默认关闭） |
 
-- 可开关的插件工具为 Terminal / WebSearch / Serial / MCP：在 `"工具"."插件"` 配置或 `/plugin` 命令中开关，**写入配置后重启生效**（运行中的会话工具表不变——工具段是缓存前缀的一部分，热增删会让其后全部缓存失效）；常驻工具（Read / Glob / Grep / Edit / Write / Shell / TodoWrite）不可关闭
+- 可开关的插件工具为 Terminal / WebSearch / Serial / MCP / Goal：在 `"工具"."插件"` 配置或 `/plugin` 命令中开关，**会话级、会话内立即生效，开始对话后锁定**（工具段是缓存前缀的一部分，热增删会让其后全部缓存失效，所以改成会话边界才允许变化）；常驻工具（Read / Glob / Grep / Edit / Write / Shell / TodoWrite）不可关闭
 - 工具输出受「输出上限KB」全局硬截断（保留首尾），超时受「超时上限秒」约束；Read 例外——按行截断并提示续读 offset，保证行号连续；Shell 输出被截断时完整输出自动落盘（进程专属临时目录），截断提示给出文件路径，可用 Read / Grep 读取全文（落盘文件首行为框架标签行，读取时可忽略）
 - Shell 后台任务：`background=true` 提交后立即返回 `bgN` 编号，结果落盘到会话专属临时目录（可 Read/Grep 读取；结果文件在会话（进程）存活期间可读，进程退出后目录被自动清理，父代理需在退出前读取；单个后台日志 50MB 封顶，超出部分滚动保留最近 1MB 至 `bgN.log.tail`——错误信息通常在尾部；槽位复用时旧结果归档为 `bgN.log.<序号>.prev`）；`bg="status"/"wait"/"cancel"` 管理，并发上限 8 个，会话结束自动清理
 - 参数错误返回对 AI 友好的中文提示（未知参数 / 缺失参数直接列出有效参数名）
@@ -623,11 +623,11 @@ narnat_agent/
 | `/thinking <强度>` | 切换思考强度（由 `思考.强度选项` 定义，写入 narnat.json） | 全部 |
 | `/thinkback [on\|off]` | 思考回传开关，默认关闭：思考内容**始终**记录到会话文件，开启后才随请求发给模型（无参数查看状态，写入 narnat.json） | 全部 |
 | `/mode <模型>` | 切换模型（由 `模型.列表` 定义，支持 Tab 补全，写入 narnat.json） | 全部 |
-| `/goal on [N]` | 开启目标模式（N=临时轮数上限） | 全部 |
-| `/goal off` | 关闭目标模式 | 全部 |
-| `/goal` | 查看目标模式状态 | 全部 |
-| `/plugin` | 查看插件工具开关状态 | 全部 |
-| `/plugin <名称> <on \| off>` | 切换插件工具（Terminal / WebSearch / Serial / MCP，大小写不敏感），写入 narnat.json，下一轮请求即生效 | 全部 |
+| `/goal on [N]` | 开启审核模式（N=临时轮数上限；需先 `/plugin Goal on`） | 全部 |
+| `/goal off` | 关闭审核模式 | 全部 |
+| `/goal` | 查看审核模式状态 | 全部 |
+| `/plugin` | 查看插件工具开关状态（含本会话是否已锁定） | 全部 |
+| `/plugin <名称> <on \| off>` | 切换插件工具（Terminal / WebSearch / Serial / MCP / Goal，大小写不敏感），会话内生效、开始对话后锁定（需新建对话再调） | 全部 |
 | `/clear` | 清屏 | 全部 |
 | `/compact` | 手动压缩上下文：AI 摘要全部历史（保留近期尾部逐字内容），过程中可按 `Esc` 取消 | 全部 |
 | `/exit` | 退出会话 / 退出程序 | 全部 |
@@ -648,9 +648,21 @@ NoSession ──/save──▶ RootSession ──/explore──▶ ChildSession
 - **ChildSession**：探索分支，继承父会话全部上下文，`/done` 时 AI 将分支讨论总结为结构化结论追加到父会话末尾；`/exit` 暂离可稍后 `/cd` 回来继续
 - 子分支通过 `父名/子名` 路径引用，`/ls` 以树形展示
 
-### 目标模式
+### 审核模式
 
-`/goal on` 开启后，AI 完成任务时须调用 GoalComplete 提交**结构化完成清单**（逐条列出 任务要求 → 可检查证据 → 状态）；若一轮对话结束仍未声明完成，则自动以「续跑提示」（含完成审计要求）发起下一轮。续跑与验证打回共用**单一预算**（`/goal on N` 临时覆盖 > `智能体.目标模式最大轮数` 默认 10）：每续跑一轮消耗 1，每发生一次验证打回额外消耗 1；预算耗尽后注入收尾指令，由 AI 总结当前进度与未完成原因后结束。普通模式下 GoalComplete 不暴露给 AI。
+**三件事互相独立，别混在一起看：**
+
+| 谁 | 管什么 |
+|---|---|
+| 插件 `Goal` | GoalComplete 是否在工具表里；**自动续跑**（任务没声明完成就继续推进） |
+| `智能体.完成验证`（界面上的「审核模式」） | AI 调用 GoalComplete 声明完成后，是否再让**独立 AI 复核**清单 |
+| `/goal on [N]` / `/goal off` | 只改**本次运行内存**里那一项「完成验证」，**不写 narnat.json**；N 是轮数上限的临时覆盖 |
+
+所以：`/goal on` 只是"多加一道独立审核"，不会开启或关闭续跑；Goal 插件开着就会续跑，与审核模式无关。
+
+`/goal on [N]` 开启审核模式（原称「目标模式」），`/goal off` 关闭，`/goal` 查状态。开启后 AI 完成任务时须调用 GoalComplete 提交**结构化完成清单**（逐条列出 任务要求 → 可检查证据 → 状态）；若一轮对话结束仍未声明完成，则自动以「续跑提示」（含完成审计要求）发起下一轮。续跑与验证打回共用**单一预算**（`/goal on N` 临时覆盖 > `智能体.目标模式最大轮数` 默认 10）：每续跑一轮消耗 1，每发生一次验证打回额外消耗 1；预算耗尽后注入收尾指令，由 AI 总结当前进度与未完成原因后结束。
+
+审核模式依赖插件 `Goal`：GoalComplete 是否注入给 AI **只由插件 `Goal` 决定**，审核模式本身不改动工具表——因此开关/关闭审核模式不会让服务端缓存失效。插件 `Goal` **未启用**时审核模式不可配置（命令与界面都报错并提示先执行 `/plugin Goal on`）；`Goal` 已启用时，无论本会话是否已开始工作都可以配置，只有 AI **正在跑的那一刻**不可改（本轮结束后再试）；插件之外的其它配置（模型 / 思考）在 AI 运行完毕后可改。`/goal` 的改动只对本次运行有效：**进入其它会话时审核模式回到 `narnat.json` 的配置值**（没配就用默认 `false`）。
 
 AI 自报完成不可信——声明完成后由**独立验证器**复核：用全新会话（不带对话历史）+ 只读工具（Read/Glob/Grep）与仅限查看语义的 Shell 抽查（拒绝删除/重定向/后台等写操作）实地核实清单证据（打开文件、搜索内容），输出三态裁决：
 

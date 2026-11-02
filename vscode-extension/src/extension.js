@@ -72,7 +72,11 @@ const MESSAGE_METHODS = {
  */
 const EVENT_PREFIXES = ['turn/', 'stream/', 'thinking/', 'tool/', 'todo/', 'verify/', 'compress/', 'bg/', 'confirm/', 'insert/'];
 /** 原样转发给 webview 的完整通知方法名 */
-const EVENT_METHODS = ['stats', 'error', 'session/list', 'session/saved', 'notice'];
+const EVENT_METHODS = ['stats', 'error', 'session/list', 'session/saved',
+  // 会话级配置快照（插件 / 插件锁定 / 审核模式）：每轮收口时后端推一条。
+  // 漏了它 = 用户问完第一句、AI 跑完后插件下拉仍是未锁定外观（点一下才被拒），
+  // 而请求与回执全通，看起来像「后端没发通知」——与 insert/ 前缀那次同一个坑。
+  'session/config', 'notice'];
 
 /**
  * 这条 webview 消息是不是「要 /skill 候选」。

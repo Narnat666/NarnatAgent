@@ -18,8 +18,37 @@ DEFAULT_MAX_TIMEOUT_SECONDS = 1800
 
 # ── 插件工具（可开关分组）默认名单 ──
 # 常驻工具（Read/Glob/Grep/Edit/Write/Shell/TodoWrite）不可开关；
-# 下列工具可在 narnat.json "工具"."插件" 中用 "on"/"off" 开关（缺项默认 on）。
-DEFAULT_PLUGIN_TOOLS = ("Terminal", "WebSearch", "Serial", "MCP")
+# 下列工具可在 narnat.json "工具"."插件" 中用 "on"/"off" 开关（缺项默认见下）。
+# Goal = 是否向 LLM 注入 GoalComplete（审核模式的依赖项），与其余插件的区别只在于
+# 它控制的定义名与插件名不同（Goal → GoalComplete）。
+DEFAULT_PLUGIN_TOOLS = ("Terminal", "WebSearch", "Serial", "MCP", "Goal")
+
+# 默认关闭的插件：Goal 关，普通对话不注入 GoalComplete（与既有默认行为一致）
+PLUGIN_DEFAULT_OFF = frozenset({"Goal"})
+
+
+def plugin_defaults() -> dict:
+    """全部插件的默认开关（{name: bool}），顺序同 DEFAULT_PLUGIN_TOOLS"""
+    return {name: name not in PLUGIN_DEFAULT_OFF for name in DEFAULT_PLUGIN_TOOLS}
+
+
+def parse_plugin_config(raw) -> dict:
+    """把一份插件开关集合归一为 {name: bool}。
+
+    两个来源共用这一份解析：narnat.json「工具.插件」（值是 "on"/"off" 字符串）
+    与 会话 JSON 的「插件」字段（值是布尔）。两者若各写一套，必然有一处漂移。
+    缺项 → 用默认（PLUGIN_DEFAULT_OFF 之外为开）；字符串仅 "off" 视为关
+    （不认 "false"，沿用既有配置口径）；布尔按值。
+    """
+    src = raw if isinstance(raw, dict) else {}
+    states = {}
+    for name in DEFAULT_PLUGIN_TOOLS:
+        if name not in src:
+            states[name] = name not in PLUGIN_DEFAULT_OFF
+            continue
+        value = src[name]
+        states[name] = value if isinstance(value, bool) else str(value).strip().lower() != "off"
+    return states
 
 # ── MCP 服务器默认值（对标 codex：DEFAULT_STARTUP_TIMEOUT / DEFAULT_TOOL_TIMEOUT）──
 DEFAULT_MCP_STARTUP_TIMEOUT = 30   # 启动 + 握手 + 列工具超时（秒）
@@ -27,8 +56,10 @@ DEFAULT_MCP_TOOL_TIMEOUT = 300     # MCP 工具调用超时（秒）
 
 # ── 目标模式默认值 ──
 # 单一预算：续跑轮数与验证打回合并计数（每轮续跑消耗1；轮内验证打回每次额外消耗1）
-DEFAULT_GOAL_MAX_ROUNDS = 10   # /goal 开启后单个任务的自动续跑轮数上限（总预算）
-DEFAULT_GOAL_VERIFY = True          # 完成验证：GoalComplete提交清单后由独立AI验证器复核
+DEFAULT_GOAL_MAX_ROUNDS = 10   # 单个任务的自动续跑轮数上限（总预算）
+# 完成验证（= 界面上的「审核模式」）：AI 调 GoalComplete 声明完成后再由独立 AI 复核。
+# 默认关：headless 不带 -g 就是「不开审核」；/goal on 只改本次运行的内存值，不写盘。
+DEFAULT_GOAL_VERIFY = False
 
 # ── 目标模式完成审计提示（续跑消息中拼接，供AI自查完成度）──
 GOAL_AUDIT_HINT = """\

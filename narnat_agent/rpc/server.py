@@ -429,6 +429,19 @@ class RpcServer:
             raise RpcError(-32602, f"{method}: params.{key} 不能为空")
         return value
 
+    def _mirror_turn_active(self) -> None:
+        """把 busy 镜像给 RpcUI —— SessionManager 的 on_goal 判据读的是 UI 那份。
+
+        为什么不直接让 SessionManager 读这里：SessionManager 在 assembly 里构造，
+        RpcServer 要等 serve(agent) 才存在。镜像由本类单向推送，UI 只读。
+        """
+        setter = getattr(self._ui, "set_turn_active", None)
+        if setter is None:
+            return
+        with self._turn_lock:
+            active = self._turn_active
+        setter(active)
+
     def _on_turn_end(self, _reason: str, intermediate: bool = False) -> None:
         # intermediate=True 是「同一用户请求内部的中间轮收口」（目标模式自动续跑）。
         # 这时**不能**解除 busy：解了之后用户能在目标跑到一半时再发一条消息，
@@ -438,20 +451,59 @@ class RpcServer:
             return
         with self._turn_lock:
             self._turn_active = False
+        self._mirror_turn_active()
+        # 这一轮真的跑完了 → 会话级配置的可用性可能刚变了（历史里第一次出现
+        # 用户消息 = 插件从此锁定；Goal 插件没开则审核模式本来就不可配置）。
+        # 只靠 initialize 与会话回执的话，用户新建对话→问第一句→AI 跑完，
+        # 插件与审核模式下拉仍是「未锁定」外观，点一下才被后端 -32000 拒绝。
+        self._emit_session_config()
+
+    def _emit_session_config(self) -> None:
+        """把会话级配置快照推给界面（与 initialize 同一份 _session_config_payload）。
+
+        为什么是轮次收口而不是 turn/end 载荷：turn/end 由 RpcStream.close_turn 发
+        在 rpc/ui.py —— 那里拿不到 _session_config_payload()，复制一份判定必然漂移。
+        这里在收口之后单独推一条，来源仍只有一处。
+        """
+        try:
+            from .ui import emit
+            emit("session/config", self._session_config_payload())
+        except Exception:
+            pass   # 通知失败不该影响轮次收口本身
 
     # ── 方法：initialize ──
 
-    def _m_initialize(self, params: Dict[str, Any]) -> Dict[str, Any]:
+    def _session_config_payload(self) -> Dict[str, Any]:
+        """当前会话的插件与审核模式快照（与 initialize 同口径，唯一产出点）。
+
+        为什么会变：插件与审核模式都是**会话级**的（SessionManager.switch_state
+        绑定），任何进入/新建/合并/删除会话的操作都会换掉它们。只带在 initialize
+        里的话，切会话后界面显示的还是上一个会话的值。
+        """
         ai = self._config.ai
         mgr = self._mgr
         enabled = bool(getattr(mgr, "_goal_enabled", False))
         max_rounds = getattr(mgr, "_goal_max_rounds", 0) or 0
         if not max_rounds:
             max_rounds = getattr(ai, "goal_max_rounds", 0) or 0
+        plugins_locked = bool(mgr.plugin_locked())
+        return {
+            # locked：审核模式是否不可配置。判据**只有一条**——插件 Goal 未启用
+            # （审核模式的完成声明依赖 GoalComplete 定义）。审核模式不改工具表、
+            # 不占缓存前缀，所以不受 pluginsLocked 约束：会话已开始工作也照常可调，
+            # 只有 AI 正在跑的当下由前端按运行态置灰。
+            "goal": {"enabled": enabled, "maxRounds": int(max_rounds),
+                     "locked": not bool(mgr.plugin_states().get("Goal"))},
+            "plugins": self._plugins(),
+            "pluginsLocked": plugins_locked,
+        }
+
+    def _m_initialize(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        ai = self._config.ai
         # 面板一打开就查一次余额：否则要等到第 1 轮对话开始才查，
         # 在那之前界面只能显示余额 0。用后台线程，不让网络请求卡住握手。
         self._kick_balance_probe()
-        return {
+        payload = {
             "version": self._version,
             "protocol": PROTOCOL_VERSION,
             "model": {"current": ai.model, "options": list(ai.model_options or [])},
@@ -459,8 +511,6 @@ class RpcServer:
                          "options": dict(ai.thinking_options or {}),
                          "passback": bool(getattr(ai, "thinking_passback",
                                                   DEFAULT_THINKING_PASSBACK))},
-            "goal": {"enabled": enabled, "maxRounds": int(max_rounds)},
-            "plugins": self._plugins(),
             "session": self._session_brief(params.get("historyLimit"),
                                            params.get("historyMaxItems")),
             "workdir": os.getcwd(),
@@ -480,6 +530,8 @@ class RpcServer:
             # markdown / 代码块 / diff / 状态 / 工具行这些「内容」的角色色。
             "theme": self._theme_snapshot(),
         }
+        payload.update(self._session_config_payload())
+        return payload
 
     def _theme_snapshot(self) -> Dict[str, Any]:
         """当前配色快照（读内存里的 UIConfig.raw，启动时已规范化）。
@@ -589,19 +641,16 @@ class RpcServer:
     def _plugins(self):
         from ..tools.registry import (PLUGIN_TOOL_NAMES, get_capability)
 
-        # 插件开关已改为「重启后生效」：运行态不会再变，面板展示配置态
-        #（读运行态会与用户刚写入的配置不一致，刷新即弹回）。
-        try:
-            configured = self._mgr._read_plugin_config()
-        except Exception:
-            configured = {}
+        # 取会话生效值（不是 narnat.json 的配置态）：插件已改为会话级，
+        # 面板要显示的是「当前这段对话实际用哪些工具」。
+        states = self._mgr.plugin_states()
         items = []
         for name in PLUGIN_TOOL_NAMES:
             cap = get_capability(name)
             items.append({
                 "name": name,
                 "label": cap.get("plugin_label") or cap.get("label") or name,
-                "enabled": bool(configured.get(name, True)),
+                "enabled": bool(states.get(name, True)),
             })
         return items
 
@@ -699,11 +748,13 @@ class RpcServer:
             if self._turn_active:
                 raise RpcError(-32000, "busy")
             self._turn_active = True
+        self._mirror_turn_active()
         try:
             self._ui.push_input(text)
         except Exception as e:
             with self._turn_lock:
                 self._turn_active = False
+            self._mirror_turn_active()
             raise RpcError(-32603, f"chat/send: 投递失败: {e}")
         # 记进输入历史（与终端形态同一个文件）。放在投递成功之后：被 busy 拒掉
         # 的那条从没发给模型，进了历史用户下次按 ↑ 会以为自己问过。
@@ -931,13 +982,20 @@ class RpcServer:
             except RpcError as e:
                 return {"handled": True, "ok": False, "noop": False,
                         "lines": [str(e.message)], "stateChanged": ["session"]}
-            return {"handled": True, "ok": True, "noop": False,
-                    # broken：删的是列表里看不到的损坏文件，文案要如实说
-                    # 「清理」而不是「删除了某会话」，否则用户不知道发生了什么
-                    "lines": [("已清理损坏的会话文件: " if res.get("broken")
-                               else "已删除会话: ") + res.get("name", target)],
-                    "wasCurrent": bool(res.get("wasCurrent")),
-                    "stateChanged": ["session"]}
+            payload = {
+                "handled": True, "ok": True, "noop": False,
+                # broken：删的是列表里看不到的损坏文件，文案要如实说
+                # 「清理」而不是「删除了某会话」，否则用户不知道发生了什么
+                "lines": [("已清理损坏的会话文件: " if res.get("broken")
+                           else "已删除会话: ") + res.get("name", target)],
+                "wasCurrent": bool(res.get("wasCurrent")),
+                "stateChanged": ["session"]}
+            # 删掉的是当前会话 → 上下文已回游离态，插件与审核模式也跟着回默认值。
+            # 这条是「执行完了」的分支（stateChanged 里有 session），不能只按
+            # 下面的主路径判：命令名硬编码与「提前 return 就不带」都会漏掉它。
+            if payload["wasCurrent"]:
+                payload.update(self._session_config_payload())
+            return payload
 
         # /cd 会进另一个会话（enter → replace_messages）：不先打断就串台。
         # 实测：正在跑的那一轮正文会写进刚切过去的会话，原会话只剩一句提问。
@@ -1018,6 +1076,14 @@ class RpcServer:
                 auto = getattr(self._mgr, "_last_auto_saved", None)
                 if auto:
                     payload["autoSaved"] = auto
+        # 会话变了就得把「会话级配置快照」一起带回去。判据用 stateChanged 里的
+        # "session"（`/cd /explore /done /rm /exit /save` 都算，将来新增的命令
+        # 只要声明了就不必再改这里）—— 按命令名硬编码必然漏。
+        # "plugin"/"goal" 也算：这两项与 session 一起构成同一份快照，且 /plugin
+        # 会改审核模式的可用性（Goal 关 → 审核模式不可配置）——不一起带回，
+        # 敲完 `/plugin Goal off` 后审核模式按钮不会灰显。
+        if _CONFIG_SNAPSHOT_STATES & set(payload["stateChanged"]):
+            payload.update(self._session_config_payload())
         return payload
 
     # ── 方法：session ──
@@ -1071,6 +1137,8 @@ class RpcServer:
                                             params.get("historyLimit"),
                                             None,
                                             params.get("historyMaxItems")))
+        # 游离态有一套自己的插件值（_plugin_defaults），同样要带回去。
+        payload.update(self._session_config_payload())
         return payload
 
     def _preflight_switch_target(self, name: str):
@@ -1154,6 +1222,8 @@ class RpcServer:
                                             params.get("historyLimit"),
                                             None,
                                             params.get("historyMaxItems")))
+        # 换会话就换了一套插件与审核模式：不带回去，界面显示的仍是上一个会话的值。
+        payload.update(self._session_config_payload())
         return payload
 
     def _m_session_history(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -1225,9 +1295,14 @@ class RpcServer:
         lines = [f"已删除 {deleted} 个会话"]
         if failed:
             lines.append("未删除：" + "; ".join(failed[:3]))
-        return {"handled": True, "ok": not failed, "noop": deleted == 0,
-                "lines": lines, "stateChanged": ["session"],
-                "wasCurrent": was_current, "current": self._current_path()}
+        payload = {"handled": True, "ok": not failed, "noop": deleted == 0,
+                   "lines": lines, "stateChanged": ["session"],
+                   "wasCurrent": was_current, "current": self._current_path()}
+        # 删光了必然回到游离态（was_current 时更是从头到尾换了上下文），
+        # 与单条 /rm 走同一个判据：执行完了就把会话级配置快照带回去。
+        if was_current or deleted:
+            payload.update(self._session_config_payload())
+        return payload
 
     def _delete_dangling_parent(self, name: str) -> Dict[str, Any]:
         """删掉「父 json 已丢、只剩 <父>/ 子会话文件」的幽灵父会话。
@@ -1257,9 +1332,13 @@ class RpcServer:
             raise RpcError(-32000,
                            f"删除未完成：幽灵父「{name}」下仍有子会话文件没能删掉"
                            f"（可能被其它程序占用），请关闭后重试")
-        return {"deleted": True, "name": name, "parent": None, "ghost": True,
-                "childrenRemoved": removed, "wasCurrent": was_current,
-                "current": self._current_path()}
+        payload = {"deleted": True, "name": name, "parent": None, "ghost": True,
+                   "childrenRemoved": removed, "wasCurrent": was_current,
+                   "current": self._current_path()}
+        # 只有清掉的是「当前所在」时才换了上下文，才需要刷新插件与审核模式。
+        if was_current:
+            payload.update(self._session_config_payload())
+        return payload
 
     def _m_session_delete(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """删除会话：允许删任意一个，并立刻落盘。
@@ -1343,13 +1422,21 @@ class RpcServer:
             # 典型是文件名与 json 里的 name 字段不一致（手工改过名、从别处拷来）。
             # 不兜底的话这条会话在界面上永远删不掉（实测）。
             if parent is None and _rm_mismatched_session_file(mgr.narnat_dir, target):
-                return {"deleted": True, "name": target, "parent": None,
-                        "wasCurrent": was_current,
-                        "current": self._current_path()}
+                payload = {"deleted": True, "name": target, "parent": None,
+                           "wasCurrent": was_current,
+                           "current": self._current_path()}
+                if was_current:
+                    payload.update(self._session_config_payload())
+                return payload
             raise RpcError(-32000, err)
-        return {"deleted": True, "name": target, "parent": parent,
-                "wasCurrent": was_current,
-                "current": self._current_path()}
+        payload = {"deleted": True, "name": target, "parent": parent,
+                   "wasCurrent": was_current,
+                   "current": self._current_path()}
+        # 删的若是当前所在（或它的父），状态已回游离态，插件也回到默认值。
+        # 删别人的会话不动当前上下文，不带。
+        if was_current:
+            payload.update(self._session_config_payload())
+        return payload
 
     def _m_session_rename(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """重命名会话。name=原名（可带 父/子），to=新名。"""
@@ -1547,6 +1634,8 @@ class RpcServer:
         if reentered:
             payload["reentered"] = True
             payload["notice"] = f"已重新进入分支 {name}"
+        # 新建与重进都换了当前会话，两条分支走同一份快照。
+        payload.update(self._session_config_payload())
         return payload
 
     def _m_session_done(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -1579,6 +1668,8 @@ class RpcServer:
         payload.update(_history_page_fields(messages, params.get("historyLimit"),
                                             None,
                                             params.get("historyMaxItems")))
+        # 合并后回到父会话，插件与审核模式跟着换成父会话那一套。
+        payload.update(self._session_config_payload())
         return payload
 
     # ── 方法：config ──
@@ -1703,13 +1794,14 @@ class RpcServer:
                 "id": iid, "group": "websearch", "label": label, "kind": "text",
                 "value": val, "writable": True, "placeholder": ph, "advanced": True,
             })
-        # 联网搜索总开关（复用已有的 plugin 通道，不新造一套）
+        # 联网搜索总开关（复用已有的 plugin 通道，不新造一套）。
+        # 插件是会话级的：会话一旦开始工作就锁定，这个开关随之只读。
         for p in self._plugins():
             if str(p.get("name")) == "WebSearch":
                 items.append({
                     "id": "plugin:WebSearch", "group": "websearch", "label": "启用联网搜索",
                     "kind": "bool", "value": bool(p.get("enabled")), "pluginName": "WebSearch",
-                    "writable": True,
+                    "writable": not bool(self._mgr.plugin_locked()),
                 })
 
         # ────────── 3. narnat.md ──────────
@@ -1826,14 +1918,23 @@ class RpcServer:
                 raise RpcError(-32602, "config/set: goal.maxRounds 必须是整数")
             if max_rounds < 0:
                 raise RpcError(-32602, "config/set: goal.maxRounds 不能为负")
-            self._mgr._goal_enabled = enabled
-            self._mgr._goal_max_rounds = max_rounds if enabled else 0
-            setter = getattr(self._mgr, "_set_goal_tool", None)
-            if setter:
-                setter(enabled)
+            # 归一为 /goal 的命令写法，与终端走同一条路径（on_goal 是唯一生效点）
+            if not enabled:
+                action = "off"
+            else:
+                action = f"on {max_rounds}" if max_rounds else "on"
+            status, text = self._mgr.on_goal(action)
+            if status == "error":
+                raise RpcError(-32000, text.strip())
+            # 复用唯一产出点，不在这里再算一遍 locked。
+            # 本次实测缺陷就是漏改这里：口径还是「会话已工作 or Goal 关」，
+            # 于是在已工作过的会话里打开审核模式时回执带回 locked:true，
+            # 前端照它把下拉锁死 —— 用户点「关」毫无反应，且还没输入任何问题。
+            cur = self._session_config_payload()["goal"]
             return {"ok": True, "current": {
-                "enabled": enabled,
-                "maxRounds": int(max_rounds or ai.goal_max_rounds),
+                "enabled": cur["enabled"],
+                "maxRounds": cur["maxRounds"],
+                "locked": cur["locked"],
             }}
         if key == "plugin":
             if not isinstance(value, dict):
@@ -1845,7 +1946,11 @@ class RpcServer:
             status, text = self._mgr.on_plugin(f"{name} {'on' if enabled else 'off'}")
             if status == "error":
                 raise RpcError(-32000, text.strip())
-            return {"ok": True, "current": {"name": name, "enabled": enabled}}
+            # 带上完整快照：关掉 Goal 插件会连带改变 goal.locked（审核模式变只读），
+            # 只回 {name, enabled} 的话界面无从知道，审核模式下拉不会跟着灰显。
+            payload = {"ok": True, "current": {"name": name, "enabled": enabled}}
+            payload.update(self._session_config_payload())
+            return payload
         if key == "api":
             return self._set_api_config(value)
         if key == "websearch":
@@ -2719,6 +2824,11 @@ _STATE_CHANGES = {
 
 def _state_changes(command: str) -> list:
     return list(_STATE_CHANGES.get(command.lower().lstrip("/"), []))
+
+
+# 回执需要附带「会话级配置快照」（plugins / pluginsLocked / goal）的变更面。
+# plugin 与 goal 也算：/plugin 会改审核模式的可用性（Goal 关 → 审核模式不可配置）。
+_CONFIG_SNAPSHOT_STATES = frozenset({"session", "plugin", "goal"})
 
 
 def _humanize_internal_error(e: BaseException) -> str:
