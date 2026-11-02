@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from .protocol import get_transport
 from .ui import RpcUI
-from ..config.defaults import DEFAULT_THINKING_PASSBACK, INTERNAL_NOTICE_MARKERS
+from ..config.defaults import DEFAULT_THINKING_PASSBACK, is_internal_notice
 from ..core.input_history import append_history, history_path, load_history
 from ..core.session_callbacks import _persist_config
 
@@ -2344,33 +2344,31 @@ class RpcServer:
 def _is_internal_notice(text: str) -> bool:
     """这条 user 消息是不是**后端自己注入的纠偏指令**（不是用户说的话）。
 
-    为什么要判：agent_loop / compression_coordinator 会在对话里插一批
-    `[系统提醒] …` 的 user 消息（TodoWrite 提醒、计划未勾、后台任务未收、
-    上下文已压缩…）。它们对模型有用，但**不该出现在界面历史里** ——
-    用户切回会话会看到一句自己从没打过的「我说的话」，以为账号串了或被改了记录。
-
-    ## 判据为什么必须锚定整条，不能只看「以 [ 开头」
-
-    实测用户的真实消息里就有大量以方括号开头的内容：
-        `[Mapping Extensions and Extra Properties (MEEP)] Animal LemurKat…`
-        `[ValleyTalk] VT-HTTP-START…`
-        `[Wind Effects] Wind Effects are disabled for today.`
-    这些是用户**粘贴的日志/模组输出**，必须原样显示。只看开头会把它们全吃掉。
-
-    所以：
-      · `[系统提醒]` 前缀 —— 程序独占（STYLE_NOTICE_TEMPLATE 也用它），
-        只管前缀就够，因为用户配的提醒语是任意内容，必须能覆盖到。
-      · 溢出压缩那条 `[]对话历史过长…` —— 用完整开头片段锚定。
+    判据实现在 config/defaults.is_internal_notice —— 与 core/message_manager
+    的「不把它拼进用户真实提问」共用同一份，两处各写一份必然漂移。
+    这里保留一层薄包装只为沿用本模块的历史调用名。
     """
-    if not isinstance(text, str):
-        return False
-    s = text.lstrip()
-    if not s:
-        return False
-    for marker in INTERNAL_NOTICE_MARKERS:
-        if s.startswith(marker):
-            return True
-    return False
+    return is_internal_notice(text)
+
+
+def _strip_trailing_notice(text: str) -> str:
+    """把「用户真话 + 空行 + 注入提醒」尾部的注入段剔掉（**仅供界面展示**）。
+
+    为什么还需要这一层：注入端已改为独立成条（见 message_manager.
+    append_user_merged），但**旧版本写进磁盘的历史里，提醒已经和用户提问拼成
+    同一条**（实测用户截图：「文档在哪我看看」下面跟着一段 [系统提醒]）。
+    只修注入端的话，那些老会话重开一次仍会看到自己没打过的话。
+
+    只剔**尾部的连续若干段**，判据仍是整段以 marker 开头；用户消息中间的
+    内容一字不动。不改消息本身，只改回给界面的副本 —— 发给模型的上下文
+    保持原样（提醒对模型仍有用）。
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    parts = text.split("\n\n")
+    while len(parts) > 1 and is_internal_notice(parts[-1]):
+        parts.pop()
+    return "\n\n".join(parts)
 
 
 def _history_payload(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -2462,7 +2460,13 @@ def _history_payload(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         # （用户截图：整段历史只有工具，没有思考）。text 给空串而不是 None，
         # 界面据此知道「这条只有思考，不建正文气泡」。
         if has_text or has_think:
-            item: Dict[str, Any] = {"role": role, "text": content if has_text else ""}
+            # 老版本把注入提醒拼进了用户提问（见 _strip_trailing_notice），
+            # 回给界面时剔掉尾部那段；发给模型的上下文不动。
+            shown = _strip_trailing_notice(content) if role == "user" else content
+            if role == "user" and isinstance(shown, str) and content and not shown.strip():
+                # 剥完一句不剩 = 这条消息整条都是注入内容，别画空气泡
+                continue
+            item: Dict[str, Any] = {"role": role, "text": shown if has_text else ""}
             if has_think:
                 item["thinking"] = thinking
             out.append(item)

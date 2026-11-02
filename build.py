@@ -361,6 +361,12 @@ def main():
         action="store_true",
         help="将 Nuitka 还原为上游原始代码后退出",
     )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="迭代用快速编译：关掉 LTO。LTO 链接占整次编译一半以上时间，"
+        "改一行也要全量重链；关掉后产物略大略慢，仅供内部验证，发版不要用",
+    )
     args = parser.parse_args()
 
     if args.patch_nuitka or args.revert_nuitka:
@@ -388,7 +394,9 @@ def main():
         "--onefile-tempdir-spec=%s" % spec,
         "--product-version=%s" % version,
         "--jobs=%d" % args.jobs,
-        "--lto=yes",
+        # LTO 链接占整次编译一半以上时间（实测 706 秒 / 总 22 分钟），且改一行
+        # 也要全量重链。--fast 供迭代验证，发布仍用默认的全量 LTO。
+        "--lto=%s" % ("no" if args.fast else "yes"),
         "--python-flag=no_docstrings",
         "--include-module=openai",
         # Pillow：Read 工具的识图能力依赖它。两个坑叠在一起，所以用整个包：
@@ -425,7 +433,12 @@ def main():
 
     print("[build] 版本: %s" % version)
     print("[build] 运行时目录模式: %s（%s）" % (args.runtime, spec))
+    print("[build] LTO: %s" % ("关闭（--fast，仅供验证）" if args.fast else "开启"))
     print("[build] 产物: %s" % os.path.join("output", output_name))
+    # clcache 缺失时「2151 个 C 文件全部重编、0 命中」是纯浪费（实测）：
+    # 内容没变的文件本该直接复用目标文件。只提示一次，不阻断编译。
+    if not shutil.which("clcache"):
+        print("[build] 提示：未检测到 clcache，C 文件无法命中缓存（不影响产物正确性）")
 
     result = subprocess.run(cmd, cwd=ROOT)
 

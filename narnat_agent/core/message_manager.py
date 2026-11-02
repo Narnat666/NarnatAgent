@@ -8,6 +8,7 @@ from typing import Optional, NamedTuple
 
 from .compressor import Compressor, select_cut_index, estimate_tokens
 from .message_list import MessageList, MessageView, SYNTHETIC_THINKING
+from ..config.defaults import is_internal_notice as _is_internal_notice
 from ..logger import AgentLogger
 
 
@@ -91,7 +92,16 @@ class MessageManager:
         带 images 的 user 消息（工具结果配图）不参与合并：拼接只动字符串，
         合并会让 images 字段静默丢失（图还在历史里但再也发不出去）。
         这类消息后面直接新起一条，Anthropic 侧的连续 user 由转换层合并内容块处理。
+
+        **后端自己注入的提醒不合并**（判据见 _is_internal_notice）：
+        合并会把 `[系统提醒] …` 拼到用户真实提问后面，整条于是不再以该前缀开头，
+        界面侧的整条过滤随之失效 —— 用户会看到自己没打过的话（实测截图）。
+        独立成条后，界面按前缀整条跳过；结构上的连续 user 由 Anthropic 转换层
+        合并内容块、OpenAI 协议本身也接受，不影响发请求。
         """
+        if _is_internal_notice(content):
+            self._messages.append_user(content)
+            return
         view = self._messages.view()
         if (len(view) > 0 and view[-1].get("role") == "user"
                 and not view[-1].get("images")):

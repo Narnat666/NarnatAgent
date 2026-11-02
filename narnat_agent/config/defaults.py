@@ -117,6 +117,25 @@ INTERNAL_NOTICE_MARKERS = (
     "[]对话历史过长已自动压缩",
 )
 
+
+def is_internal_notice(text) -> bool:
+    """这条 user 消息是不是**后端自己注入的纠偏指令**（不是用户说的话）。
+
+    两个消费方必须共用这一份判据，各写一份必然漂移：
+      · rpc/server.py 的界面历史裁剪 —— 整条不显示
+      · core/message_manager.py 的 append_user_merged —— 不把它拼进用户真实提问
+        （拼进去整条就不再以该前缀开头，界面侧的整条过滤随之失效）
+
+    判据锚定**整条开头**，不能只看「以 [ 开头」：实测用户真会粘贴
+    `[Mapping Extensions…]` `[ValleyTalk]` 这类日志，只看开头会全吃掉。
+    """
+    if not isinstance(text, str):
+        return False
+    s = text.lstrip()
+    if not s:
+        return False
+    return any(s.startswith(marker) for marker in INTERNAL_NOTICE_MARKERS)
+
 # ── 基础Prompt模板 ──
 BASE_PROMPT_TEMPLATE = """\
 | 你的身份 | 你是 {model} 智能体。 |
