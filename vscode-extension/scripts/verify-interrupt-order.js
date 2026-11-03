@@ -1,8 +1,10 @@
 /**
- * 验证「被打断后保持原顺序」（用户报障：AI 第一句话跑到总结位置）。
+ * 验证「折叠组内保持发生顺序」+「停止轮照样建组、组内顺序不变、组头点不开」。
  *
- * 真实轮次结构：思考 → 正文「我来做个工具自检」→ 工具1 → 工具2
- * 期望：全部按原顺序进组，组内顺序 == 发生顺序，正文不在组外末尾。
+ * 真实轮次结构：思考 → 正文「我来做个工具自检」 → 工具1 → 工具2
+ * 期望（正常完成）：全部按原顺序进组，组内顺序 == 发生顺序，正文不在组外末尾。
+ * 期望（用户停止）：**照样建组**并把过程按原顺序收进去，组头带「已停止」
+ * 且不可展开，组外正文末尾另挂内联「已停止」标签 —— 见场景 D。
  */
 const fs = require('fs');
 const os = require('os');
@@ -60,7 +62,7 @@ const TEST = String.raw`
   async function run(){
     await boot();
 
-    /* ===== 场景 A：真实结构 思考 → 正文 → 工具1 → 工具2，被打断 ===== */
+    /* ===== 场景 A：真实结构 思考 → 正文 → 工具1 → 工具2，正常完成 ===== */
     emit({ type: 'turn/begin', params: { round: 1 } });
     await sleep(20);
     emit({ type: 'thinking/begin', params: {} });
@@ -80,8 +82,8 @@ const TEST = String.raw`
     emit({ type: 'tool/call', params: { id: 'p2', name: 'Shell', label: '执行命令',
       summary: 'echo === CWD ===', arguments: { command: 'echo === CWD ===' } } });
     await sleep(20);
-    // 第二个工具没回结果就被打断
-    emit({ type: 'turn/end', params: { reason: 'cancelled' } });
+    // 第二个工具没回结果，这一轮正常收口
+    emit({ type: 'turn/end', params: { reason: 'done' } });
     await sleep(500);
 
     var seq = innerSeq();
@@ -93,7 +95,7 @@ const TEST = String.raw`
     var outsideAssistant = kids().filter(function(el){
       return el.classList.contains('msg') && el.classList.contains('assistant');
     });
-    ck('A2 被打断时正文不留在组外（否则会被读成总结）',
+    ck('A2 中间正文不留在组外（否则会被读成总结）',
        outsideAssistant.length === 0, 'got=' + outsideAssistant.length);
 
     // 正文确实在组内且在第一句话的位置
@@ -103,7 +105,8 @@ const TEST = String.raw`
        innerText.slice(0, 60));
 
     var label = (convo().querySelector('.turn-proc .tp-label') || {}).textContent || '';
-    ck('A4 折叠行带「已停止 ·」前缀', label.indexOf('已停止') === 0, JSON.stringify(label));
+    ck('A4 正常完成的折叠行不带状态词', label.indexOf('已停止') < 0 && label.indexOf('失败') < 0,
+       JSON.stringify(label));
     ck('A5 折叠行仍带计数', /\d+ 次工具调用/.test(label), JSON.stringify(label));
 
     var sys = [].slice.call(convo().querySelectorAll('.sys'))
@@ -172,6 +175,79 @@ const TEST = String.raw`
        'got=' + convo().querySelectorAll('.turn-proc').length);
     var tags = convo().querySelectorAll('.msg-stopped');
     ck('C2 这时在正文末尾挂「已停止」内联标签', tags.length === 1, 'got=' + tags.length);
+
+    /* ===== 场景 D：同样的结构，但这一轮被用户停止 → 照样建组，顺序不变 ===== */
+    var procBefore = convo().querySelectorAll('.turn-proc').length;
+    var markD = convo().lastElementChild;   // 本轮起点快照（turn/begin 前的最后一个兄弟）
+    emit({ type: 'turn/begin', params: { round: 4 } });
+    await sleep(20);
+    emit({ type: 'thinking/begin', params: {} });
+    await sleep(20);
+    emit({ type: 'thinking/delta', params: { text: '再跑一轮自检。' } });
+    await sleep(20);
+    emit({ type: 'thinking/end', params: {} });
+    await sleep(20);
+    emit({ type: 'stream/delta', params: { text: '这次我直接跑工具。' } });
+    await sleep(30);
+    emit({ type: 'tool/call', params: { id: 'r1', name: 'Read', label: '读取',
+      summary: 'd.md', arguments: { file_path: 'd.md' } } });
+    await sleep(20);
+    emit({ type: 'tool/result', params: { id: 'r1', ok: true, durationMs: 5, output: 'x' } });
+    await sleep(20);
+    emit({ type: 'turn/end', params: { reason: 'cancelled' } });
+    await sleep(500);
+
+    var allD = convo().querySelectorAll('.turn-proc');
+    ck('D1 停止轮照样建 1 个折叠组', allD.length === procBefore + 1,
+       'got=' + allD.length + ' before=' + procBefore);
+    var boxD = allD[allD.length - 1];
+    ck('D2 停止轮的组插在本轮起点之后（位置在原第一个过程节点处）',
+       boxD.previousElementSibling === markD,
+       'prev=' + kind(boxD.previousElementSibling) + ' 期望=' + kind(markD));
+    var seqD = [].slice.call(boxD.querySelector('.tp-inner').children).map(function(el){
+      if (el.classList.contains('think')) return 'think';
+      if (el.classList.contains('tools')) return 'tools:' + (el.getAttribute('data-tool') || '');
+      if (el.classList.contains('msg')) return 'assistant';
+      return el.className;
+    });
+    ck('D3 停止轮的组内成员顺序 == 发生顺序（思考→正文→工具）',
+       JSON.stringify(seqD) === JSON.stringify(['think', 'assistant', 'tools:Read']),
+       JSON.stringify(seqD));
+    var labelD = (boxD.querySelector('.tp-label') || {}).textContent || '';
+    ck('D4 停止轮组头带「已停止」状态词', labelD.indexOf('已停止') >= 0,
+       JSON.stringify(labelD));
+    ck('D5 停止轮组正文初始收起',
+       boxD.getAttribute('data-open') === 'false'
+       && boxD.querySelector('.tp-body').hasAttribute('hidden'),
+       'data-open=' + boxD.getAttribute('data-open'));
+    var rowD = boxD.querySelector('.tp-row');
+    rowD.click();
+    await sleep(250);
+    ck('D6 停止轮组头不可展开（disabled + 无 chevron + 点击无效）',
+       rowD.disabled === true && !boxD.querySelector('.tp-caret, .chevron')
+       && boxD.getAttribute('data-open') === 'false',
+       'disabled=' + rowD.disabled + ' data-open=' + boxD.getAttribute('data-open'));
+    var tagsD = convo().querySelectorAll('.msg-stopped');
+    ck('D7 停止轮正文末尾挂 1 个「已停止」内联标签', tagsD.length === 2
+       && tagsD[tagsD.length - 1].textContent.trim() === '已停止',
+       'tags=' + tagsD.length);
+    var asstD = convo().querySelectorAll('.msg.assistant');
+    var lastD = asstD[asstD.length - 1];
+    ck('D8 内联标签挂在本轮最后一条助手正文里', !!lastD
+       && !!lastD.querySelector('.msg-stopped')
+       && lastD.textContent.indexOf('这次我直接跑工具') >= 0,
+       lastD ? JSON.stringify((lastD.textContent || '').slice(0, 40)) : '(无)');
+    /* 本轮以工具收尾 → 没有最终回复 → 正文也收进组里，标签跟着收起。
+       这与 dsh 一致：它的内联标签在 AssistantMarkdown 里，组收起时同样看不到；
+       组头的「已停止」是另一处、始终可见。正文在组外的情形（以正文收尾的停止轮）
+       由 verify-stopped-group.js 的 A5b 守着。 */
+    ck('D9 整轮以工具收尾时正文进组、标签随组收起（组头「已停止」仍可见）',
+       boxD.contains(lastD), 'inGroup=' + (lastD ? boxD.contains(lastD) : '?'));
+    var sysD = [].slice.call(convo().querySelectorAll('.sys'))
+      .map(function(x){ return (x.textContent || '').replace(/\s+/g,' ').trim(); });
+    ck('D10 停止轮没有整行「■ 已停止」',
+       sysD.filter(function(s){ return /■.*已停止/.test(s); }).length === 0,
+       JSON.stringify(sysD));
 
     out.push('SUMMARY total=' + out.length + ' fail=' + fails);
     var pre = document.createElement('pre');

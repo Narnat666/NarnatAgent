@@ -6,7 +6,10 @@
  *     实时路径（finishTool）与历史路径（addHistoryTool）必须同口径。
  *
  *  2) 折叠行**不再**标「未完成」。用户原话：「后续正确的完整的工具调度也会在
- *     头上显示未完成，属于画蛇添足」。用户主动打断仍标「已停止」。
+ *     头上显示未完成，属于画蛇添足」。用户主动打断的那一轮**照样建组**，
+ *     组头写「已停止 · N 次工具调用」且不可展开（dsh 的 canCollapse=false →
+ *     disabled），正文末尾另挂内联标签 `.msg-stopped`
+ *     （见 verify-stopped-group.js）。
  */
 const fs = require('fs');
 const os = require('os');
@@ -29,6 +32,8 @@ const TEST = String.raw`
   function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
   function emit(m){ window.dispatchEvent(new MessageEvent('message', { data: m })); }
   function convo(){ return document.getElementById('convo'); }
+  function procGroups(){ return convo().querySelectorAll('.turn-proc'); }
+  function tags(){ return convo().querySelectorAll('.msg-stopped'); }
   function boot(){
     emit({ type: 'initialize', params: { version: 't', protocol: 1,
       model: { current: 'm', options: ['m'] },
@@ -107,7 +112,7 @@ const TEST = String.raw`
        label.indexOf('未完成') < 0, JSON.stringify(label));
     ck('N2 实时：折叠行仍带计数', /\d+ 次工具调用/.test(label), JSON.stringify(label));
 
-    /* ================= 实时：主动打断仍要标「已停止」 ================= */
+    /* ================= 实时：主动打断 → 组照建、组头「已停止」不可展开 ================= */
     convo().innerHTML = '';
     emit({ type: 'turn/begin', params: { round: 2 } });
     await sleep(20);
@@ -118,9 +123,26 @@ const TEST = String.raw`
     await sleep(30);
     emit({ type: 'turn/end', params: { reason: 'cancelled' } });
     await sleep(500);
-    var l2 = (convo().querySelector('.turn-proc .tp-label') || {}).textContent || '';
-    out.push('DIAG 实时打断折叠行=' + JSON.stringify(l2));
-    ck('S1 实时：用户主动打断仍标「已停止」', l2.indexOf('已停止') === 0, JSON.stringify(l2));
+    var P2 = procGroups();
+    var G2 = tags();
+    out.push('DIAG 实时打断 折叠组=' + P2.length + ' 内联标签=' + G2.length +
+             ' 文本=' + JSON.stringify(G2.length ? G2[0].textContent.trim() : ''));
+    var L2 = P2.length ? (P2[0].querySelector('.tp-label') || {}).textContent : '';
+    var row2 = P2.length ? P2[0].querySelector('.tp-row') : null;
+    if (row2) { row2.click(); await sleep(250); }
+    ck('S1 实时：用户主动打断仍产生 1 个 .turn-proc，组头带「已停止」',
+       P2.length === 1 && L2.indexOf('已停止') >= 0,
+       'turn-proc=' + P2.length + ' 标题=' + JSON.stringify(L2));
+    ck('S2 实时：打断轮组头不可展开（disabled + 无 chevron + 点击无效）',
+       P2.length === 1 && !!row2 && row2.disabled === true
+         && !P2[0].querySelector('.tp-caret, .chevron')
+         && P2[0].getAttribute('data-open') === 'false',
+       'disabled=' + (row2 ? row2.disabled : '?')
+         + ' data-open=' + (P2.length ? P2[0].getAttribute('data-open') : '-'));
+    ck('S3 实时：打断轮正文末尾挂 1 个 .msg-stopped「已停止」',
+       G2.length === 1 && G2[0].textContent.trim() === '已停止',
+       'msg-stopped=' + G2.length +
+       ' 文本=' + JSON.stringify(G2.length ? G2[0].textContent.trim() : ''));
 
     /* ================= 历史路径 ================= */
     convo().innerHTML = '';

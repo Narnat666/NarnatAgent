@@ -1498,9 +1498,21 @@ body[data-real="true"] .demo-tip{display:none}
 .insbar .row .b{
   flex:none;background:none;border:none;padding:0 2px;
   font:inherit;font-size:11px;color:var(--fg-faint);cursor:pointer;
+  /* 图标按钮：12px 字形 + 16px 盒，三颗并排也只占 48px，不给正文挤位置。
+     与折叠行的 16px 图标槽同尺寸，视觉上属于同一套描边图标。 */
+  display:inline-flex;align-items:center;justify-content:center;
+  width:16px;height:16px;
 }
+.insbar .row .act-ic{display:block}
 .insbar .row .b:hover{color:var(--fg)}
 .insbar .row .b.del:hover{color:var(--err)}
+/* 排队条第三颗按钮「插话发送」：非运行中禁用（灰、不响应、带 tooltip
+   「仅运行中可插话发送」）。禁用态必须**看得出来**，否则用户点了没反应，
+   以为是界面坏了。 */
+.insbar .row .b.steer{color:var(--fg-dim)}
+.insbar .row .b.steer:hover{color:var(--accent)}
+.insbar .row .b:disabled{color:var(--fg-faint);opacity:.55;cursor:default}
+.insbar .row .b:disabled:hover{color:var(--fg-faint)}
 /* 临时提示（运行中敲 / 命令、运行中带附件插话）：2~3 秒自动消失。
    同样不走 sysLine —— 理由与上面 .insbar 那条一样（会劈气泡）。 */
 .ins-hint{
@@ -1542,6 +1554,11 @@ body[data-real="true"] .demo-tip{display:none}
 .stop .sq{width:7px;height:7px;background:currentColor;border-radius:1px}
 body[data-run="true"] .stop{display:grid}
 body[data-run="true"] .send{display:none}
+/* 运行中停止按钮**常显**，不因草稿有无而隐藏。
+   曾照 dsh 的形态做成「草稿非空 → 圆钮换成发送」，代价是运行中一打字就没有
+   停止入口了（dsh 靠 Esc-Esc 兜底，我们没有那条通道）——用户明确要求停止按钮
+   必须一直能用。运行中要发消息用 Enter：去向由「繁忙时的发送行为」决定
+   （排队发送 / 插话发送），模式提示写在输入框 placeholder 上（refreshSendState）。 */
 /* 压缩中：与「运行中」同一套按钮切换（发送→停止），但走独立属性。
    为什么不复用 data-run：那个属性绑在 turn/begin↔turn/end 的轮次生命周期上，
    压缩发生在轮次之外（/compact 不产生 turn），混用会让审核模式续跑、
@@ -2306,6 +2323,11 @@ body[data-run="true"] #goalRounds{opacity:.45}
 }
 .turn-proc[data-open="true"] .tp-row{padding-bottom:12px}
 .tp-row:hover{color:var(--fg-dim)}
+/* 停止 / 失败轮的组头不可展开（dsh 的 canCollapse=false → 控件 disabled）。
+   disabled 只是语义，观感上不能还留着「可以点」的暗示：去掉手型指针、去掉
+   hover 变色（标题/副标题/耗时各有自己的颜色，这里只兜住会继承的行内颜色）。 */
+.tp-row[disabled]{cursor:default}
+.tp-row[disabled]:hover{color:var(--fg-faint)}
 .tp-caret{
   flex:none;margin-left:6px;display:inline-flex;align-items:center;justify-content:center;
   transition:transform .12s ease;transform-origin:50% 50%;
@@ -2538,23 +2560,28 @@ body[data-run="true"] #goalRounds{opacity:.45}
       <!-- 附件列表：拖拽/粘贴/「＋附件」进来的路径排在这里，发送后清空 -->
       <div class="attach" id="attachBox" data-on="false"></div>
 
-      <!-- 运行中插话的两块 UI。位置必须在输入框上方、#convo 之外：
+      <!-- 运行中提交的两块 UI。位置必须在输入框上方、#convo 之外：
            放进对话区会触发 closeAssistantSegment()，把正在流式输出的正文
            劈成两个气泡（详见 narnat.css 里 .insbar 那段注释）。
-             ① #insertHint：临时提示（运行中敲 / 命令、运行中带附件插话），
+             ① #insertHint：临时提示（运行中敲 / 命令、运行中带附件提交），
                 2~3 秒自动消失 —— 不用系统行，同样是怕劈气泡；
-             ② #insertBar：待处理队列条，队列为空时 display:none 不占空间。
+             ② #queueBar：**排队待发**（next-turn，等这一轮结束后的下一轮）；
+             ③ #insertBar：**插话待发**（next-step，本轮下一个边界生效）。
+           两条队列各自一条，都为空时各自 display:none 不占空间；同时非空时
+           垂直堆叠，排队条在上（它离「下一轮」更远，排在上面刚好是这个次序）。
            「已插入」的气泡不在这里：它是普通用户气泡 + data-inserted
-           （只用来画左边一条 1px 发丝线），由 insert/consumed 事件画进 #convo。 -->
+           （只用来画左边一条 1px 发丝线），由 insert/consumed 事件画进 #convo；
+           排队消息被消费后画的是**普通**用户气泡（不带 data-inserted）。 -->
       <div class="ins-hint" id="insertHint" data-on="false"></div>
-      <div class="insbar" id="insertBar" data-on="false" data-fold="false"></div>
+      <div class="insbar" id="queueBar" data-on="false" data-fold="false" data-kind="queue"></div>
+      <div class="insbar" id="insertBar" data-on="false" data-fold="false" data-kind="insert"></div>
 
       <textarea id="input" rows="1" placeholder="输入消息，/ 调出命令"></textarea>
 
       <div class="crow">
         <div class="right">
           <button class="attach-btn" id="attachBtn" data-tip="添加文件" aria-label="添加文件">＋</button>
-          <button class="stop" id="stopBtn" data-tip="停止" aria-label="停止"><span class="sq"></span></button>
+          <button class="stop" id="stopBtn" data-tip="停止生成" aria-label="停止生成"><span class="sq"></span></button>
           <button class="send" id="sendBtn" data-tip="发送" aria-label="发送" data-empty="true"><span class="ar">↑</span></button>
         </div>
       </div>
@@ -5659,6 +5686,11 @@ body[data-run="true"] #goalRounds{opacity:.45}
       else if (it.id === 'api.apiKey') payload = { apiKey: value };
       else if (it.id === 'api.protocol') payload = { protocol: value };
       else if (it.id === 'api.model') payload = { model: value };
+      else if (it.id === 'api.busySend') {
+        // 繁忙时的发送行为：独立 key，改完立刻生效（不必重启后端）
+        key = 'busySend';
+        payload = value;
+      }
       else if (it.id === 'api.thinking') {
         // 思考强度有热切换路径（on_thinking），不走 api 整包
         key = 'thinking';
@@ -5886,6 +5918,15 @@ body[data-run="true"] #goalRounds{opacity:.45}
   if (setCloseEl) setCloseEl.addEventListener('click', function(){ setPanelOpen(false); });
   window.__narnatOnConfigDescribe = function(p){
     setItems = (p && Array.isArray(p.items)) ? p.items : [];
+    /* 「繁忙时的发送行为」也在这份 describe 里：它决定了运行中按 Enter 的去向
+       与主按钮文案，所以不管用户看不看设置面板，收到就要同步到本地镜像。
+       （启动时由 initialize 下发一次，这里负责「用户刚改完」的那一次。） */
+    (setItems || []).forEach(function(it){
+      if (it && it.id === 'api.busySend' && (it.value === 'queue' || it.value === 'steer')) {
+        BUSY_SEND = it.value;
+      }
+    });
+    refreshSendState();
     setGroups = (p && Array.isArray(p.groups) && p.groups.length)
       ? p.groups
       // 老后端不给 groups：按已知分组兜底，至少面板不空白
@@ -6044,6 +6085,26 @@ body[data-run="true"] #goalRounds{opacity:.45}
        ATCH 用 `&&` 兜一下：本函数首次调用时 ATCH 还没赋值，那一刻是 undefined。 */
     var has = input.value.trim() || (ATCH && ATCH.length);
     b.setAttribute('data-empty', has ? 'false' : 'true');
+    /* 运行中这个圆钮是停止按钮（CSS: body[data-run="true"] 里 .send 隐藏、
+       .stop 常显），所以它的文案永远是「发送」，不随草稿变。
+       运行中的提交去向（排队 / 插话）提示在 placeholder 上：那个圆钮此刻已经
+       被停止占用，没有位置显示「排队发送 / 插话发送」。 */
+    b.setAttribute('aria-label', '发送');
+    b.setAttribute('data-tip', '发送');
+    setInputPlaceholder();
+  }
+
+  /**
+   * 输入框 placeholder：运行中多一句「Enter 的去向」。
+   *
+   * 为什么放这儿：运行中主按钮被停止占用（用户要求停止一直可点），
+   * 「这行字按 Enter 会排队还是插话」就没有别的显示位置了。不显示的话，
+   * 用户改完「繁忙时的发送行为」也看不出哪里变了。
+   */
+  function setInputPlaceholder(){
+    var run = document.body.getAttribute('data-run') === 'true';
+    input.setAttribute('placeholder',
+      run ? ('Enter ' + busyLabel() + '，/ 调出命令') : '输入消息，/ 调出命令');
   }
   /* 让「发完就清空」这类程序化改动也走同一条路：直接写 input.value 不会触发
      input 事件，发送按钮就会停在亮态（看着像「还能再发一条」）。原来是在两处
@@ -7215,6 +7276,20 @@ body[data-run="true"] #goalRounds{opacity:.45}
         return;
       }
     }
+    /* 运行中按 Cmd/Ctrl+Enter = 用**相反**的模式提交（对齐 dsh）：
+       偏好是排队发送时，这一下就是插话发送；偏好是插话时，这一下就是排队。
+       空闲时 Ctrl/Cmd+Enter 不做事（下面的普通 Enter 分支本就排除了修饰键，
+       这里只是不接管它）。 */
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+      if (body.getAttribute('data-run') === 'true') {
+        var cv = input.value.trim();
+        if (cv && cv.charAt(0) !== '/' && !(ATCH && ATCH.length)) {
+          e.preventDefault();
+          sendChat(BUSY_SEND === 'steer' ? 'queue' : 'steer');
+        }
+      }
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
       e.preventDefault();
       var v = input.value.trim();
@@ -7272,7 +7347,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
     var btn = document.getElementById('stopBtn');
     if (!btn) return;
     btn.removeAttribute('data-pending');
-    btn.setAttribute('data-tip', '停止');
+    btn.setAttribute('data-tip', '停止生成');
   }
   /**
    * 刚点过停止后的短暂窗口里，忽略发送按钮的点击。
@@ -9467,6 +9542,27 @@ body[data-run="true"] #goalRounds{opacity:.45}
           （用户取消、后端压缩、轮次比我以为的更早结束，都会这样）。
      UI 只有两处：输入框上方的队列条、对话区里那条「已插入」气泡。
      ================================================================== */
+  /**
+   * 队列条目上的图标按钮（改 / 删 / 插话发送），两条队列共用。
+   *
+   * 用图标而不是文字：一行里挤三个文字按钮（「改」「删」「插话发送」），
+   * 「插话发送」四个字会把 249px 面板里的正文压到只剩几个字。
+   * dsh 的 QueueDock 也是纯图标 + aria-label + hover 提示
+   * （`IconEditOutlineRegular` / `IconTrashOutlineRegular` / `IconSendOutlineRegular`，
+   * 见 `ui-conversation/src/client/queue/QueueDock.tsx`），文字只在 tooltip 里出现。
+   * 描边风格与 ROW_ICONS / CARET_SVG 一致（16×16、1px、currentColor）。
+   * data-tip 走全局提示层（见 showTip）：鼠标悬停与键盘焦点都会显示。
+   */
+  var ACT_ICON_EDIT = '<svg class="act-ic" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">' +
+    '<path d="M11.5 2.5l2 2L6 12H4v-2l7.5-7.5z" fill="none" stroke="currentColor"' +
+    ' stroke-width="1" stroke-linejoin="round"/></svg>';
+  var ACT_ICON_DEL = '<svg class="act-ic" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">' +
+    '<path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8h5.8l.6-8" fill="none" stroke="currentColor"' +
+    ' stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var ACT_ICON_STEER = '<svg class="act-ic" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">' +
+    '<path d="M2.5 8L13.5 3l-4 10-2.2-4.3L2.5 8z" fill="none" stroke="currentColor"' +
+    ' stroke-width="1" stroke-linejoin="round"/></svg>';
+
   /** 后端队列的本地镜像：[{id, text}]。内容一律以事件/回执为准，不本地造。 */
   var insertItems = [];
   /** 多条时是否折叠（默认展开：刚插的那句应该看得见） */
@@ -9475,8 +9571,6 @@ body[data-run="true"] #goalRounds{opacity:.45}
   var insertEditing = 0;
   /** 临时提示的定时器句柄 */
   var insertHintTimer = null;
-  /** 已发出、还没收到回执的插话正文（回执说「没插进去」时用它兜底重发） */
-  var insertPending = '';
   /** 排队条上的监听器是否已挂过（骨架是现成的，只挂一次） */
   var insertBound = false;
 
@@ -9561,7 +9655,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
     // 一条时不画首行：单个条目本身就说明了「有 1 条」，多一行纯属噪音
     if (n > 1) {
       html += '<div class="hd" data-act="fold">' +
-        '<span class="n">待处理 ' + n + ' 条</span>' +
+        '<span class="n">插话待发 ' + n + ' 条</span>' +
         '<span>' + (insertFold ? '展开' : '收起') + '</span></div>';
     }
     insertItems.forEach(function(it){
@@ -9574,8 +9668,8 @@ body[data-run="true"] #goalRounds{opacity:.45}
       }
       html += '<div class="row" data-id="' + sid + '">' +
         '<span class="tx">' + esc(it.text) + '</span>' +
-        '<button class="b" data-act="edit">改</button>' +
-        '<button class="b del" data-act="del">删</button>' +
+        '<button class="b" data-act="edit" data-tip="编辑排队消息" aria-label="编辑排队消息">' + ACT_ICON_EDIT + '</button>' +
+        '<button class="b del" data-act="del" data-tip="删除排队消息" aria-label="删除排队消息">' + ACT_ICON_DEL + '</button>' +
         '</div>';
     });
     bar.innerHTML = html;
@@ -9602,13 +9696,12 @@ body[data-run="true"] #goalRounds{opacity:.45}
 
   /** 排队条上的点击：折叠 / 改 / 删 */
   function onInsertBarClick(e){
-    var t = e.target;
-    var act = (t && t.getAttribute) ? t.getAttribute('data-act') : '';
-    if (!act && t && t.closest) {
-      // 点首行任意位置都算折叠开关（一个小箭头太难点中）
-      var hd = t.closest('.hd');
-      if (hd) act = 'fold';
-    }
+    /* 同 onQueueBarClick：按钮里装的是 SVG，target 是 <svg>/<path>，
+       data-act 在祖先 button 上，必须 closest 取，否则点了静默无反应。 */
+    var t = (e.target && e.target.closest) ? e.target.closest('[data-act]') : null;
+    if (!t) return;
+    if (t.disabled) return;
+    var act = t.getAttribute('data-act');
     if (!act) return;
     if (act === 'fold') {
       insertFold = !insertFold;
@@ -9678,13 +9771,13 @@ body[data-run="true"] #goalRounds{opacity:.45}
     input.focus();
   }
 
-  /** 入队：画一行到排队条（insert/queued 与 chatInsert 回执共用） */
+  /** 入队：画一行到插话条（insert/queued 与 chat/send 的 steer 回执共用） */
   function onInsertQueued(p){
     var id = p ? p.id : 0;
     if (!id) return;
     var text = String((p && p.text) || '');
     for (var i = 0; i < insertItems.length; i++) {
-      // 本面板发的那条通常已经从 chatInsert 回执里先入队了：按 id 去重，
+      // 本面板发的那条通常已经从回执里先入队了：按 id 去重，
       // 只把文本更新成后端那份（后端是权威）
       if (String(insertItems[i].id) === String(id)) {
         if (text) insertItems[i].text = text;
@@ -9749,65 +9842,8 @@ body[data-run="true"] #goalRounds{opacity:.45}
     addInsertedBubble((p && p.text) || '');
   }
 
-  /**
-   * 运行中提交：把文本交给后端的待处理队列。
-   * 清空输入框与 sendChat 完全一致（字已经交给队列了）；**不画气泡**。
-   */
-  function submitInsert(text, wireText){
-    insertPending = text;
-    input.value = '';
-    input.style.height = '21px';
-    input.style.overflowY = 'hidden';
-    // 程序化清空不触发 input 事件：发送按钮的亮暗手动同步一次（同 sendChat）
-    refreshSendState();
-    openPalette(false);
-    pushHistory(text);
-    post('chatInsert', { text: wireText });
-  }
-
-  /** chatInsert 的回执：插进去了就本地入队（去重靠 id），没插进去按 reason 收场 */
-  function applyInsertResult(p){
-    var pend = insertPending;
-    insertPending = '';
-    var r = p || {};
-    if (r.inserted) {
-      // insert/queued 事件随后也会到（而且是广播的，别的面板发的也算）：
-      // 这里先入队只为即时反馈，那条事件到了按 id 去重、只更新文本。
-      if (r.id && pend) onInsertQueued({ id: r.id, text: pend });
-      return;
-    }
-    /* 下面全是「没插进去」的收场，而且只处理**本面板刚发的那条**（pend 非空）。
-       回执是广播的、不带发起方 id：别的面板插话失败跟本面板无关，若在这里
-       跟着改 data-run、弹提示，用户会看到一句莫名其妙的「插话未生效」。 */
-    if (!pend) return;
-    if (r.reason === 'idle') {
-      /* 没有活跃轮次 = 本地那个 data-run 是陈旧的（轮次刚好在这一刻结束）。
-         这条不能丢，也不能留在队列里等一个不存在的轮次：放回输入框、清掉
-         陈旧的运行态，重走一次普通发送。**必须清 data-run**，不清的话
-         sendChat 会再次进插话分支，变成死循环。 */
-      body.setAttribute('data-run', 'false');
-      if (!input.value.trim()) {
-        input.value = pend;
-        sendChat();
-        return;
-      }
-      flashInsertHint('本轮已结束，消息没有插进去，请重新发送');
-      return;
-    }
-    if (r.reason === 'command') {
-      // 后端拒收「以 / 开头的插话」：明确提示，并把文本还给用户
-      flashInsertHint('运行中不支持命令，请等本轮结束');
-    } else {
-      /* 其余情况（旧后端没有 chat/insert、内部错误）：文本已经从输入框清掉了，
-         什么都不显示才是最糟的 —— 说一句。 */
-      flashInsertHint('插话未生效：' + (r.error || r.reason || '未知原因'));
-    }
-    if (!input.value.trim()) {
-      input.value = pend;
-      autoGrowInput();
-      refreshSendState();
-    }
-  }
+  /* 运行中提交的两种去向都走 chat/send 的 mode（缺省 queue / steer），
+     不再有独立的 chatInsert 请求：见 submitBusy 与后面那段双队列说明。 */
 
   /** insertEdit / insertRemove 的回执：失败说明那条已经不在（多半被消费了）→ 重新拉快照 */
   function applyInsertAck(p, key){
@@ -9815,7 +9851,351 @@ body[data-run="true"] #goalRounds{opacity:.45}
     post('insertList', {});
   }
 
-  function sendChat(){
+  /* ==================================================================
+     排队队列（next-turn）：运行中提交的**默认去向**
+     ------------------------------------------------------------------
+     与上面那条插话队列的区别只有一句话：**插话属于这一轮，排队不属于**。
+       · 插话（next-step）：本轮下一个 step 边界生效，一次领完全部；
+       · 排队（next-turn）：等这一轮真正结束，下一轮开头领 1 条。
+     所以这里有两条独立的条、两套独立的事件（queue/* 与 insert/*），后端也
+     分成 _turn_queue / _insert_queue 两个队列。界面不与后端抢真值：条目内容
+     一律以事件与回执为准，本地只做镜像。
+     ================================================================== */
+  /** 后端排队队列的本地镜像：[{id, text}] */
+  var queueItems = [];
+  /** 多条时是否折叠。默认**收起**（对齐 dsh 的 QueueDock：`useState(true)`
+      表示 collapsed 初值为真 —— 排队消息动辄好几条，摊开会把输入区顶上去）。
+      刚入队的那条也一并不显示，靠标题栏的「待处理 N 条」提示存在。 */
+  var queueFold = true;
+  /** 正在行内编辑的条目 id（0 = 没有） */
+  var queueEditing = 0;
+  /** 正在等回执的那一行 id（0 = 空闲）。对齐 dsh QueueDock 的 `busy`：
+      点下去立刻置位——该行三颗按钮全部 disabled、排队条强制展开；收到回执
+      （成功或失败）才清零。不置位会怎样（用户实测）：同一行可以连点，
+      post 出去两三条 queue/steer，第二条必然 steered:false，前端却毫无反馈。 */
+  var queueBusy = 0;
+  /** 排队条上的监听器是否已挂过 */
+  var queueBound = false;
+  /** 已发出、还没收到 chat/result 的运行中提交正文（被拒时用它还回输入框） */
+  var busyPending = '';
+
+  /* 「繁忙时的发送行为」偏好（dsh 的 DEFAULT_BUSY_ENTER_BEHAVIOR = 'queue'）：
+     queue = 排队发送（等这一轮结束后的下一轮），steer = 插话发送（本轮生效）。
+     真值在 narnat.json「智能体.繁忙时发送」：启动时随 initialize 下发一份，
+     设置面板改完随 config/describe 下发，本地只读镜像，不自己造第二份真相。 */
+  var BUSY_SEND = 'queue';
+  function busyMode(forced){
+    if (forced === 'queue' || forced === 'steer') return forced;
+    return BUSY_SEND === 'steer' ? 'steer' : 'queue';
+  }
+  function busyLabel(forced){
+    return busyMode(forced) === 'steer' ? '插话发送' : '排队发送';
+  }
+
+  /** 取（必要时就地创建）排队条容器。理由同 ensureInsertUi：三份载体可能不同步。 */
+  function ensureQueueUi(){
+    var bar = document.getElementById('queueBar');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.className = 'insbar';
+      bar.id = 'queueBar';
+      bar.setAttribute('data-on', 'false');
+      bar.setAttribute('data-fold', 'false');
+      bar.setAttribute('data-kind', 'queue');
+      var anchor = document.getElementById('insertBar');
+      if (!anchor) anchor = document.getElementById('input');
+      if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(bar, anchor);
+    }
+    if (!queueBound) {
+      queueBound = true;
+      bar.addEventListener('click', onQueueBarClick);
+      bar.addEventListener('keydown', onQueueBarKeydown);
+      bar.addEventListener('focusout', onQueueBarFocusOut);
+    }
+    return bar;
+  }
+
+  /**
+   * 重画排队条。只重建这一个容器，不碰 #convo（碰了就会劈气泡）。
+   * 每行三颗按钮：改 / 删 / 插话发送。第三颗非运行中禁用并带 tooltip
+   * 「仅运行中可插话发送」——点它等于把这条排队消息**提升**成插话。
+   */
+  function renderQueueBar(){
+    var bar = ensureQueueUi();
+    if (!bar) return;
+    var n = queueItems.length;
+    if (!n) {
+      queueEditing = 0;
+      // 队列空了要把折叠态复位成默认（收起），否则下一批排队消息会以展开态出现
+      queueFold = true;
+      bar.setAttribute('data-on', 'false');
+      bar.setAttribute('data-fold', 'false');
+      bar.innerHTML = '';
+      return;
+    }
+    /* 单条永远可见：只有一条时没有折叠头可点（n>1 才画 hd），若还按 queueFold
+       折叠就会整条都看不见 —— 界面上凭空少了一条排队消息。
+       dsh 同一条规则：`listVisible = rowCount === 1 || expanded`。
+       编辑 / 等回执期间一律强制展开（dsh 的 `interactionActive`）：那行正被
+       操作，折叠起来等于让用户对着空气等结果。 */
+    var interacting = !!(queueEditing || queueBusy);
+    var fold = queueFold && n > 1 && !interacting;
+    bar.setAttribute('data-on', 'true');
+    bar.setAttribute('data-fold', fold ? 'true' : 'false');
+    var run = body.getAttribute('data-run') === 'true';
+    var html = '';
+    if (n > 1) {
+      html += '<div class="hd" data-act="fold">' +
+        '<span class="n">排队待发 ' + n + ' 条</span>' +
+        '<span>' + (fold ? '展开' : '收起') + '</span></div>';
+    }
+    queueItems.forEach(function(it){
+      var sid = esc(String(it.id));
+      if (queueEditing && String(queueEditing) === String(it.id)) {
+        html += '<div class="row" data-id="' + sid + '">' +
+          '<input class="ed" value="' + esc(it.text) + '">' +
+          '</div>';
+        return;
+      }
+      // 该行在等回执 → 三颗按钮一起禁用（dsh：`disabled={busy !== null}`）
+      var rowBusy = !!queueBusy && String(queueBusy) === String(it.id);
+      var dis = rowBusy ? ' disabled' : '';
+      // 非运行中禁用「插话发送」：那句话没有可以插进去的轮次
+      var steer = (run && !rowBusy)
+        ? '<button class="b steer" data-act="steer" data-tip="插话发送" aria-label="插话发送">' + ACT_ICON_STEER + '</button>'
+        : '<button class="b steer" data-act="steer" disabled data-tip="' +
+          (rowBusy ? '插话发送中…' : '仅运行中可插话发送') + '" aria-label="插话发送">' + ACT_ICON_STEER + '</button>';
+      html += '<div class="row" data-id="' + sid + '">' +
+        '<span class="tx">' + esc(it.text) + '</span>' +
+        '<button class="b" data-act="edit"' + dis + ' data-tip="编辑排队消息" aria-label="编辑排队消息">' + ACT_ICON_EDIT + '</button>' +
+        '<button class="b del" data-act="del"' + dis + ' data-tip="删除排队消息" aria-label="删除排队消息">' + ACT_ICON_DEL + '</button>' +
+        steer +
+        '</div>';
+    });
+    bar.innerHTML = html;
+    if (queueEditing) {
+      var ed = bar.querySelector('.row .ed');
+      if (ed) {
+        ed.focus();
+        try { ed.setSelectionRange(ed.value.length, ed.value.length); } catch (e) {}
+      }
+    }
+  }
+
+  /** 排队条上的点击：折叠 / 改 / 删 / 插话发送 */
+  function onQueueBarClick(e){
+    /* 命中元素必须取「带 data-act 的那个」，而不是 e.target 本身：
+       三颗按钮现在装的是 SVG 图标，用户点下去时 target 是 <svg>/<path>，
+       而 data-act 与 disabled 都在**它的祖先 button** 上。早先按钮是纯文字，
+       target 恰好就是 button，直接读 target 能work；换成图标后
+       `target.getAttribute('data-act')` 恒为 null → 下面 `if (!act) return`
+       静默退出，表现就是「点了没反应、按钮也不禁用、能一直连点」（用户报障）。
+       closest 也顺带把 disabled 判断挪回真正的按钮上。
+       折叠行头同样带 data-act="fold"，所以这一个 closest 覆盖全部动作。 */
+    var t = (e.target && e.target.closest) ? e.target.closest('[data-act]') : null;
+    if (!t) return;
+    if (t.disabled) return;           // 禁用按钮点了不算数
+    var act = t.getAttribute('data-act');
+    if (!act) return;
+    if (act === 'fold') {
+      queueFold = !queueFold;
+      renderQueueBar();
+      return;
+    }
+    var row = (t && t.closest) ? t.closest('.row') : null;
+    var id = row ? Number(row.getAttribute('data-id')) : 0;
+    if (!id) return;
+    // 有行在等回执 → 整条都不接新动作（dsh 的 `busy !== null` 语义）。
+    // 按钮本身也 disabled（上面那句已拦一次），这里挡住的是「旧节点被脚本/键盘
+    // 复用」这类绕过 disabled 的路径。
+    if (queueBusy) return;
+    if (act === 'edit') {
+      queueEditing = id;
+      renderQueueBar();
+      return;
+    }
+    if (act === 'del') {
+      // 同插话：只发请求，不在本地删（真值在后端，本地先删会出现「删不掉的错觉」）
+      queueBusy = id;
+      renderQueueBar();
+      post('queueRemove', { id: id });
+      return;
+    }
+    if (act === 'steer') {
+      // 提升成插话：后端把它移出排队队列、追加到插话队列末尾并唤醒等待，
+      // 这里不动本地两列表——queue/updated 与 insert/queued 事件随后就到。
+      // 点下去立刻置 busy：回执到达前那行三颗按钮全禁用、排队条强制展开，
+      // 用户连点第二下就不再发第二条 queue/steer。
+      queueBusy = id;
+      renderQueueBar();
+      post('queueSteer', { id: id });
+    }
+  }
+
+  function onQueueBarKeydown(e){
+    var t = e.target;
+    if (!t || t.className !== 'ed') return;
+    var row = t.closest ? t.closest('.row') : null;
+    var id = row ? Number(row.getAttribute('data-id')) : 0;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (id) commitQueueEdit(id, t.value);
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      queueEditing = 0;
+      renderQueueBar();
+      input.focus();
+    }
+  }
+
+  function onQueueBarFocusOut(e){
+    var t = e.target;
+    if (!t || t.className !== 'ed') return;
+    var row = t.closest ? t.closest('.row') : null;
+    var id = row ? Number(row.getAttribute('data-id')) : 0;
+    if (!id || String(queueEditing) !== String(id)) return;
+    commitQueueEdit(id, t.value);
+  }
+
+  function commitQueueEdit(id, text){
+    var t = String(text == null ? '' : text).trim();
+    queueEditing = 0;
+    // 保存同样要等回执：那一行的三颗按钮在有结论之前别再让人点。
+    // queueEditing 先归零，上面几处 focusout 的幂等判断因此不会再发第二次。
+    if (t) queueBusy = id;
+    if (t) post('queueEdit', { id: id, text: t });
+    renderQueueBar();
+    input.focus();
+  }
+
+  /** 从本地镜像删一条（消费/提升走事件，这里只服务「删」的即时反馈） */
+  function removeQueueItem(id){
+    var out = [];
+    queueItems.forEach(function(it){
+      if (String(it.id) !== String(id)) out.push(it);
+    });
+    queueItems = out;
+    if (queueEditing && String(queueEditing) === String(id)) queueEditing = 0;
+    renderQueueBar();
+  }
+
+  /** queue/queued：入队一行（chat/result 回执也走这里，按 id 去重） */
+  function onQueueQueued(p){
+    var id = p ? p.id : 0;
+    if (!id) return;
+    var text = String((p && p.text) || '');
+    for (var i = 0; i < queueItems.length; i++) {
+      if (String(queueItems[i].id) === String(id)) {
+        if (text) queueItems[i].text = text;
+        renderQueueBar();
+        return;
+      }
+    }
+    queueItems.push({ id: id, text: text });
+    renderQueueBar();
+  }
+
+  /** queue/updated：编辑/删除/提升后的全量快照 → 整条重画 */
+  function onQueueUpdated(p){
+    var list = (p && p.items) || [];
+    var next = [];
+    list.forEach(function(it){
+      if (!it || !it.id) return;
+      next.push({ id: it.id, text: String(it.text == null ? '' : it.text) });
+    });
+    queueItems = next;
+    if (queueEditing) {
+      var alive = false;
+      queueItems.forEach(function(it){
+        if (String(it.id) === String(queueEditing)) alive = true;
+      });
+      if (!alive) queueEditing = 0;
+    }
+    renderQueueBar();
+  }
+
+  /**
+   * 排队消息被领走（= 它成了新一轮的用户消息）→ 画一条**普通**用户气泡。
+   * 不带 data-inserted：那条属性是插话专用的折叠判据（T2 靠它判「这一轮
+   * 中间有没有插过话」），排队消息是新一轮的开头，不是中间的插话。
+   */
+  function addQueuedBubble(text){
+    var t = String(text || '').trim();
+    if (!t) return;
+    // 上一轮的正文到此为止：不收口的话它会把这条新提问接在自己后面
+    closeAssistantSegment();
+    var m = document.createElement('div');
+    m.className = 'msg';
+    m.setAttribute('data-role', 'user');
+    m.innerHTML = '<div class="text">' + esc(t) + '</div>';
+    convo.appendChild(m);
+    scrollBottom(true);
+  }
+
+  /** queue/consumed：这条真的成了新一轮 → 队列去掉它 + 画普通用户气泡 */
+  function onQueueConsumed(p){
+    var id = p ? p.id : 0;
+    if (id) removeQueueItem(id);
+    addQueuedBubble((p && p.text) || '');
+  }
+
+  /** queueEdit / queueRemove 的回执：失败说明那条已不在 → 重新拉快照 */
+  function applyQueueAck(p, key){
+    // 回执到了（无论成败）才解 busy —— 与 dsh 的 `finally { setBusy(null) }` 同口径。
+    // 提前解（比如点下去就解）等于没禁，连点照样发两条。
+    queueBusy = 0;
+    if (p && p[key]) { renderQueueBar(); return; }
+    renderQueueBar();
+    post('queueList', {});
+  }
+
+  /**
+   * queueSteer 的回执：失败说明那条排队消息已经没了（被领走/被删），或者
+   * 后端拒绝了这次提升（-32010「当前轮次已结束，不再接受插话」）。
+   *
+   * 失败必须**显示出来**：不显示的话用户只看到「点了插话发送，那条消息还在
+   * 排队条上」，而它其实要等这一轮跑完才被当成新一轮发出去 —— 这正是用户
+   * 报的「等 AI 跑完才插入」。提示走 showNotice（对话区系统行），与后端其它
+   * 运行提示同一条通道，不额外发明一套。
+   */
+  function applyQueueSteerAck(p){
+    queueBusy = 0;
+    if (p && p.steered) { renderQueueBar(); return; }
+    renderQueueBar();
+    post('queueList', {});
+    var why = (p && (p.error || p.message)) || '这条排队消息已不在队列里';
+    showNotice({ text: '⚠ 插话发送失败：' + why + '（它会留在排队队列，等这一轮结束后发送）' });
+  }
+
+  /**
+   * 运行中提交：按模式交给后端（dsh 双队列）。
+   * 清空输入框（字已经交给队列了）；**不画气泡** —— 插话要等 insert/consumed、
+   * 排队消息要等 queue/consumed 才各画各的。
+   */
+  function submitBusy(text, wireText, forced){
+    busyPending = text;
+    input.value = '';
+    input.style.height = '21px';
+    input.style.overflowY = 'hidden';
+    refreshSendState();
+    openPalette(false);
+    pushHistory(text);
+    /* 清空草稿后这个圆钮就从「发送」变回「停止」，同一坐标的下一击会落在
+       停止上（原本运行中这个按钮是隐藏的，所以以前不需要这道保护）。 */
+    guardStopAfterSend();
+    post('chat', { text: wireText, mode: busyMode(forced) });
+  }
+
+  /**
+   * 发送入口。
+   * @param {string=} forced 强制指定的“繁忙时”去向（'queue' / 'steer'）。
+   *        只有 Cmd/Ctrl+Enter 会传它：运行中按它用**相反**的模式提交
+   *        （偏好是排队就插话，反之亦然，对齐 dsh 的 Cmd+Enter）。普通发送
+   *        不传，按设置里的偏好走。
+   */
+  function sendChat(forced){
     var text = input.value.trim();
     /* 允许「只发附件、不打字」——附件本身就是内容，凭什么逼用户再敲个字。
        口径对齐 dsh：`PendingSubmissionBubble` 里
@@ -9858,24 +10238,27 @@ body[data-run="true"] #goalRounds{opacity:.45}
        和修复前一样坏（第 15 轮独立验收实测：A 无插入=1 气泡 / B 插话=2 气泡，
        且前半截的下一个兄弟正是那行提示）。
 
-       **现在的做法：不再拦，改走「插话」**（RPC chat/insert）。运行中提交 =
-       进后端的待处理队列，后端在工具批次收尾/轮次收尾时逐条消费；界面上先在
-       输入框上方的排队条里看到它，被消费到（insert/consumed）才变成一条带
-       「已插入」标记的气泡（实现见上面 submitInsert / addInsertedBubble 那段）。
-       为什么不在这里直接画气泡：这一条可能整轮都没被消费到（用户点了停止、
-       后端压缩），画了就是一句「说出去了却没有回答」的假消息。 */
+       **现在的做法：不再拦，也不直接画气泡，而是按「繁忙时的发送行为」
+       把这句话交给后端的**两条队列**之一（dsh 双队列）：
+         · queue（默认）→ 排队待发，等这一轮结束、下一轮开头才发出去；
+         · steer        → 插话待发，本轮下一个 step 边界插进去。
+       两种去向都走 chat/send 的 mode 参数（handler 见 submitBusy）。界面上先在
+       输入框上方对应的那条队列条里看到它，被消费到（queue/consumed 或
+       insert/consumed）才变成对话区里的用户气泡。为什么不在这里直接画气泡：
+       这一条可能整轮都没被消费到（用户点了停止、后端压缩），画了就是一句
+       「说出去了却没有回答」的假消息。 */
     if (body.getAttribute('data-run') === 'true') {
-      /* 后端已经断了，data-run 只是断线前留下的陈旧值：插话没有接收方，
-         也不能像插话路径那样清空输入框 —— 交给下面的离线分支提示并保留文字。 */
+      /* 后端已经断了，data-run 只是断线前留下的陈旧值：队列没有接收方，
+         也不能像运行中提交那样清空输入框 —— 交给下面的离线分支提示并保留文字。 */
       if (!(REAL && body.getAttribute('data-offline') === 'true')) {
         if (ATCH.length) {
-          /* 附件刻意不支持插话（不扩大范围）：队列里的条目只有文本，带附件
+          /* 附件刻意不支持运行中提交（不扩大范围）：队列里的条目只有文本，带附件
              的那条在消费时会丢掉附件 —— 与其静默丢，不如说清并让用户等这一轮
              结束。文字与附件都留在输入框里。 */
           flashInsertHint('运行中暂不支持插入附件，请等本轮结束');
           return;
         }
-        submitInsert(text, wireText);
+        submitBusy(text, wireText, forced);
         return;
       }
     }
@@ -10009,6 +10392,17 @@ body[data-run="true"] #goalRounds{opacity:.45}
    */
   function applyChatResult(p){
     var accepted = !!(p && p.accepted);
+    /* 运行中提交（chat/send mode=queue|steer）的回执：后端的真实 id 在这里，
+       回执比 queue/queued 事件到得晚也无所谓 —— 按 id 去重，只补那一行。
+       文本取自本面板刚发出去的那条（busyPending），回执本身不带文本。 */
+    var bp = busyPending;
+    busyPending = '';
+    if (accepted && p && p.mode && p.id && bp) {
+      if (p.mode === 'steer') onInsertQueued({ id: p.id, text: bp });
+      else onQueueQueued({ id: p.id, text: bp });
+      rendered('chat/result', { accepted: true, mode: p.mode, id: p.id });
+      return;
+    }
     // 后端把「以 / 开头的文本」当命令执行了（兜底路径）：这不是发送失败，
     // 要把命令回执画出来，并退掉那条 pending 消息。
     if (p && p.handledAsCommand) {
@@ -10035,6 +10429,18 @@ body[data-run="true"] #goalRounds{opacity:.45}
       return;
     }
     var msg = (p && p.error) || '发送失败';
+    /* 运行中提交被拒（后端不可用 / 参数非法）：这条既没进任何队列、也没走
+       普通发送，输入框却已经被清空了 —— 必须把字还回去，否则用户打的字
+       凭空消失，且界面上没有任何痕迹。 */
+    if (bp) {
+      if (!input.value.trim()) {
+        input.value = bp;
+        autoGrowInput();
+        refreshSendState();
+      }
+      flashInsertHint('未发送：' + msg);
+      return;
+    }
     // 没被接受：把刚才那条「看起来已经发出去」的消息撤回。
     // 不撤回会怎样（实测）：这句话以普通用户消息留在对话里、永远没有回答，
     // 而输入框已被清空——用户既不知道没发出去，也找不回自己打的字。
@@ -11642,6 +12048,9 @@ body[data-run="true"] #goalRounds{opacity:.45}
     }
     body.setAttribute('data-run', 'true');
     resetStopBtn();
+    // 运行态开始 → 排队条里「插话发送」解除禁用；主按钮文案跟着重算
+    renderQueueBar();
+    refreshSendState();
     /* 新的一轮开始了：清掉「刚才被打断过」的记忆。
        不清会怎样：用户上一轮被打断、随后又正常提问，下一轮结束时某个
        session/result 会拿这条陈旧记录多补一句「已停止上一轮」——
@@ -12045,6 +12454,12 @@ body[data-run="true"] #goalRounds{opacity:.45}
    * @param {Node[]} nodes  要收进去的节点（工具行 / 思考块），任意顺序
    * @param {Object} o
    *   o.reason       'done' | 'cancelled' | 'error' | 'history'
+   *   o.collapsible  组头是否可点开。默认 true。传 false 时组照样存在（组头一行
+   *                  摘要 + 组正文收起），但控件 disabled、不渲染 chevron、点击
+   *                  不响应 —— 对齐 dsh 的 `canCollapse = foldable && hasContent
+   *                  && !turnProcessAlwaysOpen(node)`：停止 / 失败轮的整轮层不可
+   *                  收起，落到组头上就是「这一行点不开」。**disabled 不等于不
+   *                  渲染**：组头与顺序全在，用户仍看得到这一轮干了什么。
    *   o.elapsedMs    该轮耗时；0 / 不传表示未知（历史里就没有时长）
    *   o.headline     这一组是否承担「整轮收口」的文案（一组只有最后那段是）
    *   o.animate      建组时是否播「收起」动画。实时轮次收口时 true
@@ -12080,8 +12495,13 @@ body[data-run="true"] #goalRounds{opacity:.45}
     var open = o.open === true;
     box.setAttribute('data-open', open ? 'true' : 'false');
     box.setAttribute('data-reason', reason);
+    /* 可点开 = 正常情况下；停止 / 失败轮传 false（dsh 的 canCollapse=false →
+       控件 disabled）。不可点开时 data-open 恒为 false，且下面不绑点击。 */
+    var collapsible = o.collapsible !== false;
 
     /* 折叠行的状态词由调用方给（见 tpCountLabel 的 status 参数）：
+         · o.status === null  调用方**明确声明**这一段不写状态词（分段折叠时
+           只有末段代表整轮，前几段不能各写一个）
          · o.status           显式指定（实时打断传「已停止」，历史重放不传）
          · reason=cancelled   用户主动打断 → 「已停止」
          · reason=error       这一轮失败 → 「失败」
@@ -12090,13 +12510,20 @@ body[data-run="true"] #goalRounds{opacity:.45}
        950 次全部失败）。它由 tpCountLabel 写成「（其中 N 次失败）」。
        都不满足就不标前缀（正常完成）。 */
     var status = '';
-    if (typeof o.status === 'string' && o.status) status = o.status;
+    if (o.status === null) status = '';
+    else if (typeof o.status === 'string' && o.status) status = o.status;
     else if (stopped) status = '已停止';
     else if (failed) status = '失败';
 
     var row = document.createElement('button');
     row.type = 'button';
     row.className = 'tp-row';
+    /* 不可点开：disabled（不响应点击）+ 不渲染 chevron。组头与计数照旧渲染，
+       只是「点不开」—— dsh 的 `disabled` 控件同样还在屏幕上。 */
+    if (!collapsible) {
+      row.disabled = true;
+      row.setAttribute('aria-disabled', 'true');
+    }
     /* 主标题 = 计数式（对齐 dsh 折叠行「N 次工具调用」的形态）：
        「2 次工具调用 · 1 条消息」。类别短语降级为副标题（.tp-sub）：
        标题回答「有多少东西」，副标题回答「干了什么类别的事」。 */
@@ -12132,8 +12559,9 @@ body[data-run="true"] #goalRounds{opacity:.45}
       /* chevron 放**右侧**且常显，与 dsh 的 TurnProcessNodeView 一致：
          `<span className={css.label}>…</span>{canCollapse && <IconChevronDown…/>}`。
          放左侧会让整列工具行的语义图标与它并排，两种图标挤在同一个位置上
-         互相干扰（用户报障：「我们的图标都是 >」）。 */
-      '<span class="tp-caret">' + CARET_SVG_DOWN + '</span>';
+         互相干扰（用户报障：「我们的图标都是 >」）。
+         `canCollapse` 为假时 dsh 整个 chevron 都不渲染（不是置灰），这里同理。 */
+      (collapsible ? '<span class="tp-caret">' + CARET_SVG_DOWN + '</span>' : '');
 
     var bodyBox = document.createElement('div');
     bodyBox.className = 'tp-body';
@@ -12174,6 +12602,9 @@ body[data-run="true"] #goalRounds{opacity:.45}
       // 历史重放（收起态）：内容刚建出来就没展开过，直接是收起态，没有「收起过程」可演
       bodyBox.setAttribute('hidden', '');
     }
+    /* 停止 / 失败轮：组头不可点开，连监听器都不绑（按钮本身也 disabled，
+       双重保证点击改不了 data-open）。 */
+    if (!collapsible) return box;
     row.addEventListener('click', function () {
       var on = box.getAttribute('data-open') === 'true';
       box.setAttribute('data-open', on ? 'false' : 'true');
@@ -12358,7 +12789,8 @@ body[data-run="true"] #goalRounds{opacity:.45}
   }
 
   /**
-   * 实时轮次收口：把这一轮的**全部过程**折成一个组，最终回复裸在组外。
+   * 实时轮次收口：把这一轮的过程**按插话位置分段**折成若干个组，
+   * 插话气泡与最终回复都裸在组外。
    *
    * 形态在任务 E 按 dsh 对齐（用户报障原文：「dsh 默认是折叠状态，折叠的是
    * 工具和中间消息，最终回复没有折叠」）：
@@ -12367,11 +12799,27 @@ body[data-run="true"] #goalRounds{opacity:.45}
    *     （本轮除最终回复外的 assistant 正文）。
    *     原来中间正文平铺在组外，于是一轮里出现「正文 → 组 → 正文 → 组 →
    *     最终正文」这种碎块，跟 dsh「一组折叠 = 一轮的全部过程」对不上。
-   *   · 一轮只产生 **1 个**折叠组，插在该轮第一个过程节点原来的位置。
    *   · 最终回复 = 该轮**最后一个过程节点是正文**时的那条正文（见 finalReplyOf）。
    *     以工具/思考收尾 → 没有最终回复 → 全部进组并标状态。
    *     判据不是「最后一条正文」：那样会把 AI 开口的第一句话摘到组外末尾，
    *     看起来像总结（用户实测报障，dsh 对照保持原顺序）。
+   *
+   * ## 为什么是「若干个组」而不是「一个组」（T9，对齐 dsh 的分段机制）
+   *
+   * dsh 的 `process-groups.ts` 遇到 `isAtOrOutside(node, 'process')` 的节点
+   *（用户消息 / steering 消息都在 `input` 层）就先 `flush(true)` 把已累积的
+   * 成员封成一个组，再让这个 input 节点自己作为独立 node 输出 —— 于是顺序是
+   * `G1 → steering 1 → G2 → steering 2 → G3`（README:65）。
+   *
+   * 我们这边等价的做法：按 DOM 顺序走一遍本轮节点，插话气泡（`data-inserted`）
+   * 与最终回复各自都是**分界点** —— 先把攒着的成员封成组，自己留在组外原位。
+   * 用户实测（附图）一轮里插了两次话，屏幕上却是「一个折叠行 → 插话 → 插话 →
+   * 正文」：所有过程挤在一个组里，看不出「第一次插话之前干了什么、之后又干了
+   * 什么」。
+   *
+   * 每段各自一个 `.turn-proc`，组头的状态词 / 摘要 / 计数都**只统计它自己的
+   * 成员**；插入位置仍是该段第一个成员原来的位置（逐段独立套用）。
+   * 正常完成且没有插话的一轮只有一段，行为与分段之前完全一致。
    *
    * 流式期间不提前收口：中间正文定稿后仍在原位（只打 data-turn-text 标记），
    * 直到 turn/end 才搬进组。用户正看着的内容不会突然被折起来。
@@ -12380,6 +12828,13 @@ body[data-run="true"] #goalRounds{opacity:.45}
    *   · 本轮没有任何过程节点（纯聊天，只有最终回复）→ 没东西可折
    *   · 去掉最终回复后没有成员（一轮只有 1 条正文）→ 不建空组，
    *     工具行仍然裸行显示（dsh 的同位情况见报告「边界裁决」）
+   *
+   * 停止（cancelled / aborted / interrupted）与失败（error）轮**照样建组**：
+   *   · 组头文案加状态词「已停止」/「失败」，组正文初始收起
+   *   · 组头不可点开（disabled、无 chevron）—— 这是 dsh 整轮层
+   *     turnProcessAlwaysOpen 的语义落到组级层的结果。
+   *   T2 曾经「停止 / 失败 / 插话 → 直接不建组」，与 dsh 实机形态不符：
+   *   停止后 dsh 屏幕上仍是「已停止 / ⊠ 已完成分析 / 摘要 / ✦ 已调用工具…」。
    */
   function foldTurnProcess(reason) {
     /* 只收「本轮起点之后」的节点：turn/begin 记下的 turnStartNode 是本轮
@@ -12406,39 +12861,79 @@ body[data-run="true"] #goalRounds{opacity:.45}
         scope.push(el);
       }
     });
-    var box = null;
-    if (scope.length) {
-      /* 最终回复 = 该轮**最后一个过程节点是正文**时的那条正文
-         （见 finalReplyOf / tpMembers）。以工具或思考收尾 = 这一轮没给出结论：
-         全部进组、顺序不动，由折叠行标注状态。
-
+    /* 两个状态维度必须分开（对齐 dsh 的两层）：
+         · 组级层：组**始终**建出来，组正文初始收起 —— 停止 / 失败轮也一样。
+           dsh 的 `grouped` 只看 stepGrouping 与轮次状态，与 turnProcessAlwaysOpen
+           无关，所以停止后屏幕上仍是「⊠ 已完成分析 / 摘要 / ✦ 已调用工具…」。
+         · 整轮层：turnProcessAlwaysOpen 为真时整轮不可收起。我们没有整个轮次
+           只有一个开合开关的那层，它落到这里就是「组头不可点开」（collapsible）。
+        T2 曾经把两层合成一层（停止 / 失败 / 插话 → 直接不建组），实机形态与
+       dsh 不符：过程行全平铺出来了，组头和摘要消失。
+       插话（interleaved）不在这一层判定：dsh 的 hasInterleavedInput 只影响整轮层，
+       组级层照样可开合，我们也一样（见 tpCountLabel 的状态词表）。 */
+    var stopped = (reason === 'cancelled' || reason === 'aborted'
+      || reason === 'interrupted');
+    var failed = reason === 'error';
+    /* 分段：按 DOM 顺序再走一遍，过程成员攒进 pending，遇到分界点就把
+       pending 封成一个组。两个分界点自己都留在组外原位上 ——
+       插话气泡是「上一段到此为止」的标记，最终回复是用户真正要看的东西，
+       都不该被收进折叠区。 */
+    var tail = finalReplyOf(scope);
+    var segments = [];
+    var pending = [];
+    var flush = function () {
+      if (pending.length) segments.push(pending);
+      pending = [];
+    };
+    round.forEach(function (el) {
+      /* 分界点①：最终回复（见 finalReplyOf / tpMembers）。以工具或思考收尾 =
+         这一轮没给出结论：没有分界点，全部进组、顺序不动，由折叠行标注状态。
          之前的写法是「最后一条正文无论其后有无工具都算最终回复」，于是
          `[思考][正文][工具1][工具2]` 被摘成 `[组(思考+工具)][正文]`，
          AI 开口第一句话跑到所有工具后面，看起来像总结（用户实测报障）。 */
-      var interrupted = (reason === 'cancelled' || reason === 'aborted'
-        || reason === 'interrupted');
-      var tail = finalReplyOf(scope);
-      var members = tpMembers(scope, tail);
-      if (members.length) {
-        box = buildTurnProc(members, {
-          reason: reason,
-          /* 不再用 Math.max(1000, …) 抬下界：那会把 200ms 的一轮写成「1 秒」，
-             看起来像真值。格式化那边已经支持一位小数（0.2 秒），不显示 0 秒
-             由 elapsed > 0 保证。 */
-          elapsedMs: turnStartTime ? (Date.now() - turnStartTime) : 0,
-          headline: true,
-          animate: true,
-          /* 状态前缀只在「用户主动打断」时加。
-             「没有最终回复」**不标**：实测全库 160 轮里以工具收尾的有 44 轮，
-             其中 37 轮是「说完话又去调工具」的正常结束——它们没有收尾正文，
-             但任务本身是完整的，标上状态词等于冤枉它。用户原话：
-             「后续正确的完整的工具调度也会在头上显示未完成，属于画蛇添足」。 */
-          status: (tail || !interrupted) ? '' : '已停止'
-        });
-      }
-    }
+      if (el === tail) { flush(); return; }
+      /* 分界点②：插话气泡（dsh 的 input 层节点，见本函数的 JSDoc）。 */
+      if (el.hasAttribute('data-inserted')) { flush(); return; }
+      if (scope.indexOf(el) >= 0) pending.push(el);
+    });
+    flush();
+
+    var boxes = [];
+    /* 状态词由 reason 决定，与本轮有没有收尾正文无关（dsh：`label =
+       stopped ? 'message.stopped' : …`，不看有没有 tail）。
+       「没有最终回复」本身**不标**：实测全库 160 轮里以工具收尾的有 44 轮，
+       其中 37 轮是「说完话又去调工具」的正常结束——它们没有收尾正文，
+       但任务本身是完整的，标上状态词等于冤枉它。用户原话：
+       「后续正确的完整的工具调度也会在头上显示未完成，属于画蛇添足」。
+       **状态词与耗时同规则，只落到最后一段**：两者都是整轮属性（这一轮是
+       停止/失败、花了多久），不是某一段的属性。每段都写会怎样：一轮里插了
+       两次话，停止后屏幕上并排三段「已停止」，加上正文末尾的内联标签一共四
+       处，用户报障那种「同一件事说四遍」正是这一路的毛病。单段（没插话）时
+       最后一段就是全部，形态与分段之前完全一致。 */
+    var status = stopped ? '已停止' : (failed ? '失败' : '');
+    segments.forEach(function (members, i) {
+      var isLast = (i === segments.length - 1);
+      /* 走到这里 reason 可能已是停止 / 失败：组照样建，只是组头不可点开。 */
+      var box = buildTurnProc(members, {
+        reason: reason,
+        /* 耗时是整轮属性，只写到最后一段（承担整轮收口的那个组）：
+           一组里插了两次话，若每段都传，屏幕上会并排出现三个「12 秒」。
+           不再用 Math.max(1000, …) 抬下界：那会把 200ms 的一轮写成「1 秒」，
+           看起来像真值。格式化那边已经支持一位小数（0.2 秒），不显示 0 秒
+           由 elapsed > 0 保证。 */
+        elapsedMs: (isLast && turnStartTime) ? (Date.now() - turnStartTime) : 0,
+        headline: true,
+        animate: true,
+        status: isLast ? status : null,
+        /* 停止 / 失败轮：组照建，但组头不可点开（见 buildTurnProc 的
+           o.collapsible）。dsh 的 `canCollapse` 在这两种轮次为假 → disabled。
+           每一段都不可点（整轮状态是整轮的，不是只有末段）。 */
+        collapsible: !stopped && !failed
+      });
+      if (box) boxes.push(box);
+    });
     turnStartNode = null;
-    return box;
+    return boxes;
   }
 
   function turnEnd(p){
@@ -12493,10 +12988,16 @@ body[data-run="true"] #goalRounds{opacity:.45}
     }
     body.setAttribute('data-run', 'false');
     resetStopBtn();
-    /* 插话队列重同步。后端逐条消费（每次只吃一条），一轮跑完可能还有没吃到的；
-       「队列里还剩几条」只有后端知道，本地镜像靠全量快照对齐。本地队列是空的
-       时（绝大多数轮次）不发这一枪，免得每轮白跑一次请求。 */
+    // 运行态落定 → 「插话发送」按钮的可点状态跟着变（非运行中禁用）；
+    // placeholder 里的「Enter 去向」也要退回普通提示
+    renderQueueBar();
+    refreshSendState();
+    /* 两条队列重同步。一轮跑完可能还有没被消费到的条目（尤其排队队列：
+       每轮只领 1 条，剩下的要等下一次）；「还剩几条」只有后端知道，本地镜像
+       靠全量快照对齐。本地是空的时候（绝大多数轮次）不发这一枪，免得每轮
+       白跑一次请求。 */
     if (REAL && insertItems.length) post('insertList', {});
+    if (REAL && queueItems.length) post('queueList', {});
     if (curThink) endThink({});
     // 轮次已结束 = 后端不再等任何确认。挂着的确认条必须收掉，
     // 否则界面上还摆着可点的「确认执行」（实测：确认中点停止，
@@ -12521,21 +13022,26 @@ body[data-run="true"] #goalRounds{opacity:.45}
     /* 正文定稿之后再收工具行 —— 顺序要紧：
        提前收会把「正在流式写的那条助手气泡」一起卷进折叠区（它此刻在 DOM 里
        也是 convo 的子节点），用户在收起状态下就看不到答案了。 */
-    /* 先收口折叠组，再决定「已停止」挂哪里 —— 顺序不能反：
-       被打断时正文是**进组**的（保持原顺序，见 foldTurnProcess 里的注释），
-       若先挂标签再折叠，标签会跟着正文被折进组里看不见，折叠行又说了一遍
-       「已停止」，屏幕上等于什么都没说清。
-       现在的分工：
-         · 有折叠组（这一轮有过程可折）→ 折叠行带「已停止 ·」前缀，正文标签不挂
-         · 没有折叠组（只有一句话就停了）→ 在正文末尾挂 dsh 那个内联小标签
-       两种情况用户都看得到「停了」，且都只说一遍。 */
-    var interrupted = (reason === 'cancelled' || reason === 'aborted'
-      || reason === 'interrupted');
+    /* 「已停止」的两处（dsh 也是两处并存）：
+         · 折叠行的状态词（组头「已停止 · N 次工具调用」）—— 由 foldTurnProcess
+           按 reason 给，停止轮照样建组
+         · 正文末尾的内联小标签 .msg-stopped（markLastAssistantStopped）
+       标签必须在 foldTurnProcess **之前**挂：那一函数会把本轮过程节点搬进
+       .tp-body，搬完之后它们不再是 #convo 的子节点，markLastAssistantStopped
+       按兄弟划界就找不到本轮正文了（返回 false → 标签彻底消失）。
+       谁在组内谁在组外不影响这一步：最终回复本来就摘在组外，标签看得见；
+       整轮都以工具收尾时正文在组内，标签跟着它一起收起（dsh 也是一样，
+       内联标签在 AssistantMarkdown 里，组收起时同样看不到）。 */
     /* 本轮起点的快照：foldTurnProcess 结尾会把 turnStartNode 置 null，
        而下面可能还要用它划界挂标签 —— 必须在调用前取好
        （实测：不取快照时上一轮的正文会被挂上「已停止」）。 */
     var roundStart = turnStartNode;
-    var box = foldTurnProcess(reason);
+    /* 内联标签先挂（见上），再收口折叠组。 */
+    var stoppedMarked = (reason === 'cancelled')
+      ? markLastAssistantStopped(roundStart) : false;
+    /* 组是**数组**：本轮按插话位置 / 最终回复分了段，每段一个组（见
+       foldTurnProcess）。下面只用「有没有组」判断要不要退回整行提示。 */
+    var boxes = foldTurnProcess(reason);
     if (reason === 'cancelled') {
       /* 记一笔「刚才这一轮是被中断收尾的」。
          后端换会话前会先 cancel，于是这条 turn/end 与随后的 session/result
@@ -12543,13 +13049,8 @@ body[data-run="true"] #goalRounds{opacity:.45}
          enterSessionFrom 的清屏抹掉（见 takeCutNotice 的注释）。
          记下时间，让重画之后还能补一句「已停止上一轮」。 */
       noteTurnCut();
-      var stoppedMarked = false;
-      if (!box) {
-        // 没有折叠组：正文裸在对话流里，挂 dsh 式的内联小标签
-        stoppedMarked = markLastAssistantStopped(roundStart);
-      }
-      if (!stoppedMarked && !box) {
-        // 连正文都没有（纯系统回合被打断）：只能退回整行提示
+      if (!stoppedMarked && !boxes.length) {
+        // 连正文都没有，也没有过程可成组（纯系统回合被打断）：只能退回整行提示
         addSysLine('■', '已停止',
           cancelSettleTimerFired ? '后端无回应，界面按已停止处理' : '', '');
       }
@@ -13017,11 +13518,18 @@ body[data-run="true"] #goalRounds{opacity:.45}
     }
     // 隐藏「示例数据」提示条
     body.setAttribute('data-real', 'true');
-    /* 补一次插话队列快照。队列条平时只靠三条增量事件维护，而事件是流式的、
+    /* 补一次两条队列的快照。队列条平时只靠增量事件维护，而事件是流式的、
        没有「当前状态」—— 面板重建/重连后一条事件都不会重放，不查一次的话
-       运行中重开面板就看不到那几条待处理消息（用户会以为插话丢了）。
-       旧后端没有 insert/list：不回执，这里发出去也只是没人应答，不影响别的。 */
+       运行中重开面板就看不到那几条待发消息（用户会以为消息丢了）。
+       旧后端没有 insert/list / queue/list：不回执，这里发出去也只是没人应答。 */
     post('insertList', {});
+    post('queueList', {});
+    /* 「繁忙时的发送行为」偏好随握手下发（narnat.json「智能体.繁忙时发送」）。
+       旧后端不带这个字段 → 保持默认 'queue'，与 dsh 的缺省一致。 */
+    if (p && (p.busySend === 'queue' || p.busySend === 'steer')) {
+      BUSY_SEND = p.busySend;
+    }
+    refreshSendState();
     if (firstInit) {
       // 首次切真实态：把对话区的任何残留清空（生产骨架本来就是空的，
       // preview 演示态注入的内容也在这里让位）
@@ -14964,6 +15472,12 @@ body[data-run="true"] #goalRounds{opacity:.45}
       case 'insert/queued': onInsertQueued(msg.params || {}); break;
       case 'insert/consumed': onInsertConsumed(msg.params || {}); break;
       case 'insert/updated': onInsertUpdated(msg.params || {}); break;
+      /* 排队队列的三条后端事件（chat/send mode=queue 的队列侧）：
+         queued=入队一份、consumed=这条成了新一轮（这时才画普通用户气泡）、
+         updated=编辑/删除/提升成插话后的全量快照。 */
+      case 'queue/queued': onQueueQueued(msg.params || {}); break;
+      case 'queue/consumed': onQueueConsumed(msg.params || {}); break;
+      case 'queue/updated': onQueueUpdated(msg.params || {}); break;
       case 'stats': applyStats(msg.params || {}); break;
       case 'error': notifyError(msg.params || {}); break;
       case 'session/list': applySessionList(msg.params || {}); break;
@@ -14991,14 +15505,17 @@ body[data-run="true"] #goalRounds{opacity:.45}
       case 'narnatmd/saved': window.__narnatOnNarnatMdSaved && window.__narnatOnNarnatMdSaved(msg.params || {}); break;
       case 'configSet/result': window.__narnatOnConfigResult && window.__narnatOnConfigResult(msg.params || {}); break;
       case 'chat/result': applyChatResult(msg.params || {}); break;
-      /* 插话的四条回执。宿主侧把 webview 的 chatInsert / insertList /
-         insertEdit / insertRemove 转成 RPC 后原样回一条 <类型>/result ——
-         没有这四条，前端发出去就再也听不到结果（插话「没插进去」时尤其要紧：
-         reason:'idle' 必须知道，否则那句话既没进队列、也没走普通发送）。 */
-      case 'chatInsert/result': applyInsertResult(msg.params || {}); break;
+      /* 两条队列的回执。宿主侧把 webview 的 insertList / insertEdit /
+         insertRemove / queueList / queueEdit / queueRemove / queueSteer
+         转成 RPC 后原样回一条 <类型>/result —— 没有这些回执，前端发出去就
+         再也听不到结果（「没删掉」「没提升」都无从判断，那一行只能留在原地）。 */
       case 'insertList/result': onInsertUpdated(msg.params || {}); break;
       case 'insertEdit/result': applyInsertAck(msg.params || {}, 'edited'); break;
       case 'insertRemove/result': applyInsertAck(msg.params || {}, 'removed'); break;
+      case 'queueList/result': onQueueUpdated(msg.params || {}); break;
+      case 'queueEdit/result': applyQueueAck(msg.params || {}, 'edited'); break;
+      case 'queueRemove/result': applyQueueAck(msg.params || {}, 'removed'); break;
+      case 'queueSteer/result': applyQueueSteerAck(msg.params || {}); break;
       case 'cancel/result': applyCancelResult(msg.params || {}); break;
       case 'prompt/result': onPromptResult(msg.params || {}); break;
       case 'notice': showNotice(msg.params || {}); break;

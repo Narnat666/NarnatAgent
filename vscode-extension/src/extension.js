@@ -59,7 +59,13 @@ const MESSAGE_METHODS = {
   chatInsert: 'chat/insert',
   insertList: 'insert/list',
   insertEdit: 'insert/edit',
-  insertRemove: 'insert/remove'
+  insertRemove: 'insert/remove',
+  /* 排队队列（排队发送）：运行中提交的默认去向，与插话队列并列的另一条。
+     同样四条必须一起登记，少一条就是「点了没反应」（见上面同一段注释）。 */
+  queueList: 'queue/list',
+  queueEdit: 'queue/edit',
+  queueRemove: 'queue/remove',
+  queueSteer: 'queue/steer'
 };
 
 /**
@@ -70,7 +76,7 @@ const MESSAGE_METHODS = {
  * 事件在宿主这一层就被丢掉，前端队列条永远不动、被消费的那条也画不出气泡 ——
  * 而请求是全通的，看起来像「后端没发事件」，极难查。
  */
-const EVENT_PREFIXES = ['turn/', 'stream/', 'thinking/', 'tool/', 'todo/', 'verify/', 'compress/', 'bg/', 'confirm/', 'insert/'];
+const EVENT_PREFIXES = ['turn/', 'stream/', 'thinking/', 'tool/', 'todo/', 'verify/', 'compress/', 'bg/', 'confirm/', 'insert/', 'queue/'];
 /** 原样转发给 webview 的完整通知方法名 */
 const EVENT_METHODS = ['stats', 'error', 'session/list', 'session/saved',
   // 会话级配置快照（插件 / 插件锁定 / 审核模式）：每轮收口时后端推一条。
@@ -276,7 +282,13 @@ const RECEIPT_TYPES = {
   // 运行中插话的发送。它在 failReceipt 里有专属分支（理由见那一支），
   // 所以必须登记 —— 不登记就是「专用回执 + 通用 notice」双报，
   // 用户会以为插话失败是两件事。
-  chatInsert: 1
+  chatInsert: 1,
+  // 排队行的「插话发送」。同样在 failReceipt 里有专属分支：后端会拒绝
+  // （-32010「当前轮次已结束，不再接受插话」），拒绝必须送回 webview，
+  // 否则那一行永远停在 busy（按钮全禁用）、用户也不知道为什么没插进去。
+  queueSteer: 1,
+  queueRemove: 1,
+  queueEdit: 1
 };
 
 /**
@@ -1817,6 +1829,20 @@ function failReceipt(type, message, params, errData) {
     broadcast({ type: 'chatInsert/result', params: {
       inserted: false, reason: 'error', error: message, message: message
     } });
+  } else if (type === 'queueSteer') {
+    // 「插话发送」失败必须回执。后端 -32010（当前轮次已结束）是最常见的拒绝，
+    // 前端要靠这条回执解 busy，并把原因显示出来 —— 不回执会怎样：那一行三颗
+    // 按钮永久 disabled（点下去就置 busy，只等这一条），用户以为面板卡死；
+    // 而消息其实还在排队队列里，等这一轮跑完才发出去。
+    broadcast({ type: 'queueSteer/result', params: {
+      steered: false, error: message, message: message
+    } });
+  } else if (type === 'queueRemove' || type === 'queueEdit') {
+    // 同一条理由：删/改的回执没到，busy 就不解，行也停在原地。
+    const key = type === 'queueRemove' ? 'removed' : 'edited';
+    const payload = { error: message, message: message };
+    payload[key] = false;
+    broadcast({ type: type + '/result', params: payload });
   } else if (type === 'command') {
     // command/exec 抛错（-32000 业务拒绝、-32603 内部错误）时也必须回执。
     // 原来这条只在 handled:false 时回，异常路径一条都不发 —— 界面点了
@@ -2026,6 +2052,25 @@ async function dispatch(type, method, params) {
     }
     if (type === 'insertRemove') {
       broadcast({ type: 'insertRemove/result', params: result || {} });
+      return;
+    }
+    /* 排队队列的四条回执。同上面的理由：没被任何分支接管的类型会静默走完 ——
+       queueList 收不到则面板重建后排队条永远空白；queueEdit / queueRemove 收不到
+       则 edited/removed:false 无从判断；queueSteer 收不到则「插话发送」点了没反应。 */
+    if (type === 'queueList') {
+      broadcast({ type: 'queueList/result', params: result || {} });
+      return;
+    }
+    if (type === 'queueEdit') {
+      broadcast({ type: 'queueEdit/result', params: result || {} });
+      return;
+    }
+    if (type === 'queueRemove') {
+      broadcast({ type: 'queueRemove/result', params: result || {} });
+      return;
+    }
+    if (type === 'queueSteer') {
+      broadcast({ type: 'queueSteer/result', params: result || {} });
       return;
     }
   } catch (err) {

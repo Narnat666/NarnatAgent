@@ -60,6 +60,10 @@ class AIConfig:
     goal_max_rounds: int = DEFAULT_GOAL_MAX_ROUNDS  # 目标模式单个任务的自动续跑轮数上限（总预算）
     goal_verify: bool = DEFAULT_GOAL_VERIFY          # 完成验证：GoalComplete提交清单后由独立AI验证器复核
     goal_verify_model: str = ""                      # 验证模型，空=当前模型
+    # 繁忙（AI 正在跑这一轮）时从界面提交一句话的去向：
+    # "queue" = 排队发送（等这一轮结束、下一轮开头再发，dsh 的缺省），
+    # "steer" = 插话发送（本轮下一个 step 边界插进去）。
+    busy_send: str = "queue"
 
 
 @dataclass(frozen=True)
@@ -666,6 +670,24 @@ def _parse_model_config(value) -> tuple:
     return DEFAULT_MODEL, [DEFAULT_MODEL]
 
 
+def _parse_busy_send(value) -> str:
+    """「智能体.繁忙时发送」→ 'queue' | 'steer'（缺省/非法一律 'queue'）。
+
+    缺省取 queue 与 dsh 的 DEFAULT_BUSY_ENTER_BEHAVIOR 一致：运行中再发一句话
+    是「排在下一轮」，不会突然插进正在做的活里。非法值不报错也不崩，
+    只回落到缺省 —— 这一个字段坏掉不该让整份配置被丢弃。
+    """
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("queue", "steer"):
+            return low
+        if low in ("排队", "排队发送"):
+            return "queue"
+        if low in ("插话", "插话发送"):
+            return "steer"
+    return "queue"
+
+
 def _build_ai_config(data: dict) -> AIConfig:
     """从narnat.json的"智能体"分组构建AIConfig"""
     ai = data.get("智能体", {})
@@ -712,6 +734,7 @@ def _build_ai_config(data: dict) -> AIConfig:
         goal_max_rounds=_coerce(ai.get("目标模式最大轮数"), int) or DEFAULT_GOAL_MAX_ROUNDS,
         goal_verify=_coerce_bool(ai.get("完成验证"), DEFAULT_GOAL_VERIFY),
         goal_verify_model=str(ai.get("验证模型", "") or ""),
+        busy_send=_parse_busy_send(ai.get("繁忙时发送")),
     )
 
 

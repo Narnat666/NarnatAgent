@@ -391,9 +391,21 @@ class RpcUI:
         self._insert_queue: List[Dict[str, Any]] = []
         self._insert_lock = threading.Lock()
         self._insert_seq = 0
+        # 排队队列（chat/send mode='queue'）：运行中提交的**默认去向**。
+        # 与插话队列的根本区别是归属：插话属于**当前这一轮**（下一个 step 边界
+        # 生效），排队消息不属于本轮（等这一轮真正收口后由 agent.py 取 1 条开
+        # 下一轮）。混在一个队列里就无法做到「每轮只领 1 条排队消息」。
+        self._turn_queue: List[Dict[str, Any]] = []
+        self._turn_queue_lock = threading.Lock()
+        self._turn_seq = 0
         self._stream_lock = threading.RLock()
         self._active_stream: Optional[RpcStream] = None
         self._turn_end_callback = None
+        # 轮次开始回调（由 RpcServer 注册）：每开一条新流 = 一轮的起点，
+        # 服务端据此把 busy 置位。排队消息由 agent.py 在轮末直接开下一轮，
+        # 不经过 chat/send —— 没有这条回调，那些轮次在服务端是空闲态，
+        # queue/steer、chat/insert 会被 -32010 误拒（T8 实测）。
+        self._turn_begin_callback = None
         self._round = 0
         # 这一轮的真实起点（毫秒，0 = 还没开过流）。turn/begin 的下发时刻
         # 可能远晚于轮起点（工具确认流程会另建新流），面板重建后宿主补发
@@ -542,10 +554,10 @@ class RpcUI:
         return {"id": item["id"], "text": body, "position": position}
 
     def drain_insert(self) -> Optional[Dict[str, Any]]:
-        """取走队首一条（每次只取 1 条），返回 {id, text}；空则 None。
+        """取走队首一条，返回 {id, text}；空则 None。
 
-        只取 1 条是有意的：整批塞进去会让 AI 一次面对好几条互不相干的插话，
-        逐条消费才能一条一条地回应（agent_loop 取到就 continue 重新请求）。
+        主路径已改成 drain_insert_all（dsh 语义：一个 step 边界整批领完）。
+        这里保留单条接口给只认单条的调用方，并作为 agent_loop 的向后兼容探测。
         """
         with self._insert_lock:
             if not self._insert_queue:
@@ -553,6 +565,21 @@ class RpcUI:
             item = self._insert_queue.pop(0)
         emit("insert/consumed", {"id": item["id"], "text": item["text"]})
         return {"id": item["id"], "text": item["text"]}
+
+    def drain_insert_all(self) -> List[Dict[str, Any]]:
+        """一次取走队列里**全部**插话（按入队顺序），空则 []。
+
+        dsh 的 claim 粒度是一个 step 边界领走全部 next-step：逐条领会让 3 条
+        插话花 3 次模型调用，整批领则一次请求一起答复，顺序仍是入队顺序。
+        """
+        with self._insert_lock:
+            if not self._insert_queue:
+                return []
+            items = self._insert_queue
+            self._insert_queue = []
+        for item in items:
+            emit("insert/consumed", {"id": item["id"], "text": item["text"]})
+        return [{"id": it["id"], "text": it["text"]} for it in items]
 
     def has_insert(self) -> bool:
         with self._insert_lock:
@@ -586,6 +613,98 @@ class RpcUI:
             items = [{"id": it["id"], "text": it["text"]} for it in self._insert_queue]
         emit("insert/updated", {"items": items})
         return True
+
+    # ── 排队队列（next-turn：等这一轮结束后再发）──
+
+    def push_turn(self, text: str) -> Optional[Dict[str, Any]]:
+        """chat/send(mode='queue') 入队，返回 {id, text, position}；空文本返回 None。
+
+        与 push_insert 的两处**刻意不同**：
+        - **不唤醒** `Shell(bg="wait")`：那个等待挂在本轮里，叫醒它只会让本轮
+          白跑一步，排队消息照样要等轮末（它不属于这一轮）；
+        - 不 emit `insert/*`：两条队列各有各的事件族，前端靠事件名分工。
+        """
+        body = text or ""
+        if not body.strip():
+            return None
+        with self._turn_queue_lock:
+            self._turn_seq += 1
+            item = {"id": self._turn_seq, "text": body}
+            self._turn_queue.append(item)
+            position = len(self._turn_queue)
+        emit("queue/queued", {"id": item["id"], "text": body, "position": position})
+        return {"id": item["id"], "text": body, "position": position}
+
+    def peek_turn(self) -> Optional[Dict[str, Any]]:
+        """看一眼队首（不出队、不发事件）；空则 None。"""
+        with self._turn_queue_lock:
+            if not self._turn_queue:
+                return None
+            item = self._turn_queue[0]
+            return {"id": item["id"], "text": item["text"]}
+
+    def pop_turn(self) -> Optional[Dict[str, Any]]:
+        """取走队首一条（新一轮开始时消费，每轮只领 1 条），空则 None。"""
+        with self._turn_queue_lock:
+            if not self._turn_queue:
+                return None
+            item = self._turn_queue.pop(0)
+            items = [{"id": it["id"], "text": it["text"]} for it in self._turn_queue]
+        emit("queue/consumed", {"id": item["id"], "text": item["text"]})
+        # 队列里还剩几条也一并同步：前端据这一份快照重画，不用自己算剩余
+        emit("queue/updated", {"items": items})
+        return {"id": item["id"], "text": item["text"]}
+
+    def has_turn(self) -> bool:
+        with self._turn_queue_lock:
+            return bool(self._turn_queue)
+
+    def list_turn(self) -> List[Dict[str, Any]]:
+        with self._turn_queue_lock:
+            return [{"id": it["id"], "text": it["text"]} for it in self._turn_queue]
+
+    def edit_turn(self, turn_id: int, text: str) -> bool:
+        """按 id 改文本；id 不存在（或改后为空）返回 False。"""
+        body = text or ""
+        if not body.strip():
+            return False
+        with self._turn_queue_lock:
+            item = next((it for it in self._turn_queue if it["id"] == turn_id), None)
+            if item is None:
+                return False
+            item["text"] = body
+            items = [{"id": it["id"], "text": it["text"]} for it in self._turn_queue]
+        emit("queue/updated", {"items": items})
+        return True
+
+    def remove_turn(self, turn_id: int) -> bool:
+        """按 id 删除；id 不存在返回 False。"""
+        with self._turn_queue_lock:
+            item = next((it for it in self._turn_queue if it["id"] == turn_id), None)
+            if item is None:
+                return False
+            self._turn_queue.remove(item)
+            items = [{"id": it["id"], "text": it["text"]} for it in self._turn_queue]
+        emit("queue/updated", {"items": items})
+        return True
+
+    def promote_turn(self, turn_id: int) -> bool:
+        """把一条**排队**消息提升成**插话**（界面上的「插话发送」按钮）。
+
+        语义：移出排队队列 → 追加到插话队列末尾 → 唤醒 `Shell(bg="wait")`。
+        走 push_insert 而不是自己拼一条：插话队列的 id 空间、`insert/queued`
+        事件、wake_waiters 都在那里，抄一份必然分叉。id 因此会换（排队 id 与
+        插话 id 是两套自增序列），前端按「旧行消失 + 新行出现」处理。
+        """
+        with self._turn_queue_lock:
+            item = next((it for it in self._turn_queue if it["id"] == turn_id), None)
+            if item is None:
+                return False
+            body = item["text"]
+            self._turn_queue.remove(item)
+            items = [{"id": it["id"], "text": it["text"]} for it in self._turn_queue]
+        emit("queue/updated", {"items": items})
+        return bool(self.push_insert(body))
 
     # ── 命令 ──
 
@@ -622,6 +741,10 @@ class RpcUI:
         stream = RpcStream(self, round_no=self._round)
         with self._stream_lock:
             self._active_stream = stream
+        # 每一轮的起点（用户轮 / 排队消息开的轮 / 目标续跑轮）都经过这里，
+        # 通知服务端「本轮开始了」—— 它的 _turn_active 只由 chat/send 置位，
+        # 排队轮绕过了 chat/send，不补这一下整轮都是空闲态。
+        self._notify_turn_begin()
         stream.begin()
         return stream
 
@@ -679,6 +802,12 @@ class RpcUI:
             return self._awaiting_confirm
 
     def cancel_active(self) -> bool:
+        """用户点「停止」：打断这一轮，**不动两条队列**（dsh 的
+        `cancel(cause, keepInbox: true)`）。
+
+        排队消息与插话都是用户已经说出口的话，停止按钮只该停下 AI 的输出，
+        不该把它们一起丢掉；下一轮开始时它们照旧按 [插话…, 排队消息] 的顺序发出。
+        """
         # 正在等确认时点「停止」：把确认闸门按「不确认」推开。
         # 不推会怎样（实测）：后端一直阻塞在确认读上，界面显示「已打断」，
         # 之后用户点一下确认，那条被「停止」的命令照样执行了。
@@ -754,6 +883,18 @@ class RpcUI:
 
     def set_turn_end_callback(self, callback) -> None:
         self._turn_end_callback = callback
+
+    def set_turn_begin_callback(self, callback) -> None:
+        self._turn_begin_callback = callback
+
+    def _notify_turn_begin(self) -> None:
+        callback = self._turn_begin_callback
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:
+            pass
 
     # ── 统计 ──
 

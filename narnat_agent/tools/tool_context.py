@@ -271,6 +271,30 @@ class ToolContext:
             elif f.default_factory is not MISSING:
                 setattr(self, f.name, f.default_factory())
 
+    def reset_session(self) -> None:
+        """复位会话级的风格提醒状态（换会话时由 SessionManager 的 reset 链调用）。
+
+        两个字段都不带 task_scoped（讨论轮数是跨任务的会话级状态，不该随用户
+        每句新输入清零），所以它们一直是**进程级**的。换会话只换消息列表时，
+        基准停在上一段会话上：
+
+          · token 通道：`style_token_baseline` 还是上个会话的值，而
+            `_stats.input_tokens` 已经是新会话的长度。切进一个更长的会话时
+            `cur - baseline` 一下就超过「间隔token数」→ **刚进会话就注入一次**
+            （用户报障：「重新进入会话后会重新注入提示语」）。
+          · 轮次通道：`style_discuss_rounds` 累计着上个会话的纯讨论轮数，
+            新会话第一轮就可能凑满间隔。
+
+        复位成什么值：
+          · `style_token_baseline = -1`（**不能是 0**）：-1 的既有语义是
+            「尚未初始化，下次检查时取当时的上下文为基准」，正好等价于
+            「重新进入会话从零开始计算」；写成 0 的话 cur - 0 = 整个上下文长度，
+            长会话照样会立刻触发一次。
+          · `style_discuss_rounds = 0`：从零开始数连续纯讨论轮。
+        """
+        self.style_discuss_rounds = 0
+        self.style_token_baseline = -1
+
     def on_todo_update(self, todos):
         """调用TodoWrite UI回调"""
         if self.ui_callback:

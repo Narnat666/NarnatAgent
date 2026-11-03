@@ -120,6 +120,46 @@ class MessageManager:
             return
         self._messages.append_user_images(images, content, tool_call_id)
 
+    def append_user_turn(self, ui, text: str) -> Optional[dict]:
+        """写一条新用户消息；本轮残留的插话与它同批、且排在它之前发出。
+
+        dsh 的 claim 粒度：新 turn 的第 1 个 step 先把待发插话整批领走，
+        再取用户新消息，二者同批同一次请求发出，顺序 `[插话…, 新消息]`。
+
+        - 探测不到 `drain_insert_all`（终端形态）/ 队列为空 → 与改造前逐字等价：
+          `append_user(text)`；
+        - 有残留插话 → 先逐条 `append_user_merged`，再把新消息并入其后。合成
+          一条 user 而不是追加两条：末尾已是 user 时再 append 会形成连续 user
+          （Anthropic 严格后端要求角色交替），合并后顺序仍是「插话 → 新消息」。
+
+        **唯一实现**：agent 的新回合入口与压缩前追加都必须走这里。曾经各写一份
+        （agent._append_user_turn 与 compression_coordinator._append_pending_user），
+        两份的详情/异常处理随即分叉，是同一份逻辑的两处真相。
+
+        Returns:
+            写入后的末条消息（供压缩路径持有它的身份做归档摘除）。
+            **必须是列表里那个对象本身**，不能拷贝：压缩路径靠 `m is prepended`
+            的身份比较来定位「压缩前先追加的那条」，拷贝会让比较恒为假、
+            它会永久留在归档里，会话文件出现两遍。
+            取不到返回 None。
+        """
+        drain_all = getattr(ui, "drain_insert_all", None)
+        pending: list = []
+        if drain_all is not None:
+            try:
+                pending = [it for it in (drain_all() or [])
+                           if (it.get("text") or "").strip()]
+            except Exception:
+                pending = []
+        if not pending:
+            self._messages.append_user(text)
+        else:
+            for item in pending:
+                self.append_user_merged(item["text"])
+            self.append_user_merged(text)
+        view = self._messages.view()
+        return view[-1] if len(view) else None
+
     def append_assistant(self, content: str, tool_calls: Optional[list] = None,
                          thinking: Optional[str] = None,
                          thinking_signature: Optional[str] = None) -> bool:

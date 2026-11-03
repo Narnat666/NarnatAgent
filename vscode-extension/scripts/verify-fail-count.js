@@ -6,8 +6,11 @@
  *
  * 新口径（对齐 dsh：状态词只由整轮决定，个别工具失败只是计数里的子集）：
  *   1) 组内个别工具失败 → 写成「N 次工具调用（其中 M 次失败）」，**不再**前置「失败 · 」
- *   2) 整轮 reason==='error' → 仍前置「失败 · 」（这确实是整轮失败）
- *   3) 用户主动打断 → 仍前置「已停止 · 」
+ *   2) 整轮 reason==='error' → 组**照样建**（dsh：组级层与 turnProcessAlwaysOpen
+ *      无关），组头写「失败 · N 次工具调用」，组头不可展开（disabled）；
+ *      另有组外的系统行「✗ 请求失败」提供重试出口
+ *   3) 用户主动打断 → 组照样建，组头写「已停止 · N 次工具调用」且不可展开，
+ *      正文末尾另挂内联标签 `.msg-stopped`（见 verify-stopped-group.js）
  *   4) 副标题不重复说失败
  */
 const fs = require('fs');
@@ -40,6 +43,17 @@ const TEST = String.raw`
   }
   function label(){ return (convo().querySelector('.turn-proc .tp-label') || {}).textContent || ''; }
   function sub(){ return (convo().querySelector('.turn-proc .tp-sub') || {}).textContent || ''; }
+  function procGroups(){ return convo().querySelectorAll('.turn-proc'); }
+  function tags(){ return convo().querySelectorAll('.msg-stopped'); }
+  /** 本轮留在对话流里（可见）的工具行：不折叠时过程行应当平铺在这里 */
+  function visibleTools(){
+    return [].slice.call(convo().querySelectorAll(':scope > .tools'))
+      .filter(function(x){ return x.getBoundingClientRect().height > 0; });
+  }
+  function sysTexts(){
+    return [].slice.call(convo().querySelectorAll('.sys'))
+      .map(function(x){ return (x.textContent || '').replace(/\s+/g, ' ').trim(); });
+  }
 
   /** 跑一轮：tools = [{ok:bool}]，reason 为 turn/end 的 reason */
   async function round(round, tools, reason){
@@ -89,20 +103,62 @@ const TEST = String.raw`
     out.push('DIAG 2 全成功 标题=' + JSON.stringify(L2));
     ck('B1 全成功时标题无「失败」', L2.indexOf('失败') < 0, JSON.stringify(L2));
 
-    /* ===== 3. 整轮失败（reason=error）仍要标「失败 · 」 ===== */
+    /* ===== 3. 整轮失败（reason=error）→ 组照建，组头「失败」且点不开 ===== */
     await round(3, [{ ok: false }], 'error');
     var L3 = label();
-    out.push('DIAG 3 整轮 error 标题=' + JSON.stringify(L3));
-    ck('C1 整轮失败仍前置「失败 · 」', L3.indexOf('失败 · ') === 0, JSON.stringify(L3));
-    ck('C2 整轮失败标题仍带计数', /1 次工具调用/.test(L3), JSON.stringify(L3));
-    ck('C3 整轮失败不重复写「其中 N 次失败」', L3.indexOf('其中') < 0, JSON.stringify(L3));
+    var P3 = procGroups();
+    var T3 = visibleTools();
+    out.push('DIAG 3 整轮 error 标题=' + JSON.stringify(L3) +
+             ' 折叠组=' + P3.length + ' 顶层可见工具行=' + T3.length +
+             ' 系统行=' + JSON.stringify(sysTexts()));
+    ck('C1 整轮失败产生 1 个 .turn-proc，且该轮工具行收进组里（不再平铺）',
+      P3.length === 1 && T3.length === 0
+        && P3[0].querySelectorAll('.tp-inner .tools').length === 1,
+      'turn-proc=' + P3.length + ' 顶层可见工具行=' + T3.length +
+      ' 组内工具行=' + (P3.length ? P3[0].querySelectorAll('.tp-inner .tools').length : '-'));
+    ck('C2 整轮失败组头 =「失败 · 计数」，且组头不可展开（disabled、无 chevron）',
+      /^失败 · /.test(L3) && P3.length === 1
+        && (function(){
+          var row = P3[0].querySelector('.tp-row');
+          var before = P3[0].getAttribute('data-open');
+          row.click();
+          return row.disabled === true && !P3[0].querySelector('.tp-caret, .chevron')
+            && P3[0].getAttribute('data-open') === before;
+        })(),
+      '标题=' + JSON.stringify(L3));
+    var FAIL_SYS3 = sysTexts().filter(function(s){ return s.indexOf('请求失败') >= 0; });
+    ck('C3 整轮失败另有组外「请求失败」系统行（保留重试出口）',
+      FAIL_SYS3.length === 1
+        && !P3[0].contains(convo().querySelector('.sys')),
+      '请求失败行=' + JSON.stringify(FAIL_SYS3) + ' 全部系统行=' + JSON.stringify(sysTexts()));
+    ck('C4 整轮失败不重复写「其中 N 次失败」', L3.indexOf('其中') < 0, JSON.stringify(L3));
 
-    /* ===== 4. 用户主动打断仍标「已停止」，不被内部失败改写 ===== */
+    /* ===== 4. 用户主动打断：组照建、组头「已停止」、正文末尾挂内联标签 ===== */
     await round(4, [{ ok: false }, { ok: true }], 'cancelled');
     var L4 = label();
-    out.push('DIAG 4 打断 标题=' + JSON.stringify(L4));
-    ck('D1 打断仍标「已停止」', L4.indexOf('已停止 · ') === 0, JSON.stringify(L4));
-    ck('D2 打断时不出现「失败」状态前缀', L4.indexOf('失败 · ') !== 0, JSON.stringify(L4));
+    var P4 = procGroups();
+    var G4 = tags();
+    out.push('DIAG 4 打断 标题=' + JSON.stringify(L4) + ' 折叠组=' + P4.length +
+             ' 内联标签=' + G4.length +
+             ' 文本=' + JSON.stringify(G4.length ? G4[0].textContent.trim() : ''));
+    ck('D1 打断产生 1 个 .turn-proc，组头 =「已停止 · 计数」',
+      P4.length === 1 && /^已停止 · /.test(L4),
+      'turn-proc=' + P4.length + ' 标题=' + JSON.stringify(L4));
+    ck('D2 打断轮组头不可展开（disabled + 无 chevron + 点击无效）',
+      P4.length === 1 && (function(){
+        var row = P4[0].querySelector('.tp-row');
+        var before = P4[0].getAttribute('data-open');
+        row.click();
+        return row.disabled === true && !P4[0].querySelector('.tp-caret, .chevron')
+          && P4[0].getAttribute('data-open') === before;
+      })(), '标题=' + JSON.stringify(L4));
+    ck('D3 打断轮正文末尾挂 1 个 .msg-stopped，文本「已停止」',
+      G4.length === 1 && G4[0].textContent.trim() === '已停止',
+      'msg-stopped=' + G4.length +
+      ' 文本=' + JSON.stringify(G4.length ? G4[0].textContent.trim() : ''));
+    ck('D4 打断时不出现「失败 · 」状态前缀', L4.indexOf('失败 · ') !== 0, JSON.stringify(L4));
+    ck('D5 组内个别失败仍写成子集说明',
+      /2 次工具调用（其中 1 次失败）/.test(L4), JSON.stringify(L4));
 
     /* ===== 5. 历史重放同口径 ===== */
     convo().innerHTML = '';

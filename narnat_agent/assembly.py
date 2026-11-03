@@ -223,6 +223,13 @@ class Assembly:
         # 切换//cd//explore//done/删除当前会话/headless 复位全在那一处汇合。
         session_mgr.add_context_reset(stats.reset_session)
 
+        # 同理复位风格提醒的两个基准：它们不带 task_scoped（讨论轮数是会话级的，
+        # 不该随用户每句新输入清零），于是变成进程级残留 —— 换会话后 token 基准
+        # 还是上一段的，而 input_tokens 已是本会话长度，差值一下就超过「间隔token数」，
+        # 表现是「重新进入会话就立刻注入一次提示语」（用户报障）。复位成 -1 =
+        # 「下次检查时以当时上下文为基准」，即重新从零开始计算。
+        session_mgr.add_context_reset(tool_context.reset_session)
+
         # RpcUI 需要 stats（stats 字段的缺省来源），它在第 11 步先于 stats 构造 → 此处回注
         if rpc:
             ui.attach_stats(stats)

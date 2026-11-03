@@ -152,6 +152,12 @@ class RpcServer:
         self._shutdown = threading.Event()
         self._version = ""
         self._watchdog: "Optional[_ParentWatchdog]" = None
+        # 每一轮的起点都要把 busy 置位（见 _on_turn_begin）。注册在这里而不是
+        # serve()：RpcServer 就是那份状态的唯一主人，谁构造它谁就负责接线，
+        # 少一处漏注册就少一整类误拒。
+        _setter = getattr(self._ui, "set_turn_begin_callback", None)
+        if _setter is not None:
+            _setter(self._on_turn_begin)
 
         # 让「会话保存失败」这类提示能在界面上看见。
         # 不注册会怎样（实测）：轮末自动保存失败时提示只落到 stderr，
@@ -209,6 +215,12 @@ class RpcServer:
             "insert/list": self._m_insert_list,
             "insert/edit": self._m_insert_edit,
             "insert/remove": self._m_insert_remove,
+            # 排队消息（next-turn）：运行中提交的默认去向，等这一轮结束后由
+            # agent.py 每轮领 1 条开新一轮。queue/steer 把一条排队消息提升成插话。
+            "queue/list": self._m_queue_list,
+            "queue/edit": self._m_queue_edit,
+            "queue/remove": self._m_queue_remove,
+            "queue/steer": self._m_queue_steer,
             "command/exec": self._m_command_exec,
             "session/list": self._m_session_list,
             "session/new": self._m_session_new,
@@ -442,6 +454,21 @@ class RpcServer:
             active = self._turn_active
         setter(active)
 
+    def _on_turn_begin(self) -> None:
+        """一轮真的开始了 → 置 busy。
+
+        为什么不能只靠 chat/send 置位（T8 实测的缺陷 1 根因）：排队消息
+        由 agent.py 在轮末 `_pop_turn()` 直接开下一轮，不经过 chat/send；
+        那一整轮的 `_turn_active` 恒为 False，而前端已经收到 turn/begin、
+        「插话发送」按钮已解禁。用户点它 → queue/steer 被 -32010 拒 →
+        消息留在排队队列，等这一轮跑完才被领走另起一轮，表现为「等 AI
+        整个跑完才插入」。同样的不同步还会让 chat/insert 退化成新一轮、
+        切会话时的 _settle_turn 认为没在跑（后者的后果是孤立 tool_result）。
+        """
+        with self._turn_lock:
+            self._turn_active = True
+        self._mirror_turn_active()
+
     def _on_turn_end(self, _reason: str, intermediate: bool = False) -> None:
         # intermediate=True 是「同一用户请求内部的中间轮收口」（目标模式自动续跑）。
         # 这时**不能**解除 busy：解了之后用户能在目标跑到一半时再发一条消息，
@@ -529,6 +556,10 @@ class RpcServer:
             # 面板底色/顶栏/输入框仍然跟 VSCode 主题走，这里只给
             # markdown / 代码块 / diff / 状态 / 工具行这些「内容」的角色色。
             "theme": self._theme_snapshot(),
+            # 「繁忙时的发送行为」：运行中提交一句话时默认去哪条队列。
+            # 首屏就要知道（主按钮文案与 Enter 的行为都取决于它），所以随握手
+            # 下发，而不是等用户打开设置面板拉 describe。
+            "busySend": getattr(ai, "busy_send", "queue"),
         }
         payload.update(self._session_config_payload())
         return payload
@@ -744,6 +775,18 @@ class RpcServer:
             # 要求「压缩期间干脆不让发，等结束再解锁」），这里兜住其它客户端
             # （CLI、第三方）以及锁与请求之间的竞态窗口。
             raise RpcError(-32000, "busy")
+        # 运行中的两条去向（dsh 双队列）：queue = 等这一轮结束后的下一轮，
+        # steer = 本轮下一个 step 边界插进去。缺省 queue 与 dsh 的
+        # DEFAULT_BUSY_ENTER_BEHAVIOR='queue' 一致。
+        mode = params.get("mode", "queue")
+        if mode is None:
+            mode = "queue"
+        if mode not in ("queue", "steer"):
+            raise RpcError(-32602, f"chat/send: params.mode 只能是 queue/steer（收到 {mode!r}）")
+        with self._turn_lock:
+            busy = self._turn_active
+        if busy:
+            return self._enqueue_busy(text, mode)
         with self._turn_lock:
             if self._turn_active:
                 raise RpcError(-32000, "busy")
@@ -877,6 +920,26 @@ class RpcServer:
 
     # ── 方法：运行中插话 ──
 
+    def _enqueue_busy(self, text: str, mode: str) -> Dict[str, Any]:
+        """运行中提交的分流：queue → 排队队列，steer → 插话队列。
+
+        回执统一带 mode 与 id：前端据此在对应那条队列里先画一行（等后端事件
+        按 id 去重），并知道这句话到底排到哪去了。id 缺失（空文本）时抛错，
+        与 push_* 的空文本拒收同一口径。
+        """
+        if mode == "steer":
+            item = self._ui.push_insert(text)
+            if not item:
+                raise RpcError(-32602, "chat/send: params.text 不能为空")
+            return {"accepted": True, "mode": "steer", "id": item["id"]}
+        item = self._ui.push_turn(text)
+        if not item:
+            raise RpcError(-32602, "chat/send: params.text 不能为空")
+        # 记进输入历史：排队消息是「用户真的要发出去的一轮」，与插话（本轮碎片）
+        # 不同，它确实会作为下一轮的用户消息发出去，理应能被 ↑ 翻回来。
+        append_history(history_path(self._config.paths.data_dir), text)
+        return {"accepted": True, "mode": "queue", "id": item["id"]}
+
     def _m_chat_insert(self, params: Dict[str, Any]) -> Dict[str, Any]:
         text = self._require_str(params, "text", "chat/insert", allow_empty=True)
         if not text.strip():
@@ -921,6 +984,43 @@ class RpcServer:
         if not isinstance(insert_id, int) or isinstance(insert_id, bool):
             raise RpcError(-32602, "insert/remove: params.id 缺失或不是整数")
         return {"removed": bool(self._ui.remove_insert(insert_id))}
+
+    # ── 方法：排队消息（next-turn） ──
+
+    def _m_queue_list(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return {"items": self._ui.list_turn()}
+
+    def _m_queue_edit(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        text = self._require_str(params, "text", "queue/edit")
+        turn_id = params.get("id", _MISSING)
+        if not isinstance(turn_id, int) or isinstance(turn_id, bool):
+            raise RpcError(-32602, "queue/edit: params.id 缺失或不是整数")
+        return {"edited": bool(self._ui.edit_turn(turn_id, text))}
+
+    def _m_queue_remove(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        turn_id = params.get("id", _MISSING)
+        if not isinstance(turn_id, int) or isinstance(turn_id, bool):
+            raise RpcError(-32602, "queue/remove: params.id 缺失或不是整数")
+        return {"removed": bool(self._ui.remove_turn(turn_id))}
+
+    def _m_queue_steer(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """把一条排队消息提升成插话（界面上的「插话发送」）。
+
+        空闲时拒绝：dsh 对同一动作有前置校验（`commands.ts` 里
+        `action.kind === 'steer' && (target !== 'next-turn' || agent.status !== 'running')`
+        → `session/steer-unavailable`，「当前轮次不再接受插话」）。它挡的是
+        「轮次刚好在这一刻结束」的竞态：前端看到 running 才点的，请求到达时却已经
+        空闲，此时把消息塞进插话队列没有任何本轮边界可以承接它。前端按钮非运行中
+        本来就置灰，这道校验是给它兜底（绕过界面 / 第三方客户端也能走到这里）。
+        """
+        turn_id = params.get("id", _MISSING)
+        if not isinstance(turn_id, int) or isinstance(turn_id, bool):
+            raise RpcError(-32602, "queue/steer: params.id 缺失或不是整数")
+        with self._turn_lock:
+            busy = self._turn_active
+        if not busy:
+            raise RpcError(-32010, "queue/steer: 当前轮次已结束，不再接受插话")
+        return {"steered": bool(self._ui.promote_turn(turn_id))}
 
     def _m_command_exec(self, params: Dict[str, Any]) -> Dict[str, Any]:
         command = self._require_str(params, "command", "command/exec")
@@ -1738,6 +1838,17 @@ class RpcServer:
             "options": [{"value": k, "label": v}
                         for k, v in (getattr(ai, "thinking_options", None) or {}).items()],
         })
+        # 繁忙（AI 正在跑）时从界面提交的一句话默认去哪：排队 = 等这一轮结束，
+        # 插话 = 本轮下一个 step 边界生效。缺省 queue（对齐 dsh）。
+        items.append({
+            "id": "api.busySend", "group": "api", "label": "繁忙时的发送行为",
+            "kind": "select", "value": getattr(ai, "busy_send", "queue"), "writable": True,
+            "options": [
+                {"value": "queue", "label": "排队发送（等这一轮结束后再发）"},
+                {"value": "steer", "label": "插话发送（本轮立即插进去）"},
+            ],
+            "hint": "运行中按 Cmd/Ctrl+Enter 用另一种方式发送",
+        })
 
         # ────────── 2. 联网工具（REST 双接口：search 搜索 / fetch 抓取）──────────
         # 不绑定厂商：地址、认证、请求字段名、响应解析全部落到下面的字段里由用户填。
@@ -1953,9 +2064,35 @@ class RpcServer:
             return payload
         if key == "api":
             return self._set_api_config(value)
+        if key == "busySend":
+            return self._set_busy_send(value)
         if key == "websearch":
             return self._set_websearch_config(value)
         raise RpcError(-32602, f"config/set: 未知 key {key}")
+
+    def _set_busy_send(self, value: Any) -> Dict[str, Any]:
+        """改「繁忙时的发送行为」：queue（排队）/ steer（插话）。
+
+        与 api 那几项不同，这个开关**不需要重启**也会立刻生效：链路上没有任何
+        缓存它的地方 —— 界面每次提交都读自己那份镜像，而那份镜像的来源是这里
+        的返回值与 narnat.json。所以同时改内存（本进程后续握手用）与磁盘
+        （重启后仍是用户选的那个值）。
+        """
+        if not isinstance(value, str) or value.strip().lower() not in ("queue", "steer"):
+            raise RpcError(-32000, "config/set: 繁忙时发送只能是 queue / steer")
+        mode = value.strip().lower()
+
+        def _mutate(data):
+            data.setdefault("智能体", {})["繁忙时发送"] = mode
+
+        err = _persist_config(getattr(self._mgr, "_config_dir", ""), _mutate)
+        if err:
+            raise RpcError(-32000, "保存失败：" + err)
+        try:
+            self._config.ai.busy_send = mode
+        except Exception:
+            pass
+        return {"ok": True, "current": mode}
 
     def _set_api_config(self, value: Any) -> Dict[str, Any]:
         """改模型的接入配置：接口地址 / 接口密钥 / 协议 / 模型名。

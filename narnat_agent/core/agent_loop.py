@@ -169,25 +169,33 @@ class AgentLoop:
         ctx.style_token_baseline = max(0, self._stats.input_tokens)
 
     def _consume_insert(self, stream) -> bool:
-        """把运行中插入的用户消息取 1 条进上下文（没有则返回 False）。
+        """把运行中插入的用户消息**整批**取进上下文（没有则返回 False）。
 
-        只在 RPC 形态生效：终端 UI 没有这个方法（getattr 探测不到）→ 直接
-        返回 False，终端行为完全不变，agent_loop 也不用 import 任何 rpc 模块。
+        只在 RPC 形态生效：终端 UI 没有 drain_insert_all / drain_insert
+        （getattr 探测不到）→ 直接返回 False，终端行为完全不变，agent_loop
+        也不用 import 任何 rpc 模块。
 
-        每次只取 1 条：取到就 continue 重新请求，剩下的留到下一个消费点，
-        多条插话于是逐条生效（一次全塞进去会让 AI 对着几条不相干的话一起答）。
+        整批领取（dsh 语义）：一个 step 边界一次领完全部，一起并入同一次请求。
+        逐条领取会取到就 continue 重新请求，3 条插话于是花 3 次模型调用。
         """
-        drain = getattr(self._ui, "drain_insert", None)
-        if drain is None:
-            return False
-        item = drain()
-        if not item:
+        drain_all = getattr(self._ui, "drain_insert_all", None)
+        if drain_all is not None:
+            items = drain_all() or []
+        else:
+            drain = getattr(self._ui, "drain_insert", None)
+            if drain is None:
+                return False
+            item = drain()
+            items = [item] if item else []
+        if not items:
             return False
         # 用 append_user_merged 而不是 append_user：插话紧跟在 tool_result 之后，
         # 直接追加会形成连续两条 user；合并进同一条才是合法结构
         #（llm.py 的转换层对"tool_result 后的独立 user"已有真实 API 验证，
-        # 合并只是顺带把连续 user 的隐患一并消掉）。
-        self._msg_manager.append_user_merged(item["text"])
+        # 合并只是顺带把连续 user 的隐患一并消掉。多条插话同理：整批进来后
+        # 合成一条，先后顺序即入队顺序）。
+        for item in items:
+            self._msg_manager.append_user_merged(item["text"])
         # 复用同一stream继续内循环：先把上一轮文字落定到屏幕，
         # 再重启"思考中"spinner，避免LLM等待期界面无动画静默卡住
         stream.flush_renderer()
@@ -206,7 +214,17 @@ class AgentLoop:
         ctx = self._tool_context
         cur = self._stats.input_tokens
         if ctx.style_token_baseline < 0:
-            ctx.style_token_baseline = max(0, cur)
+            # 基准待建立（进程首次 / 刚换过会话）。
+            # 必须等到**真实的上下文快照**（cur > 0）才固化：
+            # `input_tokens` 是「最后一轮请求的 prompt token 数」（stats.update 里
+            # 是赋值不是累加），刚换会话时它被 reset_session 清成 0。若在 cur == 0
+            # 时就固化基准，则第一个请求的 usage 回来后它一跃变成整个旧会话的长度
+            # （例如 180000），差值直接超过「间隔token数」→ 刚进旧会话就注入一次，
+            # 正是用户报障的「重新进入会话就重新注入」。保持 -1 继续等，下一次进来
+            # （那时已有真实快照）才建立基准 = 从零开始计算。
+            if cur <= 0:
+                return
+            ctx.style_token_baseline = cur
             return
         if cur < ctx.style_token_baseline:
             # 压缩后上下文缩小：人设已回到最前，距离重置，重新计时

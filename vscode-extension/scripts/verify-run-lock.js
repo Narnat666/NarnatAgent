@@ -12,8 +12,11 @@
  *   L6  运行中点插件开关 → 不发 configSet，开关状态不变
  *   L7  运行中 #goalRounds.disabled === true
  *   L8  运行中输入 /ls 按 Enter → 不发命令、输入框保留、回车被消费
- *   L9  运行中输入普通文本按 Enter → 走插话（发 chatInsert、清空输入框、
- *       不进对话区、不落普通 chat、data-run 保持 true）
+ *   L9  运行中输入普通文本按 Enter → 走 chat 且 params.mode==='queue'
+ *       （默认偏好）：chatInsert 增量 0、清空输入框、不画用户气泡、
+ *       data-run 保持 true、回车被消费
+ *   L9b 偏好切到 steer（随 initialize 下发 busySend）后同样操作 →
+ *       chat 的 params.mode==='steer'（其余判据同上）
  *   L10 data-run 回到 false 后全部自动恢复（锁解开、能切、外观复原、命令能发）
  */
 const fs = require('fs');
@@ -139,7 +142,7 @@ const TEST = String.raw`
       'command 增量=' + (byKind(/command/i).length - cmd0) +
       ' input=' + JSON.stringify(el('input').value) + ' prevented=' + prevented8);
 
-    /* L9 运行中普通文本走插话（chatInsert）：不丢字、不进对话区、不落普通发送 */
+    /* L9 运行中普通文本走 chat(mode=queue)：不丢字、不画气泡、仍是运行中 */
     var chat0 = byKind(/^chat$/i).length;
     var ins0 = byKind(/chatInsert/i).length;
     var bub0 = $('#convo').querySelectorAll('.msg[data-role="user"]').length;
@@ -147,16 +150,50 @@ const TEST = String.raw`
     await sleep(80);
     var prevented9 = enter();
     await sleep(60);
-    var insD = byKind(/chatInsert/i).length - ins0;
-    var bubD = $('#convo').querySelectorAll('.msg[data-role="user"]').length - bub0;
-    ck('L9 运行中输入普通文本改走插话（chatInsert，不丢字也不画气泡）',
-      insD === 1 && byKind(/^chat$/i).length === chat0 &&
-      el('input').value === '' && bubD === 0 &&
-      document.body.getAttribute('data-run') === 'true',
-      'chatInsert 增量=' + insD + ' chat 增量=' + (byKind(/^chat$/i).length - chat0) +
-      ' input=' + JSON.stringify(el('input').value) + ' user气泡增量=' + bubD +
+    var chats9 = byKind(/^chat$/i);
+    var last9 = chats9[chats9.length - 1] || {};
+    var chatD9 = chats9.length - chat0;
+    var insD9 = byKind(/chatInsert/i).length - ins0;
+    var bubD9 = $('#convo').querySelectorAll('.msg[data-role="user"]').length - bub0;
+    ck('L9 运行中输入普通文本改走 chat 且 mode=queue（不丢字也不画气泡）',
+      chatD9 === 1 && !!last9.params && last9.params.mode === 'queue' &&
+      insD9 === 0 && el('input').value === '' && bubD9 === 0 &&
+      document.body.getAttribute('data-run') === 'true' && prevented9 === true,
+      'chat 增量=' + chatD9 + ' mode=' + JSON.stringify(last9.params && last9.params.mode) +
+      ' chatInsert 增量=' + insD9 +
+      ' input=' + JSON.stringify(el('input').value) + ' user气泡增量=' + bubD9 +
       ' data-run=' + document.body.getAttribute('data-run') +
       ' prevented=' + prevented9);
+
+    /* L9b 偏好切到 steer（随 initialize 下发 busySend）→ 运行中提交 mode=steer */
+    emit({ type: 'initialize', params: { version: 't', protocol: 1,
+      model: { current: 'm1', options: ['m1', 'm2'] },
+      thinking: { effort: 'high', options: { high: '高', max: '全开' } },
+      goal: { enabled: false, maxRounds: 10 },
+      plugins: [{ name: 'term', label: '多终端持久 SSH', enabled: true }],
+      session: {}, busySend: 'steer' } });
+    await sleep(200);
+    var chatB0 = byKind(/^chat$/i).length;
+    var insB0 = byKind(/chatInsert/i).length;
+    var bubB0 = $('#convo').querySelectorAll('.msg[data-role="user"]').length;
+    setVal('插一句');
+    await sleep(80);
+    var preventedB = enter();
+    await sleep(60);
+    var chatsB = byKind(/^chat$/i);
+    var lastB = chatsB[chatsB.length - 1] || {};
+    var chatDB = chatsB.length - chatB0;
+    var bubDB = $('#convo').querySelectorAll('.msg[data-role="user"]').length - bubB0;
+    ck('L9b 偏好 busySend=steer 时运行中按 Enter → chat 的 mode=steer',
+      chatDB === 1 && !!lastB.params && lastB.params.mode === 'steer' &&
+      byKind(/chatInsert/i).length === insB0 && el('input').value === '' &&
+      bubDB === 0 && document.body.getAttribute('data-run') === 'true' &&
+      preventedB === true,
+      'chat 增量=' + chatDB + ' mode=' + JSON.stringify(lastB.params && lastB.params.mode) +
+      ' chatInsert 增量=' + (byKind(/chatInsert/i).length - insB0) +
+      ' input=' + JSON.stringify(el('input').value) + ' user气泡增量=' + bubDB +
+      ' data-run=' + document.body.getAttribute('data-run') +
+      ' prevented=' + preventedB);
 
     /* ---------------- 这一轮结束：全部自动恢复 ---------------- */
     setRun('false');

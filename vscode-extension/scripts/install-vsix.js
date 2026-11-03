@@ -151,7 +151,23 @@ function installedDir() {
   if (!fs.existsSync(base)) return null;
   const hits = fs.readdirSync(base).filter((n) => n.startsWith('narnat.narnat-vscode'));
   if (!hits.length) return null;
-  hits.sort();
+  /* 按**版本号数值**取最大，不能按目录名字符串排序：字符串比较下
+     'narnat.narnat-vscode-0.0.7-win32-x64' > 'narnat.narnat-vscode-0.0.10'
+     （'7' > '1'），于是刚装好的 0.0.10 被跳过、拿旧目录去比对，
+     报出一串「内容不同」的假 FAIL，真正装错时反而看不出来（实测）。
+     取不到版本号段的目录（名字异常）排在最后：它们不该被当成当前版本。 */
+  const verOf = (n) => {
+    const m = /-(\d+)\.(\d+)\.(\d+)/.exec(n);
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [-1, -1, -1];
+  };
+  hits.sort((a, b) => {
+    const va = verOf(a);
+    const vb = verOf(b);
+    for (let i = 0; i < 3; i++) {
+      if (va[i] !== vb[i]) return va[i] - vb[i];
+    }
+    return a.localeCompare(b);
+  });
   return path.join(base, hits[hits.length - 1]);
 }
 

@@ -95,6 +95,15 @@ class CompressionCoordinator:
             f"{INTERNAL_NOTICE_PREFIX} 对话历史过长已压缩，早前内容已总结为上下文成果；"
         )
 
+    def _append_pending_user(self, pending_input: str):
+        """把「残留插话 + 本次新输入」按 dsh 顺序组装成一条 user 消息，返回该条。
+
+        组装规则与顺序由 `MessageManager.append_user_turn` 唯一定义（插话在前、
+        新消息在后，同一条 user），这里只是转调 —— 曾经此处另写一份，两份的
+        异常处理随即分叉。
+        """
+        return self._msg_manager.append_user_turn(self._ui, pending_input)
+
     def _detach_prepended(self, prepended: dict) -> None:
         """把压缩前追加的那条输入从归档里摘掉。
 
@@ -162,7 +171,7 @@ class CompressionCoordinator:
         if not self._msg_manager.has_compressible_history(self._config.session.retain_tokens):
             self._logger.warning(
                 "compressor", "占比超阈值但保留预算内无可压缩历史，跳过压缩（避免空转）")
-            self._msg_manager.append_user(pending_input)
+            self._append_pending_user(pending_input)
             return True
 
         # 压缩窗口内用户随时可能关窗口/重启后端（真实模型 7~11 秒），而退出
@@ -171,9 +180,10 @@ class CompressionCoordinator:
         # 故压缩开始前就先追加：任何时刻退出它都在列表里、能被落盘。
         # 交给 handle_compress 的是空串——输入已在尾部，空串让它只并入尾部
         # 而不重复追加一次；拼接痕迹由 _fix_prepended_tail 收尾。
+        # 残留插话与它同批组装（顺序「插话 → 新消息」，见 _append_pending_user）：
+        # 留着它们等 step 边界再并入，顺序会倒过来。
         self._msg_manager.repair()
-        self._msg_manager.append_user(pending_input)
-        prepended = self._msg_manager.view[-1]
+        prepended = self._append_pending_user(pending_input)
 
         def on_interrupt():
             self._ui.end_compressing()
