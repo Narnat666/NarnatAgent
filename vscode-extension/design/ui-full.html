@@ -1052,6 +1052,12 @@ body[data-real="true"] .demo-tip{display:none}
   font-size:12px;line-height:24px;
 }
 .row:hover{background:color-mix(in srgb, var(--fg) 6%, transparent)}
+/* 「准备中」的行不可展开（此刻还拿不到完整参数，slot 是空的）——
+   与 dsh 同口径：`DisclosureRow` 只在可展开时才给 `data-expandable`，
+   pointer 光标也是它的属性选择器给的（`ui-primitives/DisclosureRow.module.css`:
+   `.row[data-expandable]{cursor:pointer}`）。这里照做：不可展开就不是手型，
+   用户一眼能看出「现在点不了」，而不是点了没反应以为坏了。 */
+.tools .row[data-noexpand="1"]{cursor:default}
 /* 行首图标槽：语义图标与 chevron 叠在同一个 16px 盒里（dsh 的 DisclosureRow：
    `.leading` 16px 盒 + 14px 字形 + `.iconIdle` ↔ `.chevronHover` 透明度互换）。
    盒子尺寸固定，两者切换时行内文字不左右跳动。 */
@@ -1653,11 +1659,17 @@ body[data-compact="true"] .send{display:none}
    一圈与面板脱节的亮白/纯黑框，实测被点名为「白框太丑」）。 */
 .palette .item .c{
   font-family:var(--mono);font-size:11.5px;color:var(--fg);flex:none;
-  /* 名字列宽度按内容给，但**不超过**一个上限。
+  /* 名字列宽度按内容给，上限是整行而不是 150px。
      原来写死 88px：最长命令名 `/thinkback` 只要 67.4px，白占 20.6px；
      而会话名 40 字符时只显示得下约 13 个字符（实测）。改成 max-content 后
-     命令名不再截断、长会话名也拿得到多出来的宽度，描述列跟着受益。 */
-  width:max-content;min-width:64px;max-width:150px;
+     命令名不再截断、长会话名也拿得到多出来的宽度，描述列跟着受益。
+     但 150px 这道上限仍会把长技能名截成「VSCode-远程连VMware内Ub…」
+     和「software-design-comple…」（用户报障截图）。而描述列剩下的那十几
+     像素本来也放不下一个字，让名字拿满整行更划算。命令名全都远短于
+     150px，所以这条改动只作用于超长候选。
+     减掉的 10px 是下面 .item 的 gap：名字写到满行时描述列被压成 0 宽，
+     间隙照旧占位，不减就会把行撑出容器、在面板里留下横向滚动。 */
+  width:max-content;min-width:64px;max-width:calc(100% - 10px);
   /* 会话名可能很长（`grep-ignore-case/try-regex`）：必须省略而不是折行。
      不截会怎样（实测）：同一列表里出现 28.5 / 48.1 / 67.6px 三种行高，
      方向键上下移动时列表跟着来回滚，眼睛跟不上。 */
@@ -7540,6 +7552,9 @@ body[data-run="true"] #goalRounds{opacity:.45}
     }
     var row = e.target.closest('.row');
     if (!row) return;
+    /* 「准备中」的行没有内容可展开（slot 是空的）：放行会切出一张空卡片，
+       还会把准备态的 data-open 改掉。等 `tool/call` 升级成正式行之后才可展开。 */
+    if (row.getAttribute('data-preparing') === '1') return;
     var next = row.getAttribute('data-open') === 'true' ? 'false' : 'true';
     row.setAttribute('data-open', next);
     // 同步外层容器的 data-open：思考块的标题颜色靠 .think[data-open] 控制，
@@ -11063,6 +11078,16 @@ body[data-run="true"] #goalRounds{opacity:.45}
       // 被打断 / 未执行 都不是执行失败：走 warn 一档（琥珀），红留给真跑挂的。
       // 用户点停止后看到红字会以为「它报错了」，而它只是被掐掉了。
       entry.row.setAttribute('data-st', 'warn');
+      /* 还停在「准备中」的行（模型被打断 / `tool/call` 永远不会来 / 掉线）：
+         必须把准备态标记一起清掉，否则这一行永久转圈，而且点击仍被
+         `data-preparing` 拦着展不开、永远等不到那个不会来的 tool/call。
+         文案由下面那段统一写成「已中断」/「未完成」，这里只负责退出准备态。 */
+      if (entry.row.getAttribute('data-preparing') === '1') {
+        entry.row.removeAttribute('data-preparing');
+        entry.preparing = false;
+        entry.argChunks = [];
+        entry.scanner = null;
+      }
       // 打上「已由收口逻辑定性」的标记：被打断的工具，它的 tool/result 往往
       // 还会晚几百毫秒才到（实测 242~294ms 后到达）。那个迟到结果会把
       // 「已中断」直接覆盖成「完成 · 1915ms」——用户点过停止，却看到最后一步
@@ -11402,12 +11427,600 @@ body[data-run="true"] #goalRounds{opacity:.45}
     if (el) el.__html = moreHtml;
   }
 
+  /* ══════════════════════════════════════════════════════════════════════
+     「准备中」工具行 —— 参数还在流式生成时就把这一行画出来
+     ══════════════════════════════════════════════════════════════════════
+
+     用户报障原文：「ai 写文件的时候，界面会卡住，原因是需要等到 ai 写完毕后才
+     在界面上显示写了什么」。对照 dsh：模型还在生成参数时，屏幕上已经有一行
+     「准备写入文件 · path/to/a.js · 12KB」，数字持续往上跳，所以从不会看起来卡死。
+
+     数据来源是 `tool/call_delta`（协议 §4.4.1）：同一 id 的多片 `delta` 顺序
+     拼接 == 完整 arguments JSON **原文**。所以这一层必须自己扫一遍半截 JSON：
+       · `JSON.parse` 用不了（半截文本必抛），而这条路径上抛异常 = 整行画不出来；
+       · 30KB 的 content 反复拼成一个大字符串再扫是 O(n²)，所以按**分片**增量扫。
+
+     显示口径（dsh 的设计，见 nn-tasks/T01-dsh-write-streaming.report.md §5.1）：
+       · 路径进 `.arg`，KB 与行数进 `.meta`，**content 的正文一个字都不进 DOM**
+         （dsh 的 `contentKilobytes()` 只取 `stringLength()`，只显示数字）；
+       · 准备阶段没有 label（`label` 来自源码 CAPABILITY，客户端不自行推导，
+         见 docs/vscode-rpc-protocol.md:396），所以 `.name` 只显示 `name` 原文；
+       · `tool/call` 到了就地升级成正式行（`upgradePreparingTool`），不新建第二行。
+  */
+
+  /**
+   * 半截 JSON 扫描器（只认顶层 object，只关心字符串字段的读法）。
+   *
+   * ```js
+   * var sc = createArgScanner();
+   * sc.append('{"file_path":"a.js","content":"const ');
+   * sc.append('x = 1\\n');
+   * sc.complete('file_path'); // true
+   * sc.text('file_path');     // 'a.js'
+   * sc.length('content');     // 9
+   * ```
+   *
+   * ## 为什么不是「每次读取先把分片 join 起来再从头扫」
+   * 写一个 30KB 文件时后端会发几十片，每片都全量重扫就是 O(n²)；而这个读取
+   * 发生在每一帧里。这里游标**只前进不后退**：已经扫过的字符永远不会被扫第二遍，
+   * 读取时只增量扫「还没扫过的那一截」（惰性——扫描由读取触发，append 不扫）。
+   *
+   * ## 容错是硬要求（任何一条都不许抛）
+   *   · 尾部孤立 `\`（被转义的字符在下一片）→ 停在原地等下一片
+   *   · 半个 `\uXXXX` → 停住等下一片；4 位但不是十六进制 → 该字段作废
+   *     （`text` 返回 undefined、`complete` 返回 false），扫描继续，绝不抛
+   *   · `\"` 与 `\\` 按**反斜杠奇偶性**判引号是否闭合：转义按「反斜杠 + 一个字符」
+   *     两格一起吃掉，天然就是奇偶性判据 —— `"a\\\\"`（两个反斜杠后闭合）与
+   *     `"a\\"`（一个反斜杠后还没闭合）不会判成同一个边界
+   *   · 字段顺序任意（`file_path` 可能晚于 `content` 到达）
+   *   · 顶层不是 object → 标记死掉、后面一个字符都不再扫（读法照旧不抛）
+   *
+   * @returns {{append:Function, text:Function, complete:Function, length:Function, lines:Function}}
+   */
+  function createArgScanner(){
+    /* 分片原文。**不拼接**（拼接是 O(n²) 的源头），扫描时跨片读。 */
+    var chunks = [];
+    var ci = 0;            // 当前片下标
+    var ii = 0;            // 片内偏移
+    /* 状态机：start / key / kstr / colon / val / vstr / scalar / nested / after
+       （kstr=正在读键名，vstr=正在读字符串值） */
+    var st = 'start';
+    var dead = false;      // 顶层结构非法 → 不再扫
+    var finished = false;  // 顶层 } 已到达
+    var recs = {};         // key → { parts, buf, len, nl, closed, bad }
+    var keyAcc = '';       // 正在读的键（跨片续读）
+    var keyName = null;    // 刚读完的键
+    var val = null;        // 正在读的字符串值记录
+    var depth = 0;         // 跳过嵌套结构时的层数
+    var inStr = false;     // 跳过嵌套结构时是否落在字符串里
+    var escPending = false;// 跳过嵌套结构时上一个字符是反斜杠
+
+    function recOf(k){
+      var r = recs[k];
+      if (!r) {
+        r = recs[k] = { parts: [], buf: '', len: 0, nl: 0, closed: false, bad: false };
+      }
+      return r;
+    }
+    /* 把缓冲区里的字符落进 parts（每轮扫描结束时一次，避免逐字符建散片） */
+    function flush(){
+      if (val && val.buf) { val.parts.push(val.buf); val.buf = ''; }
+    }
+    function put(ch){
+      val.buf += ch;
+      val.len += 1;
+      if (ch === '\n') val.nl += 1;
+    }
+    function emitCh(ch, isKey){
+      if (isKey) keyAcc += ch; else put(ch);
+    }
+    /* 从游标起跨片取最多 n 个字符；不足 n = 数据还没到（调用方停在原地等） */
+    function readAhead(n){
+      var out = '';
+      var j = ci, k = ii;
+      while (out.length < n && j < chunks.length) {
+        var c = chunks[j] || '';
+        out += c.slice(k, k + (n - out.length));
+        j += 1;
+        k = 0;
+      }
+      return out;
+    }
+    /* 游标前进 n（调用前必须已用 readAhead 确认字符足够） */
+    function skip(n){
+      while (n > 0 && ci < chunks.length) {
+        var c = chunks[ci] || '';
+        var take = c.length - ii;
+        if (take <= 0) { ci += 1; ii = 0; continue; }
+        if (take > n) take = n;
+        ii += take;
+        n -= take;
+      }
+    }
+    function isWs(ch){
+      return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r';
+    }
+    function isHex4(s){ return /^[0-9a-fA-F]{4}$/.test(s); }
+
+    /**
+     * 增量扫一遍「还没扫过的那一截」。每次读取都先调它；游标已经到底时
+     * 这一趟就是 O(1)。死循环防护：每个分支要么吃字符、要么换状态，
+     * 换到的状态（key/after/nested/scalar）都必然吃字符。
+     */
+    function scan(){
+      while (!dead && !finished) {
+        var c = chunks[ci];
+        if (c === undefined) break;              // 新片还没到 → 等
+        if (ii >= c.length) { ci += 1; ii = 0; continue; }
+        var ch = c.charAt(ii);
+
+        if (st === 'start') {
+          if (isWs(ch)) { ii += 1; continue; }
+          if (ch !== '{') { dead = true; break; } // 只认顶层 object
+          ii += 1; st = 'key'; continue;
+        }
+
+        if (st === 'key') {
+          if (isWs(ch)) { ii += 1; continue; }
+          if (ch === '}') { ii += 1; finished = true; break; }
+          if (ch === ',') { ii += 1; continue; }
+          if (ch === '"') { ii += 1; keyAcc = ''; st = 'kstr'; continue; }
+          ii += 1; continue;                      // 杂讯：跳过（宽容，不抛）
+        }
+
+        if (st === 'kstr' || st === 'vstr') {
+          var isKey = (st === 'kstr');
+          if (ch === '\\') {
+            var esc2 = readAhead(2);
+            if (esc2.length < 2) break;           // 尾部孤立 \ → 等下一片
+            var e2 = esc2.charAt(1);
+            if (e2 === 'u') {
+              var hex6 = readAhead(6);
+              if (hex6.length < 6) break;         // 半个 \uXXXX → 等下一片
+              var h4 = hex6.slice(2, 6);
+              if (!isHex4(h4)) {
+                /* 4 位但不是十六进制：该字段作废，吃掉 \uXXXX 继续扫（不抛） */
+                if (!isKey && val) val.bad = true;
+                skip(6); continue;
+              }
+              var code = parseInt(h4, 16);
+              skip(6);
+              emitCh(String.fromCharCode(code), isKey);
+              continue;
+            }
+            if (e2 === '"') { skip(2); emitCh('"', isKey); continue; }
+            if (e2 === '\\') { skip(2); emitCh('\\', isKey); continue; }
+            if (e2 === '/') { skip(2); emitCh('/', isKey); continue; }
+            if (e2 === 'b') { skip(2); emitCh('\b', isKey); continue; }
+            if (e2 === 'f') { skip(2); emitCh('\f', isKey); continue; }
+            if (e2 === 'n') { skip(2); emitCh('\n', isKey); continue; }
+            if (e2 === 'r') { skip(2); emitCh('\r', isKey); continue; }
+            if (e2 === 't') { skip(2); emitCh('\t', isKey); continue; }
+            /* 其余转义非法：字段作废，吃掉这个转义继续扫（不抛） */
+            if (!isKey && val) val.bad = true;
+            skip(2); continue;
+          }
+          if (ch === '"') {
+            ii += 1;
+            if (isKey) { keyName = keyAcc; keyAcc = ''; st = 'colon'; }
+            else { if (val) val.closed = true; st = 'after'; }
+            continue;
+          }
+          /* 普通字符。控制字符也照收（宽容：宁可显示，也不要整行消失） */
+          emitCh(ch, isKey);
+          ii += 1; continue;
+        }
+
+        if (st === 'colon') {
+          if (isWs(ch)) { ii += 1; continue; }
+          if (ch === ':') { ii += 1; st = 'val'; continue; }
+          /* 不是冒号：结构不对，但别抛，退回 key 状态继续找（key 分支必然吃字符） */
+          st = 'key'; continue;
+        }
+
+        if (st === 'val') {
+          if (isWs(ch)) { ii += 1; continue; }
+          if (ch === '"') {
+            val = recOf(keyName === null ? '' : keyName);
+            // 同一个键重复出现：按新值从头算
+            val.parts = []; val.buf = ''; val.len = 0; val.nl = 0;
+            val.closed = false; val.bad = false;
+            ii += 1; st = 'vstr'; continue;
+          }
+          if (ch === '{' || ch === '[') {
+            depth = 1; inStr = false; escPending = false;
+            ii += 1; st = 'nested'; continue;
+          }
+          /* 数字 / true / false / null：整段跳过（不关心非字符串字段） */
+          st = 'scalar'; continue;
+        }
+
+        if (st === 'scalar') {
+          if (ch === ',' || ch === '}') { st = 'after'; continue; } // 交给 after 吃
+          ii += 1; continue;
+        }
+
+        if (st === 'nested') {
+          if (inStr) {
+            if (escPending) { escPending = false; ii += 1; continue; }
+            if (ch === '\\') { escPending = true; ii += 1; continue; }
+            if (ch === '"') { inStr = false; ii += 1; continue; }
+            ii += 1; continue;
+          }
+          if (ch === '"') { inStr = true; ii += 1; continue; }
+          if (ch === '{' || ch === '[') { depth += 1; ii += 1; continue; }
+          if (ch === '}' || ch === ']') {
+            depth -= 1; ii += 1;
+            if (depth <= 0) { depth = 0; st = 'after'; }
+            continue;
+          }
+          ii += 1; continue;
+        }
+
+        if (st === 'after') {
+          if (isWs(ch)) { ii += 1; continue; }
+          if (ch === ',') { ii += 1; st = 'key'; continue; }
+          if (ch === '}') { ii += 1; finished = true; break; }
+          dead = true; break;                     // 结构坏了：停止扫描（不抛）
+        }
+
+        /* 兜底：不该到这儿，前进一格防死循环 */
+        ii += 1;
+      }
+      flush();
+    }
+
+    function append(fragment){
+      if (typeof fragment !== 'string' || !fragment) return;
+      // 已经收口（顶层 } 到了 / 结构判死）之后，增量对行头没有任何意义，也不占内存
+      if (dead || finished) return;
+      chunks.push(fragment);
+    }
+    function rec(k){
+      scan();
+      return recs[k];
+    }
+    /** 已解码的字符串值；字段没出现或解码出错 → undefined */
+    function text(k){
+      var r = rec(k);
+      if (!r || r.bad) return undefined;
+      return r.parts.join('') + r.buf;
+    }
+    /** 该字段的闭合引号是否已到达（内容合法性不影响此判据；解错过则是 false） */
+    function complete(k){
+      var r = rec(k);
+      return !!(r && r.closed && !r.bad);
+    }
+    /** 已解码的字符数；没闭合也给**当前**长度（进度显示靠它），字段没出现给 0 */
+    function length(k){
+      var r = rec(k);
+      return r ? r.len : 0;
+    }
+    /** 已解码内容里 '\n' 的个数（行数 = 它 + 1），字段没出现给 0 */
+    function lines(k){
+      var r = rec(k);
+      return r ? r.nl : 0;
+    }
+
+    return { append: append, text: text, complete: complete, length: length, lines: lines };
+  }
+
+  /**
+   * 下一帧执行（同一帧内多次调用只跑一次由调用方的 rafPending 保证）。
+   *
+   * 为什么不是裸 `requestAnimationFrame`：**无合成器环境里 rAF 永不触发**。
+   * 实测（回归脚本用的 headless Edge + `--virtual-time-budget`）：页面加载后
+   * 只跑了第 1 个帧回调，之后连排 20 次 requestAnimationFrame 一次都没执行，
+   * 而同一页的 setTimeout 链条 20 步全跑完 —— 只用 rAF 的话，行头数字在回归里
+   * 永远停在第一帧，P1/P3/P4/P6 根本无法验证。
+   * 语义不变（相邻两次刷新之间至少隔一次「帧或定时器」），做法是两者赛跑：
+   * 生产 webview 有帧，rAF 必然先到（≤16.7ms）；定时器只在没有帧的环境里兜底。
+   */
+  var PREPARE_FRAME_MS = 50;
+  function afterFrame(fn){
+    var done = false;
+    var go = function(){ if (done) return; done = true; fn(); };
+    raf(go);
+    setTimeout(go, PREPARE_FRAME_MS);
+  }
+
+  /** 行头摘要元素的唯一写法：className（路径要套 .path 保尾部）与正文一起换 */
+  function setRowArg(row, text){
+    if (!row) return;
+    var el = row.querySelector('.arg');
+    if (!el) return;
+    var ap = argParts(text);
+    el.className = ap.isPath ? 'arg path' : 'arg';
+    el.textContent = ap.text;
+  }
+
+  /**
+   * 刷新一行「准备中」的行头：三样东西按 dsh 口径算。
+   *
+   *   · 路径：**必须 `complete()` 为真才显示**。半截路径会带出右引号
+   *     （`D:\a\b.js"` 这种怪东西），还可能被误认成可点链接；
+   *     显示前过一遍 `relativizeToCwd()`（与普通工具行同一个出口）。
+   *   · 内容进度：`content` / `old_string` / `new_string` 三个字段各算已解码
+   *     长度，取最大值（Write 用 content，Edit 两个字段都要算）。
+   *   · 行数：已解码内容里 '\n' 的个数 + 1；内容为空时不算行数。
+   *
+   * 归属（**唯一归属，不再自己另定**）：路径进 `.arg`，KB 与行数进 `.meta`，
+   * 与「准备中」之间用 ` · ` 连接；KB 与行数同时出现或同时不出现。
+   *
+   * 闸门二（变化量）：`floor(chars/1024)`、行数、路径三样都没变时
+   * **一个字节的 DOM 都不写** —— 1023 字符以内的增长不产生任何 DOM 写入。
+   */
+  function refreshPreparingRow(entry){
+    if (!entry || entry.preparing !== true || !entry.scanner) return;
+    var sc = entry.scanner;
+    var rawPath = sc.complete('file_path') ? sc.text('file_path') : undefined;
+    var showPath = (typeof rawPath === 'string') ? relativizeToCwd(rawPath) : '';
+    var KEYS = ['content', 'old_string', 'new_string'];
+    var bestKey = '', bestLen = 0, i;
+    for (i = 0; i < KEYS.length; i++) {
+      var n = sc.length(KEYS[i]);
+      if (n > bestLen) { bestLen = n; bestKey = KEYS[i]; }
+    }
+    var kb = Math.floor(bestLen / 1024);
+    var lines = bestLen > 0 ? (sc.lines(bestKey) + 1) : 0;
+    if (kb === entry.shownKb && lines === entry.shownLines
+      && showPath === entry.shownPath) return;
+    entry.shownKb = kb;
+    entry.shownLines = lines;
+    entry.shownPath = showPath;
+    setRowArg(entry.row, showPath);
+    var metaEl = entry.row.querySelector('.meta');
+    if (metaEl) {
+      /* 只写数字，绝不写 content 的正文（dsh 的有意设计，见本段开头的注释）。
+         不到 1KB 时写 `<1KB` 而不是 `0KB`：300 字节的文件显示「0KB」读起来像
+         「什么都没写」，而台阶比较仍按 kb 数字走（0 一直显示 `<1KB`，跨到 1
+         才变），闸门二的判据不受这句话影响。 */
+      var kbText = kb > 0 ? kb + 'KB' : '<1KB';
+      metaEl.textContent = bestLen > 0
+        ? '准备中 · ' + kbText + ' · ' + lines + ' 行'
+        : '准备中';
+    }
+  }
+
+  /** 排一次帧末刷新（同一帧内多次 delta 只刷一次；点这里防重入） */
+  function schedulePreparing(entry){
+    if (!entry || entry.rafPending) return;
+    entry.rafPending = true;
+    afterFrame(function(){
+      entry.rafPending = false;
+      refreshPreparingRow(entry);
+    });
+  }
+
+  /**
+   * `name`/`label` 晚于参数到达时才拿到工具名：这里才更新名字/图标/可复制口径。
+   *
+   * 显示用 `label || name`：`label` 由后端从 `CAPABILITY["label"]` 查表下发
+   * （与 `tool/call` 的 label 同源，见 `rpc/ui.py::on_tool_call_delta`），
+   * 所以这里**不需要**也不许自建 name→中文 的映射表；label 还没到时退回英文名。
+   *
+   * 两个入参都是**可选补充**，空值不覆盖已有值：后续分片若只带 `name` 不带
+   * `label`（协议允许），清空 label 会让已经显示出来的中文名当场退回英文
+   * （实测 C5：`写入` → `Write`）。
+   */
+  function setPreparingName(entry, nm, lb){
+    if (nm) entry.name = nm;
+    if (lb) entry.label = lb;
+    var shown = entry.label || entry.name || '工具';
+    var nameEl = entry.row.querySelector('.name');
+    if (nameEl) nameEl.textContent = shown;
+    entry.wrap.setAttribute('data-tool', entry.name);
+    entry.wrap.setAttribute('data-tool-label', entry.label || '');
+    entry.copyable = toolHasCopy(entry.name);
+    // 图标跟着名字换：没名字时用的是 other 兜底图标（GenericToolCard 的口径）
+    var caret = entry.row.querySelector('.caret');
+    if (caret) caret.outerHTML = rowGlyph(rowIconKey(entry.name));
+  }
+
+  /**
+   * `tool/call_delta` 的处理函数：参数还在流式生成时就把行画出来。
+   *
+   * 幂等：同一个 id 的第一条建行，之后的只往 `entry.argChunks` 里追加分片 +
+   * 排一次刷新。`tool/call` 到了由 `upgradePreparingTool` 原地升级。
+   *
+   * 与 `addToolRow` 的差别（全部是「准备阶段还没有的东西」）：
+   *   · `.name` 用后端随 delta 下发的 `label`（与 `tool/call` 的 label 同源），
+   *     两者都没有时退回 `'工具'`；客户端**不许**自造中文名
+   *     （docs/vscode-rpc-protocol.md:396）；
+   *   · `.slot` 里不放 IN/OUT 卡片（此时没有内容），点击也不展开
+   *     ——与 dsh 同口径（`ToolRow` 的 `expandable = state !== 'preparing' && …`）；
+   *   · `.meta` 是「准备中」+ 数字，`data-preparing="1"` 标记它是准备态。
+   */
+  function preparingTool(p){
+    if (!p || !p.id) return;
+    var entry = toolMap[p.id];
+    var nm = (typeof p.name === 'string') ? p.name : '';
+    var lb = (typeof p.label === 'string') ? p.label : '';
+    var dl = (typeof p.delta === 'string') ? p.delta : '';
+
+    if (!entry) {
+      // 与 addToolRow 同口径：离线态不该出现「准备中」的行（后端已经没了，
+      // 这条永远不会升级成正式行，行会一直转）。
+      if (body.getAttribute('data-offline') === 'true') return;
+      /* 正文/思考确实已经结束了（工具调用就是边界），所以与 addToolRow 一样
+         先收口两段，保证「正文 → 工具 → 正文」的真实顺序。 */
+      closeAssistantSegment();
+      closeThinkSegment();
+      var wrap = document.createElement('div');
+      wrap.className = 'tools';
+      wrap.innerHTML = '<div class="row" data-open="false" data-st="running"' +
+        ' data-preparing="1" data-noexpand="1">' +
+        rowGlyph(rowIconKey(nm)) +
+        '<span class="name">' + esc(lb || nm || '工具') + '</span>' +
+        '<span class="arg"></span>' +
+        '<span class="meta dot-anim">准备中</span></div>' +
+        '<div class="slot"></div>';
+      convo.appendChild(wrap);
+      entry = {
+        wrap: wrap,
+        row: wrap.querySelector('.row'),
+        slot: wrap.querySelector('.slot'),
+        isTodo: false,
+        input: '',
+        sum: '',
+        copyable: toolHasCopy(nm),
+        name: nm,
+        label: lb,
+        todo: null,
+        extra: null,
+        /* ---- 准备态专用（升级时全部清掉） ---- */
+        preparing: true,
+        argChunks: [],          // 分片原文（升级时清空，释放内存）
+        scanner: createArgScanner(),
+        shownKb: 0,             // 上一次**写进 DOM**的 KB 台阶（闸门二）
+        shownLines: 0,          // 上一次写进 DOM 的行数
+        shownPath: '',          // 上一次写进 DOM 的路径
+        rafPending: false       // 帧末刷新是否已排队
+      };
+      toolMap[p.id] = entry;
+      // 与 addToolRow 一致的三件标记：轮末折叠组、折叠摘要的行文要用
+      wrap.setAttribute('data-turn-tool', '1');
+      wrap.setAttribute('data-tool', nm);
+      wrap.setAttribute('data-tool-label', lb);
+      turnToolCount += 1;
+      scrollBottom();
+    } else if (entry.preparing === true
+        && ((nm && nm !== entry.name) || (lb && lb !== (entry.label || '')))) {
+      setPreparingName(entry, nm, lb);
+    }
+    // 已经升级成正式行（或本来就不是准备行）：增量到此为止
+    if (entry.preparing !== true) return;
+    if (dl) {
+      entry.argChunks.push(dl);
+      if (entry.scanner) entry.scanner.append(dl);
+    }
+    schedulePreparing(entry);
+  }
+
+  /**
+   * `tool/call` 到达：把「准备中」的行**原地升级**成正式工具行。
+   *
+   * 必须复用同一个 `wrap` 节点（不能新建一个再替换）：节点身份一变，用户正看着
+   * 的那一行会闪一下，折叠组/滚动定位也跟着抖；验收 P6 直接断言引用相等。
+   *
+   * 这里**不能**再做的事（做了就是重复）：
+   *   · 不再调 `closeAssistantSegment` / `closeThinkSegment`（准备阶段已收口，
+   *     再切一刀会把已经收口的段落多切一次）
+   *   · 不再 `appendChild` 到 convo、不再 `turnToolCount += 1`
+   *   · 不再发 `rendered('tool/call')`（这条回执在准备阶段已经由建行那一次代表）
+   */
+  function upgradePreparingTool(entry, p){
+    var isTodo = p.label === '更新计划' || p.name === 'TodoWrite';
+    var sumText = argSummary(p.name, p.label, p.arguments, p.summary);
+    var inputText = isTodo ? '' : toolInputText(p);
+    var nm = String(p.name || '');
+    var lb = String(p.label || '');
+    entry.preparing = false;
+    entry.isTodo = isTodo;
+    entry.input = inputText;
+    entry.sum = sumText;
+    entry.name = nm;
+    entry.copyable = toolHasCopy(p.name);
+    // 准备态标记到此为止（点击委托靠它拦展开，见 convo 的 click 委托）
+    entry.row.removeAttribute('data-preparing');
+    /* 参数到齐 = 现在有 body 可看了：把「可展开」的三件语义补回来（与
+       `addToolRow` 建行时一致）。dsh 的 DisclosureRow 是同一个口径——
+       可展开才给 role=button / tabindex / pointer 光标。 */
+    entry.row.removeAttribute('data-noexpand');
+    entry.row.setAttribute('tabindex', '0');
+    entry.row.setAttribute('role', 'button');
+    if (isTodo) {
+      entry.wrap.setAttribute('data-todo', 'true');
+      entry.row.setAttribute('data-open', 'true');
+    }
+    entry.wrap.setAttribute('data-tool', nm);
+    entry.wrap.setAttribute('data-tool-label', lb);
+    // 名字与 addToolRow 完全一致（label 优先）：准备阶段没有 label，此时才拿到
+    var nameEl = entry.row.querySelector('.name');
+    if (nameEl) nameEl.textContent = (lb || nm || '工具');
+    setRowArg(entry.row, sumText);
+    // IN 段卡片到这里才第一次挂上（准备阶段 slot 是空的）
+    if (isTodo) {
+      entry.slot.innerHTML = '<div class="todo"></div><div class="extra"></div>';
+      entry.todo = entry.slot.querySelector('.todo');
+      entry.extra = entry.slot.querySelector('.extra');
+      pendingTodoRow = entry;
+    } else {
+      var card = toolCardHtml(inputText, plannedWriteOut(p), entry.copyable);
+      entry.slot.innerHTML = card.html;
+      bindMoreHtml(entry.slot, card.more);
+    }
+    // 状态位：准备中 → 执行中（保留 dot-anim 动画；data-st 一直就是 running）
+    var metaEl = entry.row.querySelector('.meta');
+    if (metaEl) { metaEl.className = 'meta dot-anim'; metaEl.textContent = '执行中'; }
+    /* 增量缓冲与扫描器到此释放：升级后一切以完整 arguments 为准，
+       几十 KB 的 content 片段和它的扫描状态没有继续留着的理由。 */
+    entry.argChunks = [];
+    entry.scanner = null;
+    scrollBottom();
+    /* 回执在这里补发：老路径（`addToolRow`）每收到一条 `tool/call` 就发一条
+       `rendered('tool/call')`，宿主靠它累加 renderTotal / renderLog。升级路径
+       若不补，同一个工具在「有 delta」与「无 delta」两条路径上的回执条数就不
+       一致了（实测：老路径 3 条、升级路径 0 条）。准备阶段建行**不**发——
+       那时还没有 label，回执里的 label 只能是空，而回执的用途就是核对
+       「哪个工具渲染出来了」。一条 tool/call 对应一条回执，与改动前同口径。 */
+    rendered('tool/call', { label: lb || nm, id: p.id });
+  }
+
+  /**
+   * Write 的「预计 diff」：`tool/call` 一到就展开，看到的是**将被写入的内容**，
+   * 而不是等 `tool/result` 回来才有东西看。
+   *
+   * 口径照 dsh 的 `presentCall`（`fs/tool-fs/src/write.ts:133-142`）：
+   *   `diffs: [{ path, oldText: null, newText: args.content }]`
+   * 并附上那句注释的原意——**调用期拿不到旧文件内容，所以覆写也一律画成整文件
+   * 新增**。这不是「假装文件是空的」，而是「这条调用会产出这些行」；真实增删
+   * 行数由 `tool/result` 的 diff 覆盖（`finishTool` 会整段重渲染）。
+   * Edit 不画预计 diff：dsh 的 `diffCardModel` 对 `str_replace_editor` 直接
+   * `return null`（`ui-tool/src/client/tool/models/diff-card-model.ts:467`）。
+   *
+   * 行数上限 `PLANNED_MAX_LINES`：`toolCardHtml` 会按 `DIFF_MAX_LINES` 折叠显示，
+   * 但被折起来的中间行仍要拼成完整 HTML 字符串挂在 `.more` 上（点击展开时插入），
+   * 五万行的 content 会在这里一次吃掉几十 MB。超过上限就不画预计 diff，退回
+   * 只显示 IN 段——用户至少还有路径与「准备中」进度，不会卡。
+   */
+  var PLANNED_MAX_LINES = 5000;
+  function plannedWriteOut(p){
+    var a = p && p.arguments;
+    if (!a || typeof a !== 'object') return null;
+    if (String(p.name || '') !== 'Write') return null;
+    var content = a.content;
+    if (typeof content !== 'string') return null;
+    var text = content.split('\n');
+    /* 末尾换行不产生空行：与后端的 `str.splitlines()` 同口径（`_make_diff`）。
+       不剥会怎样：`"a\nb\nc\n"` 数出 4 行、diff 末行是个空的 `+`，
+       而 `tool/result` 的真实 diff 是 3 行 —— 同一个文件两种行数（实测）。 */
+    if (text.length > 1 && text[text.length - 1] === '') text.pop();
+    if (text.length > PLANNED_MAX_LINES) return null;
+    var lines = [];
+    for (var i = 0; i < text.length; i++) {
+      lines.push({ type: 'add', no: i + 1, text: text[i] });
+    }
+    return {
+      kind: 'diff',
+      lines: lines,
+      foot: '预计 +' + text.length + ' −0 · 真实改动以执行结果为准'
+    };
+  }
+
   function addToolRow(p){
     if (!p || !p.id) return;
     // 离线态不该出现「执行中」的工具行：后端已经没了，那个工具永远不会
     // 有结果，行会一直转。同屏「⚡离线」+「执行中」两个矛盾结论（实测）。
     if (body.getAttribute('data-offline') === 'true') {
       rendered('tool/call', { label: p.label || p.name || '', id: p.id, ignored: true });
+      return;
+    }
+    /* 这一行已经被 `tool/call_delta` 提前画出来了：**原地升级**，不新建第二行。
+       放在离线判断之后：离线态的行为必须与改动前一个字节都不差。 */
+    var pre = toolMap[p.id];
+    if (pre && pre.preparing === true) {
+      upgradePreparingTool(pre, p);
       return;
     }
     var isTodo = p.label === '更新计划' || p.name === 'TodoWrite';
@@ -15454,6 +16067,11 @@ body[data-run="true"] #goalRounds{opacity:.45}
       case 'thinking/begin': beginThink(); break;
       case 'thinking/delta': appendThink(msg.params || {}); break;
       case 'thinking/end': endThink(msg.params || {}); break;
+      /* 参数还在流式生成时的「准备中」行（协议 §4.4.1）。放在 tool/call 之前：
+         同一 id 的多片 delta 会先建行/刷数字，tool/call 到了再由 addToolRow
+         原地升级（不新建第二行）。一条 delta 都收不到时（协议不支持流式），
+         这个分支永不进入，行为与改动前完全一致。 */
+      case 'tool/call_delta': preparingTool(msg.params || {}); break;
       case 'tool/call': addToolRow(msg.params || {}); break;
       case 'tool/result': finishTool(msg.params || {}); break;
       case 'todo/update': renderTodo(msg.params || {}); break;

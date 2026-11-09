@@ -391,6 +391,12 @@ class AgentLoop:
                     if _thinking_hook is not None:
                         _thinking_hook(chunk["thinking_delta"])
 
+                # c4. 工具参数增量转发给 stream（同上：终端形态无该钩子 → 什么都不做）
+                if "tool_call_delta" in chunk:
+                    _tcd_hook = getattr(stream, "on_tool_call_delta", None)
+                    if _tcd_hook is not None:
+                        _tcd_hook(chunk["tool_call_delta"])
+
                 # d. 处理纯文本
                 if "content" in chunk and "tool_calls" not in chunk:
                     stream.feed(chunk["content"])

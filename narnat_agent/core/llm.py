@@ -948,6 +948,15 @@ class _OpenAIBackend:
                             buf["name"] += tc.function.name
                         if tc.function.arguments:
                             buf["arguments"] += tc.function.arguments
+                            # 参数增量旁路：让上层在参数还在生成时就能显示「准备写文件 · 路径」，
+                            # 不必等 finish_reason 的完整 tool_calls。id 取 buf["id"]（与
+                            # completed_calls 里的 id 同源，前端靠它复用同一行 DOM）；
+                            # name 尚未到达时给 None（json null），不塞空串。
+                            yield {"tool_call_delta": {
+                                "id": buf["id"],
+                                "name": buf["name"] or None,
+                                "delta": tc.function.arguments,
+                            }}
 
                 if finish_reason:
                     received_finish = True
@@ -1356,6 +1365,16 @@ class _AnthropicBackend:
                         pj = delta.get("partial_json", "")
                         if idx in tool_use_blocks:
                             tool_use_blocks[idx]["input_json"] += pj
+                            # 参数增量旁路（语义同 OpenAI 路径）：id/name 在
+                            # content_block_start 就已稳定到达，这里直接取用；
+                            # 空片段不发，上层据此在流式阶段画出「准备写入」行。
+                            if pj:
+                                _tu = tool_use_blocks[idx]
+                                yield {"tool_call_delta": {
+                                    "id": _tu["id"],
+                                    "name": _tu["name"] or None,
+                                    "delta": pj,
+                                }}
 
                     elif d_type == "signature_delta":
                         # Claude：思考块签名经 signature_delta 事件送达（回传思考块必需）

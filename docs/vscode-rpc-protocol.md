@@ -334,6 +334,7 @@ narnat.exe --rpc [--projects-root <路径>]
 turn/begin
   thinking/begin? …thinking/delta × N …thinking/end?
   stream/delta × N
+  tool/call_delta × N（0~N 条，同一 id 拼起来 == tool/call 的 arguments JSON 原文）
   tool/call → tool/result（可多个，工具间可并行）
   todo/update?
   compress/begin → compress/end?
@@ -393,6 +394,53 @@ turn/end
 ```
 
 `label` / `dispatch` / `summary` 全部来自源码 `CAPABILITY`，客户端不自行推导。
+
+### 4.4.1 `tool/call_delta`
+
+工具参数**还在流式生成时**就下发的原始 JSON 片段。有了它，客户端不必等 `tool/call`
+（后者带完整 arguments，要等模型把参数全部生成完）就能画出「准备写入文件 · 路径 · N KB」
+并持续刷新。
+
+```jsonc
+{"jsonrpc":"2.0","method":"tool/call_delta","params":{
+   "id":"toolu_01ABC",
+   "name":"Write",
+   "label":"写入",
+   "delta":"{\"file_path\":\"a.js\",\"content\":\"const "
+ }}
+```
+
+- `id`：与本次工具调用最终 `tool/call` 的 `id` **完全一致**（客户端靠它复用同一行 DOM）。
+- `name`：工具名；该片到达时名字还未知则填 `null`（json `null`，不是空串）。
+- `label`：工具中文名，与 `tool/call` 的 `label` **同源**（后端 `ToolDispatcher._tool_label`
+  → `CAPABILITY["label"]`）。`name` 为 `null` 时它也必须是 `null`。客户端直接用它显示，
+  **不得**自建 name→中文 的映射表——那会是同一条信息的第二份定义。
+- `delta`：本片新增的 arguments JSON **原文片段**（未解析、未解码）。同一 id 的多次 `delta`
+  按到达顺序直接拼接 == 完整 arguments JSON 文本。
+- 只在有增量时发；空片段不发。
+- 不支持流式的路径一个不发，客户端行为与现在完全一致（不要用「发一条空 delta 当开始信号」
+  这类补丁绕）。
+
+> 两条 LLM 路径都支持：OpenAI/DeepSeek 协议（`chat_stream` 的 `delta.tool_calls`）与
+> Anthropic 协议（`content_block_delta` 的 `input_json_delta`）各有一处 yield。
+> 但**客户端不得假设一定存在**：`name` 可能为 `null`，条数可能是 0 条（某些模型/网关
+> 把参数一次性给完，或将来出现不支持增量的路径）。事件是纯旁路——即使一条都收不到，
+> 也必须能仅靠 `tool/call` 正常工作。
+> 另外 `id` 在 Anthropic 路径下来自 `content_block_start`（早于所有 `input_json_delta`），
+> 所以片到达时 `id` 恒有值；只有 `name` 在极端情况下可能还是 `null`。
+
+> **实测补充（T05 系统性测试）**：
+> 1. `name` **不保证完整**。OpenAI 路径的 `delta.tool_calls[].function.name` 若与 arguments
+>    同一片到达，名字会按增量累积（`buf["name"] += …`），首条 delta 可能给出半截名字
+>    （实测构造出 `'Wr'`；真机未复现）。客户端**不得**把 `name` 当权威值缓存一次就完事，
+>    每条 delta 都要按新值更新显示——后续片会补齐成完整名字。
+> 2. 打断（`chat/cancel`）会留下**孤儿 id**：已有若干 `tool/call_delta`，但该工具的
+>    `tool/call` 永远不会来（后端已 `turn_closed`）。客户端必须能在轮末把这类行收口
+>    （清理「准备中」状态），不能让它永久转圈。实测：取消时刻越早，孤儿越多。
+> 3. 碎片率实测（真机，1~1500 每行一个数字的 Write）：3531 条 delta / 7970 字节 /
+>    14.8 秒，峰值 238 片/秒、平均 2.26 字节/片。单轮线路字节 ≈483 KB（每条通知的
+>    JSON 外壳远大于载荷，放大 ~62×）。这在本地 stdio 上不构成负担，但**不要**假设
+>    delta 条数与内容体积成正比地小。
 
 ### 4.5 `tool/result`
 

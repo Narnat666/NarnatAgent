@@ -52,7 +52,8 @@ class RpcStream:
 
     与 UIStreamSession 公开方法集保持一致（begin/feed/pause_spinner/
     resume_spinner/flush_renderer/reset_renderer/finish/abort/cancelled/aborted），
-    另外提供 core 侧可选钩子 on_tool_call / on_tool_result / on_thinking_delta。
+    另外提供 core 侧可选钩子 on_tool_call / on_tool_call_delta / on_tool_result /
+    on_thinking_delta。
     """
 
     def __init__(self, ui: "RpcUI", round_no: int = 0) -> None:
@@ -67,6 +68,9 @@ class RpcStream:
         self._thinking_started = False
         self._thinking_t0 = 0.0
         self._thinking_chars = 0
+        # 已为哪些 tool call id 收口过思考段（on_tool_call_delta 只在首次收口，
+        # 同一 id 的参数流会给很多条 delta，重复收口没有意义）
+        self._delta_ids = set()
 
     # ── 状态位 ──
 
@@ -315,6 +319,66 @@ class RpcStream:
             "diff": diff,
         })
         self._maybe_bg_submit(text)
+
+    def on_tool_call_delta(self, payload: Optional[dict] = None, **kwargs) -> None:
+        """工具参数还在生成时的增量片段（core/llm 的两条协议路径都会调）。
+
+        **为什么必须在参数流式阶段就下发**：一轮里模型生成 30KB 文件内容要几十秒，
+        这期间 `tool/call` 还没到（它带的是完整 arguments，只在 finish_reason /
+        message_delta 时才产出），面板上一行新东西都没有，用户以为卡死了。
+        把原始 JSON 片段先发下去，客户端就能画出「准备写入 · 路径 · N KB」并持续刷新。
+
+        字段严格按契约（docs/vscode-rpc-protocol.md §4.4.1）：同一 id 的多次
+        `delta` 顺序拼接 == 完整 arguments JSON 原文；`name` 未知时是 None。
+
+        `label` 与 `tool/call` 的 label **同源**（`ToolDispatcher._tool_label` →
+        `CAPABILITY["label"]`）：客户端在准备阶段就拿它显示中文名，不必自己维护
+        一张 name→中文 的映射表（那会是同一条信息的第二份定义，迟早分叉）。
+        """
+        # 兼容两种调用形态：位置参数给 dict，或 id=/name=/delta= 关键字（同 on_tool_call 风格）
+        if isinstance(payload, dict):
+            call_id = payload.get("id")
+            name = payload.get("name")
+            delta = payload.get("delta")
+        else:
+            call_id = payload
+            name = None
+            delta = None
+        if "id" in kwargs:
+            call_id = kwargs["id"]
+        if "name" in kwargs:
+            name = kwargs["name"]
+        if "delta" in kwargs:
+            delta = kwargs["delta"]
+        # 空片段不发：客户端拿到空 delta 只会白白重排一次，协议也要求「只在有增量时发」
+        if not isinstance(delta, str) or not delta:
+            return
+        name_out = name if isinstance(name, str) and name else None
+        label_out = None
+        if name_out is not None:
+            try:
+                from ..core.tool_dispatcher import ToolDispatcher
+
+                label_out = ToolDispatcher._tool_label(name_out)
+            except Exception:
+                label_out = None
+        with self._lock:
+            if self._turn_closed or self._aborted:
+                return
+            # 工具调用是思考段的边界：必须先收口再下发（理由同 on_tool_call 的注释——
+            # 前端收到工具相关事件时就地本地收口，拿不到后端真值 → 段级耗时丢失）。
+            # 同一参数流会给很多条 delta，只在**首次**为该 id 收口一次。
+            first_for_id = call_id not in self._delta_ids
+            if first_for_id:
+                self._delta_ids.add(call_id)
+        if first_for_id:
+            self._end_thinking()
+        emit("tool/call_delta", {
+            "id": call_id,
+            "name": name_out,
+            "label": label_out,
+            "delta": delta,
+        })
 
     def on_thinking_delta(self, text: str) -> None:
         if not text:
