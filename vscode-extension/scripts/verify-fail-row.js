@@ -129,16 +129,20 @@ const TEST = String.raw`
              ' 文本=' + JSON.stringify(G2.length ? G2[0].textContent.trim() : ''));
     var L2 = P2.length ? (P2[0].querySelector('.tp-label') || {}).textContent : '';
     var row2 = P2.length ? P2[0].querySelector('.tp-row') : null;
+    var openBefore2 = P2.length ? P2[0].getAttribute('data-open') : '-';
     if (row2) { row2.click(); await sleep(250); }
+    var openAfter2 = P2.length ? P2[0].getAttribute('data-open') : '-';
     ck('S1 实时：用户主动打断仍产生 1 个 .turn-proc，组头带「已停止」',
        P2.length === 1 && L2.indexOf('已停止') >= 0,
        'turn-proc=' + P2.length + ' 标题=' + JSON.stringify(L2));
-    ck('S2 实时：打断轮组头不可展开（disabled + 无 chevron + 点击无效）',
-       P2.length === 1 && !!row2 && row2.disabled === true
-         && !P2[0].querySelector('.tp-caret, .chevron')
-         && P2[0].getAttribute('data-open') === 'false',
+    /* 打断轮：默认展开（用户要看它跑到哪一步）+ 组头可自由收起
+       （dsh 的组级 header 是普通 button，disabled 只属于整轮层）。 */
+    ck('S2 实时：打断轮默认展开，且组头点一下能收起（可自由开合）',
+       P2.length === 1 && !!row2 && row2.disabled !== true
+         && !!P2[0].querySelector('.tp-caret, .chevron')
+         && openBefore2 === 'true' && openAfter2 === 'false',
        'disabled=' + (row2 ? row2.disabled : '?')
-         + ' data-open=' + (P2.length ? P2[0].getAttribute('data-open') : '-'));
+         + ' 点击前=' + openBefore2 + ' 点击后=' + openAfter2);
     ck('S3 实时：打断轮正文末尾挂 1 个 .msg-stopped「已停止」',
        G2.length === 1 && G2[0].textContent.trim() === '已停止',
        'msg-stopped=' + G2.length +

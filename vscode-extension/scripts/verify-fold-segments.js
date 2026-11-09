@@ -14,8 +14,8 @@
  *   4/5. 每组组头的计数只统计自己的成员
  *   6. 两组的展开互相独立
  *   7. 两次插话 → 3 个组，顺序 G1 → 插话1 → G2 → 插话2 → G3 → 正文
- *   8. 停止轮 + 插话 → 3 个组，只有末段带「已停止」、各段都不可展开，正文末尾 1 个 .msg-stopped
- *   9. 失败轮 + 插话 → 3 个组，只有末段带「失败」，各段都不可展开
+ *   8. 停止轮 + 插话 → 3 个组，只有末段带「已停止」、各段都默认展开且可自由开合，正文末尾 1 个 .msg-stopped
+ *   9. 失败轮 + 插话 → 3 个组，只有末段带「失败」，各段都默认展开且可自由开合
  *   10/11. 插话气泡与最终回复都不在任何组内部
  */
 const fs = require('fs');
@@ -77,12 +77,20 @@ const TEST = String.raw`
     row.click();
     await sleep(250);
     var after = p.getAttribute('data-open');
+    row.click();
+    await sleep(250);
+    var back = p.getAttribute('data-open');
+    /* 停止 / 失败轮的正确形态是「默认展开 + 组头可自由开合」：
+       dsh 的组级 header 是普通 button（没有 disabled），禁收起只属于整轮层，
+       我们没实现那一层。这里保留函数名，判据改成「可开合且默认展开」。 */
     return {
       caret: !!caret,
       disabled: row.disabled === true,
       before: before,
       after: after,
-      ok: !caret && row.disabled === true && after === before
+      back: back,
+      ok: !!caret && row.disabled !== true && before === 'true'
+        && after === 'false' && back === 'true'
     };
   }
   function reset(){ convo().innerHTML = ''; }
@@ -229,7 +237,7 @@ const TEST = String.raw`
       }),
       PC.map(function(p){ return rowOf(p) ? rowOf(p).disabled : '?'; }).join('/'));
 
-    /* ===== D：停止轮 + 两次插话 → 3 个组，每组「已停止」且都不可展开 ===== */
+    /* ===== D：停止轮 + 两次插话 → 3 个组，每组「已停止」且都默认展开、可自由开合 ===== */
     reset();
     emit({ type: 'turn/begin', params: { round: 4 } });
     await sleep(20);
@@ -260,7 +268,7 @@ const TEST = String.raw`
       dExp.push(JSON.stringify(r));
       if (!r.ok) dOk = false;
     }
-    ck('D3 每个组头都不可展开（disabled + 无 chevron + 点击无效）', dOk, dExp.join(' '));
+    ck('D3 每个组头都默认展开且可自由开合（有 chevron、未 disabled、点击能收起再展开）', dOk, dExp.join(' '));
     ck('D4 正文末尾挂 1 个 .msg-stopped，文本「已停止」',
       tags().length === 1 && tags()[0].textContent.trim() === '已停止',
       'got=' + tags().length + ' 文本=' + JSON.stringify(tags().length ? tags()[0].textContent.trim() : ''));
@@ -269,7 +277,7 @@ const TEST = String.raw`
         && !inAnyGroup(lastAssistant()),
       'inGroup=' + inAnyGroup(lastAssistant()));
 
-    /* ===== E：失败轮 + 两次插话 → 3 个组，每组「失败」且都不可展开 ===== */
+    /* ===== E：失败轮 + 两次插话 → 3 个组，每组「失败」且都默认展开、可自由开合 ===== */
     reset();
     emit({ type: 'turn/begin', params: { round: 5 } });
     await sleep(20);
@@ -298,7 +306,7 @@ const TEST = String.raw`
       eExp.push(JSON.stringify(r2));
       if (!r2.ok) eOk = false;
     }
-    ck('E3 每个组头都不可展开（disabled + 无 chevron + 点击无效）', eOk, eExp.join(' '));
+    ck('E3 每个组头都默认展开且可自由开合（有 chevron、未 disabled、点击能收起再展开）', eOk, eExp.join(' '));
     ck('E4 组外仍有「请求失败」的系统行（重试出口没被收进组）',
       [].slice.call(convo().querySelectorAll('.sys')).filter(function(x){
         return (x.textContent || '').indexOf('请求失败') >= 0 && !inAnyGroup(x);

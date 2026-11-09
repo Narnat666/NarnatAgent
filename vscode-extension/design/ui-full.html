@@ -2335,11 +2335,9 @@ body[data-run="true"] #goalRounds{opacity:.45}
 }
 .turn-proc[data-open="true"] .tp-row{padding-bottom:12px}
 .tp-row:hover{color:var(--fg-dim)}
-/* 停止 / 失败轮的组头不可展开（dsh 的 canCollapse=false → 控件 disabled）。
-   disabled 只是语义，观感上不能还留着「可以点」的暗示：去掉手型指针、去掉
-   hover 变色（标题/副标题/耗时各有自己的颜色，这里只兜住会继承的行内颜色）。 */
-.tp-row[disabled]{cursor:default}
-.tp-row[disabled]:hover{color:var(--fg-faint)}
+/* 组头永远是普通可点按钮（dsh 的组级 header 没有 disabled 分支）。
+   原来这里给停止 / 失败轮留了 `.tp-row[disabled]` 的样式，配套的是「收起 + 点不开」，
+   已随实现一起删除。 */
 .tp-caret{
   flex:none;margin-left:6px;display:inline-flex;align-items:center;justify-content:center;
   transition:transform .12s ease;transform-origin:50% 50%;
@@ -13067,12 +13065,6 @@ body[data-run="true"] #goalRounds{opacity:.45}
    * @param {Node[]} nodes  要收进去的节点（工具行 / 思考块），任意顺序
    * @param {Object} o
    *   o.reason       'done' | 'cancelled' | 'error' | 'history'
-   *   o.collapsible  组头是否可点开。默认 true。传 false 时组照样存在（组头一行
-   *                  摘要 + 组正文收起），但控件 disabled、不渲染 chevron、点击
-   *                  不响应 —— 对齐 dsh 的 `canCollapse = foldable && hasContent
-   *                  && !turnProcessAlwaysOpen(node)`：停止 / 失败轮的整轮层不可
-   *                  收起，落到组头上就是「这一行点不开」。**disabled 不等于不
-   *                  渲染**：组头与顺序全在，用户仍看得到这一轮干了什么。
    *   o.elapsedMs    该轮耗时；0 / 不传表示未知（历史里就没有时长）
    *   o.headline     这一组是否承担「整轮收口」的文案（一组只有最后那段是）
    *   o.animate      建组时是否播「收起」动画。实时轮次收口时 true
@@ -13080,6 +13072,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
    *                  历史重放时 false（刚渲染出来的东西不该先展开再收起）
    *   o.open         建组后是否**展开**。默认 false（收起），实时轮次收口必须
    *                  保持收起，否则一轮结束时那一大片工具行不会收起来。
+   *                  **停止 / 失败轮传 true**（见 foldTurnProcess）。
    *                  **任务 E 起历史重放也不再传 true**：用户对照 dsh 后确认
    *                  「dsh 默认是折叠状态」，历史里一屏摊开 675 条工具行既不是
    *                  用户要的，也不是 dsh 的行为。入口保留（未来若要「记住上次
@@ -13103,14 +13096,20 @@ body[data-run="true"] #goalRounds{opacity:.45}
 
     var box = document.createElement('div');
     box.className = 'turn-proc';
-    // 默认收起：实时轮次收口靠这个把摊开的工具行收起来。历史重放也不传
-    // o.open（任务 E：与 dsh 一致的默认收起），见 JSDoc。
+    /* 组**永远可开合**（对齐 dsh 的组级层 `ChatGroupSeat` / `ProcessGroupHeader`：
+       那个 header 是普通 button，没有 disabled，chevron 常显）。
+       dsh 有两层，别把上层的语义搬下来：
+         · 组级层（步骤组，就是本函数）→ 可自由开合；
+         · 整轮层（`TurnProcessNodeView`，我们没实现这一层）→ 停止/失败轮
+           `canCollapse=false` → 该控件 disabled，内容按 `turnProcessAlwaysOpen`
+           保持展开（`keeps it open`）。
+       我们只有组这一层，所以取两者的并集：**默认展开**（被终止的工具立刻可见，
+       正是整轮层 keep open 的意图）+ **可点收起**（组级层的自由开合）。
+       曾把整轮层的 disabled 直接套到组头上，结果是「收起且永远打不开」、
+       被终止的工具彻底消失（用户两次报障）。*/
     var open = o.open === true;
     box.setAttribute('data-open', open ? 'true' : 'false');
     box.setAttribute('data-reason', reason);
-    /* 可点开 = 正常情况下；停止 / 失败轮传 false（dsh 的 canCollapse=false →
-       控件 disabled）。不可点开时 data-open 恒为 false，且下面不绑点击。 */
-    var collapsible = o.collapsible !== false;
 
     /* 折叠行的状态词由调用方给（见 tpCountLabel 的 status 参数）：
          · o.status === null  调用方**明确声明**这一段不写状态词（分段折叠时
@@ -13131,12 +13130,8 @@ body[data-run="true"] #goalRounds{opacity:.45}
     var row = document.createElement('button');
     row.type = 'button';
     row.className = 'tp-row';
-    /* 不可点开：disabled（不响应点击）+ 不渲染 chevron。组头与计数照旧渲染，
-       只是「点不开」—— dsh 的 `disabled` 控件同样还在屏幕上。 */
-    if (!collapsible) {
-      row.disabled = true;
-      row.setAttribute('aria-disabled', 'true');
-    }
+    /* 组头永远是普通可点按钮：dsh 的组级 header（`ProcessGroupHeader`）就是
+       普通 button + 常显 chevron，没有任何 disabled 分支。 */
     /* 主标题 = 计数式（对齐 dsh 折叠行「N 次工具调用」的形态）：
        「2 次工具调用 · 1 条消息」。类别短语降级为副标题（.tp-sub）：
        标题回答「有多少东西」，副标题回答「干了什么类别的事」。 */
@@ -13169,12 +13164,12 @@ body[data-run="true"] #goalRounds{opacity:.45}
       (sub && sub !== label && (counts.tools > 0 || counts.texts > 0)
         ? '<span class="tp-sub">' + esc(sub) + '</span>' : '') +
       (metaText ? '<span class="tp-meta">' + esc(metaText) + '</span>' : '') +
-      /* chevron 放**右侧**且常显，与 dsh 的 TurnProcessNodeView 一致：
-         `<span className={css.label}>…</span>{canCollapse && <IconChevronDown…/>}`。
+      /* chevron 放**右侧**且常显：dsh 的组级 header 里 chevron 是常显的
+         （`ProcessGroupHeader` 用 open ? IconChevronUp : IconChevronDown），
+         只有整轮层那个 disabled 控件才不渲染它。
          放左侧会让整列工具行的语义图标与它并排，两种图标挤在同一个位置上
-         互相干扰（用户报障：「我们的图标都是 >」）。
-         `canCollapse` 为假时 dsh 整个 chevron 都不渲染（不是置灰），这里同理。 */
-      (collapsible ? '<span class="tp-caret">' + CARET_SVG_DOWN + '</span>' : '');
+         互相干扰（用户报障：「我们的图标都是 >」）。 */
+      '<span class="tp-caret">' + CARET_SVG_DOWN + '</span>';
 
     var bodyBox = document.createElement('div');
     bodyBox.className = 'tp-body';
@@ -13215,9 +13210,8 @@ body[data-run="true"] #goalRounds{opacity:.45}
       // 历史重放（收起态）：内容刚建出来就没展开过，直接是收起态，没有「收起过程」可演
       bodyBox.setAttribute('hidden', '');
     }
-    /* 停止 / 失败轮：组头不可点开，连监听器都不绑（按钮本身也 disabled，
-       双重保证点击改不了 data-open）。 */
-    if (!collapsible) return box;
+    /* 组头始终可点：收起 ↔ 展开对任何轮次都成立（停止 / 失败轮也一样，
+       它们只是**默认展开**，用户仍可自己收起来）。 */
     row.addEventListener('click', function () {
       var on = box.getAttribute('data-open') === 'true';
       box.setAttribute('data-open', on ? 'false' : 'true');
@@ -13475,11 +13469,15 @@ body[data-run="true"] #goalRounds{opacity:.45}
       }
     });
     /* 两个状态维度必须分开（对齐 dsh 的两层）：
-         · 组级层：组**始终**建出来，组正文初始收起 —— 停止 / 失败轮也一样。
+         · 组级层：组**始终**建出来；正常轮初始收起，停止 / 失败轮初始展开。
            dsh 的 `grouped` 只看 stepGrouping 与轮次状态，与 turnProcessAlwaysOpen
            无关，所以停止后屏幕上仍是「⊠ 已完成分析 / 摘要 / ✦ 已调用工具…」。
-         · 整轮层：turnProcessAlwaysOpen 为真时整轮不可收起。我们没有整个轮次
-           只有一个开合开关的那层，它落到这里就是「组头不可点开」（collapsible）。
+           **组头永远可点**：dsh 的组级 header 是普通 button，没有 disabled 分支。
+         · 整轮层：turnProcessAlwaysOpen 为真时整轮不可收起（控件 disabled、
+           内容留在屏幕上）。我们**没有**这一层（整轮只有一个开合开关的那层），
+           所以不能把它的 disabled 搬到组头上 —— 那会变成「收起且打不开」，
+           被终止的工具彻底消失（用户两次报障）。
+           我们能表达的最佳近似就是：停止 / 失败轮**默认展开**、仍可自行收起。
         T2 曾经把两层合成一层（停止 / 失败 / 插话 → 直接不建组），实机形态与
        dsh 不符：过程行全平铺出来了，组头和摘要消失。
        插话（interleaved）不在这一层判定：dsh 的 hasInterleavedInput 只影响整轮层，
@@ -13538,10 +13536,14 @@ body[data-run="true"] #goalRounds{opacity:.45}
         headline: true,
         animate: true,
         status: isLast ? status : null,
-        /* 停止 / 失败轮：组照建，但组头不可点开（见 buildTurnProc 的
-           o.collapsible）。dsh 的 `canCollapse` 在这两种轮次为假 → disabled。
-           每一段都不可点（整轮状态是整轮的，不是只有末段）。 */
-        collapsible: !stopped && !failed
+        /* 停止 / 失败轮：组照建、**默认展开**，但组头可自由收起。
+           两条依据分开看，别混成一条：
+             · 默认展开 = dsh 的 `turnProcessAlwaysOpen`（`keeps it open`）意图：
+               被打断时用户最想确认「它到底跑到哪一步了」，收起来等于把答案藏了。
+             · 可收起 = dsh 的**组级层**（`ProcessGroupHeader`）是普通 button，
+               从来没有 disabled 分支。dsh 那个 disabled 属于整轮层
+               （`TurnProcessNodeView`），我们没实现那一层，不该把它的限制搬下来。 */
+        open: stopped || failed
       });
       if (box) boxes.push(box);
     });

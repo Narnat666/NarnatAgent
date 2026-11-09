@@ -216,17 +216,23 @@ const TEST = String.raw`
     var labelD = (boxD.querySelector('.tp-label') || {}).textContent || '';
     ck('D4 停止轮组头带「已停止」状态词', labelD.indexOf('已停止') >= 0,
        JSON.stringify(labelD));
-    ck('D5 停止轮组正文初始收起',
-       boxD.getAttribute('data-open') === 'false'
-       && boxD.querySelector('.tp-body').hasAttribute('hidden'),
+    /* 停止轮组正文**展开**（dsh 的 turnProcessAlwaysOpen = keep open，
+       canCollapse=false 只禁「收」）。收起且打不开 = 被终止的工具彻底消失。 */
+    ck('D5 停止轮组正文初始展开（内容一直露着）',
+       boxD.getAttribute('data-open') === 'true'
+       && !boxD.querySelector('.tp-body').hasAttribute('hidden'),
        'data-open=' + boxD.getAttribute('data-open'));
     var rowD = boxD.querySelector('.tp-row');
     rowD.click();
     await sleep(250);
-    ck('D6 停止轮组头不可展开（disabled + 无 chevron + 点击无效）',
-       rowD.disabled === true && !boxD.querySelector('.tp-caret, .chevron')
-       && boxD.getAttribute('data-open') === 'false',
-       'disabled=' + rowD.disabled + ' data-open=' + boxD.getAttribute('data-open'));
+    var closedD = boxD.getAttribute('data-open');
+    rowD.click();
+    await sleep(250);
+    ck('D6 停止轮组头可自由开合（有 chevron、未 disabled、点击能收起再展开）',
+       rowD.disabled !== true && !!boxD.querySelector('.tp-caret, .chevron')
+       && closedD === 'false' && boxD.getAttribute('data-open') === 'true',
+       'disabled=' + rowD.disabled + ' 收起后=' + closedD
+         + ' 再展开后=' + boxD.getAttribute('data-open'));
     var tagsD = convo().querySelectorAll('.msg-stopped');
     ck('D7 停止轮正文末尾挂 1 个「已停止」内联标签', tagsD.length === 2
        && tagsD[tagsD.length - 1].textContent.trim() === '已停止',

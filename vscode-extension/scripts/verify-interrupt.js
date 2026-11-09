@@ -57,9 +57,13 @@ const TEST = String.raw`
     row.click();
     await sleep(250);
     var after = p.getAttribute('data-open');
+    row.click();
+    await sleep(250);
+    var back = p.getAttribute('data-open');
+    /* 组头可自由开合（dsh 的组级 header 是普通 button），停止轮只要求**默认展开** */
     return { caret: caret, disabled: row.disabled === true,
-      before: before, after: after,
-      ok: !caret && row.disabled === true && after === before };
+      before: before, after: after, back: back,
+      ok: caret && row.disabled !== true && before === 'true' && after === 'false' && back === 'true' };
   }
 
   async function run(){
@@ -87,12 +91,14 @@ const TEST = String.raw`
     ck('A1 停止轮产生 1 个折叠组', procs().length === 1, 'got=' + procs().length);
     ck('A2 组头文案含「已停止」', labelOf(A).indexOf('已停止') >= 0, JSON.stringify(labelOf(A)));
     var bodyA = A ? A.querySelector('.tp-body') : null;
-    ck('A3 组正文初始收起', !!A && A.getAttribute('data-open') === 'false'
-       && !!bodyA && bodyA.hasAttribute('hidden'),
+    /* 停止轮组正文**展开**（dsh 的 turnProcessAlwaysOpen = keep open）：
+       收起且打不开会让被终止的工具彻底消失（用户报障）。 */
+    ck('A3 组正文初始展开（内容一直露着）', !!A && A.getAttribute('data-open') === 'true'
+       && !!bodyA && !bodyA.hasAttribute('hidden'),
        'data-open=' + (A ? A.getAttribute('data-open') : '-')
          + ' hidden=' + (bodyA ? bodyA.hasAttribute('hidden') : '-'));
     var expA = await canExpand(A);
-    ck('A4 组头不可展开（点击后 data-open 不变 + disabled + 无 chevron）',
+    ck('A4 组头可自由开合（有 chevron、未 disabled、点击能收起再展开）',
        expA.ok, JSON.stringify(expA));
     var ta = tags();
     ck('A5 正文末尾挂了 1 个 .msg-stopped', ta.length === 1, 'got=' + ta.length);

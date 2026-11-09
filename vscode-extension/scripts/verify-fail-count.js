@@ -7,9 +7,9 @@
  * 新口径（对齐 dsh：状态词只由整轮决定，个别工具失败只是计数里的子集）：
  *   1) 组内个别工具失败 → 写成「N 次工具调用（其中 M 次失败）」，**不再**前置「失败 · 」
  *   2) 整轮 reason==='error' → 组**照样建**（dsh：组级层与 turnProcessAlwaysOpen
- *      无关），组头写「失败 · N 次工具调用」，组头不可展开（disabled）；
+ *      无关），组头写「失败 · N 次工具调用」，默认展开、组头可收起；
  *      另有组外的系统行「✗ 请求失败」提供重试出口
- *   3) 用户主动打断 → 组照样建，组头写「已停止 · N 次工具调用」且不可展开，
+ *   3) 用户主动打断 → 组照样建，组头写「已停止 · N 次工具调用」且默认展开、可收起，
  *      正文末尾另挂内联标签 `.msg-stopped`（见 verify-stopped-group.js）
  *   4) 副标题不重复说失败
  */
@@ -116,14 +116,19 @@ const TEST = String.raw`
         && P3[0].querySelectorAll('.tp-inner .tools').length === 1,
       'turn-proc=' + P3.length + ' 顶层可见工具行=' + T3.length +
       ' 组内工具行=' + (P3.length ? P3[0].querySelectorAll('.tp-inner .tools').length : '-'));
-    ck('C2 整轮失败组头 =「失败 · 计数」，且组头不可展开（disabled、无 chevron）',
+    /* 失败轮：默认展开 + 组头可自由收起（dsh 的组级 header 是普通 button，
+       disabled 只属于整轮层）。 */
+    ck('C2 整轮失败组头 =「失败 · 计数」，且默认展开、可点收起',
       /^失败 · /.test(L3) && P3.length === 1
         && (function(){
           var row = P3[0].querySelector('.tp-row');
           var before = P3[0].getAttribute('data-open');
           row.click();
-          return row.disabled === true && !P3[0].querySelector('.tp-caret, .chevron')
-            && P3[0].getAttribute('data-open') === before;
+          var flipped = P3[0].getAttribute('data-open');
+          row.click();
+          return row.disabled !== true && !!P3[0].querySelector('.tp-caret, .chevron')
+            && before === 'true' && flipped === 'false'
+            && P3[0].getAttribute('data-open') === 'true';
         })(),
       '标题=' + JSON.stringify(L3));
     var FAIL_SYS3 = sysTexts().filter(function(s){ return s.indexOf('请求失败') >= 0; });
@@ -144,13 +149,16 @@ const TEST = String.raw`
     ck('D1 打断产生 1 个 .turn-proc，组头 =「已停止 · 计数」',
       P4.length === 1 && /^已停止 · /.test(L4),
       'turn-proc=' + P4.length + ' 标题=' + JSON.stringify(L4));
-    ck('D2 打断轮组头不可展开（disabled + 无 chevron + 点击无效）',
+    ck('D2 打断轮默认展开、组头可点收起（可自由开合）',
       P4.length === 1 && (function(){
         var row = P4[0].querySelector('.tp-row');
         var before = P4[0].getAttribute('data-open');
         row.click();
-        return row.disabled === true && !P4[0].querySelector('.tp-caret, .chevron')
-          && P4[0].getAttribute('data-open') === before;
+        var flipped = P4[0].getAttribute('data-open');
+        row.click();
+        return row.disabled !== true && !!P4[0].querySelector('.tp-caret, .chevron')
+          && before === 'true' && flipped === 'false'
+          && P4[0].getAttribute('data-open') === 'true';
       })(), '标题=' + JSON.stringify(L4));
     ck('D3 打断轮正文末尾挂 1 个 .msg-stopped，文本「已停止」',
       G4.length === 1 && G4[0].textContent.trim() === '已停止',
