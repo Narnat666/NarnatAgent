@@ -239,6 +239,35 @@ const TEST = String.raw`
       'queueBar.top=' + Math.round(qTop) + ' insertBar.top=' + Math.round(iTop) +
       ' 排队条可见=' + visible('queueBar') + ' 插话条可见=' + visible('insertBar'));
 
+    /* ========= q11 前端误判空闲 → 以回执为准与队列条归一 =========
+       场景（用户报障）：界面 data-run 已是 false（这一轮在前端看来结束了），
+       后端其实还在跑，于是 enter 走了「普通发送」分支、先画出乐观气泡，
+       后端却按 busy 把它收进排队队列 —— 屏幕上同时出现「已经发出去的对话」
+       与「输入框上方还在排队」。再点「插话发送」就会多出第二个气泡，
+       同一条消息在对话区出现两次。 */
+    emit({ type: 'queue/updated', params: { items: [] } });
+    emit({ type: 'insert/updated', params: { items: [] } });
+    emit({ type: 'turn/end', params: { reason: 'done' } });
+    await sleep(260);
+    var ubQ = userBubbles().length;
+    setVal('误判空闲时发的一句');
+    await sleep(40);
+    enter();
+    await sleep(80);
+    var ubOptimistic = userBubbles().length;
+    emit({ type: 'queue/queued', params: { id: 801, text: '误判空闲时发的一句', position: 1 } });
+    await sleep(50);
+    emit({ type: 'chat/result', params: { accepted: true, mode: 'queue', id: 801 } });
+    await sleep(110);
+    ck('q11 前端以为空闲、回执说已入队 → 乐观气泡撤回，只剩排队条一行且回到运行态',
+      ubOptimistic === ubQ + 1 && userBubbles().length === ubQ &&
+      rows('queueBar').length === 1 && barOn('queueBar') &&
+      document.body.getAttribute('data-run') === 'true',
+      '乐观气泡增量=' + (ubOptimistic - ubQ) +
+      ' 归一后增量=' + (userBubbles().length - ubQ) +
+      ' 排队行=' + rows('queueBar').length +
+      ' data-run=' + document.body.getAttribute('data-run'));
+
     /* ================= q10 设置面板里的「繁忙时的发送行为」 ================= */
     el('btnSettings').click();
     await sleep(90);

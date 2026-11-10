@@ -9891,6 +9891,13 @@ body[data-run="true"] #goalRounds{opacity:.45}
   var queueBound = false;
   /** 已发出、还没收到 chat/result 的运行中提交正文（被拒时用它还回输入框） */
   var busyPending = '';
+  /** AI 正在执行 Shell(bg="wait")（等待后台任务）→ 按 Enter 默认插话（steer）。 */
+  var busyWaiting = false;
+  /** 一条 tool/call 是不是「等待后台任务」的 wait 调用。 */
+  function isWaitCall(p){
+    return !!(p && p.name === 'Shell' && p.arguments &&
+      String(p.arguments.bg || '') === 'wait');
+  }
 
   /* 「繁忙时的发送行为」偏好（dsh 的 DEFAULT_BUSY_ENTER_BEHAVIOR = 'queue'）：
      queue = 排队发送（等这一轮结束后的下一轮），steer = 插话发送（本轮生效）。
@@ -9899,6 +9906,10 @@ body[data-run="true"] #goalRounds{opacity:.45}
   var BUSY_SEND = 'queue';
   function busyMode(forced){
     if (forced === 'queue' || forced === 'steer') return forced;
+    /* AI 正在 wait（等待后台任务）：插话会立刻唤醒它（wake_waiters），
+       按 Enter 默认插话而不是排队——用户要的是「马上说给它听」，
+       排队却要等这轮 wait 超时（最长 120s）才轮到。 */
+    if (busyWaiting) return 'steer';
     return BUSY_SEND === 'steer' ? 'steer' : 'queue';
   }
   function busyLabel(forced){
@@ -10410,9 +10421,52 @@ body[data-run="true"] #goalRounds{opacity:.45}
        文本取自本面板刚发出去的那条（busyPending），回执本身不带文本。 */
     var bp = busyPending;
     busyPending = '';
-    if (accepted && p && p.mode && p.id && bp) {
-      if (p.mode === 'steer') onInsertQueued({ id: p.id, text: bp });
-      else onQueueQueued({ id: p.id, text: bp });
+    if (accepted && p && p.mode && p.id) {
+      if (bp) {
+        if (p.mode === 'steer') onInsertQueued({ id: p.id, text: bp });
+        else onQueueQueued({ id: p.id, text: bp });
+        rendered('chat/result', { accepted: true, mode: p.mode, id: p.id });
+        return;
+      }
+      /* bp 为空 = 本面板没走运行中提交那条路：它以为已经空闲，走了普通发送，
+         已经把这条乐观画成对话区里的用户气泡；后端回执却说它被收进了队列。
+         两个真相此时是矛盾的——气泡写着「已经发出去了」，输入框上方的队列条
+         写着「还在排队」，用户点了队列条上的「插话发送」之后对话区还会再画
+         一条插话气泡，同一条消息变成两个一模一样的气泡（用户实测报障）。
+         以回执为准，把两边归一：
+           · 撤掉那条气泡（它并没有开始任何一轮，不是本轮的提问）；
+           · 文本补进对应队列条（queue/queued 事件多半已到，onQueueQueued 按
+             id 去重，这里只负责补上文本）；
+           · 保持运行态：后端此刻确实 busy，退出运行态会让停止按钮消失。
+
+         **谁的回执**：回执是广播的、不带发起方 id，同窗口两个面板时别人的运行中
+         提交也会进来（#70 同源的歧义）。判据只能是「队列条里这个 id 的文本 ==
+         本面板那条待定气泡的文本」——两边文本一致才认定是这一条；对不上就
+         什么都不做（交给下面原样处理），绝不误撤别人的气泡。 */
+      var node = findPendingMessage();
+      var pendingText = node
+        ? String(((node.querySelector('.text') || {}).textContent || '')).trim() : '';
+      var mirror = p.mode === 'steer' ? insertItems : queueItems;
+      var hit = null;
+      for (var mi = 0; mi < mirror.length; mi++) {
+        if (String(mirror[mi].id) === String(p.id)) { hit = mirror[mi]; break; }
+      }
+      if (hit && pendingText && String(hit.text || '').trim() === pendingText) {
+        if (node.parentNode) node.parentNode.removeChild(node);
+        if (p.mode === 'steer') onInsertQueued({ id: p.id, text: pendingText });
+        else onQueueQueued({ id: p.id, text: pendingText });
+        // 气泡已经不在对话区了：指向它的「可能已接受」标记一并作废，否则断连时
+        // settlePendingMessage 会去撤回一条不存在的节点。文字已交给队列，
+        // 重试按钮也不该再把它发第二遍。
+        lastSentMaybeAccepted = false;
+        lastSentText = '';
+        body.setAttribute('data-run', 'true');
+        renderQueueBar();
+        refreshSendState();
+        rendered('chat/result', { accepted: true, mode: p.mode, id: p.id, queued: true });
+        return;
+      }
+      if (node) lastSentMaybeAccepted = true;
       rendered('chat/result', { accepted: true, mode: p.mode, id: p.id });
       return;
     }
@@ -11919,6 +11973,8 @@ body[data-run="true"] #goalRounds{opacity:.45}
     entry.sum = sumText;
     entry.name = nm;
     entry.copyable = toolHasCopy(p.name);
+    entry.isWait = isWaitCall(p);
+    if (entry.isWait) busyWaiting = true;
     // 准备态标记到此为止（点击委托靠它拦展开，见 convo 的 click 委托）
     entry.row.removeAttribute('data-preparing');
     /* 参数到齐 = 现在有 body 可看了：把「可展开」的三件语义补回来（与
@@ -12056,10 +12112,12 @@ body[data-run="true"] #goalRounds{opacity:.45}
       // 工具名要留在 entry 上：finishTool 判退出码时得知道这是不是命令类工具，
       // 否则 Write 的 diff 里出现 `[exit code: 3]` 会把成功写入标成失败（实测）。
       name: String(p.name || ''),
+      isWait: isWaitCall(p),
       todo: isTodo ? wrap.querySelector('.todo') : null,
       extra: isTodo ? wrap.querySelector('.extra') : null
     };
     toolMap[p.id] = entry;
+    if (entry.isWait) busyWaiting = true;
     // 打本轮标记：轮末按它挑出「这一轮的工具行」收进折叠组。
     // 历史重放走 addHistoryTool，不设这个标记，所以不会被卷进来。
     wrap.setAttribute('data-turn-tool', '1');
@@ -12080,6 +12138,7 @@ body[data-run="true"] #goalRounds{opacity:.45}
     if (!p || !p.id) return;
     var entry = toolMap[p.id];
     if (!entry) return;
+    if (entry.isWait) busyWaiting = false;
     var ok = !(p.failed || p.ok === false);
     var outText = String((p && p.output) || '');
     // 后端在「等用户确认」时会先把 AWAIT_CONFIRM 哨兵换成文本、照发一条
@@ -12659,6 +12718,9 @@ body[data-run="true"] #goalRounds{opacity:.45}
     }
     body.setAttribute('data-run', 'true');
     resetStopBtn();
+    // 新一轮开始：上一轮的 wait 状态不能带进来（wait 工具若被打断收口，
+    // finishTool 未必走到，这里兜底复位）。
+    busyWaiting = false;
     // 运行态开始 → 排队条里「插话发送」解除禁用；主按钮文案跟着重算
     renderQueueBar();
     refreshSendState();
