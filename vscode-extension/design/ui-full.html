@@ -13978,11 +13978,39 @@ body[data-run="true"] #goalRounds{opacity:.45}
   }
 
   /**
-   * 应用「会话级配置快照」：插件开关 + 插件锁定态 + 审核模式。
+   * 落地模型与思考强度的显示（状态栏按钮 + 下拉勾选）。
    *
-   * 后端把这三项合并在 initialize、所有会切会话的回执（session/*、command/exec）、
-   * 以及每轮收口的 session/config 通知里——它们是**会话级**的，换个会话或
-   * 跑完一轮就是另一套值。散在各分支里各写一遍必然漏。
+   * 两个调用点共用：握手（initialize）与切会话回来的 session/config。
+   * 后者带这两个字段是为了「换会话统一回到 narnat.json」——插件里改这两项
+   * 只影响运行、不写盘，切会话时后端会恢复成配置值，界面必须跟着回退，
+   * 否则按钮上还写着上一个会话选的模型，后端已经在用另一个。
+   *
+   * 口径与原来那段一致：选项数组**空数组也要重建**（清掉脏残留），
+   * 只有字段整个缺失才跳过。
+   */
+  function applyModelThinking(model, think){
+    model = model || {};
+    think = think || {};
+    if (Array.isArray(model.options)) rebuildModelPop(model.options);
+    if (model.current) {
+      setChecked(document.getElementById('popModel'), model.current);
+      document.getElementById('btnModel').textContent = model.current;
+    }
+    if (think.options) rebuildThinkPop(think.options);
+    if (think.effort) {
+      setChecked(document.getElementById('popThink'), think.effort);
+      var lb = document.querySelector('#popThink .pi[data-v="' + think.effort + '"] .lb');
+      document.getElementById('btnThink').textContent = lb ? lb.textContent : think.effort;
+    }
+  }
+
+  /**
+   * 应用「会话级配置快照」：插件开关 + 插件锁定态 + 审核模式 + 模型/思考强度。
+   *
+   * 后端把这几项合并在 initialize、所有会切会话的回执（session/*、command/exec）、
+   * 以及每轮收口的 session/config 通知里——插件与审核模式是**会话级**的，
+   * 模型与思考强度则是**运行期**的（插件里改不写盘，切会话恢复成配置值）。
+   * 散在各分支里各写一遍必然漏。
    * 字段缺失时**保持现状**（旧后端不带这些字段，不能因此把界面清空或解锁）。
    */
   function applySessionConfig(p){
@@ -13990,6 +14018,12 @@ body[data-run="true"] #goalRounds{opacity:.45}
     if (Array.isArray(p.plugins)) applyPlugins(p.plugins);
     if ('pluginsLocked' in p) applyPluginLock(!!p.pluginsLocked);
     if (p.goal) applyGoal(p.goal);
+    // 运行期值（模型 / 思考强度）：切会话时后端已把它们恢复成 narnat.json
+    // 的值，界面跟上。只带这两个值、不带 options —— 选项集合不会因切会话而变，
+    // applyModelThinking 里「字段缺失就跳过」的口径自然生效。
+    if (p.runtime) {
+      applyModelThinking({ current: p.runtime.model }, { effort: p.runtime.thinking });
+    }
     // 回滚基准一起推进。不推会怎样（实测）：锁定态下点一下插件 → 后端 -32000
     // → revertConfigUi() 读 RPC_STATE.init 里的**旧** pluginsLocked（未锁定），
     // 把下拉退回可点外观；用户再点还是失败，反复假反馈。
@@ -14168,17 +14202,10 @@ body[data-run="true"] #goalRounds{opacity:.45}
     // 只有字段整个缺失才跳过。原来判 `model.options.length`，
     // 后端把可选模型收窄成空时，下拉里还留着上一批名字，点了会发一个
     // 后端不认的模型名（实测脏残留，和 plugins:[] 是同一类问题）。
-    if (Array.isArray(model.options)) rebuildModelPop(model.options);
-    if (model.current) {
-      setChecked(document.getElementById('popModel'), model.current);
-      document.getElementById('btnModel').textContent = model.current;
-    }
-    if (think.options) rebuildThinkPop(think.options);
-    if (think.effort) {
-      setChecked(document.getElementById('popThink'), think.effort);
-      var lb = document.querySelector('#popThink .pi[data-v="' + think.effort + '"] .lb');
-      document.getElementById('btnThink').textContent = lb ? lb.textContent : think.effort;
-    }
+    // 落地逻辑抽成 applyModelThinking：切会话回来的 session/config 也带
+    // 这两个字段（后端在那里把运行期值恢复成 narnat.json 的值），两处必须
+    // 用同一份实现，否则「握手时」与「切会话后」的显示口径会分叉。
+    applyModelThinking(model, think);
     // plugins 为空数组时也必须处理 —— 原来 `if (plugins.length)` 会把整段跳过，
     // 于是「重新握手时后端把插件全删/全关」这种情况，界面还留着上一批插件名：
     // 按钮写着旧数字，下拉里点一下还会往一个后端已经不认的插件发 configSet

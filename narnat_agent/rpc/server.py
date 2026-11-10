@@ -515,6 +515,15 @@ class RpcServer:
             max_rounds = getattr(ai, "goal_max_rounds", 0) or 0
         plugins_locked = bool(mgr.plugin_locked())
         return {
+            # 运行期值（模型 / 思考强度）：插件里改这两项**只影响运行**（不写
+            # narnat.json），切会话时后端把它们恢复成配置值 —— 界面必须跟着回退，
+            # 否则按钮上还写着上一个会话选的模型，而后端已经在用 json 的值。
+            #
+            # **不能叫 `model` / `thinking`**：initialize 的 payload 也有这两个键
+            # （带完整的 options 列表），而它末尾会 `payload.update(...)` 本函数，
+            # 同名键会把 options 整个覆盖掉 —— 前端模型下拉直接变空（实测）。
+            # 权威定义留在 initialize，这里只带「变了的那两个值」。
+            "runtime": {"model": ai.model, "thinking": ai.thinking_effort},
             # locked：审核模式是否不可配置。判据**只有一条**——插件 Goal 未启用
             # （审核模式的完成声明依赖 GoalComplete 定义）。审核模式不改工具表、
             # 不占缓存前缀，所以不受 pluginsLocked 约束：会话已开始工作也照常可调，
@@ -1983,6 +1992,16 @@ class RpcServer:
                 "needRestart": True}
 
     def _m_config_set(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """改运行期配置。
+
+        模型 / 思考强度 / 审核模式 / 插件这四项**只影响本次运行**（persist=False）：
+        不写 narnat.json。原因是扩展宿主用 FileSystemWatcher 盯着 narnat.json，
+        一改就弹「配置文件已修改，需要重启后端才会生效」——而这四项本来就不需要
+        重启，那个弹窗纯属噪音（用户报障）。既然不落盘，生存期就要说清楚：
+        换会话时 `SessionManager.switch_state` 把它们统一恢复成 narnat.json 的值。
+        终端形态的 /mode /think /goal /plugin 走 persist=True 的老路径，行为不变。
+        api / busySend / websearch 仍然写盘：它们真的需要重启后端才生效。
+        """
         key = self._require_str(params, "key", "config/set")
         value = params.get("value", _MISSING)
         if value is _MISSING:
@@ -1991,20 +2010,21 @@ class RpcServer:
         if key == "model":
             if not isinstance(value, str):
                 raise RpcError(-32602, "config/set: model 的 value 必须是字符串")
-            text = self._mgr.on_mode(value)
+            text = self._mgr.on_mode(value, persist=False)
             if text.startswith("无效值"):
                 raise RpcError(-32000, text)
             # 「仅本次会话有效」= 内存改成功但配置写回磁盘失败。
             # 当成成功返回会怎样（实测）：面板下拉框显示已切换、界面一声不响，
             # 磁盘上的 narnat.json 还是旧值 —— 用户重启后发现设置自己变回去了，
             # 完全不知道发生过写入失败。这里如实报错。
+            # 现在 persist=False 不写盘，这条分支只在写盘路径才会命中。
             if "仅本次会话有效" in text:
                 raise RpcError(-32000, text)
             return {"ok": True, "current": ai.model}
         if key == "thinking":
             if not isinstance(value, str):
                 raise RpcError(-32602, "config/set: thinking 的 value 必须是字符串")
-            text = self._mgr.on_thinking(value)
+            text = self._mgr.on_thinking(value, persist=False)
             if text.startswith("无效值"):
                 raise RpcError(-32000, text)
             if "仅本次会话有效" in text:
@@ -2054,7 +2074,8 @@ class RpcServer:
             if not isinstance(name, str) or not name.strip():
                 raise RpcError(-32602, "config/set: plugin.name 缺失")
             enabled = _as_bool(value.get("enabled", False))
-            status, text = self._mgr.on_plugin(f"{name} {'on' if enabled else 'off'}")
+            status, text = self._mgr.on_plugin(
+                f"{name} {'on' if enabled else 'off'}", persist=False)
             if status == "error":
                 raise RpcError(-32000, text.strip())
             # 带上完整快照：关掉 Goal 插件会连带改变 goal.locked（审核模式变只读），

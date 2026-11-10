@@ -298,6 +298,38 @@ const TEST = String.raw`
       lockOf('#popPlugin') === 'true' && noteCount('#popPlugin') === 1,
       'lock=' + lockOf('#popPlugin') + ' plock=' + noteCount('#popPlugin'));
 
+    /* ===== 15 运行期值（模型 / 思考强度）随 session/config 回退 =====
+       插件里改这两项**只影响运行**（不写 narnat.json，避免扩展宿主弹
+       「配置已修改，需要重启后端」）。既然不落盘，换会话就必须恢复成
+       narnat.json 的值 —— 后端在 session/config 里带 runtime 字段，
+       界面不跟着回退就会「按钮写着 v4-pro、后端在用 flash」。 */
+    document.getElementById('btnModel').textContent = 'deepseek-v4-pro';
+    document.getElementById('btnThink').textContent = '快速';
+    emit({ type: 'session/config', params: {
+      runtime: { model: 'deepseek-flash', thinking: 'high' } } });
+    await sleep(150);
+    ck('15a session/config.runtime 把模型按钮退回配置值',
+      document.getElementById('btnModel').textContent === 'deepseek-flash',
+      JSON.stringify(document.getElementById('btnModel').textContent));
+    ck('15b session/config.runtime 把思考强度按钮退回配置值（取下拉里的 label）',
+      // 期望值从下拉里取，不在断言里写死文案 —— 文案属于配置（narnat.json
+      // 「思考.强度选项」），测试写死会在用户改配置后变成假失败。
+      (function(){
+        var el = document.querySelector('#popThink .pi[data-v="high"] .lb');
+        var want = el ? el.textContent : 'high';
+        return document.getElementById('btnThink').textContent === want;
+      })(),
+      JSON.stringify(document.getElementById('btnThink').textContent));
+
+    document.getElementById('btnModel').textContent = 'deepseek-v4-pro';
+    emit({ type: 'session/config', params: {
+      plugins: [], pluginsLocked: false } });
+    await sleep(150);
+    ck('15c 不带 runtime 的 session/config 不动模型按钮（缺字段保持现状）',
+      document.getElementById('btnModel').textContent === 'deepseek-v4-pro',
+      JSON.stringify(document.getElementById('btnModel').textContent));
+    document.getElementById('btnModel').textContent = 'deepseek-flash';
+
     out.push('SUMMARY total=' + (out.length + 0) + ' fail=' + fails);
     var pre = document.createElement('pre');
     pre.id = 'RESULT';

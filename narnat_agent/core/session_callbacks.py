@@ -1312,6 +1312,15 @@ class SessionManager:
             dict(plugin_defaults) if plugin_defaults is not None else default_plugin_states()
         )
         self._plugin_states: Dict[str, bool] = dict(self._plugin_defaults)
+        # 模型 / 思考强度的「配置值」快照（构造时那一次，即 narnat.json 的值）。
+        # 与 _goal_verify_config 同一个套路：插件里这几项改成**只影响运行**
+        # （persist=False，不写盘、不弹「需要重启」），切会话时一律回到这里。
+        # 快照必须构造时取一次并留住，不能切会话时重新读盘 —— 磁盘上仍是原值，
+        # 重新读盘得到的也是它，但多一次 IO 且会在「配置文件被手改过」时
+        # 把用户手改的值带进来（那是另一条路径：手改要重启，已经有提示）。
+        self._model_config: str = (self._get_model or (lambda: ""))()
+        self._thinking_effort_config: str = (
+            self._get_thinking_effort or (lambda: ""))()
         # AI 是否正在跑这一轮（审核模式在运行中只读）。默认不忙：终端/headless
         # 形态的命令只在输入提示符处被处理，天然不会撞上运行中。
         self._busy_check: Optional[Callable[[], bool]] = busy_check
@@ -1405,9 +1414,29 @@ class SessionManager:
         """
         self._state = new_state
         self._bind_plugins()
+        # 模型 / 思考强度 / 审核模式都不是会话级持久配置，只是本次运行的临时值：
+        # 换会话统一回到 narnat.json（插件里改这几项只改内存，不写盘）。
+        self._reset_runtime_config()
         # 审核模式不属于会话，只跟随 narnat.json「完成验证」：换会话时把 /goal
         # 的临时覆盖丢掉，界面按配置显示（需求：「进入其他会话时按 narnat.json 配置」）
         self._reset_goal_audit()
+
+    def _reset_runtime_config(self) -> None:
+        """把模型 / 思考强度恢复成构造时那份配置值（切会话时调用）。
+
+        为什么要有这一步：插件里切换模型与思考强度改成**只影响运行**（不写
+        narnat.json，避免每次改都弹「配置已修改，需要重启后端」）。既然不落盘，
+        它们的生存期就必须说清楚，否则会跨会话泄漏 —— 用户在 A 会话切到
+        model-b，切到 B 会话后仍在用 model-b，而界面上 B 会话显示的是 json 的
+        model-a（界面按快照走），两边不一致。
+
+        插件开关不在这里恢复：它由 `_bind_plugins()` 按 `_plugin_defaults`
+        （= 构造时那份 json 配置）绑定，游离态 / 新会话拿到的就是配置值。
+        """
+        if self._set_model is not None and self._model_config:
+            self._set_model(self._model_config)
+        if self._set_thinking_effort is not None and self._thinking_effort_config:
+            self._set_thinking_effort(self._thinking_effort_config)
 
     def _bind_plugins(self) -> None:
         """按当前会话绑定插件开关（switch_state 与构造时各调一次）。
@@ -1682,7 +1711,14 @@ class SessionManager:
         self._messages.append_user(content)
         return ""
 
-    def on_thinking(self, effort: str) -> str:
+    def on_thinking(self, effort: str, persist: bool = True) -> str:
+        """思考强度：/think 查状态，/think <档位> 切换。
+
+        persist=False（插件侧）只改内存，不写 narnat.json —— 写了会触发
+        扩展宿主的配置监视器弹「配置文件已修改，需要重启后端」，而这一项
+        本来就不需要重启。切会话时由 `_reset_runtime_config` 回到配置值。
+        终端形态（persist=True）行为完全不变：写盘，重启后仍是用户选的档位。
+        """
         options = self._thinking_options
         if not effort:
             current = (self._get_thinking_effort or (lambda: "high"))()
@@ -1694,12 +1730,16 @@ class SessionManager:
             return f"无效值: {effort_lower}（可用: {available}）"
         if self._set_thinking_effort:
             self._set_thinking_effort(effort_lower)
+        text = f"思考强度已切换为: {options[effort_lower]}"
+        if not persist:
+            # 不写盘就没有「写回失败」这回事，也不该出现「仅本次会话有效」——
+            # 那是失败提示语，正常路径加它会让用户以为出了问题。
+            return text
 
         def _mutate(data):
             data.setdefault("智能体", {}).setdefault("思考", {})["强度"] = effort_lower
 
         err = _persist_config(self._config_dir, _mutate)
-        text = f"思考强度已切换为: {options[effort_lower]}"
         return f"{text}（{err}，仅本次会话有效）" if err else text
 
     def on_list_thinking_options(self) -> list:
@@ -1735,7 +1775,14 @@ class SessionManager:
             return f"思考回传已关闭：思考内容仍会记录到会话，只是不再发给模型{suffix}"
         return f"无效值: {act}（可用: on / off）"
 
-    def on_mode(self, name: str) -> str:
+    def on_mode(self, name: str, persist: bool = True) -> str:
+        """模型切换：/mode 查状态，/mode <名称> 切换。
+
+        persist=False（插件侧）只改内存，不写 narnat.json —— 写了会触发
+        扩展宿主的配置监视器弹「配置文件已修改，需要重启后端」，而换模型
+        本来就不需要重启。切会话时由 `_reset_runtime_config` 回到配置值。
+        终端形态（persist=True）行为完全不变：写盘，重启后仍是用户选的模型。
+        """
         options = list(self._model_options or [])
         if not name:
             current = (self._get_model or (lambda: ""))()
@@ -1751,6 +1798,8 @@ class SessionManager:
             return f"无效值: {target}（可用: {available}）"
         if self._set_model:
             self._set_model(matched)
+        if not persist:
+            return f"设置成功：{matched}"
 
         def _mutate(data):
             data.setdefault("智能体", {}).setdefault("模型", {})["当前"] = matched
@@ -1815,13 +1864,21 @@ class SessionManager:
             return "ok", "  审核模式已开启（仅本次运行有效，未写入配置）"
         return "error", f"  无效值: {arg}（可用: on [轮数] / off）"
 
-    def on_plugin(self, action: str) -> Tuple[str, str]:
+    def on_plugin(self, action: str, persist: bool = True) -> Tuple[str, str]:
         """插件开关（会话级）：/plugin 查看状态，/plugin <名称> <on|off> 改配置。
 
         改动在**本会话内**立即生效（工具表按新开关重建）。会话一旦开始工作
         （AI 已执行过、历史里有用户消息）就锁定，之后只能新建对话再调——
         否则同一段对话的前缀会在中途变化，服务端缓存全部失效。
         返回 (status, text)：status ∈ {"info","ok","hint","error"}，命令层据此着色。
+
+        persist=False（插件侧）：只改内存与本会话生效值，**不写** narnat.json
+        与会话文件，也不更新 `_plugin_defaults`。三条合起来才有「只影响运行」
+        的语义：
+          · 不写 json → 扩展宿主不弹「配置已修改，需要重启后端」；
+          · 不写会话文件 → 换会话时不会再从文件里读回当时那个值；
+          · 不更新 defaults → 新建对话 / 回到游离态时用的是构造时那份 json 配置。
+        终端形态（persist=True）行为完全不变。
         """
         from ..tools import registry as _registry
         if not action:
@@ -1851,7 +1908,11 @@ class SessionManager:
         if bool(self._plugin_states.get(name)) == target:
             return "hint", f"  {name} 已处于{state}状态"
         # 先写盘再改内存：写盘失败就当这次没改过（否则内存与磁盘/会话文件不一致，
-        # 重启后行为突变）
+        # 重启后行为突变）。persist=False 的路径一次盘都不碰，见上方 docstring。
+        if not persist:
+            self._plugin_states[name] = target
+            self._apply_plugins(self._plugin_states)
+            return "ok", f"  {name} 已{state}（本次运行有效，未写入配置）"
         err = self._persist_plugin_states(name, target)
         if err:
             return "error", f"  {name} 配置写回失败（{err}）"
