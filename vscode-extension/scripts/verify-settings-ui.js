@@ -244,6 +244,31 @@ const TEST = String.raw`
          === '{"extra_params":{"domains":{"type":"array","field":"include_domains"}}}',
        sentEp[0] ? JSON.stringify(sentEp[0].params) : '-');
 
+    /* ── 底栏提示不累积（用户报障：什么都没改，却堆了 4 条「需重启后端才生效」）──
+       根因是 setMsg 用 querySelector('.set-msg') 删旧的那条，而 #setBody 里
+       也有 .set-msg（「正在读取配置…」），文档序在前 → 删的是占位符，
+       底栏上方那条越积越多。这里连续发 3 次 restartPending 的 describe。 */
+    for (var ri = 0; ri < 3; ri++) {
+      emit({ type: 'config/describe', params: Object.assign({}, DESC, { restartPending: true }) });
+      await sleep(90);
+    }
+    var footMsgs = document.querySelectorAll('.set-msg-foot');
+    var bodyMsgs = document.querySelectorAll('#setBody .set-msg');
+    ck('连续 3 次 describe{restartPending} 后底栏提示仍只有 1 条',
+       footMsgs.length === 1 && footMsgs[0].textContent.indexOf('需重启后端才生效') >= 0,
+       '条数=' + footMsgs.length +
+       ' 文本=' + [].slice.call(footMsgs).map(function(x){ return x.textContent; }).join(' | '));
+    ck('setBody 里的占位提示没被底栏提示误删',
+       bodyMsgs.length <= 1,
+       'setBody .set-msg 条数=' + bodyMsgs.length +
+       ' 文本=' + [].slice.call(bodyMsgs).map(function(x){ return x.textContent; }).join(' | '));
+    // restartPending 为 false 时提示必须消失（用户什么都没改就不该有这行）
+    emit({ type: 'config/describe', params: DESC });
+    await sleep(90);
+    ck('restartPending:false 时底栏不显示「需重启后端才生效」',
+       document.querySelectorAll('.set-msg-foot').length === 0,
+       '条数=' + document.querySelectorAll('.set-msg-foot').length);
+
     out.push('SUMMARY total=' + (out.length) + ' fail=' + fails);
     var p = document.createElement('pre');
     p.id = 'RESULT';

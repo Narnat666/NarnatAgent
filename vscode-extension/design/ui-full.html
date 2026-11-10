@@ -2629,7 +2629,6 @@ body[data-run="true"] #goalRounds{opacity:.45}
      写死几个模型名和编造的价格，在握手前会当成真实可选项展示出来。 -->
 <div class="pop" id="popModel">
   <div class="pt">模型</div>
-  <div class="pd">立即生效，并写入 narnat.json</div>
 </div>
 
 <div class="pop" id="popThink">
@@ -5419,15 +5418,23 @@ body[data-run="true"] #goalRounds{opacity:.45}
     post('configDescribe', {});
   }
 
-  function setMsg(text, kind){
+  function setMsg(text, kind, flag){
     var foot = document.getElementById('setFoot');
     if (!foot) return;
-    var old = foot.parentNode.querySelector('.set-msg');
+    /* 只删底栏自己的那条（set-msg-foot）。
+       原来 querySelector('.set-msg') 会先命中 #setBody 里的占位提示
+       （「正在读取配置…」/「这一组没有可配置项」），删掉的是它，
+       而底栏上方那条越积越多 —— 用户报障「什么都没改，却堆了 4 条
+       『需重启后端才生效』」就是这么来的。 */
+    var old = foot.parentNode.querySelector('.set-msg-foot');
     if (old) old.parentNode.removeChild(old);
     if (!text) return;
     var d = document.createElement('div');
-    d.className = 'set-msg';
+    d.className = 'set-msg set-msg-foot';
     if (kind) d.setAttribute('data-kind', kind);
+    /* flag 标出「这条是跟随配置状态变化的」而不是操作反馈：
+       状态恢复时要能被单独撤掉（见 __narnatOnConfigDescribe 的 else 分支）。 */
+    if (flag) d.setAttribute('data-flag', flag);
     d.textContent = text;
     foot.parentNode.insertBefore(d, foot);
   }
@@ -5944,8 +5951,13 @@ body[data-run="true"] #goalRounds{opacity:.45}
     if (!setGroups.some(function(g){ return g.id === setGroup; })) setGroup = setGroups[0].id;
     // 有改动还没生效 → 面板顶部常驻一行提示。
     // 不提示会怎样：用户改完 key 直接提问、拿到 401，以为新 key 是错的。
+    // 反过来，状态恢复正常（restartPending 变 false）时必须把这行撤掉：
+    // 只置不清的话，用户重启后端后再打开面板，红字还挂在那里。
     if (p && p.restartPending) {
-      setMsg('需重启后端才生效', 'err');
+      setMsg('需重启后端才生效', 'err', 'restart');
+    } else {
+      var stale = document.querySelector('#settingsPanel .set-msg-foot[data-flag="restart"]');
+      if (stale && stale.parentNode) stale.parentNode.removeChild(stale);
     }
     renderTabs();
     renderFoot();

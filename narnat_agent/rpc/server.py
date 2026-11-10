@@ -2399,23 +2399,24 @@ class RpcServer:
         base_url = disk.get("接口地址")
         protocol = disk.get("协议")
         key = disk.get("接口密钥")
-        # 模型也是「内存 vs 磁盘」的一对：on_mode 没切成（名字不在候选列表）时，
-        # 内存还在旧值、盘上已是新值。不算进 restartPending 的话，用户改完模型
-        # 看到的仍是旧模型名 + 一句「已保存」，会以为没生效而反复重试。
-        disk_model = disk.get("模型")
-        disk_model = disk_model.get("当前") if isinstance(disk_model, dict) else None
         return {
             "baseUrl": base_url if isinstance(base_url, str) else ai.base_url,
             "apiKeyMasked": self._mask_key(key if isinstance(key, str) else ai.api_key),
             "apiKeySet": bool((key if isinstance(key, str) else ai.api_key)),
             "protocol": protocol if isinstance(protocol, str) else ai.protocol,
             "model": ai.model,
-            # 内存值与磁盘值不一致 = 改动还没生效，界面据此提示重启
+            # 内存值与磁盘值不一致 = 改动还没生效，界面据此提示重启。
+            #
+            # **模型不参与这个判断**：模型是 persist=False 的会话级设置
+            # （见 _m_config_set：不写 narnat.json，避免宿主 FileSystemWatcher
+            # 弹窗；换会话时 switch_state 会恢复成磁盘值）。于是「磁盘 v4-pro、
+            # 内存 flash」是**正常状态**而不是待重启。原来把它算进来会造成
+            # 永久误报：用户在面板上切过模型后，每次打开设置都显示
+            # 「需重启后端才生效」，而他什么都没改（用户报障）。
             "restartPending": (
                 (isinstance(base_url, str) and base_url != ai.base_url)
                 or (isinstance(protocol, str) and protocol != ai.protocol)
                 or (isinstance(key, str) and key != ai.api_key)
-                or (isinstance(disk_model, str) and disk_model != ai.model)
             ),
         }
 
