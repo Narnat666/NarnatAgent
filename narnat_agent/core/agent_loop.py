@@ -196,6 +196,12 @@ class AgentLoop:
         # 合成一条，先后顺序即入队顺序）。
         for item in items:
             self._msg_manager.append_user_merged(item["text"])
+        # 插话 = 用户提出了新的要求，等价于一次新输入：把「只提醒一次」的后台任务
+        # 软提醒复位，让 AI 回复完插话、后台仍有任务在跑时，能再次被提醒去
+        # wait / cancel，而不是沿用上一轮已经提醒过、就此放行。
+        # 只复位 bg_reminded 这一个标志：其它任务级状态（todo 列表、goal 进度）
+        # 不属于插话该重置的范围，插话也不是新任务。
+        self._tool_context.bg_reminded = False
         # 复用同一stream继续内循环：先把上一轮文字落定到屏幕，
         # 再重启"思考中"spinner，避免LLM等待期界面无动画静默卡住
         stream.flush_renderer()
