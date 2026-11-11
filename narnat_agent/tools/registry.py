@@ -62,15 +62,26 @@ TOOL_DEFINITIONS: List[Dict] = [
     BASH_DEF, TERMINAL_DEF, WEBSEARCH_DEF, TODOWRITE_DEF,
     SERIAL_DEF, MCP_DEF,
 ]
-# GoalComplete 不进默认工具定义：它是 Goal 插件控制的定义，由
-# LLMClient.set_goal_tool() 按插件开关注入，普通模式不暴露给 LLM
+# GoalComplete 不进这张常驻列表：它是 Goal 插件控制的定义，由
+# get_tool_definitions() 按插件开关追加，普通模式不暴露给 LLM
 #（执行能力始终注册，兼容历史残留调用）。
-# 插件名 → 其控制的工具定义名。名字相同是常态（Terminal→Terminal），
-# 只有 Goal 插件例外（Goal 本身不是工具，它控制 GoalComplete）。
-_PLUGIN_DEFINITION_NAMES: Dict[str, str] = {"Goal": "GoalComplete"}
-
-# 插件名 → 能力表里的工具名（/plugin 状态表与 RPC 插件列表取 label 用）
-_PLUGIN_CAPABILITY_ALIAS: Dict[str, str] = {"Goal": "GoalComplete"}
+# 为什么必须在本文件追加、而不是让消费方自己往表里塞：get_tool_definitions()
+# 是「发给 LLM 的工具表」的唯一派生点，凡是偏离这条派生路径的写法都会变成
+# 一份快照，运行期开关再也改不动真正发出去的请求。
+#
+# ── 插件名 → 其控制的工具定义：「插件名 ≠ 定义名」的唯一归属点 ──
+# 名字相同是常态（Terminal→Terminal），这种插件不必登记：派生时按插件名去
+# TOOL_DEFINITIONS 里取即可。只有「插件名 ≠ 定义名 / 定义还不常驻」的插件才在
+# 这里写一行 —— 当前只有 Goal：Goal 本身不是工具，它控制 GoalComplete 的注入。
+#
+# 这张表是**唯一**一份：get_tool_definitions / get_plugin_definitions /
+# plugin_definition_names / get_capability 全部由它派生，谁都不许再写第二份。
+# 归一前的形态是四份编码：一个内容相同的别名表（供 CAPABILITY 用）、两处按
+# 名字写死的特判分支（一处决定是否追加定义、一处决定是否按目标名查表）。
+# 新增一个这类插件要同时改四处，漏一处就是「开关改了、发给模型的表没变」。
+_PLUGIN_CONTROLLED_DEFINITIONS: Dict[str, tuple] = {
+    "Goal": (GOALCOMPLETE_DEF,),
+}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -152,10 +163,13 @@ def get_capability(name: str) -> Dict[str, Any]:
     未声明的动态工具（mcp__*，MCP 服务器热注册）与未知工具返回保守默认：
     串行调度 + 原名标签；动态工具输出含服务端文本（不可信，失败判定只认框架标签）
     且摘要风格为 mcp，未知工具无摘要。
-    插件名与工具名不同的一处（Goal → GoalComplete）走别名，插件状态表因此
-    能拿到「目标模式」这个说明文案。
+    插件名与工具名不同的地方（Goal → GoalComplete）由
+    _PLUGIN_CONTROLLED_DEFINITIONS 派生，插件状态表因此能拿到「目标模式」这个
+    说明文案 —— 这里不再维护第二份别名表。
     """
-    cap = _CAPABILITIES.get(name) or _CAPABILITIES.get(_PLUGIN_CAPABILITY_ALIAS.get(name, ""))
+    cap = _CAPABILITIES.get(name)
+    if cap is None:
+        cap = _plugin_capability(name)
     if cap is not None:
         return cap
     cap = _UNDECLARED_CAPABILITIES.get(name)
@@ -281,6 +295,28 @@ def _definition_name(definition: Dict) -> str:
     return definition.get("function", {}).get("name") or ""
 
 
+def _plugin_definition_objects(name: str) -> tuple:
+    """插件名 → 它控制的、不常驻 TOOL_DEFINITIONS 的定义对象（无则空元组）。
+
+    空元组即「定义名 == 插件名」：该插件的定义就在 TOOL_DEFINITIONS 里按名取。
+    唯一数据来源是 _PLUGIN_CONTROLLED_DEFINITIONS，此处只做查表。
+    """
+    return _PLUGIN_CONTROLLED_DEFINITIONS.get(name, ())
+
+
+def _plugin_capability(name: str) -> Optional[Dict[str, Any]]:
+    """插件名 → 它控制的定义的 CAPABILITY（没有「插件名 ≠ 定义名」映射时返回 None）。
+
+    消费方（/plugin 状态表、RPC 插件列表）拿插件名来查 label，而 _CAPABILITIES
+    按定义名登记，故需一次派生；映射仍只来自 _PLUGIN_CONTROLLED_DEFINITIONS。
+    """
+    for definition in _plugin_definition_objects(name):
+        cap = _CAPABILITIES.get(_definition_name(definition))
+        if cap is not None:
+            return cap
+    return None
+
+
 def resolve_plugin_name(name: str) -> Optional[str]:
     """插件名规范化（大小写不敏感）；非插件名返回 None"""
     target = (name or "").strip().lower()
@@ -327,7 +363,10 @@ def plugin_definition_names(name: str) -> List[str]:
         names = [canonical]
         names += [n for n in (_definition_name(d) for d in _DYNAMIC_DEFINITIONS) if n]
         return names
-    return [_PLUGIN_DEFINITION_NAMES.get(canonical, canonical)]
+    controlled = _plugin_definition_objects(canonical)
+    if controlled:
+        return [_definition_name(d) for d in controlled]
+    return [canonical]
 
 
 def get_plugin_definitions(name: str) -> List[Dict]:
@@ -335,11 +374,13 @@ def get_plugin_definitions(name: str) -> List[Dict]:
     canonical = resolve_plugin_name(name)
     if canonical is None:
         return []
-    target = _PLUGIN_DEFINITION_NAMES.get(canonical, canonical)
-    defs = [d for d in TOOL_DEFINITIONS if _definition_name(d) == target]
-    if target == "GoalComplete":
-        # GoalComplete 不在 TOOL_DEFINITIONS 里（由 set_goal_tool 注入）
-        defs += [GOALCOMPLETE_DEF]
+    controlled = _plugin_definition_objects(canonical)
+    if controlled:
+        # 插件名 ≠ 定义名：定义对象由唯一映射表给出（如 Goal → GoalComplete）
+        defs = list(controlled)
+    else:
+        # 名字相同：定义就在常驻表里
+        defs = [d for d in TOOL_DEFINITIONS if _definition_name(d) == canonical]
     if canonical == "MCP":
         defs += list(_DYNAMIC_DEFINITIONS)
     return defs
@@ -351,8 +392,25 @@ def get_tool_names() -> List[str]:
 
 
 def get_tool_definitions() -> List[Dict]:
-    """返回LLM工具定义列表（含运行时动态注册的工具；不含已关闭的插件工具）"""
+    """当前应发给 LLM 的工具定义列表 —— **全仓唯一派生点**。
+
+    三条规则：
+      1. 内置工具中已关闭的插件工具（_disabled_plugins）被过滤掉；
+      2. 插件名 ≠ 定义名的插件（_PLUGIN_CONTROLLED_DEFINITIONS，当前只有
+         Goal → GoalComplete）开启时，追加它的定义；这里遍历映射表派生，
+         不对任何名字做特判；
+      3. MCP 插件开启时追加运行时动态注册的工具（MCP 服务器 tools/list）。
+
+    返回的是「这一刻」的表，不做任何缓存：LLMClient 每次请求都调用它取当前表，
+    不持有副本。曾经把返回值当静态列表交给 LLMClient 保存，于是运行期插件开关
+    只改了本模块的过滤集合，真正发给模型的表还是启动时那一份——界面上开着
+    Terminal/Serial，模型却拿不到这两个工具（本缺陷的根因）。缓存同理会把
+    同一个 bug 请回来。
+    """
     defs = [d for d in TOOL_DEFINITIONS if _definition_name(d) not in _disabled_plugins]
-    if "MCP" in _disabled_plugins:
+    for plugin, controlled in _PLUGIN_CONTROLLED_DEFINITIONS.items():
+        if is_plugin_enabled(plugin):
+            defs.extend(controlled)
+    if not is_plugin_enabled("MCP"):
         return defs
     return defs + list(_DYNAMIC_DEFINITIONS)

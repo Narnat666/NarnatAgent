@@ -63,9 +63,9 @@ class Assembly:
 
         # 3. 全局工具配置（写入各工具模块的状态类；LLM 重试次数由 LLMClient 构造时读取）
         TerminalRuntime.set_max_sessions(config.tools.max_sessions)
-        # 插件工具开关（narnat.json "工具"."插件" + 子代理隔离）：关闭的定义不发 LLM，
-        # 必须在下方 get_tool_definitions() 之前应用。这一份 merged 同时是
-        # SessionManager 的会话级插件初值（游离态/新会话用它）。
+        # 插件工具开关（narnat.json "工具"."插件" + 子代理隔离）：关闭的定义不发 LLM。
+        # LLMClient 只在**请求时**向 registry 取表，所以这里先把配置落地即可。
+        # 这一份 merged 同时是 SessionManager 的会话级插件初值（游离态/新会话用它）。
         from .tools.registry import apply_plugin_config
         from .config.isolation import plugin_states
         merged_plugin_states = plugin_states(config.tools.plugin_tools, headless)
@@ -76,18 +76,21 @@ class Assembly:
         if debug:
             logger.start(config.paths.logs_dir)
 
-        # 5. MCP 连接管理器（AI 按需连接，narnat.json 不配置名单）+ 工具定义
+        # 5. MCP 连接管理器（AI 按需连接，narnat.json 不配置名单）
         from .mcp import McpManager
         mcp_manager = McpManager(logger)
-        from .tools.registry import get_tool_definitions
-        tool_definitions = get_tool_definitions()
 
         # 6. LLM
+        # 注入「取表函数」而不是一份表：LLMClient 每次请求都调用它取当前派生表，
+        # 运行期插件开关 / 会话切换（registry 的过滤集合）因此立刻生效。
+        # 反过来把 get_tool_definitions() 的返回值当静态列表传进去，就是本 bug 的
+        # 根因：界面显示 4/5 开启，真正发给模型的表还是启动那一份。
+        from .tools.registry import get_tool_definitions
         llm = LLMClient(
             config.ai,
             logger,
             max_output_tokens=config.ui.max_output_tokens,
-            tool_definitions=tool_definitions,
+            tool_definitions=lambda: get_tool_definitions(),
             data_dir=config.paths.data_dir,
         )
 
@@ -169,7 +172,6 @@ class Assembly:
             summary_anim_stop=None,
             cancel_check=lambda: _interrupt_ctrl.is_set,
             name_func=lambda msgs: summarizer.name_session(msgs),
-            goal_tool_setter=llm.set_goal_tool,
             goal_max_rounds=config.ai.goal_max_rounds,
             # 审核模式 = narnat.json「智能体.完成验证」的运行期值：
             # /goal on|off 只改内存（读这里），不写盘。

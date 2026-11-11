@@ -1223,7 +1223,6 @@ class SessionManager:
                  summary_anim_stop: Callable[[], None] = None,
                  cancel_check: Callable[[], bool] = None,
                  name_func: Callable[[List[Dict[str, Any]]], str] = None,
-                 goal_tool_setter: Callable[[bool], None] = None,
                  goal_max_rounds: int = 0,
                  goal_verify_getter: Callable[[], bool] = None,
                  goal_verify_setter: Callable[[bool], None] = None,
@@ -1268,7 +1267,6 @@ class SessionManager:
         self.name_func = name_func
         # 手动压缩（/compact）：由 Assembly 注入 CompressionCoordinator.compress_manual
         self.compact_func: Optional[Callable[[], Tuple[str, str]]] = None
-        self._set_goal_tool = goal_tool_setter
         # 项目技能根目录: None=自动发现（扫描所有名为 skills 的目录）；空元组=关闭；非空=显式
         self._project_skill_roots = project_skill_roots
 
@@ -1465,15 +1463,19 @@ class SessionManager:
         self._apply_plugins(self._plugin_states)
 
     def _apply_plugins(self, states: Dict[str, bool]) -> None:
-        """把插件开关施加到工具表（唯一生效点）。
+        """把插件开关施加到 registry 的过滤集合（唯一生效点）。
+
+        这里只写这一处就够，因为「发给 LLM 的工具表」由
+        `tools/registry.get_tool_definitions()` 现场派生，LLMClient 每次请求都
+        调它取当前表（见 core/llm.py 的 tool_definitions 提供者）。**不要**再往
+        LLMClient 推一份工具表：那会变成第二份状态，漏推一处就复现「界面开着、
+        AI 拿不到」的缺陷。GoalComplete 的增删同样归 registry（按 Goal 开关注入）。
 
         **不碰**审核模式（=读取「完成验证」的运行期值）：审核模式只是一道
         额外的独立 AI 复核，与工具表无关，也不因插件开关而改变。Goal 插件关掉时
         工具虽然没了，但审核模式开关本身仍在（界面上按「Goal 未启用」灰显只读）。
         """
         _apply_plugin_config(states)
-        if self._set_goal_tool:
-            self._set_goal_tool(bool(states.get("Goal", False)))
 
     @property
     def _goal_enabled(self) -> bool:

@@ -469,6 +469,25 @@ def _iter_to_queue(iterator, q, err_box=None, data_ts=None):
 # LLM 客户端
 # ═══════════════════════════════════════════════════════════════
 
+def _as_tool_provider(tool_definitions):
+    """把 tool_definitions 参数归一成「取当前工具表」的 getter。
+
+    接受两种形态：
+      · Callable[[], List[dict]] —— 生产路径（assembly 注入
+        `lambda: get_tool_definitions()`）。每次请求都重新派生，
+        运行期插件开关 / 会话切换立刻反映到真正发出去的请求里。
+      · 静态 List[dict]           —— 兼容单测、脚本与验证器等替身表。
+
+    **不保留可变副本**：这里没有第二份状态，就只有这一份 getter。曾经的实现
+    把表复制进 `self._tool_defs`，那成了启动快照 —— 界面上把 Terminal/Serial
+    打开，registry 的过滤集合变了，发给模型的表没变（AI 自报少两个工具）。
+    """
+    if callable(tool_definitions):
+        return tool_definitions
+    static = list(tool_definitions or [])
+    return lambda: static
+
+
 class LLMClient:
     """LLM客户端，通过 config.protocol 选择 OpenAI 或 Anthropic 协议。"""
 
@@ -487,13 +506,20 @@ class LLMClient:
         cls._max_rate_retries = max(1, min(n, 10))     # 429 与网络重试同源同值
 
     def __init__(self, config: AIConfig, logger=None, max_output_tokens: int = 128000,
-                 tool_definitions: list = None, data_dir: str = ""):
+                 tool_definitions=None, data_dir: str = ""):
+        """tool_definitions：工具表**提供者**，不是工具表本身。
+
+        Callable[[], List[dict]]（生产路径：registry.get_tool_definitions）或静态
+        List[dict]（单测/脚本替身表）。内部统一存成 getter，**不持有副本**：
+        副本就是启动快照，运行期插件开关只会改 registry 的过滤集合，永远流不回
+        这份副本 —— 那正是「界面上开着 Terminal/Serial，AI 却拿不到」的根因。
+        """
         self._config = config
         self._logger = logger
         # 附件库根目录（<项目>/.narnat/data）：发请求时把图片引用展开成真实图片块
         self._data_dir = data_dir
-        # 复制一份：set_goal_tool 动态增删 GoalComplete 时不影响调用方持有的原列表
-        self._tool_defs = list(tool_definitions or [])
+        # 取当前工具表的唯一入口（每次请求现取；调用它即得到此刻该发的表）
+        self._tool_defs_provider = _as_tool_provider(tool_definitions)
         self._max_output_tokens = max_output_tokens
         self.set_retry_count(config.retry_count)
 
@@ -504,10 +530,11 @@ class LLMClient:
         if protocol not in ("anthropic", "openai"):
             raise ValueError(f"不支持的协议: {protocol}（可选: anthropic / openai）")
         if protocol == "anthropic":
-            self._backend = _AnthropicBackend(config, self._tool_defs, logger, max_output_tokens,
-                                              data_dir=data_dir)
+            self._backend = _AnthropicBackend(config, self._tool_defs_provider, logger,
+                                              max_output_tokens, data_dir=data_dir)
         else:
-            self._backend = _OpenAIBackend(config, self._tool_defs, logger, data_dir=data_dir)
+            self._backend = _OpenAIBackend(config, self._tool_defs_provider, logger,
+                                           data_dir=data_dir)
 
     def chat_stream(self, messages: List[Dict[str, Any]], no_tools: bool = False,
                     no_thinking: bool = False, cancel_check=None,
@@ -521,27 +548,6 @@ class LLMClient:
                                          no_thinking=no_thinking, cancel_check=cancel_check,
                                          tool_defs=tool_defs, model=model,
                                          max_tokens=max_tokens)
-
-    def set_goal_tool(self, enabled: bool) -> None:
-        """动态注入/移除 GoalComplete 工具定义。
-
-        目标模式（/goal on）开启时注入，关闭时移除；普通模式不向 LLM 暴露该工具。
-        幂等：重复开启/关闭不会重复添加或报错。
-        """
-        # 局部导入避免模块顶层循环依赖
-        from ..tools.goal_complete import DEFINITION as _GOAL_DEF
-        name = _GOAL_DEF["function"]["name"]
-        exists = any(
-            d.get("function", {}).get("name") == name
-            for d in self._tool_defs
-        )
-        if enabled and not exists:
-            self._tool_defs.append(_GOAL_DEF)
-        elif not enabled and exists:
-            self._tool_defs[:] = [
-                d for d in self._tool_defs
-                if d.get("function", {}).get("name") != name
-            ]
 
     @property
     def raw_sse(self):
@@ -574,9 +580,10 @@ class _RequestScope:
 class _OpenAIBackend:
     """OpenAI SDK 后端"""
 
-    def __init__(self, config, tool_defs, logger, data_dir=""):
+    def __init__(self, config, tool_defs_provider, logger, data_dir=""):
         self._config = config
-        self._tool_defs = tool_defs
+        # 工具表提供者（每次请求现取；不是工具表副本，见 LLMClient.__init__）
+        self._tool_defs_provider = tool_defs_provider
         self._logger = logger
         self._data_dir = data_dir
         self._client_lock = threading.Lock()
@@ -728,7 +735,9 @@ class _OpenAIBackend:
                 if think_extra:
                     kwargs["extra_body"] = think_extra
                 if not no_tools:
-                    kwargs["tools"] = self._tool_defs if tool_defs is None else tool_defs
+                    # 默认表每次请求现取（getter），请求级 tool_defs= 覆盖优先不变
+                    kwargs["tools"] = (
+                        self._tool_defs_provider() if tool_defs is None else tool_defs)
                 # thinking 模式下 temperature 不生效（部分厂商契约下直接报错），不传
                 if (self._config.temperature is not None
                         and not (think_body_top or think_extra)):
@@ -1024,9 +1033,10 @@ class _AnthropicBackend:
     使用 httpx 替代 requests，统一HTTP客户端依赖。
     """
 
-    def __init__(self, config, tool_defs, logger, max_output_tokens=128000, data_dir=""):
+    def __init__(self, config, tool_defs_provider, logger, max_output_tokens=128000, data_dir=""):
         self._config = config
-        self._tool_defs = tool_defs
+        # 工具表提供者（每次请求现取；不是工具表副本，见 LLMClient.__init__）
+        self._tool_defs_provider = tool_defs_provider
         self._logger = logger
         self._data_dir = data_dir
         self._max_output_tokens = max_output_tokens
@@ -1059,7 +1069,9 @@ class _AnthropicBackend:
         # 转换消息格式
         try:
             system, anthropic_msgs = self._convert_messages(messages, model=request_model)
-            anthropic_tools = self._convert_tools(self._tool_defs if tool_defs is None else tool_defs)
+            # 默认表每次请求现取（getter），请求级 tool_defs= 覆盖优先不变
+            anthropic_tools = self._convert_tools(
+                self._tool_defs_provider() if tool_defs is None else tool_defs)
         except Exception as e:
             yield {"content": f"[错误: 消息格式转换失败: {e}]", "finish_reason": "error"}
             return

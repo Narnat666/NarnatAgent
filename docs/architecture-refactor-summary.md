@@ -131,21 +131,41 @@ Agent 526行 → 98行纯编排者
 
 **问题:** `core/llm.py` 通过 `from ..tools.registry import get_tool_definitions` 反向依赖工具层。
 
-**解决:** 工具定义通过构造参数注入：
+**解决:** `LLMClient` 不依赖工具层，改为接收一个「取工具表」的**提供者**（getter），由 Assembly 注入；LLM 侧只存 getter，不存表本身：
 
 ```python
-# Before (llm.py)
+# Before (llm.py) —— 模块层反向依赖
 from ..tools.registry import get_tool_definitions
 self._tool_defs = get_tool_definitions()
 
-# After (llm.py)
-def __init__(self, ..., tool_definitions: list = None):
-    self._tool_defs = tool_definitions or []
+# After (llm.py) —— 只存 getter，每次请求现取
+def _as_tool_provider(tool_definitions):
+    if callable(tool_definitions):
+        return tool_definitions          # 生产路径：每请求现取
+    static = list(tool_definitions or [])
+    return lambda: static                # 兼容单测/脚本的替身表
 
-# Assembly 负责桥接
+def __init__(self, ..., tool_definitions=None):
+    self._tool_defs_provider = _as_tool_provider(tool_definitions)
+
+# 每次请求（OpenAI: kwargs["tools"] / Anthropic: body["tools"]）
+tools = self._tool_defs_provider() if tool_defs is None else tool_defs
+
+# Assembly 负责桥接 —— 注入的是函数本身，不是它的返回值
 from .tools.registry import get_tool_definitions
-llm = LLMClient(..., tool_definitions=get_tool_definitions())
+llm = LLMClient(..., tool_definitions=lambda: get_tool_definitions())
 ```
+
+**错误做法（本缺陷的根因，照抄就会复发）:** `self._tool_defs = tool_definitions or []` 配
+`LLMClient(..., tool_definitions=get_tool_definitions())` —— 构造那一刻就把表取了回来，
+之后 `registry` 按插件开关做的过滤永远流不回这份副本。表现是插件面板显示 Terminal/Serial
+已开启（4/5），AI 自报却只有 9 个工具：**界面上开着、模型拿不到**。原因与约束：
+
+- `tools/registry.get_tool_definitions()` 是「发给 LLM 的工具表」的唯一派生点，每次调用都按
+  当前插件开关重新派生，**它自己不缓存**；
+- `LLMClient` 只持有 provider（`self._tool_defs_provider`），每次请求调用一次取当前表，
+  因此运行期改开关、切会话立刻反映到真正发出去的请求里；
+- 任何「把表存进实例属性 / 往 `LLMClient` 推一份表」的写法都是启动快照，会复现同一缺陷。
 
 ### Phase 5 — 中断系统评估
 
@@ -716,8 +736,8 @@ Assembly.build()
   ├─ 3. set_max_sessions()     ← 终端会话数（过渡期全局setter）
   │    set_retry_count()       ← LLM重试次数（过渡期全局setter）
   ├─ 4. Logger                ← 日志
-  ├─ 5. get_tool_definitions()← 工具定义（桥接点）
-  ├─ 6. LLMClient             ← LLM客户端
+  ├─ 5. McpManager            ← MCP 连接管理器
+  ├─ 6. LLMClient             ← LLM客户端（注入 get_tool_definitions 函数本身，不注入表）
   ├─ 7. ContextTracker        ← 轮次计数
   ├─ 8. Compressor            ← 压缩器
   ├─ 9. MessageList           ← 消息唯一所有者

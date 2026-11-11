@@ -2116,9 +2116,9 @@ class RpcServer:
         return {"ok": True, "current": mode}
 
     def _set_api_config(self, value: Any) -> Dict[str, Any]:
-        """改模型的接入配置：接口地址 / 接口密钥 / 协议 / 模型名。
+        """改模型的接入配置：接口地址 / 接口密钥 / 协议（写盘，需重启）+ 模型名（热切换）。
 
-        ## 为什么必须重启后端才生效
+        ## 为什么地址/密钥/协议必须重启后端才生效
 
         `AIConfig` 是**加载时**构造的不可变对象，LLMClient 持有它的一份引用。
         改磁盘上的 narnat.json 只影响**下一次启动**，当前进程里的 client
@@ -2126,8 +2126,18 @@ class RpcServer:
         然后拿到 401 —— 却不知道是因为改动还没生效，会去怀疑新 key 是错的。
 
         所以这里如实返回 `needRestart: true`，界面显示「重启后端后生效」。
-        （模型名和思考强度是例外：它们有 on_mode / on_thinking 热切换路径，
-        那两条走的是 `config/set` 的 model/thinking 分支，不在这里。）
+
+        ## 模型名为什么不进这条写盘路径（本次报障错的正是这一点）
+
+        模型有热切换路径：`config/set{key:"model"}`（状态栏下拉）走的就是
+        `mgr.on_mode(value, persist=False)` —— 只改内存、不写 narnat.json。
+        原来这里把「模型」也当 api 配置写盘，同一个动作在设置面板与状态栏上
+        两套口径，而且写盘会触发宿主的 FileSystemWatcher 弹「配置文件已修改，
+        需要重启后端才会生效」——模型根本不需要重启（用户报障：切个模型就弹重启）。
+
+        现在两条入口同口径：模型一律 `persist=False` 热切换、**不写盘**；
+        只有真的改了 baseUrl / apiKey / protocol（patch 非空）才写盘并回
+        `needRestart: true`。只改模型时 `needRestart` 为 `False`。
         """
         if not isinstance(value, dict):
             raise RpcError(-32602, "config/set: api 的 value 必须是对象")
@@ -2147,55 +2157,55 @@ class RpcServer:
             if v not in ("openai", "anthropic"):
                 raise RpcError(-32000, "config/set: 协议只支持 openai / anthropic")
             patch["协议"] = v
+        # 模型：候选列表内的名字只热切换、**不写盘**（与 config/set{key:"model"}
+        # 的 model 分支同口径）；不在候选列表的名字（换厂商自填）**写盘持久化**。
+        #
+        # on_mode 对「不在候选列表里的名字」是**返回一句「无效值」而不是抛异常**，
+        # 所以不能只靠 try/except：它的原话必须带回界面（mode_note → warning），
+        # 否则用户点了切换、模型没变、界面一声不响，完全看不出发生了什么。
+        mode_note = ""
         if "model" in value:
             v = value.get("model")
             if not isinstance(v, str) or not v.strip():
                 raise RpcError(-32602, "config/set: api.model 必须是非空字符串")
-            patch["模型"] = {"当前": v.strip()}
-
-        # 模型先在**写盘前**尝试热切换，用它的结果决定盘上到底写什么。
-        #
-        # 原实现是先写盘、再 on_mode，而 on_mode 对「不在候选列表里的名字」是
-        # **返回一句「无效值」而不是抛异常** —— try/except 抓不到，返回值也没人看。
-        # 后果（实测）：换成 Moonshot 填 kimi-k2 → 盘上是 kimi-k2、内存还是旧的，
-        # 界面回显旧模型名，用户以为没保存成功，反复重试；重启后又突然变成
-        # kimi-k2，若这个名字无效则整个后端起不来。
-        #
-        # 现在：候选列表里有的名字用**列表里的写法**写盘（顺带归一大小写/空格）；
-        # 列表里没有的名字照样写盘（换厂商必须能自己填），但把 on_mode 的原话
-        # 作为 warning 回给界面，让用户知道「本次会话仍用旧模型」。
-        mode_note = ""
-        if "模型" in patch:
-            wanted = patch["模型"]["当前"]
+            wanted = v.strip()
             try:
-                reply = self._mgr.on_mode(wanted)
-            except Exception as e:      # on_mode 内部异常不影响写盘
+                reply = self._mgr.on_mode(wanted, persist=False)
+            except Exception as e:      # on_mode 内部异常不影响其它字段落盘
                 reply = f"热切换异常: {e}"
-            if isinstance(reply, str) and reply:
-                if reply.startswith("设置成功："):
-                    # 切成功：用候选列表里的写法落盘，避免盘上留下 DEEPSEEK-FLASH
-                    patch["模型"]["当前"] = reply.split("：", 1)[1].strip()
-                else:
-                    # 没切成功（无效值 / 写回失败）：盘上仍写用户填的名字，
-                    # 但必须把原因带回界面 —— 否则用户完全看不出发生了什么
-                    mode_note = reply
+            # 成功时 on_mode 回 "设置成功：<候选列表里的写法>"（大小写/空格已归一）：
+            # 候选列表内 → 本次会话已热切换，不写盘。
+            if not (isinstance(reply, str) and reply.startswith("设置成功：")):
+                # 换厂商自填新名：本次会话不生效（on_mode 无效），但必须写盘——
+                # 重启后 loader._parse_model_config 会把不在列表里的「当前」自动
+                # insert 进候选列表（loader.py 664-665 行），新模型随即生效。
+                # 这是「换厂商」的唯一落盘入口，删掉就再也填不了新模型名。
+                patch["模型"] = {"当前": wanted}
+                mode_note = reply or "模型切换失败（on_mode 未返回原因）"
 
-        if not patch:
+        # 只剩模型热切换（或什么都没带）时不要走写盘：空 patch 调 _persist_config
+        # 会重写整个文件，宿主 watcher 照样弹「配置文件已修改，需要重启后端」。
+        if not patch and "model" not in value:
             raise RpcError(-32602, "config/set: api 没有任何可写字段")
 
-        def _mutate(data):
-            ai = data.setdefault("智能体", {})
-            if "模型" in patch:
-                # 模型是嵌套对象（当前/列表），只改"当前"，保住"列表"
-                ai.setdefault("模型", {})["当前"] = patch["模型"]["当前"]
-            for k, v in patch.items():
-                if k != "模型":
-                    ai[k] = v
+        if patch:
+            def _mutate(data):
+                ai = data.setdefault("智能体", {})
+                # 模型是嵌套对象（当前/列表）：只改「当前」，保住「列表」。
+                # 换厂商自填的新名不在列表里，重启时 loader 会自动补进列表。
+                if "模型" in patch:
+                    ai.setdefault("模型", {})["当前"] = patch["模型"]["当前"]
+                for k, v in patch.items():
+                    if k != "模型":
+                        ai[k] = v
 
-        err = _persist_config(getattr(self._mgr, "_config_dir", ""), _mutate)
-        if err:
-            raise RpcError(-32000, "保存失败：" + err)
-        out: Dict[str, Any] = {"ok": True, "needRestart": True,
+            err = _persist_config(getattr(self._mgr, "_config_dir", ""), _mutate)
+            if err:
+                raise RpcError(-32000, "保存失败：" + err)
+
+        # needRestart 按需：真的写了盘（地址/密钥/协议）才提示重启；
+        # 只改模型时为 False —— 模型已经热切换生效，提示重启就是误报。
+        out: Dict[str, Any] = {"ok": True, "needRestart": bool(patch),
                                "current": self._api_snapshot()}
         if mode_note:
             # 前端会把它显示在设置面板的提示行里（见 __narnatOnConfigResult）
@@ -2377,6 +2387,27 @@ class RpcServer:
             return "*" * len(key)
         return key[:4] + "*" * (len(key) - 8) + key[-4:]
 
+    @staticmethod
+    def _norm_base_url(value: str) -> str:
+        """接口地址的比较形态：去首尾空白 + 去**尾斜杠**。
+
+        只用于 `restartPending` 的比较，不改上报给界面的原值，也不改 loader
+        的解析行为：尾斜杠对「拼路径发请求」等价，磁盘多一个 `/` 不该变成
+        「需要重启后端」。
+        """
+        return value.strip().rstrip("/")
+
+    @staticmethod
+    def _norm_protocol(value: str) -> str:
+        """协议的比较形态：去首尾空白 + 小写。
+
+        loader 对「非法值回退默认」是**大小写敏感**的（见 `_build_ai_config`：
+        磁盘写 `"Anthropic"` 会回退成 `DEFAULT_PROTOCOL`，而默认值恰好是小写的
+        `"anthropic"`）。拿磁盘原始值与内存规范化值直接比，就是下面这个永久误报：
+        用户什么都没改，一打开设置面板就显示「需重启后端才生效」。
+        """
+        return value.strip().lower()
+
     def _api_snapshot(self) -> Dict[str, Any]:
         """当前 API 配置（密钥打码）。
 
@@ -2413,9 +2444,16 @@ class RpcServer:
             # 内存 flash」是**正常状态**而不是待重启。原来把它算进来会造成
             # 永久误报：用户在面板上切过模型后，每次打开设置都显示
             # 「需重启后端才生效」，而他什么都没改（用户报障）。
+            #
+            # 比较两侧都走同一套规范化（_norm_base_url / _norm_protocol）：
+            # 磁盘是用户手写的原文，内存是 loader 解析/回退后的值，直接比会拿
+            # 「磁盘 'Anthropic'」和「内存 'anthropic'」判成不相等 —— 同样是
+            # 「什么都没改却提示重启」的一类误报（本次报障的另一条）。
             "restartPending": (
-                (isinstance(base_url, str) and base_url != ai.base_url)
-                or (isinstance(protocol, str) and protocol != ai.protocol)
+                (isinstance(base_url, str) and isinstance(ai.base_url, str)
+                 and self._norm_base_url(base_url) != self._norm_base_url(ai.base_url))
+                or (isinstance(protocol, str) and isinstance(ai.protocol, str)
+                    and self._norm_protocol(protocol) != self._norm_protocol(ai.protocol))
                 or (isinstance(key, str) and key != ai.api_key)
             ),
         }
